@@ -24,6 +24,7 @@ const settings = {
 };
 let root: Root;
 let container: HTMLDivElement;
+let installedTouchPoints: PropertyDescriptor | undefined;
 const selector = '[aria-label="Task notifications"]';
 const popup = '[data-web-shell-notification-help]';
 function render(node: ReactNode = <BrowserNotificationControl />) {
@@ -80,6 +81,16 @@ afterEach(() => {
   container.remove();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  // The platform helper installs an own `maxTouchPoints` accessor on the jsdom
+  // navigator; deleting the original would leak it into the next test.
+  if (installedTouchPoints !== undefined) {
+    Object.defineProperty(
+      window.navigator,
+      'maxTouchPoints',
+      installedTouchPoints,
+    );
+    installedTouchPoints = undefined;
+  }
 });
 
 it('describes a help popup rather than a settings toggle', () => {
@@ -233,6 +244,12 @@ function operatingSystemGuides(
 ): Array<{ heading: string; body: string }> {
   vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue(platform);
   // jsdom's navigator has no maxTouchPoints, so it cannot be spied on.
+  if (installedTouchPoints === undefined) {
+    installedTouchPoints = Object.getOwnPropertyDescriptor(
+      window.navigator,
+      'maxTouchPoints',
+    );
+  }
   Object.defineProperty(window.navigator, 'maxTouchPoints', {
     configurable: true,
     get: () => maxTouchPoints,
@@ -255,11 +272,18 @@ it.each([
   ['iPhone', 5, []],
   // An Apple device name says mobile even when the touch count does not: a
   // device reporting `iPhone` with no touch points was still a phone, and the
-  // name fallback is what keeps the guides off it.
+  // name fallback is what keeps the guides off it. Each name needs its own
+  // row; one row only pins the name it spells.
   ['iPhone', 0, []],
+  ['iPad', 0, []],
+  ['iPod', 0, []],
   // An iPad in desktop mode reports `MacIntel` but has a touch screen, and
   // the macOS steps do not apply to it.
   ['MacIntel', 5, []],
+  // A single reported touch point is still a touch device. The platforms that
+  // report touch at all are mobile ones; a desktop reports none.
+  ['Linux armv8l', 1, []],
+  ['MacIntel', 1, []],
   // Android reports a Linux platform with touch points; the desktop guides
   // name settings screens a phone does not have.
   ['Linux armv8l', 5, []],

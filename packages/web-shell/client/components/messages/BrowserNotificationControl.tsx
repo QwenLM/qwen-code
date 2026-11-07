@@ -61,9 +61,11 @@ export function BrowserNotificationControl() {
   // Apple mobile reports `iPhone`/`iPad`/`iPod`, and an iPad in desktop mode
   // reports `MacIntel` with a touch screen. Android reports a `Linux` platform
   // with touch points, so match any touch device that is not Windows rather
-  // than listing Apple's names. Neither guide applies on a phone or tablet.
+  // than listing Apple's names. A single reported touch point still counts:
+  // the platform strings that carry touch at all are mobile ones, and a
+  // desktop reports none. Neither guide applies on a phone or tablet.
   const isMobile =
-    !showWindowsHelp && (/iPhone|iPad|iPod/i.test(platform) || touchPoints > 1);
+    !showWindowsHelp && (/iPhone|iPad|iPod/i.test(platform) || touchPoints > 0);
   const showMacHelp = /Mac/i.test(platform) && !isMobile;
   // An empty or unrecognized desktop platform keeps both rather than losing
   // the help.
