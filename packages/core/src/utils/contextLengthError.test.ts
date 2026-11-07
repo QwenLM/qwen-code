@@ -597,6 +597,74 @@ describe('contextLengthError', () => {
 
     it.each([
       [
+        'a stale count far above the current one',
+        'Previous attempt: prompt is too long: 310000 tokens. Current: maximum context length is 40000 tokens. However, you requested 41000 tokens.',
+      ],
+      [
+        'a stale count below the current one',
+        'Previous attempt: prompt is too long: 30000 tokens. Current: maximum context length is 40000 tokens. However, you requested 41000 tokens.',
+      ],
+      [
+        'two prompt counts',
+        'Previous attempt: prompt is too long: 210000 tokens > 200000 maximum; current: prompt is too long: 230000 tokens > 200000 maximum',
+      ],
+    ])(
+      'takes no count from one text that states two different sizes: %s',
+      (_label, message) => {
+        // One text carrying two attempts cannot say which size is this
+        // request's, whatever order they come in (#15936 R3-2).
+        const info = getContextLengthExceededInfo(new Error(message));
+
+        expect(info.isExceeded).toBe(true);
+        expect(info.promptTokens).toBeUndefined();
+        expect(info.requestedTokens).toBeUndefined();
+      },
+    );
+
+    it('keeps the window a text with two different sizes states once', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          'Previous attempt: prompt is too long: 310000 tokens. Current: maximum context length is 40000 tokens. However, you requested 41000 tokens.',
+        ),
+      );
+
+      expect(info.limitTokens).toBe(40_000);
+      expect(info.limitKind).toBe('total');
+    });
+
+    it('reads a size the text states twice with the same figure', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          "Input length (40000) exceeds model's maximum context length (32768). Your prompt contains 40000 input tokens.",
+        ),
+      );
+
+      expect(info.promptTokens).toBe(40_000);
+    });
+
+    it('does not fall back to another field when the rejection itself states two sizes', () => {
+      // The other field is likely an earlier attempt too; when the
+      // rejection's own text is ambiguous, no field supplies the size.
+      const info = getContextLengthExceededInfo(
+        Object.assign(
+          new Error(
+            'Previous attempt: prompt is too long: 310000 tokens. Current: maximum context length is 40000 tokens. However, you requested 41000 tokens.',
+          ),
+          {
+            previousAttempt: {
+              error:
+                "This model's maximum context length is 32768 tokens. However, your prompt contains 25000 input tokens, which exceeds this limit.",
+            },
+          },
+        ),
+      );
+
+      expect(info.promptTokens).toBeUndefined();
+      expect(info.requestedTokens).toBeUndefined();
+    });
+
+    it.each([
+      [
         'the error object',
         (body: object) => Object.assign(new Error('400 Bad Request'), body),
       ],

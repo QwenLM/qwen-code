@@ -254,28 +254,56 @@ function parseTokenCounts(text: string): {
   return {};
 }
 
-/**
- * The prompt's own size as one fragment states it. A match whose wording a
- * limit word qualifies is passed over: "maximum prompt tokens (32768)" names
- * what the server takes (#15936 R3-2).
- */
-function parsePromptTokens(
-  fragment: string,
-): Pick<ContextLengthExceededInfo, 'promptTokens' | 'requestedTokens'> {
-  for (const pattern of PROMPT_TOKEN_PATTERNS) {
-    for (const match of fragment.matchAll(new RegExp(pattern, 'gi'))) {
-      if (!LIMIT_QUALIFIER.test(wordsBefore(fragment, match.index))) {
-        return { promptTokens: parseInteger(match[1]!) };
-      }
-    }
-  }
-  const match = REQUESTED_TOKENS_PATTERN.exec(fragment);
-  if (!match || OUTPUT_WORDING.test(match[2]!)) return {};
+type RequestSize = Pick<
+  ContextLengthExceededInfo,
+  'promptTokens' | 'requestedTokens'
+>;
+
+/** The size a "you requested N tokens" statement gives. */
+function requestedSize(match: RegExpMatchArray): RequestSize {
   const total = parseInteger(match[1]!);
   const output = match[3] ? OUTPUT_SHARE_PATTERN.exec(match[3]) : null;
   if (!output) return { requestedTokens: total };
   const prompt = total - parseInteger(output[1]!);
   return prompt > 0 ? { promptTokens: prompt } : {};
+}
+
+/**
+ * The request's size as each statement in one fragment gives it. A match
+ * whose wording a limit word qualifies is passed over: "maximum prompt
+ * tokens (32768)" names what the server takes (#15936 R3-2).
+ */
+function statedSizes(fragment: string): RequestSize[] {
+  const promptCounts = PROMPT_TOKEN_PATTERNS.flatMap((pattern) =>
+    [...fragment.matchAll(new RegExp(pattern, 'gi'))]
+      .filter(
+        (match) => !LIMIT_QUALIFIER.test(wordsBefore(fragment, match.index)),
+      )
+      .map((match) => ({ promptTokens: parseInteger(match[1]!) })),
+  );
+  const requested = [
+    ...fragment.matchAll(new RegExp(REQUESTED_TOKENS_PATTERN, 'gi')),
+  ]
+    .filter((match) => !OUTPUT_WORDING.test(match[2]!))
+    .map(requestedSize);
+  return [...promptCounts, ...requested];
+}
+
+/**
+ * The request's size one fragment states, or `'ambiguous'` when its
+ * statements disagree. A text that gives two sizes carries more than one
+ * attempt, and nothing in provider prose says which one is this request's,
+ * so neither is taken (#15936 R3-2).
+ */
+function parseRequestSize(fragment: string): RequestSize | 'ambiguous' {
+  const [first, ...rest] = statedSizes(fragment);
+  if (!first) return {};
+  const agree = rest.every(
+    (size) =>
+      size.promptTokens === first.promptTokens &&
+      size.requestedTokens === first.requestedTokens,
+  );
+  return agree ? first : 'ambiguous';
 }
 
 type TokenCounts = Omit<ContextLengthExceededInfo, 'isExceeded' | 'message'>;
@@ -285,26 +313,26 @@ type TokenCounts = Omit<ContextLengthExceededInfo, 'isExceeded' | 'message'>;
  * with another fragment's count. The first fragment that states the prompt's
  * size wins: collection order puts the error's own message before the fields
  * and causes it carries, such as an earlier attempt's rejection (#15936
- * R3-2). Without a stated size, the first fragment that states any figure
- * supplies it.
+ * R3-2). A fragment that states two different sizes ends the search with no
+ * size: the fields after it are likelier still to be earlier attempts.
+ * Without a stated size, the first fragment that states any figure supplies
+ * it.
  */
 function parseCounts(overflowFragments: string[]): TokenCounts {
   let figuresOnly: TokenCounts | undefined;
   const texts = overflowFragments.flatMap(ownTexts).filter(isOverflowText);
   for (const fragment of texts) {
     const counts = parseTokenCounts(fragment);
-    const prompt = parsePromptTokens(fragment);
-    if (
-      prompt.promptTokens !== undefined ||
-      prompt.requestedTokens !== undefined
-    ) {
-      return { ...counts, ...prompt };
-    }
     if (
       figuresOnly === undefined &&
       (counts.actualTokens !== undefined || counts.limitTokens !== undefined)
     ) {
       figuresOnly = counts;
+    }
+    const size = parseRequestSize(fragment);
+    if (size === 'ambiguous') return figuresOnly ?? {};
+    if (size.promptTokens !== undefined || size.requestedTokens !== undefined) {
+      return { ...counts, ...size };
     }
   }
   return figuresOnly ?? {};
