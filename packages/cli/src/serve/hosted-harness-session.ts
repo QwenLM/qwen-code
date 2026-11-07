@@ -8319,6 +8319,24 @@ export function registerHostedHarnessSessionRoutes(
         });
         await session.automations?.reconcileRuns();
         if (phase === 'settle_resources') {
+          // Drain every Runtime a turn left held ahead of the owner close that
+          // asks for the mount back (R22-1, the order the v1 close already
+          // keeps for R14-2): a Hook-configured turn's background Shell keeps
+          // the release-mount guard refusing runtime_session_busy, so a
+          // handback issued first parks the detach on recovery-required for as
+          // long as the process lives. The drain's stops also land their
+          // finalize through the still-open publisher closed below.
+          if (brokerOptions)
+            await retryHostedCleanup(
+              session,
+              {
+                ...brokerOptions,
+                lifecycleAuthority: () => session.lifecycle,
+              },
+              true,
+            );
+          else if (hasHostedCleanupDebt(session.managed))
+            throw new Error('Runtime cleanup remains owed after drain.');
           // Only a delete is terminal; a close keeps the deterministic owner
           // re-acquirable across the reload (R14-1).
           await session.hooks?.close({ terminal: kind === 'delete' });
@@ -8331,17 +8349,6 @@ export function registerHostedHarnessSessionRoutes(
           await session.shell?.publisher?.close();
           await session.backgroundLane?.publisher?.close();
           await session.mcp?.closeResources({ terminal: kind === 'delete' });
-          if (brokerOptions)
-            await retryHostedCleanup(
-              session,
-              {
-                ...brokerOptions,
-                lifecycleAuthority: () => session.lifecycle,
-              },
-              true,
-            );
-          else if (hasHostedCleanupDebt(session.managed))
-            throw new Error('Runtime cleanup remains owed after drain.');
         }
         res.json({
           protocolVersion: 2,

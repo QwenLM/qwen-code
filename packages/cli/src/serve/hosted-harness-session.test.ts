@@ -22188,6 +22188,7 @@ describe('Hosted Harness no-tool session', () => {
           runtimeLeaseOwedByTerminalRoute?: boolean;
           blocked: boolean;
           cleanupBlocked?: boolean;
+          hooks?: HostedHookSession;
           hooksBusy?: boolean;
           recoveredTurn?: string;
           mcpClosing?: boolean;
@@ -22313,6 +22314,68 @@ describe('Hosted Harness no-tool session', () => {
           .expect(204);
     },
   );
+
+  it('drains a held Runtime before the non-terminal Hook mount handback on a v2 close (R22-1)', async () => {
+    const toolProfile = 'hosted-workspace-shell/1';
+    const f = await recoveryFileSession(toolProfile);
+    await f.submit();
+    await f.idle();
+    f.resident.monitorWake?.close();
+    await f.owe();
+    // A Hook-configured turn shares this Runtime and leaves a live background
+    // Shell (its finish() skips the release). The Broker's release-mount guard
+    // refuses while that row is active, and only the drain proves it stopped,
+    // so a handback issued first parks the detach on recovery-required for as
+    // long as the process lives. Model that guard at the seam: releaseMount
+    // refuses until the drain has run.
+    let backgroundLive = true;
+    const order: string[] = [];
+    vi.mocked(HostedWorkspaceBroker.prototype.release).mockImplementation(
+      async (opts) => {
+        order.push('drain');
+        // Only the cleanup-debt drain names the owed turn's Runtime and so
+        // proves its background Shell stopped; the lease drain carries no
+        // descriptor and stops nothing this guard waits on.
+        if (opts?.drain && 'bindingId' in opts) backgroundLive = false;
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'det-claim',
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockImplementation(
+      async () => {
+        order.push('handback');
+        if (backgroundLive)
+          throw new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy');
+      },
+    );
+    const hooks = new HostedHookSession(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      f.resident.managed,
+      hookPin,
+      undefined,
+      () => false,
+      `extensions-components-${'e'.repeat(64)}`,
+    );
+    // The Hook turn already acquired and holds the mount; the deterministic
+    // owner id keeps the close non-terminal (R13-1).
+    vi.spyOn(hooks, 'mountHeld', 'get').mockReturnValue(true);
+    f.resident.hooks = hooks;
+    await f
+      .authorize(supertest(f.server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send({
+        protocolVersion: 2,
+        phase: 'settle_resources',
+        kind: 'close',
+        toolProfile,
+        sessionKey: f.resident.managed.authority.sessionHeader.sessionKey,
+        authority: { operationId: 'close-drain-order', claimGeneration: 1 },
+      })
+      .expect(200);
+    // The 200 above is the witness: a handback issued before the drain refuses
+    // busy, and the route parks the detach on 503 instead of attaching.
+    expect(order).toContain('handback');
+  });
 
   it.each([false, true])(
     'keeps a later active Turn safe from a delayed original cancellation (public children: %s)',
