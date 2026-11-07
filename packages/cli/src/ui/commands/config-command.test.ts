@@ -458,7 +458,7 @@ describe('configCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: expect.not.stringContaining('maxRecentImagesTo...'),
+        content: expect.not.stringContaining('maxRecentImages...'),
       });
     });
 
