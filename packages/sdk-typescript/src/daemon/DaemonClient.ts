@@ -2676,7 +2676,7 @@ export class DaemonClient {
       {
         method: 'POST',
         headers,
-        body: req.data,
+        body: req.data as BodyInit,
         ...(req.signal ? { signal: req.signal } : {}),
       },
       async (res) => {
