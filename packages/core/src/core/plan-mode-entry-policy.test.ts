@@ -6,7 +6,35 @@
 
 import { describe, expect, it } from 'vitest';
 import { ToolNames } from '../tools/tool-names.js';
-import { findPlanModeEntryBatchBoundaryIndex } from './plan-mode-entry-policy.js';
+import { getPlanModeSystemReminder } from './prompts.js';
+import {
+  findPlanModeEntryBatchBoundaryIndex,
+  getPlanModeLifecyclePrefix,
+} from './plan-mode-entry-policy.js';
+
+describe('getPlanModeLifecyclePrefix', () => {
+  it.each([
+    { planOnly: false, hasBashSearch: false },
+    { planOnly: true, hasBashSearch: false },
+    { planOnly: false, hasBashSearch: true },
+    { planOnly: true, hasBashSearch: true },
+  ])(
+    'recognizes the $planOnly/$hasBashSearch reminder variant',
+    ({ planOnly, hasBashSearch }) => {
+      const reminder = getPlanModeSystemReminder(planOnly, hasBashSearch);
+
+      expect(
+        getPlanModeLifecyclePrefix(ToolNames.ENTER_PLAN_MODE, reminder),
+      ).toBe(reminder);
+      expect(
+        getPlanModeLifecyclePrefix(
+          ToolNames.ENTER_PLAN_MODE,
+          `${reminder}\n\nextra`,
+        ),
+      ).toBe(`${reminder}\n\n`);
+    },
+  );
+});
 
 describe('findPlanModeEntryBatchBoundaryIndex', () => {
   it.each([
