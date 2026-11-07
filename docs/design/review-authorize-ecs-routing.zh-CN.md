@@ -178,10 +178,11 @@ verify 确认、以及停用通告——每一步现在都以相同的自包含 
   通过。
 - 完整 `qwen-pr-review-workflow.test.js`（271 个测试）与
   `qwen-resolve-workflow.test.js`（55 个测试）通过。
-- triage 门由 `.github/scripts/qwen-triage-workflow.test.mjs`（131 个测试）与
-  `.github/scripts/ci-runner-routing.test.mjs`（103 个测试）的路由矩阵 pin 住，两者
-  通过；还原 triage 析取项、删某 gh 步前导、或向任一步骤正文（含不携带凭据的
-  budget 步骤）追加仓库代码执行行，均使 triage 测试变红。
+- triage 门由 `.github/scripts/qwen-triage-workflow.test.mjs`（131 个测试）
+  pin 住；`.github/scripts/ci-runner-routing.test.mjs`（103 个测试）中的路由
+  矩阵也全部通过（它 pin 住的是兄弟上池 job，而非本门）。还原 triage 析取项、
+  删某 gh 步前导、或向任一步骤正文（含不携带凭据的 budget 步骤）追加仓库代码
+  执行行，均使 triage 测试变红。
 
 ## 验收标准
 

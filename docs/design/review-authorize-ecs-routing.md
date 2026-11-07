@@ -214,8 +214,9 @@ hardening.
 - Full `qwen-pr-review-workflow.test.js` (271 tests) and
   `qwen-resolve-workflow.test.js` (55 tests) pass.
 - The triage gate is pinned by `.github/scripts/qwen-triage-workflow.test.mjs`
-  (131 tests) and the routing matrix in
-  `.github/scripts/ci-runner-routing.test.mjs` (103 tests); both pass. Mutation
+  (131 tests); the routing matrix in
+  `.github/scripts/ci-runner-routing.test.mjs` (103 tests) also passes (it
+  pins the sibling pool jobs, not this gate). Mutation
   witnesses: reverting the triage disjuncts, removing a gh step's preamble, or
   appending a repository-code execution line to any step's body (including
   the credential-free budget step) each reds the triage test.
