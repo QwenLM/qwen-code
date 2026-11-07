@@ -15,7 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parse } from 'yaml';
+import { isMap, isSeq, parse, parseDocument } from 'yaml';
 
 // macOS ships rm at /bin/rm, so a hardcoded /usr/bin/rm exits 127 on the macOS
 // scripts lane (which collects these files — the vitest exclude is win32-only).
@@ -2126,15 +2126,62 @@ describe('ci failure patrol workflow', () => {
     )) {
       for (const key of [
         'HTTPS_PROXY',
-        'https_proxy',
         'HTTP_PROXY',
-        'http_proxy',
         'SSL_CERT_FILE',
         'SSL_CERT_DIR',
         'NODE_EXTRA_CA_CERTS',
       ]) {
         expect(step.env[key], `${step.name}.${key}`).toBe('');
       }
+      // GitHub env keys are case-INSENSITIVE, so the lowercase variants cannot
+      // sit beside the uppercase ones — actionlint rejects the file outright
+      // ("key https_proxy is duplicated in env section"). They are read by gh
+      // at exec time rather than by bash at startup, so the body closes them.
+      expect(step.env.https_proxy, `${step.name}.https_proxy`).toBeUndefined();
+      expect(step.env.http_proxy, `${step.name}.http_proxy`).toBeUndefined();
+      expect(step.run, `${step.name} unsets lowercase proxies`).toContain(
+        'unset https_proxy http_proxy',
+      );
     }
+  });
+
+  it('has no case-insensitive duplicate keys in any env section', () => {
+    // GitHub treats env keys case-insensitively, so `HTTPS_PROXY` and
+    // `https_proxy` in one block are a duplicate that actionlint rejects and
+    // the whole Lint & Static lane reds on. A plain YAML parse does NOT see it
+    // (the keys differ as strings), which is how it reached CI. Walk the AST so
+    // this is caught locally without depending on actionlint being installed.
+    const doc = parseDocument(workflow);
+    expect(doc.errors).toEqual([]);
+    const offenders = [];
+    let envBlocks = 0;
+    // yaml 2.x nodes are class instances (YAMLMap/YAMLSeq/Pair) with no `type`
+    // field — a `node.type === 'MAP'` test is silently always false and makes
+    // this whole check vacuous. Use the library's own guards.
+    const visit = (node, parentKey) => {
+      if (isMap(node)) {
+        if (parentKey === 'env') {
+          envBlocks += 1;
+          const seen = new Map();
+          for (const pair of node.items) {
+            const key = String(pair.key?.value ?? '');
+            const lower = key.toLowerCase();
+            if (seen.has(lower)) {
+              offenders.push(`${key} duplicates ${seen.get(lower)}`);
+            }
+            seen.set(lower, key);
+          }
+        }
+        for (const pair of node.items) {
+          visit(pair.value, String(pair.key?.value ?? ''));
+        }
+      } else if (isSeq(node)) {
+        for (const item of node.items) visit(item, parentKey);
+      }
+    };
+    visit(doc.contents, null);
+    // Non-vacuity: the walk must actually reach the env blocks it judges.
+    expect(envBlocks).toBeGreaterThanOrEqual(15);
+    expect(offenders).toEqual([]);
   });
 });

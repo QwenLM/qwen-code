@@ -428,9 +428,7 @@ jobs:
           # file makes its certificate trusted. Probed unset on ecs-qwen-hk3-26,
           # so emptying them costs no egress.
           HTTPS_PROXY: ''
-          https_proxy: ''
           HTTP_PROXY: ''
-          http_proxy: ''
           SSL_CERT_FILE: ''
           SSL_CERT_DIR: ''
           NODE_EXTRA_CA_CERTS: ''
@@ -461,6 +459,11 @@ jobs:
           done
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          # GitHub env keys are case-insensitive, so the lowercase variants cannot
+          # be pinned alongside the uppercase ones (actionlint: duplicated key).
+          # They are read by gh at exec time, not by bash at startup, so unsetting
+          # them here closes the same channel.
+          unset https_proxy http_proxy
           # Not a minted directory. `mktemp -d` under $RUNNER_TEMP is 0700 but
           # owned by the job uid, in a listable parent — the same construction
           # this workflow rejects for the Git config, and the dir would be
@@ -494,9 +497,7 @@ jobs:
           LD_LIBRARY_PATH: ''
           NODE_OPTIONS: ''
           HTTPS_PROXY: ''
-          https_proxy: ''
           HTTP_PROXY: ''
-          http_proxy: ''
           SSL_CERT_FILE: ''
           SSL_CERT_DIR: ''
           NODE_EXTRA_CA_CERTS: ''
@@ -547,6 +548,11 @@ jobs:
           done
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          # GitHub env keys are case-insensitive, so the lowercase variants cannot
+          # be pinned alongside the uppercase ones (actionlint: duplicated key).
+          # They are read by gh at exec time, not by bash at startup, so unsetting
+          # them here closes the same channel.
+          unset https_proxy http_proxy
           # See the identity step: a minted dir under the uid-writable
           # $RUNNER_TEMP is plantable between calls. This path cannot be created.
           GH_CONFIG_DIR='/nonexistent/patrol-gh-config'
@@ -1159,9 +1165,7 @@ jobs:
           # gh's egress and trust-store channels; see identity. Probed unset on
           # the pool, so emptying them costs no egress.
           HTTPS_PROXY: ''
-          https_proxy: ''
           HTTP_PROXY: ''
-          http_proxy: ''
           SSL_CERT_FILE: ''
           SSL_CERT_DIR: ''
           NODE_EXTRA_CA_CERTS: ''
@@ -1189,6 +1193,11 @@ jobs:
           done
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          # GitHub env keys are case-insensitive, so the lowercase variants cannot
+          # be pinned alongside the uppercase ones (actionlint: duplicated key).
+          # They are read by gh at exec time, not by bash at startup, so unsetting
+          # them here closes the same channel.
+          unset https_proxy http_proxy
           # See the identity step: a minted dir under the uid-writable
           # $RUNNER_TEMP is plantable between calls. This path cannot be created.
           GH_CONFIG_DIR='/nonexistent/patrol-gh-config'
@@ -1222,9 +1231,7 @@ jobs:
           # gh's egress and trust-store channels; see identity. Probed unset on
           # the pool, so emptying them costs no egress.
           HTTPS_PROXY: ''
-          https_proxy: ''
           HTTP_PROXY: ''
-          http_proxy: ''
           SSL_CERT_FILE: ''
           SSL_CERT_DIR: ''
           NODE_EXTRA_CA_CERTS: ''
@@ -1252,6 +1259,11 @@ jobs:
           done
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          # GitHub env keys are case-insensitive, so the lowercase variants cannot
+          # be pinned alongside the uppercase ones (actionlint: duplicated key).
+          # They are read by gh at exec time, not by bash at startup, so unsetting
+          # them here closes the same channel.
+          unset https_proxy http_proxy
           # See the identity step: a minted dir under the uid-writable
           # $RUNNER_TEMP is plantable between calls. This path cannot be created.
           GH_CONFIG_DIR='/nonexistent/patrol-gh-config'
