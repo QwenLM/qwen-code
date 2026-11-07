@@ -1158,6 +1158,11 @@ export async function runNonInteractive(
 
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
+      // SIGHUP (ssh/session teardown, terminal multiplexers, `kill -HUP`) would
+      // otherwise end the process by default action: the abort never reaches
+      // running shell tools, which live in their own process group and finish
+      // unobserved, so on resume their calls have no recorded result.
+      process.on('SIGHUP', shutdownHandler);
 
       try {
         await modSession?.initialize(abortController.signal);
@@ -4224,6 +4229,7 @@ export async function runNonInteractive(
       // Cleanup signal handlers
       process.removeListener('SIGINT', shutdownHandler);
       process.removeListener('SIGTERM', shutdownHandler);
+      process.removeListener('SIGHUP', shutdownHandler);
       if (isTelemetrySdkInitialized()) {
         await shutdownTelemetry();
       }
