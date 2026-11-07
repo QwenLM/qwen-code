@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedUserQuestions;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicActionList;
@@ -217,20 +218,6 @@ public class ManagedActionService {
     }
 
     public OperationAdmission respond(
-            String tenant,
-            String actor,
-            String session,
-            String id,
-            String key,
-            String kind,
-            JsonNode revision,
-            String policy,
-            String option) {
-        return respond(principalOf(tenant, actor), session, id, key, kind,
-                revision, policy, option);
-    }
-
-    public OperationAdmission respond(
             SessionPrincipal principal,
             String session,
             String id,
@@ -238,23 +225,39 @@ public class ManagedActionService {
             String kind,
             JsonNode revision,
             String policy,
-            String option) {
+            String option,
+            JsonNode answers,
+            boolean publicNames) {
         sessions.requireReadableSession(principal, session);
         ManagedAgentService.validateIdempotencyKey(key);
-        if (!"permission".equals(kind)
+        if (!("permission".equals(kind) || "question".equals(kind))
                 || revision == null
                 || !revision.isIntegralNumber()
                 || !revision.canConvertToLong()) {
             throw new ManagedAgentException(
                     400,
                     "invalid_action_response",
-                    "Only permission responses are supported.");
+                    "The Action response kind or revision is invalid.");
         }
-        ObjectNode body =
-                json.createObjectNode()
-                        .put("optionId", option)
-                        .put("inputRevision", revision.longValue())
-                        .put("policyRevision", policy);
+        ObjectNode body = json.createObjectNode();
+        if ("question".equals(kind)) {
+            Action action = actions.find(principal.tenantId(), session, id).orElseThrow(() ->
+                    new ManagedAgentException(404, "action_not_found", "The Action was not found."));
+            try {
+                if (option != null || !ManagedUserQuestions.isQuestion(action.options())) {
+                    throw new IllegalArgumentException();
+                }
+                body.set("answers", ManagedUserQuestions.canonicalAnswers(action.options().get("questions"), answers, publicNames));
+            } catch (IllegalArgumentException error) {
+                throw new ManagedAgentException(400, "invalid_action_response", "The answer does not match the original question.");
+            }
+        } else {
+            if (answers != null) {
+                throw new ManagedAgentException(400, "invalid_action_response", "Permission responses cannot contain answers.");
+            }
+            body.put("optionId", option);
+        }
+        body.put("inputRevision", revision.longValue()).put("policyRevision", policy);
         OperationAdmission admitted =
                 actions.admit(
                         principal.tenantId(),
@@ -362,7 +365,7 @@ public class ManagedActionService {
                 json.createObjectNode()
                         .put(web ? "actionId" : "id", action.id())
                         .put(web ? "sessionId" : "session_id", session)
-                        .put("kind", "permission")
+                        .put("kind", ManagedUserQuestions.isQuestion(options) ? "question" : "permission")
                         .put("state", action.state());
         result.set(
                 "source",
@@ -382,7 +385,18 @@ public class ManagedActionService {
         }
         actions.publicTurnId(tenant, session, options.path("turnId").asText())
                 .ifPresent(turn -> result.put(web ? "turnId" : "turn_id", turn));
-        result.set("options", options.path("options"));
+        if (ManagedUserQuestions.isQuestion(options)) {
+            JsonNode questions = options.path("questions").deepCopy();
+            if (!web) {
+                for (JsonNode question : questions) {
+                    ObjectNode item = (ObjectNode) question;
+                    item.set("allow_text", item.remove("allowText"));
+                }
+            }
+            result.set("questions", questions);
+        } else {
+            result.set("options", options.path("options"));
+        }
         JsonNode preview = inputPreview(tenant, session, action, web);
         if (preview != null) {
             result.set(web ? "inputPreview" : "input_preview", preview);

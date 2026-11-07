@@ -198,7 +198,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "workspace_generation:VARBINARY,canonical_cwd:VARCHAR,capability_digest:VARBINARY,"
                     + "isolation_class:VARCHAR,harness_session_id:VARBINARY,turn_kind:VARCHAR,binding_id:VARBINARY,"
                     + "runtime_generation:BIGINT,session_state:VARCHAR,record_version:BIGINT,last_active_at:BIGINT,"
-                    + "execution_storage_key:CHAR,is_execution_exclusive:BOOLEAN"),
+                    + "execution_storage_key:CHAR,is_rewind_pending:BOOLEAN"),
             declaration("ma_runtime_slot", "request_key",
                     "request_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,workspace_generation:VARBINARY,"
                     + "canonical_cwd:VARCHAR,capability_digest:VARBINARY,isolation_class:VARCHAR,isolation_key:VARBINARY,"
@@ -256,7 +256,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "previous_commit_digest:CHAR,commit_digest:CHAR,writer_generation:BIGINT,writer_id:VARBINARY,"
                     + "writer_token_hash:CHAR,activation_epoch:BIGINT,latest_checkpoint_resource_id:VARBINARY,"
                     + "record_encoding:VARCHAR,record_bytes:MEDIUMBLOB,byte_length:BIGINT,record_digest:CHAR,"
-                    + "activation_lease_until:BIGINT,activation_renewal_seq:BIGINT,gmt_create:BIGINT"),
+                    + "activation_lease_until:BIGINT,activation_renewal_seq:BIGINT,is_activation_record:BOOLEAN,gmt_create:BIGINT"),
             declaration("ma_session_record", "session_scope_key,record_key",
                     "session_scope_key:CHAR,record_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,"
                     + "session_id:VARBINARY,domain:VARCHAR,record_id:VARBINARY,operation_hash:CHAR,revision:BIGINT,"
@@ -284,7 +284,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "mount_registration_id:CHAR,storage_kind:VARCHAR,csi_phase:VARCHAR,csi_revision:BIGINT,"
                     + "csi_reservation_id:CHAR,csi_registration_key:CHAR,csi_registration_revision:BIGINT,"
                     + "csi_provision_request_id:VARBINARY,maintenance_id:CHAR,maintenance_generation:BIGINT,"
-                    + "physical_key:CHAR,member_count:BIGINT,exclusive_member_key:CHAR"),
+                    + "physical_key:CHAR,member_count:BIGINT"),
             declaration("ma_tenant_guard", "tenant_key,guard_domain",
                     "tenant_key:CHAR,tenant_id:VARBINARY,guard_domain:VARCHAR"),
             declaration("ma_tool_execution", "execution_call_id_hash",
@@ -2955,8 +2955,7 @@ final class WorkspaceCsiApplicationInventory {
                         && Objects.equals(row.number("csi_revision"),
                                 CsiOwnershipRevision.next(intent.reservation().revision()))
                         && row.cell("maintenance_id").isNull()
-                        && Objects.equals(0L, row.number("member_count"))
-                        && row.cell("exclusive_member_key").isNull());
+                        && Objects.equals(0L, row.number("member_count")));
                 case "ma_runtime_slot" -> expect(table, row, request(row)
                         && original.bindingId().equals(row.text("active_binding_id"))
                         && Objects.equals(original.generation(), row.number("last_generation")));
@@ -2970,7 +2969,7 @@ final class WorkspaceCsiApplicationInventory {
                         && Objects.equals(intent.resourceHandleVersion().longValue(), row.number("resource_handle_version"))
                         && Objects.equals(intent.attestationGeneration(), row.number("attestation_generation")));
                 case "ma_runtime_session" -> expect(table, row, scope(row)
-                        && row.cell("execution_storage_key").isNull() && Boolean.FALSE.equals(row.bool("is_execution_exclusive"))
+                        && row.cell("execution_storage_key").isNull() && Boolean.FALSE.equals(row.bool("is_rewind_pending"))
                         && original.bindingId().equals(row.text("binding_id")) && session.equals(row.text("runtime_session_id"))
                         && session.equals(row.text("harness_session_id")) && "bootstrap".equals(row.text("turn_kind"))
                         && Objects.equals(original.generation(), row.number("runtime_generation"))

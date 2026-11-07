@@ -856,8 +856,8 @@ importers:
         specifier: ^17.7.2
         version: 17.7.2
       yauzl:
-        specifier: ^2.10.0
-        version: 2.10.0
+        specifier: ^3.4.0
+        version: 3.4.0
       zod:
         specifier: ^3.23.8
         version: 3.25.76
@@ -1621,6 +1621,9 @@ importers:
       '@modelcontextprotocol/ext-apps':
         specifier: ^1.7.5
         version: 1.7.5(@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@3.25.76))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(zod@3.25.76)
+      '@noble/hashes':
+        specifier: 1.8.0
+        version: 1.8.0
       '@tanstack/react-table':
         specifier: ^8.21.3
         version: 8.21.3(react-dom@19.2.4(react@19.2.4))(react@19.2.4)

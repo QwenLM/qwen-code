@@ -413,6 +413,7 @@ import {
 } from '../extension-skills.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
+import { subscriptionQuotaFromError } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import type {
   AvailableCommand,
   ContentBlock,
@@ -2822,6 +2823,8 @@ export class Session implements SessionContext {
   private unsubscribeApprovalModeChange?: () => void;
   private unsubscribeWorkflowModeChange?: () => void;
   private workflowModeUpdateQueue: Promise<void> = Promise.resolve();
+  private availableCommandsUpdateTail: Promise<void> = Promise.resolve();
+  private lastSuccessfulAvailableCommandsHash?: string;
   private unsubscribeRequestLifecycle?: () => void;
   private requestLifecycleSessionId: string;
   private readonly requestLifecycleExecutions = new Set<string>();
@@ -4738,7 +4741,35 @@ export class Session implements SessionContext {
     }
   }
 
-  async reloadModelProvidersFromDisk(): Promise<void> {
+  async reloadModelProvidersFromDisk(options?: {
+    subscriptionSignedOut?: boolean;
+  }): Promise<void> {
+    if (
+      options?.subscriptionSignedOut &&
+      this.config.getAuthType() === AuthType.QWEN_SUBSCRIPTION
+    ) {
+      this.config
+        .getBackgroundTaskRegistry()
+        .abortAll({ notify: false, persistedStatus: 'cancelled' });
+      this.config.setSubscriptionPlan(undefined);
+      const authType = this.config.getAuthType();
+      const currentModelId = authType
+        ? getCurrentAcpModelId(
+            buildAcpModelOptions(this.config.getAllConfiguredModels()),
+            this.config.getModel(),
+            authType,
+            this.config.getCurrentModelRegistryBaseUrl(),
+          )
+        : '';
+      await this.client.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: this.sessionId,
+        currentModelId,
+        subscriptionSignedOut: true,
+      });
+      await this.sendAvailableCommandsUpdate();
+      return;
+    }
     if (
       !this.settings.reloadScopesFromDiskAtomically([
         SettingScope.User,
@@ -9365,6 +9396,7 @@ export class Session implements SessionContext {
 
     const errorStatus = getErrorStatus(error);
     const errorMessage = error instanceof Error ? error.message : String(error);
+    const quota = subscriptionQuotaFromError(error);
     const hookSystem = this.config.getHookSystem?.();
     if (
       !this.config.getDisableAllHooks?.() &&
@@ -9382,9 +9414,20 @@ export class Session implements SessionContext {
     }
 
     if (errorStatus === 429) {
-      throw new RequestError(429, 'Rate limit exceeded. Try again later.');
+      throw new RequestError(
+        429,
+        this.config.getAuthType() === AuthType.QWEN_SUBSCRIPTION
+          ? errorMessage
+          : 'Rate limit exceeded. Try again later.',
+      );
     }
 
+    if (quota) {
+      throw new RequestError(-32603, errorMessage, {
+        details: errorMessage,
+        subscriptionQuota: quota,
+      });
+    }
     throw error;
   }
 
@@ -14855,7 +14898,18 @@ export class Session implements SessionContext {
     if (updateFailed) throw updateError;
   }
 
-  reloadSkillSettings(): void {
+  reloadSkillSettings(includeUserSettings = false): void {
+    if (includeUserSettings) {
+      if (
+        !this.settings.reloadScopesFromDiskAtomically([
+          SettingScope.Workspace,
+          SettingScope.User,
+        ])
+      ) {
+        throw new Error('Failed to reload user skill settings');
+      }
+      return;
+    }
     this.settings.reloadScopeFromDisk(SettingScope.Workspace);
   }
 
@@ -14868,24 +14922,41 @@ export class Session implements SessionContext {
     );
   }
 
-  private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
-    if (this.#isAutomaticWorkHeld()) return;
-    const { availableCommands, availableSkills, availableSkillDetails } =
-      await this.buildAvailableCommandsSnapshot();
-    this.config.refreshWorkflowMode?.();
-    const update: SessionUpdate = {
-      sessionUpdate: 'available_commands_update',
-      availableCommands,
-      ...(availableSkills !== undefined
-        ? {
-            _meta: {
-              availableSkills,
-              ...(availableSkillDetails ? { availableSkillDetails } : {}),
-            },
-          }
-        : {}),
-    };
-    await this.sendUpdate(update);
+  private sendAvailableCommandsUpdateOrThrow(): Promise<void> {
+    const pending = this.availableCommandsUpdateTail.then(async () => {
+      if (this.disposed || this.#isAutomaticWorkHeld()) return;
+      const { availableCommands, availableSkills, availableSkillDetails } =
+        await this.buildAvailableCommandsSnapshot();
+      if (this.disposed || this.#isAutomaticWorkHeld()) return;
+      this.config.refreshWorkflowMode?.();
+      const update: SessionUpdate = {
+        sessionUpdate: 'available_commands_update',
+        availableCommands,
+        ...(availableSkills !== undefined
+          ? {
+              _meta: {
+                availableSkills,
+                ...(availableSkillDetails ? { availableSkillDetails } : {}),
+              },
+            }
+          : {}),
+      };
+      const hash = createHash('sha256')
+        .update(JSON.stringify(update))
+        .digest('hex');
+      if (
+        hash === this.lastSuccessfulAvailableCommandsHash ||
+        this.disposed ||
+        this.#isAutomaticWorkHeld()
+      ) {
+        return;
+      }
+      await this.sendUpdate(update);
+      if (this.disposed || this.#isAutomaticWorkHeld()) return;
+      this.lastSuccessfulAvailableCommandsHash = hash;
+    });
+    this.availableCommandsUpdateTail = pending.catch(() => undefined);
+    return pending;
   }
 
   #withBackgroundPermission(
@@ -15038,6 +15109,25 @@ export class Session implements SessionContext {
         undefined,
         `authType cannot be determined for modelId "${parsed.modelId}"`,
       );
+    }
+
+    const enforcedAuthType = this.settings.merged.security?.auth?.enforcedType;
+    const modelAuthType = parsed.modelId.startsWith(RUNTIME_SNAPSHOT_PREFIX)
+      ? parsed.modelId.split('|', 3)[1]
+      : selectedAuthType;
+    if (enforcedAuthType && enforcedAuthType !== modelAuthType) {
+      throw RequestError.invalidParams(
+        { errorKind: 'auth_type_enforced' },
+        'Authentication is restricted by policy.',
+      );
+    }
+
+    if (
+      this.requiresManagedConversationBinding &&
+      selectedAuthType === AuthType.QWEN_SUBSCRIPTION &&
+      !resolvedRoute
+    ) {
+      await this.config.refreshSubscriptionModels();
     }
 
     const requireCachedCredentials =

@@ -10,6 +10,8 @@ import type {
 } from './managed-agent-provider';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import { useManagedActions } from './use-managed-actions';
+import { webcrypto } from 'node:crypto';
+import { pendingQuestion } from './managed-question.test-fixtures';
 
 const pending: ManagedAgentPendingAction = {
   actionId: 'tool_approval_1',
@@ -48,6 +50,7 @@ describe('useManagedActions', () => {
     act(() => root?.unmount());
     root = undefined;
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   function mount(
@@ -119,6 +122,102 @@ describe('useManagedActions', () => {
       await hook.latest!.respond(child.actionId, 'allow');
     });
     expect(respond).toHaveBeenCalledWith(child, 'allow', expect.anything());
+    expect(hook.latest?.answerError).toBeUndefined();
+  });
+
+  it('keeps a question visible while answering and reuses the canonical response key on retry and reload', async () => {
+    vi.stubGlobal('crypto', webcrypto);
+    const question = pendingQuestion();
+    const listPending = vi.fn().mockResolvedValue([question]);
+    let reject!: (error: Error) => void;
+    const respond = vi
+      .fn()
+      .mockImplementationOnce(
+        () => new Promise<void>((_resolve, fail) => (reject = fail)),
+      )
+      .mockRejectedValue(new Error('unconfirmed'));
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(question));
+    const response = {
+      kind: 'question' as const,
+      answers: [
+        {
+          questionId: 'q2',
+          optionIds: ['q2o2', 'q2o1'],
+          text: 'custom, value',
+        },
+        { questionId: 'q1', optionIds: ['q1o2'] },
+      ],
+    };
+    let first!: Promise<void>;
+    await act(async () => {
+      first = hook.latest!.respond(question.actionId, response);
+      await hook.latest!.respond(question.actionId, response);
+    });
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+    expect(hook.latest?.action).toEqual(question);
+    const key = respond.mock.calls[0][2].idempotencyKey;
+    expect(key).toMatch(/^question:[0-9a-f]{64}$/);
+    await act(async () => {
+      reject(new Error('unconfirmed'));
+      await expect(first).rejects.toThrow('unconfirmed');
+    });
+    await act(async () => {
+      await expect(
+        hook.latest!.respond(question.actionId, {
+          ...response,
+          answers: [...response.answers].reverse().map((answer) => ({
+            ...answer,
+            optionIds: [...answer.optionIds].reverse(),
+          })),
+        }),
+      ).rejects.toThrow('unconfirmed');
+    });
+    expect(respond.mock.calls[1][2].idempotencyKey).toBe(key);
+    act(() => root!.unmount());
+    root = undefined;
+    const reloaded = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(reloaded.latest?.action).toEqual(question));
+    respond.mockResolvedValueOnce(undefined);
+    await act(async () =>
+      reloaded.latest!.respond(question.actionId, response),
+    );
+    expect(respond.mock.calls[2][2].idempotencyKey).toBe(key);
+    expect(reloaded.latest?.action).toBeUndefined();
+  });
+
+  it('reconciles a question answered by another client and refreshes after a stream gap', async () => {
+    vi.stubGlobal('crypto', webcrypto);
+    const question = pendingQuestion();
+    const listPending = vi
+      .fn()
+      .mockResolvedValueOnce([question])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([question]);
+    const respond = vi
+      .fn()
+      .mockRejectedValue({ code: 'action_already_resolved' });
+    const hook = mount(
+      { actions: { listPending, respond } } as unknown as ManagedAgentProvider,
+      { enabled: true, events: [] },
+    );
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(question));
+    await act(async () =>
+      hook.latest!.respond(question.actionId, {
+        kind: 'question',
+        answers: [
+          { questionId: 'q1', text: 'custom' },
+          { questionId: 'q2', optionIds: ['q2o1'] },
+        ],
+      }),
+    );
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
+    expect(hook.latest?.action).toBeUndefined();
+    hook.rerender({ events: [gap(9)] });
+    await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(3));
     expect(hook.latest?.answerError).toBeUndefined();
   });
 

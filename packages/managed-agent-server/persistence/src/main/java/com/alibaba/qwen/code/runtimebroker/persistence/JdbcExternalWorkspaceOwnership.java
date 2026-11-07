@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAdmission;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
+import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -260,7 +262,7 @@ public final class JdbcExternalWorkspaceOwnership {
                         || acquiring && (!session.isAcquirable() || !java.util.Set.of("ACQUIRING", "READY").contains(row.getString("session_state"))
                                 || session.getState() == RuntimeSessionRecord.State.READY && !"READY".equals(row.getString("session_state")))
                         || !acquiring && !java.util.Set.of("ACQUIRING", "READY", "RELEASING", "RELEASED").contains(row.getString("session_state"))
-                        || row.getBoolean("is_execution_exclusive")
+                        || row.getBoolean("is_rewind_pending")
                         || row.getString("execution_storage_key") != null && !physical.equals(row.getString("execution_storage_key"))) {
                     throw unavailable();
                 }
@@ -333,7 +335,7 @@ public final class JdbcExternalWorkspaceOwnership {
             RuntimeSessionRecord session) throws SQLException {
         held(connection, owner, binding, session, false);
         try (var statement = connection.prepareStatement("UPDATE ma_runtime_session SET execution_storage_key = NULL,"
-                + " is_execution_exclusive = FALSE WHERE execution_storage_key = ? AND binding_id = ?"
+                + " is_rewind_pending = FALSE WHERE execution_storage_key = ? AND binding_id = ?"
                 + " AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?")) {
             statement.setString(1, owner.registration().ownerKey());
             JdbcRepositorySupport.setIdentity(statement, 2, binding.getBindingId());
@@ -373,6 +375,53 @@ public final class JdbcExternalWorkspaceOwnership {
             }
         }
         requireStopped(connection, current, claim, session);
+    }
+
+    /** Stopped-release prelude: owner lock, saved-context proof, harness admission, in that order. */
+    public static Owner lockStoppedRelease(Connection connection, RuntimeBindingRecord claim,
+            String harnessSessionId) throws SQLException {
+        Owner owner = lockOwner(connection, claim);
+        savedContext(connection, claim, harnessSessionId, false);
+        requireExternalHarnessAdmission(connection, claim.getRequest(), claim.getRequest().getScope(), harnessSessionId, true);
+        return owner;
+    }
+
+    /** Stopped-release member dispatch: the EXTERNAL receipt-backed release or the local member clear. */
+    public static void releaseStoppedMember(Connection connection, boolean external, Owner externalOwner,
+            RuntimeBindingRecord binding, RuntimeBindingRecord claim, RuntimeSessionRecord expected, String physical) throws SQLException {
+        if (external) {
+            releaseStopped(connection, externalOwner, binding, claim, expected);
+        } else if (physical != null) {
+            JdbcRuntimeBindingRepository.clearStoppedMember(connection, physical, expected);
+        }
+    }
+
+    public static void requireExternalHarnessAdmission(Connection connection, RuntimeProvisionRequest request,
+            RuntimeScope scope, String harnessSessionId, boolean cleanup) throws SQLException {
+        if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)
+                || !request.getScope().equals(scope)) {
+            throw JdbcRuntimeBindingRepository.unverifiedWorkspaceHolder();
+        }
+        boolean shared = HarnessOwnership.sharesRuntimeSessions(request);
+        JdbcRuntimeBindingRepository.requireHarnessAdmission(connection, scope, harnessSessionId,
+                scope.getLifecycleAuthority(), cleanup
+                        ? JdbcRuntimeBindingRepository.fence(shared, JdbcRuntimeBindingRepository.HarnessFence.CLEANUP, JdbcRuntimeBindingRepository.HarnessFence.RETIREMENT)
+                        : JdbcRuntimeBindingRepository.fence(shared));
+    }
+
+    /**
+     * The single read of "is this storage routed through the external provider?";
+     * admission and authorization must not drift apart on this answer.
+     */
+    public static boolean externalStorage(org.springframework.jdbc.core.JdbcTemplate jdbc,
+            com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding binding) {
+        if (binding == null) {
+            return false;
+        }
+        return jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE alias_key = ?",
+                        String.class, JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId()))
+                .stream()
+                .anyMatch(kind -> java.util.Set.of("EXTERNAL", "EPHEMERAL").contains(kind));
     }
 
     private static void requireStopped(Connection connection, RuntimeBindingRecord current,

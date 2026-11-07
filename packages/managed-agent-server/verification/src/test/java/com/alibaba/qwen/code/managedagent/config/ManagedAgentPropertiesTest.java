@@ -1256,6 +1256,8 @@ public class ManagedAgentPropertiesTest {
 
     @Test
     public void automationTunablesBindFromTheShippedConfiguration() throws Exception {
+        assertThat(new ManagedAgentProperties().getAutomation().isEnabled())
+                .isTrue();
         var yaml = new org.springframework.boot.env.YamlPropertySourceLoader()
                 .load("application.yml",
                         new org.springframework.core.io.ClassPathResource(
@@ -1280,7 +1282,7 @@ public class ManagedAgentPropertiesTest {
             assertThat(source.containsProperty("qwen.managed-agent.automation"
                     + ".scanner-threads")).isTrue();
         });
-        new ApplicationContextRunner()
+        var runner = new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class)
                 .withInitializer(ctx -> {
                     java.util.Map<String, Object> ambient =
@@ -1293,25 +1295,33 @@ public class ManagedAgentPropertiesTest {
                                     "systemEnvironment", ambient));
                     yaml.forEach(ctx.getEnvironment().getPropertySources()
                             ::addLast);
-                })
-                .run(started -> {
-                    assertThat(started).hasNotFailed();
-                    var automation = started
-                            .getBean(ManagedAgentProperties.class)
-                            .getAutomation();
-                    assertThat(automation.isEnabled()).isFalse();
-                    assertThat(automation.getScanDelay())
-                            .isEqualTo(java.time.Duration.ofSeconds(10));
-                    assertThat(automation.getLease())
-                            .isEqualTo(java.time.Duration.ofSeconds(60));
-                    assertThat(automation.getLateTolerance())
-                            .isEqualTo(java.time.Duration.ofMinutes(5));
-                    assertThat(automation.getLookback())
-                            .isEqualTo(java.time.Duration.ofHours(24));
-                    assertThat(automation.getMaxSlotsPerTick()).isEqualTo(1000);
-                    assertThat(automation.getConcurrency()).isEqualTo(4);
-                    assertThat(automation.getScannerThreads()).isEqualTo(4);
                 });
+        runner.run(started -> {
+            assertThat(started).hasNotFailed();
+            var automation = started.getBean(ManagedAgentProperties.class)
+                    .getAutomation();
+            assertThat(automation.isEnabled()).isTrue();
+            assertThat(automation.getScanDelay())
+                    .isEqualTo(java.time.Duration.ofSeconds(10));
+            assertThat(automation.getLease())
+                    .isEqualTo(java.time.Duration.ofSeconds(60));
+            assertThat(automation.getLateTolerance())
+                    .isEqualTo(java.time.Duration.ofMinutes(5));
+            assertThat(automation.getLookback())
+                    .isEqualTo(java.time.Duration.ofHours(24));
+            assertThat(automation.getMaxSlotsPerTick()).isEqualTo(1000);
+            assertThat(automation.getConcurrency()).isEqualTo(4);
+            assertThat(automation.getScannerThreads()).isEqualTo(4);
+        });
+        for (String override : List.of(
+                "QWEN_MANAGED_AGENT_AUTOMATION_ENABLED=false",
+                "qwen.managed-agent.automation.enabled=false")) {
+            runner.withPropertyValues(override).run(started -> {
+                assertThat(started).hasNotFailed();
+                assertThat(started.getBean(ManagedAgentProperties.class)
+                        .getAutomation().isEnabled()).isFalse();
+            });
+        }
     }
 
     @Test
@@ -1328,7 +1338,6 @@ public class ManagedAgentPropertiesTest {
                 p -> p.getAutomation().setLookback(java.time.Duration.ZERO));
         for (Consumer<ManagedAgentProperties> change : invalid) {
             ManagedAgentProperties properties = new ManagedAgentProperties();
-            properties.getAutomation().setEnabled(true);
             // The complete values bind cleanly: the offender alone throws.
             assertThatCode(properties::validateWorkspaceFiles)
                     .doesNotThrowAnyException();
@@ -1338,6 +1347,7 @@ public class ManagedAgentPropertiesTest {
         }
         // And automation OFF may carry any values untouched.
         ManagedAgentProperties off = new ManagedAgentProperties();
+        off.getAutomation().setEnabled(false);
         off.getAutomation().setMaxSlotsPerTick(0);
         assertThatCode(off::validateWorkspaceFiles).doesNotThrowAnyException();
     }

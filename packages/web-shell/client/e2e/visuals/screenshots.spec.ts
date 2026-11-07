@@ -5,6 +5,7 @@
  */
 
 import { devices, expect, test, type Page } from '@playwright/test';
+import { plugin as githubChannelPlugin } from '@qwen-code/channel-github';
 import type {
   DaemonEvent,
   DaemonSessionSummary,
@@ -37,6 +38,13 @@ import {
 } from './harness';
 
 const THEMES: readonly VisualTheme[] = ['dark', 'light'];
+
+// The action-template editor captures use the plugin's own descriptor so the
+// screenshots show the production key vocabulary, not a hand-pruned fixture.
+const githubManagement = githubChannelPlugin.management;
+if (!githubManagement) {
+  throw new Error('@qwen-code/channel-github declares no management metadata.');
+}
 
 test.use({ viewport: { ...VISUAL_VIEWPORT } });
 
@@ -759,6 +767,143 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `session-overview-details-${theme}`);
     });
 
+    test('session overview bulk delete batches at the route limit', async ({
+      page,
+    }, testInfo) => {
+      const workspaceCwd = '/workspace/session-overview-bulk-delete';
+      // The mock catalog deliberately exceeds the real daemon's 100-row page cap.
+      const sessions = Array.from({ length: 101 }, (_, index) => ({
+        sessionId: `bulk-delete-${index}`,
+        displayName: `Bulk delete fixture ${index}`,
+        workspaceCwd,
+        clientCount: 0,
+        hasActivePrompt: false,
+        updatedAt: '2026-07-01T12:00:00.000Z',
+      }));
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd,
+        sessions: [
+          ...sessions,
+          {
+            sessionId: 'web-shell-e2e-session',
+            displayName: 'Current session to keep',
+            workspaceCwd,
+            clientCount: 1,
+            hasActivePrompt: true,
+          },
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      const batches: string[][] = [];
+      const browserErrors: string[] = [];
+      page.on('pageerror', (error) => browserErrors.push(error.message));
+      page.on('console', (message) => {
+        if (['error', 'warning'].includes(message.type())) {
+          browserErrors.push(message.text());
+        }
+      });
+      await page.route('**/workspace/models', (route) =>
+        route.fulfill({ json: { models: [] } }),
+      );
+      await page.route('**/daemon/status?*', (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            detail: 'full',
+            generatedAt: '2026-07-01T12:00:00.000Z',
+            status: 'ok',
+            issues: [],
+            daemon: { pid: 0, uptimeMs: 0, mode: 'http-bridge', workspaceCwd },
+            full: {
+              sessions: scenario.sessions.map((session) => ({
+                ...session,
+                subscriberCount: 0,
+                attachCount: 0,
+                pendingPromptCount: 0,
+                pendingPermissionCount: 0,
+                lastEventId: 0,
+              })),
+            },
+          },
+        }),
+      );
+      await page.route('**/sessions/delete', async (route) => {
+        const { sessionIds } = route.request().postDataJSON() as {
+          sessionIds: string[];
+        };
+        batches.push(sessionIds);
+        if (sessionIds.length > 100) {
+          await route.fulfill({
+            status: 400,
+            json: { error: 'max 100 session IDs', code: 'invalid_request' },
+          });
+          return;
+        }
+        const removed = scenario.sessions
+          .filter((session) => sessionIds.includes(session.sessionId))
+          .map((session) => session.sessionId);
+        scenario.sessions = scenario.sessions.filter(
+          (session) => !removed.includes(session.sessionId),
+        );
+        await route.fulfill({
+          json: {
+            removed,
+            notFound: sessionIds.filter((id) => !removed.includes(id)),
+            errors: [],
+          },
+        });
+      });
+      await gotoSession(page, scenario, daemon, theme);
+      await page.getByRole('button', { name: 'More', exact: true }).click();
+      await page
+        .getByRole('button', { name: 'Session Overview', exact: true })
+        .click();
+      const panel = page.locator('[data-web-shell-session-panel]');
+      await panel
+        .getByRole('textbox', { name: 'Search title, branch, PR or ID…' })
+        .fill('Bulk delete fixture');
+      await expect(panel).toContainText('101 session(s)');
+      await panel
+        .getByRole('checkbox', { name: 'Select all', exact: true })
+        .check();
+      await expect(panel).toContainText('101 of 101 row(s) selected');
+      await panel
+        .locator('[data-web-shell-session-footer]')
+        .getByRole('button', { name: 'Delete', exact: true })
+        .click();
+      await expect(page.getByRole('alertdialog')).toContainText(
+        'Delete 101 sessions?',
+      );
+      await captureScreenshot(
+        page,
+        `session-overview-bulk-delete-confirm-${theme}`,
+      );
+      await page.locator('[data-slot="alert-dialog-action"]').click();
+      await expect(
+        panel
+          .getByText('No data', { exact: true })
+          .or(panel.getByText(/Failed to delete session/)),
+      ).toBeVisible();
+      await captureScreenshot(
+        page,
+        `session-overview-bulk-delete-result-${theme}`,
+      );
+      expect(batches.map((ids) => ids.length)).toEqual([100, 1]);
+      expect(batches.flat().sort()).toEqual(
+        sessions.map((session) => session.sessionId).sort(),
+      );
+      expect(scenario.sessions.map((session) => session.sessionId)).toEqual([
+        scenario.sessionId,
+      ]);
+      await expect(panel.getByText('No data', { exact: true })).toBeVisible();
+      await expect(panel).not.toContainText('Failed to delete session');
+      expect(browserErrors).toEqual([]);
+    });
+
     test('conversation search', async ({ page }, testInfo) => {
       const events = Array.from({ length: 12 }, (_, index) => [
         userTextEvent(`Explain synthetic example ${index + 1}.`, {
@@ -1363,6 +1508,93 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `channel-editor-existing-${theme}`);
     });
 
+    test(`Channel action template editor`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'github',
+            displayName: 'GitHub',
+            manageable: true,
+            fields: githubManagement.fields,
+          },
+        ],
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await page.getByRole('button', { name: 'Configure GitHub' }).click();
+      const editor = page.getByRole('dialog');
+      await expect(
+        editor.getByRole('heading', { name: 'Configure GitHub' }),
+      ).toBeVisible();
+      await editor
+        .getByRole('switch', { name: 'Use Local GitHub CLI Authentication' })
+        .click();
+      await editor
+        .getByRole('switch', { name: 'Deliver To PR-Bound Sessions' })
+        .click();
+
+      // Anchors: the on-demand editor shows the add picker and zero rows on a
+      // fresh draft. The pre-change renderer (one input per key, no picker
+      // control behind the label) fails here instead of silently shipping an
+      // old-UI capture.
+      const addPicker = editor.getByLabel('Bound Session Actions');
+      await addPicker.scrollIntoViewIfNeeded();
+      await expect(addPicker).toBeVisible();
+      await expect(editor.locator('textarea')).toHaveCount(0);
+      await captureScreenshot(page, `channel-action-templates-empty-${theme}`);
+
+      await addPicker.click();
+      const reviewOption = page.getByRole('option', {
+        name: /review:watch:ci_failure/,
+      });
+      await expect(reviewOption).toBeVisible();
+      await captureScreenshot(page, `channel-action-templates-picker-${theme}`);
+      await reviewOption.click();
+      await editor
+        .getByRole('textbox', { name: 'review:watch:ci_failure' })
+        .fill('Review the CI failure on %repo%#%pr% and propose a fix.');
+      await addPicker.click();
+      await page.getByRole('option', { name: /^fix:comment/ }).click();
+      await editor
+        .getByRole('textbox', { name: 'fix:comment' })
+        .fill('Address the new comments on %repo%#%pr%.');
+      await expect(editor.locator('textarea')).toHaveCount(2);
+      await editor
+        .getByRole('textbox', { name: 'review:watch:ci_failure' })
+        .scrollIntoViewIfNeeded();
+      await captureScreenshot(
+        page,
+        `channel-action-templates-configured-${theme}`,
+      );
+
+      const fullscreenToggle = editor.locator('button[aria-pressed]');
+      await fullscreenToggle.click();
+      await expect(fullscreenToggle).toHaveAttribute('aria-pressed', 'true');
+      await captureScreenshot(
+        page,
+        `channel-action-templates-fullscreen-${theme}`,
+      );
+    });
+
     test(`Channel events`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         capabilities: {
@@ -1934,7 +2166,9 @@ for (const theme of THEMES) {
       // row is required to fit — at this viewport the two rows together are
       // taller than the dialog body, so demanding both would fail on geometry
       // rather than on a regression.
-      await inheriting.scrollIntoViewIfNeeded();
+      await inheriting.evaluate((element) =>
+        element.scrollIntoView({ block: 'center', inline: 'nearest' }),
+      );
       await expect(inheriting).toBeInViewport({ ratio: 1 });
       await captureScreenshot(page, `github-channel-repositories-${theme}`);
     });

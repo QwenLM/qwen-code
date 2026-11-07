@@ -55,7 +55,7 @@ public class ManagedWorkspaceRegistry
     }
 
     public boolean isExternal(ContextBinding binding) {
-        return com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.externalStorage(jdbc, binding);
+        return com.alibaba.qwen.code.runtimebroker.persistence.JdbcExternalWorkspaceOwnership.externalStorage(jdbc, binding);
     }
 
     public boolean externalFilesAllowed(ContextBinding binding) {
@@ -493,7 +493,7 @@ public class ManagedWorkspaceRegistry
             throw new ManagedAgentException(404, "workspace_not_found", "Workspace not found.");
         }
         if (isExternal(binding)
-                && (!AgentSessionPolicies.externalFilesAllowedOrRefuse(this, binding)
+                && (!ExternalWorkspaceSessionPolicies.externalFilesAllowedOrRefuse(this, binding)
                 || !".".equals(binding.getCwdRelative()))) {
             throw new ManagedAgentException(HttpStatus.CONFLICT.value(), "workspace_unavailable", "External Workspace files are unavailable.");
         }

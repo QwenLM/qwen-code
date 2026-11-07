@@ -1065,6 +1065,13 @@ final class AgentSessionCommands {
                         row.sessionStatusBefore(), row.actorKey(), row.createdAt(), row.updatedAt()));
     }
 
+    private static final String TURN_SESSION_PROJECTION_GUARD = " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
+            + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
+            + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
+            + " 'hosted-workspace-shell/1','hosted-workspace-files/3','hosted-workspace-external-files/1')"
+            + " AND (tool_profile <> 'hosted-workspace-external-files/1' OR"
+            + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))";
+
     void insertTurn(String tenantId, String sessionId,
             String turnId, String promptId, List<Map<String, Object>> input,
             String payloadDigest, long now) {
@@ -1073,33 +1080,13 @@ final class AgentSessionCommands {
                         + " status, gmt_create, gmt_modified, model_id, model_revision, approval_mode, approval_revision, is_plan_enabled, permission_rules_json) SELECT"
                         + " ?, ?, ?, ?, ?, ?, 'ACCEPTED', ?, ?, model_id,"
                         + " CASE WHEN model_id IS NULL THEN NULL ELSE model_revision END,"
-                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
-                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3','hosted-workspace-external-files/1')"
-                        + " AND (tool_profile <> 'hosted-workspace-external-files/1' OR"
-                        + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))"
+                        + TURN_SESSION_PROJECTION_GUARD
                         + " THEN COALESCE(selected_approval_mode, approval_mode) ELSE NULL END,"
-                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
-                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3','hosted-workspace-external-files/1')"
-                        + " AND (tool_profile <> 'hosted-workspace-external-files/1' OR"
-                        + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))"
+                        + TURN_SESSION_PROJECTION_GUARD
                         + " THEN approval_revision ELSE NULL END,"
-                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
-                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3','hosted-workspace-external-files/1')"
-                        + " AND (tool_profile <> 'hosted-workspace-external-files/1' OR"
-                        + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))"
+                        + TURN_SESSION_PROJECTION_GUARD
                         + " THEN CASE WHEN tool_profile = 'hosted-workspace-external-files/1' THEN FALSE ELSE is_plan_enabled END ELSE NULL END,"
-                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
-                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3','hosted-workspace-external-files/1')"
-                        + " AND (tool_profile <> 'hosted-workspace-external-files/1' OR"
-                        + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))"
+                        + TURN_SESSION_PROJECTION_GUARD
                         + " THEN permission_rules_json ELSE NULL END"
                         + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId, turnId, promptId, storeRows.writeJson(input),

@@ -76,8 +76,9 @@ class ManagedHostedRecoveryRecordsTest {
                 .isInstanceOf(RuntimeException.class);
     }
 
-    @Test
-    void sharesClosureMemoAcrossRootsAndStillRejectsConflictingMetadata() {
+    @ParameterizedTest
+    @ValueSource(ints = {3, 4})
+    void sharesClosureMemoAcrossRootsAndStillRejectsConflictingMetadata(int version) {
         byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);
         var nested = new ManagedSessionStoreModels.StoredResource("shared", "managed-definition", 1,
                 bytes.length, "a".repeat(64), bytes);
@@ -90,7 +91,7 @@ class ManagedHostedRecoveryRecordsTest {
             return nested;
         };
         for (int i = 0; i < 12; i++) {
-            byte[] root = json.createObjectNode().put("v", 3).set("definitionRef", ref).toString().getBytes(StandardCharsets.UTF_8);
+            byte[] root = json.createObjectNode().put("v", version).set("definitionRef", ref).toString().getBytes(StandardCharsets.UTF_8);
             ManagedHostedRecoveryRecords.validateResource(new ManagedSessionStoreModels.StoredResource(
                     "root-" + i, "managed-action-options", 1, root.length, "b".repeat(64), root),
                     "tenant", "workspace", "session", reader, seen);

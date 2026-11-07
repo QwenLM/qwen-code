@@ -430,6 +430,13 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     expect(resolveDaemonTelemetryRoute(mockReq('POST', '/language'))).toEqual({
       route: 'POST /language',
     });
+    expect(
+      resolveDaemonTelemetryRoute(
+        mockReq('POST', '/workspaces/ws-secondary/language'),
+      ),
+    ).toEqual({
+      route: 'POST /workspaces/:workspace/language',
+    });
   });
 
   it.each([
