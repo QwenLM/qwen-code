@@ -641,7 +641,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                     + " AND retention_state = 'DELETING' LIMIT 1" + currentRead, String.class, captureScope).isEmpty(), "source_drift");
         }
         var retirements = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, session_id, retirement_operation_id AS operation_id,"
-                + " retirement_generation AS generation, retired_at, recovery_protected FROM ma_session"
+                + " retirement_generation AS generation, retired_at, is_recovery_protected FROM ma_session"
                 + " WHERE tenant_id = ? AND session_id = ? AND retirement_generation > 0", tenant, session);
         check(retirements.size() <= 1, "source_drift");
         source.putNull("retirement");
@@ -652,7 +652,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                     && ((Number) row.get("deleted_at")).longValue() > 0
                     && ((Number) retirement.get("generation")).longValue() == 1
                     && ((Number) retirement.get("retired_at")).longValue() > 0
-                    && !ToolPublicationRetentionStore.flag(retirement, "recovery_protected"), "source_drift");
+                    && !ToolPublicationRetentionStore.flag(retirement, "is_recovery_protected"), "source_drift");
             JsonNode retiredHead = source.path("head");
             check(retiredHead.isNull() || "DELETED".equals(retiredHead.path("state").asText())
                     && retiredHead.path("latestCheckpointResourceId").isNull()

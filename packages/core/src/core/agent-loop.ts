@@ -92,7 +92,13 @@ export interface AgentLoopToolResult {
 export type AgentLoopSettledCall = Pick<
   CompletedToolCall,
   'status' | 'request' | 'response'
->;
+> & {
+  /**
+   * The executor counts the call toward the client's tool-call stats
+   * itself, as the Ink TUI's Mod tool middleware does for each attempt.
+   */
+  recorded?: boolean;
+};
 
 /** Provider replay bookkeeping; shared when several loops serve one run. */
 export interface AgentLoopDuplicateState {
@@ -314,6 +320,27 @@ export interface ToolBatchOptions {
    * with the stop reason `cancelled`, for a surface that keeps them.
    */
   keepCancelledResults?: boolean;
+  /**
+   * Leave each result unrecorded and return its recording as `record` on
+   * `responses`, for a surface that records only the results it sends.
+   */
+  deferRecording?: boolean;
+}
+
+export interface ToolBatchResult {
+  /** The results in request order, finalized, as the next round sends them. */
+  parts: Part[];
+  /**
+   * The same parts by call, for a surface that drops some calls' results.
+   * Absent when the batch stopped before it answered any call.
+   */
+  responses?: Array<{
+    callId: string;
+    parts: Part[];
+    /** Records the result, when the batch deferred recording. */
+    record?: () => void;
+  }>;
+  stop?: AgentLoopStopReason;
 }
 
 /**
@@ -324,7 +351,7 @@ export interface ToolBatchOptions {
 export async function runToolBatch(
   calls: ToolCallRequestInfo[],
   options: ToolBatchOptions,
-): Promise<{ parts: Part[]; stop?: AgentLoopStopReason }> {
+): Promise<ToolBatchResult> {
   const { config, client, signal, duplicates, executor } = options;
   const host = options.host ?? {};
   const toolSignal = options.toolSignal ?? signal;
@@ -454,7 +481,10 @@ export async function runToolBatch(
     if (!call || !launches.get(request.callId)) continue;
     terminateTurn ||= call.response.terminateTurn === true;
     // A plan-mode entry's siblings never ran.
-    if (planModeEntry === undefined || index === planModeEntry) {
+    if (
+      !call.recorded &&
+      (planModeEntry === undefined || index === planModeEntry)
+    ) {
       client.recordCompletedToolCall(
         call.request.name,
         call.request.args as Record<string, unknown>,
@@ -501,37 +531,47 @@ export async function runToolBatch(
     })),
     new Map(ordered.map(({ request }) => [request.callId, request.prompt_id])),
   );
-  const recorder = config.getChatRecordingService?.();
   const parts: Part[] = [];
+  const responses: NonNullable<ToolBatchResult['responses']> = [];
   ordered.forEach(({ request, executionRequest, response, status }, index) => {
     const responseParts = finalized[index].responseParts;
     parts.push(...responseParts);
-    const provenance = goalToolResultProvenance(
-      executionRequest,
-      responseParts,
-    );
-    recorder?.recordToolResult?.(
-      responseParts,
-      {
-        callId: request.callId,
-        status,
-        resultDisplay: response.resultDisplay,
-        persistedOutputFiles: finalized[index].persistedOutputFiles,
-        artifacts: finalized[index].artifacts,
-        error: response.error,
-        errorType: response.errorType,
-        executionStatus: response.executionStatus,
-      },
-      ...(provenance ? ([provenance] as const) : ([] as const)),
-    );
+    // The recorder is resolved when the result is written, as the surface
+    // may record it later.
+    const record = () => {
+      const provenance = goalToolResultProvenance(
+        executionRequest,
+        responseParts,
+      );
+      config.getChatRecordingService?.()?.recordToolResult?.(
+        responseParts,
+        {
+          callId: request.callId,
+          status,
+          resultDisplay: response.resultDisplay,
+          persistedOutputFiles: finalized[index].persistedOutputFiles,
+          artifacts: finalized[index].artifacts,
+          error: response.error,
+          errorType: response.errorType,
+          executionStatus: response.executionStatus,
+        },
+        ...(provenance ? ([provenance] as const) : ([] as const)),
+      );
+    };
+    if (options.deferRecording) {
+      responses.push({ callId: request.callId, parts: responseParts, record });
+    } else {
+      responses.push({ callId: request.callId, parts: responseParts });
+      record();
+    }
   });
 
-  if (aborted && !ended) return { parts, stop: 'cancelled' };
-  if (ended) return { parts, stop: 'surface_ended' };
+  if (aborted && !ended) return { parts, responses, stop: 'cancelled' };
+  if (ended) return { parts, responses, stop: 'surface_ended' };
   if (terminateTurn && (host.endsOnTerminateTurn?.() ?? true)) {
-    return { parts, stop: 'tool_ended_turn' };
+    return { parts, responses, stop: 'tool_ended_turn' };
   }
-  return { parts };
+  return { parts, responses };
 }
 
 function executedResult(

@@ -60,6 +60,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -211,13 +212,9 @@ class HostedHookReplyLossFaultGatesIT {
                 + "; process.env.QWEN_MANAGED_HOOK_CGROUP_ROOT=" + json.writeValueAsString(hookRoot.toString())
                 + "; process.argv[1]=" + json.writeValueAsString(cli.toString())
                 + "; await import(" + json.writeValueAsString(cli.toUri().toString()) + ");\n");
-        try (var control = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
-                var hosted = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
-                var runtime = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
-            port = control.getLocalPort();
-            harnessPort = hosted.getLocalPort();
-            brokerPort = runtime.getLocalPort();
-        }
+        port = reservePort();
+        harnessPort = reservePort();
+        brokerPort = reservePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
         model.setExecutor(modelExecutor);

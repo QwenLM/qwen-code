@@ -41,7 +41,7 @@ public class HarnessPlacementStore
 
     public boolean hasUnreleasedOwnership(String instance, String boot) {
         return !jdbc.query("SELECT m.session_id FROM ma_session m WHERE m.harness_instance_id = ?"
-                + " AND m.harness_owner_boot_id = ? AND m.resource_gc_completed = FALSE"
+                + " AND m.harness_owner_boot_id = ? AND m.is_resource_gc_completed = FALSE"
                 + " AND m.harness_placement_state <> 'RELEASED'"
                 + " AND (m.status NOT IN ('CLOSED', 'ARCHIVED', 'DELETED') OR EXISTS ("
                 + " SELECT 1 FROM ma_session_head h WHERE h.tenant_id = m.tenant_id AND h.session_id = m.session_id"
@@ -227,7 +227,7 @@ public class HarnessPlacementStore
             case ARCHIVE -> "ARCHIVING";
             default -> "CLOSING";
         };
-        var admission = jdbc.query("SELECT status, session_kind, workspace_id, csi_guard FROM ma_session"
+        var admission = jdbc.query("SELECT status, session_kind, workspace_id, is_csi_guard FROM ma_session"
                 + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", (row, index) ->
                 pendingStatus.equals(row.getString(1))
                         && ("PUBLIC".equals(row.getString(2)) || row.getString(3) != null)

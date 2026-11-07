@@ -477,7 +477,7 @@ interface ChatEditorRenderProps
   language?: WebShellLanguage;
   builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
   atProviders?: WebShellCustomization['atProviders'];
-  skills?: Array<{ name: string; description: string }>;
+  skills?: ComponentProps<typeof ChatEditor>['skills'];
   onSkillsOpenChange?: (open: boolean) => void;
   skillsLoading?: boolean;
   skillsLoadError?: boolean;
@@ -4392,6 +4392,30 @@ describe('ChatEditor toolbar popovers', () => {
     ).toBe(true);
   });
 
+  it('clears the cached model label when the selection and model catalog are empty', () => {
+    const props = {
+      visibleToolbarActions: ['model'] as const,
+      currentModel: 'subscription-model',
+      availableModels: [
+        { id: 'subscription-model', label: 'Subscription Model' },
+      ],
+    };
+    const container = renderChatEditor(props);
+    const button = () =>
+      container.querySelector('[data-web-shell-model-button]');
+    expect(button()?.getAttribute('aria-label')).toContain(
+      'Subscription Model',
+    );
+    rerenderChatEditor(container, {
+      ...props,
+      currentModel: '',
+      availableModels: [],
+    });
+    expect(button()?.getAttribute('aria-label')).not.toContain(
+      'Subscription Model',
+    );
+  });
+
   it('displays the model label instead of an opaque route id', () => {
     const routeId = 'qwen-route:v1:abcdefghijklmnop';
     const container = renderChatEditor({
@@ -4644,6 +4668,81 @@ describe('ChatEditor toolbar popovers', () => {
 });
 
 describe('ChatEditor slash command popovers', () => {
+  it.each([
+    { source: 'plugin-command', extensionName: undefined },
+    { source: 'skill', extensionName: 'suite' },
+  ])(
+    'separates Extension Skill details for $source',
+    ({ source, extensionName }) => {
+      const name = 'suite:rust:chat';
+      composerCoreState.slashMenu = {
+        kind: 'command',
+        from: 0,
+        to: 1,
+        query: '',
+        selectedIndex: 0,
+        items: [
+          { id: name, label: `/${name}`, apply: `/${name} `, detail: 'Chat' },
+        ],
+      };
+      renderChatEditor({
+        commands: [{ name, description: 'Chat', source }],
+        skills: [{ name, description: 'Chat', extensionName }],
+      });
+      const option = document.querySelector(
+        '[data-web-shell-slash-menu] [role="option"]',
+      );
+      act(() =>
+        option?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
+      );
+      const detail = document.querySelector('[data-web-shell-slash-detail]');
+      expect(detail?.firstElementChild?.children[0]?.textContent).toBe(
+        'rust:chat',
+      );
+      expect(detail?.firstElementChild?.children[1]?.textContent).toBe(
+        'Extension: suite',
+      );
+    },
+  );
+
+  it.each([true, false])(
+    'preserves colon names without an Extension (Skill: %s)',
+    (isSkill) => {
+      const name = 'analysis:report';
+      composerCoreState.slashMenu = {
+        kind: 'command',
+        from: 0,
+        to: 1,
+        query: '',
+        selectedIndex: 0,
+        items: [
+          { id: name, label: `/${name}`, apply: `/${name} `, detail: 'Report' },
+        ],
+      };
+      renderChatEditor({
+        commands: [
+          {
+            name,
+            description: 'Report',
+            source: isSkill ? 'skill-dir-command' : 'plugin-command',
+          },
+        ],
+        skills: isSkill ? [{ name, description: 'Report' }] : [],
+      });
+      const option = document.querySelector(
+        '[data-web-shell-slash-menu] [role="option"]',
+      );
+      act(() =>
+        option?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
+      );
+      const detail = document.querySelector('[data-web-shell-slash-detail]');
+      expect(detail?.firstElementChild?.children[0]?.textContent).toBe(
+        isSkill ? name : `/${name}`,
+      );
+      expect(detail?.textContent).not.toContain('Extension:');
+    },
+  );
+
   it('keeps Skill status messages out of populated local command menus', () => {
     composerCoreState.slashMenu = {
       kind: 'command',
@@ -6909,6 +7008,90 @@ describe('ChatEditor Workflow mode', () => {
     expect(composerCoreState.submitText).not.toHaveBeenCalled();
   });
 
+  it('shows a dismissible chip while Workflow is requested, even mid-response', () => {
+    const onWorkflowModeChange = vi.fn();
+    const props = {
+      ...ready,
+      isRunning: true,
+      disabled: true,
+      visibleToolbarActions: ['addMenu', 'workflowMode', 'model'] as const,
+      onWorkflowModeChange,
+    };
+    const container = renderChatEditor(props);
+    const chip = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-workflow-chip]',
+    )!;
+    expect(chip.getAttribute('aria-pressed')).toBe('true');
+    expect(chip.getAttribute('aria-disabled')).toBeNull();
+    expect(chip.hasAttribute('data-unavailable')).toBe(false);
+    act(() => chip.click());
+    expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(false);
+
+    rerenderChatEditor(container, {
+      ...props,
+      workflowMode: { requested: false, available: true, effective: false },
+    });
+    expect(
+      container.querySelector('[data-web-shell-workflow-chip]'),
+    ).toBeNull();
+  });
+
+  it('keeps the chip dismissible but marked while the requested mode is unavailable', () => {
+    const onWorkflowModeChange = vi.fn();
+    const container = renderChatEditor({
+      workflowModeStatus: 'ready',
+      workflowMode: {
+        requested: true,
+        available: false,
+        effective: false,
+        reason: 'workflow_unavailable',
+      },
+      visibleToolbarActions: ['addMenu', 'workflowMode'],
+      onWorkflowModeChange,
+    });
+    const chip = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-workflow-chip]',
+    )!;
+    expect(chip.hasAttribute('data-unavailable')).toBe(true);
+    act(() => chip.click());
+    expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it('makes the chip inert while a Workflow write is pending', () => {
+    const onWorkflowModeChange = vi.fn();
+    const container = renderChatEditor({
+      ...ready,
+      workflowModePending: true,
+      visibleToolbarActions: ['addMenu', 'workflowMode'],
+      onWorkflowModeChange,
+    });
+    const chip = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-workflow-chip]',
+    )!;
+    expect(chip.getAttribute('aria-disabled')).toBe('true');
+    act(() => chip.click());
+    expect(onWorkflowModeChange).not.toHaveBeenCalled();
+  });
+
+  it('hands focus to the composer when the focused chip goes away', () => {
+    const props = {
+      ...ready,
+      visibleToolbarActions: ['addMenu', 'workflowMode'] as const,
+      onWorkflowModeChange: vi.fn(),
+    };
+    const container = renderChatEditor(props);
+    const chip = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-workflow-chip]',
+    )!;
+    act(() => chip.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, {
+      ...props,
+      workflowMode: { requested: false, available: true, effective: false },
+    });
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
   it('hides Workflow when the host excludes the add menu', () => {
     const container = renderChatEditor({
       ...ready,
@@ -6916,6 +7099,9 @@ describe('ChatEditor Workflow mode', () => {
     });
     expect(
       container.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-workflow-chip]'),
     ).toBeNull();
   });
 
