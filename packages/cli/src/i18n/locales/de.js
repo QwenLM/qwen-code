@@ -1147,6 +1147,8 @@ export default {
   'disabled (bare mode)': 'deaktiviert (Bare-Modus)',
   'disabled (safe mode)': 'deaktiviert (Sicherheitsmodus)',
   'disabled (disableAllHooks)': 'deaktiviert (disableAllHooks)',
+  'disabled (not approved)': 'deaktiviert (nicht freigegeben)',
+  'disabled (rejected)': 'deaktiviert (abgelehnt)',
   'disabled (folder not trusted)':
     'deaktiviert (Ordner nicht vertrauenswürdig)',
   'disabled (turned off for this session)':
@@ -2221,6 +2223,8 @@ export default {
   out: 'aus',
   'In/Out': 'Ein/Aus',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Updates auf eine bestimmte Version erfordern eine Standalone-Installation. Installieren Sie Version {{version}} manuell mit Ihrer Installationsmethode.',
   'Check for Qwen Code updates and install if available':
     'Auf Qwen Code-Updates prüfen und installieren, falls verfügbar',
   'Qwen Code update available! {{current}} → {{latest}}':

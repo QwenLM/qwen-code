@@ -11,6 +11,10 @@ import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yargs, { type Argv } from 'yargs';
 import {
+  DEFAULT_RING_MAX_BYTES,
+  MAX_RING_MAX_BYTES,
+} from '@qwen-code/acp-bridge/eventBus';
+import {
   maybeOpenWebShellBrowser,
   serveCommand,
   validateManagedLocalFlags,
@@ -63,6 +67,39 @@ function buildParser(): Argv {
 }
 
 describe('serve command args', () => {
+  it('accepts a Conversations root without changing the supplied path', () => {
+    const root = '/persistent/Qwen Conversations ';
+    expect(
+      buildParser().parseSync(['--conversations-dir', root])[
+        'conversations-dir'
+      ],
+    ).toBe(root);
+    expect(buildParser().parseSync([])['conversations-dir']).toBeUndefined();
+    expect(() => buildParser().parseSync('--conversations-dir')).toThrow(
+      /Not enough arguments/u,
+    );
+  });
+
+  it.each([
+    ['--conversations-dir', '/srv/a', '--conversations-dir', '/srv/b'],
+    ['--conversations-dir=/srv/a', '--conversations-dir=/srv/b'],
+  ])(
+    'rejects repeated Conversations roots in %j before dispatch',
+    (...args) => {
+      const handler = vi.fn();
+      const parser = yargs([])
+        .exitProcess(false)
+        .fail(false)
+        .locale('en')
+        .command({ ...serveCommand, handler });
+
+      expect(() => parser.parseSync(['serve', ...args])).toThrow(
+        'pass --conversations-dir once.',
+      );
+      expect(handler).not.toHaveBeenCalled();
+    },
+  );
+
   it('parses and isolates the Managed Web gateway deployment options', () => {
     const parsed = buildParser().parseSync(
       '--managed-web-config /etc/qwen-web/gateway.json --hostname 0.0.0.0 --port 4171 --allow-origin https://managed.example',
@@ -83,6 +120,7 @@ describe('serve command args', () => {
     for (const flag of [
       '--managed',
       '--workspace=/run/secrets',
+      '--conversations-dir=/persistent/conversations',
       '--profile=hosted-harness',
       '--enable-session-shell',
       '--channel=telegram',
@@ -227,6 +265,37 @@ describe('serve command args', () => {
       '--permission-response-timeout-ms 60000',
     );
     expect(parsed['permission-response-timeout-ms']).toBe(60000);
+  });
+
+  it('defaults and parses --event-ring-max-bytes', () => {
+    expect(buildParser().parseSync('')['event-ring-max-bytes']).toBe(
+      DEFAULT_RING_MAX_BYTES,
+    );
+    for (const value of [1, 1024 * 1024, MAX_RING_MAX_BYTES]) {
+      expect(
+        buildParser().parseSync(`--event-ring-max-bytes ${value}`)[
+          'event-ring-max-bytes'
+        ],
+      ).toBe(value);
+    }
+    expect(() => buildParser().parseSync('--event-ring-max-bytes')).toThrow(
+      /Not enough arguments/,
+    );
+  });
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER + 1,
+    MAX_RING_MAX_BYTES + 1,
+  ])('rejects --event-ring-max-bytes=%s', (value) => {
+    expect(() =>
+      buildParser().parseSync(`--event-ring-max-bytes=${value}`),
+    ).toThrow(/eventRingMaxBytes/);
   });
 
   it('parses --compacted-replay-max-bytes as a number', () => {
@@ -558,6 +627,23 @@ describe('serve rate limit env parsing', () => {
     ).toBe(expected);
   });
 
+  it.each([
+    ['', DEFAULT_RING_MAX_BYTES],
+    ['--event-ring-max-bytes 1048576', 1024 * 1024],
+  ] as const)(
+    'forwards the event ring byte cap %s to the daemon',
+    async (args, expected) => {
+      mockRunQwenServe.mockResolvedValueOnce({
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: false,
+      });
+      await startServeHandlerWithArgs(`--no-web ${args}`);
+      expect(mockRunQwenServe.mock.calls[0]?.[0]).toMatchObject({
+        eventRingMaxBytes: expected,
+      });
+    },
+  );
+
   it('applies authenticated open before the yargs path starts the daemon', async () => {
     let tokenAtBoot: string | undefined;
     mockRunQwenServe.mockImplementationOnce(
@@ -615,6 +701,23 @@ describe('serve rate limit env parsing', () => {
     const options = mockRunQwenServe.mock.calls[0]?.[0];
     expect(options).not.toHaveProperty('maxJournalEvents');
     expect(options).not.toHaveProperty('maxJournalBytes');
+  });
+
+  it('forwards the explicit Conversations root to runQwenServe', async () => {
+    process.env['QWEN_CONVERSATIONS_DIR'] = '/environment/conversations';
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+    await startServeHandlerWithArgs(
+      '--conversations-dir "/persistent/Qwen Conversations" --no-web',
+    );
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationsDir: '/persistent/Qwen Conversations',
+      }),
+      expect.anything(),
+    );
   });
 
   it('forwards pinned journal caps to runQwenServe', async () => {

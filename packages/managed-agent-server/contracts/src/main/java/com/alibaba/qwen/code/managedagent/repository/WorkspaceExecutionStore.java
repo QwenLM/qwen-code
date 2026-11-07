@@ -3,17 +3,20 @@ package com.alibaba.qwen.code.managedagent.repository;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
+import java.nio.file.Path;
+
 public interface WorkspaceExecutionStore {
-    public java.nio.file.Path createdStorageRoot(String tenantId, String storageId);
+    public Path createdStorageRoot(String tenantId, String storageId);
 
     public boolean verifiedRecoveryEnabled();
 
     public void authorize(SessionRecord session);
 
-    public void authorizeLifecycle(SessionRecord session, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority);
+    public void authorizeLifecycle(SessionRecord session, RuntimeLifecycleAuthority authority);
 
     public void authorizeLegacyClose(SessionRecord session);
 
@@ -32,17 +35,19 @@ public interface WorkspaceExecutionStore {
 
     public void claim(ContextBinding binding, RuntimeSessionRecord session);
 
-    public boolean beginRewind(ContextBinding binding, RuntimeSessionRecord session);
+    public void beginRewind(ContextBinding binding, RuntimeSessionRecord session);
 
     public void endRewind(ContextBinding binding, RuntimeSessionRecord session);
 
-    public boolean hasExclusiveClaim(RuntimeSessionRecord session);
+    public boolean hasPendingRewind(RuntimeSessionRecord session);
 
     public void assertHeld(ContextBinding binding, RuntimeSessionRecord session);
 
     public boolean isHeld(ContextBinding binding, RuntimeSessionRecord session);
 
     public void release(ContextBinding binding, RuntimeSessionRecord session);
+
+    public void releaseMount(ContextBinding binding, RuntimeSessionRecord session);
 
     public String holdForMaintenance(ContextBinding binding, String maintenanceId,
             long claimGeneration);

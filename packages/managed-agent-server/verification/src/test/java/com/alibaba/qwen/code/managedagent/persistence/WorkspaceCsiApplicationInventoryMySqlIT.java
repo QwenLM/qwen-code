@@ -14,6 +14,11 @@ class WorkspaceCsiApplicationInventoryMySqlIT extends WorkspaceCsiApplicationInv
     }
 
     @Override
+    void dropRowIdentity() {
+        alterColumn("ma_session", "id", "BIGINT UNSIGNED");
+    }
+
+    @Override
     void alterColumn(String table, String column, String type) {
         var current = jdbc.queryForMap("SELECT IS_NULLABLE, COLUMN_DEFAULT FROM INFORMATION_SCHEMA.COLUMNS"
                 + " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?", table, column);

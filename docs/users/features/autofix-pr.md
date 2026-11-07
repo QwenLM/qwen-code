@@ -1,6 +1,6 @@
 # Autofix a Pull Request
 
-`/autofix-pr` watches one of your pull requests from a local Qwen Code session and fixes what comes up: failed CI checks, review feedback from people you trust, and merge conflicts. Each fix is made and verified in a worktree of its own, pushed to the PR branch and answered on the PR, under your own git and `gh` identity. It stops by itself when the PR is merged or closed.
+`/autofix-pr` watches one of your pull requests from a local Qwen Code session and fixes what comes up: failed CI checks, review feedback from people you trust, and merge conflicts. Each fix is made and verified in a worktree of its own, pushed to the PR branch and answered on the PR, under your own git and `gh` identity. It stops by itself when the PR is merged or closed. It gets the PR ready to merge and keeps it there, and no further: it never approves a PR, changes its review state, merges or closes it, or turns on auto-merge. The repository's reviews and checks still decide, and merging stays yours — combine the watch with the repository's auto-merge to merge as soon as they pass.
 
 ```text
 /autofix-pr [<pr-number>|<pr-url>] [--once] [--every <minutes>] [--no-reply] [--yes] [instructions...]
@@ -24,7 +24,7 @@
 - The start question also offers **Start, fixes run without asking**: the fix agent's commands — builds, tests, commits in the PR worktree — then run without asking for this watch, after one more dialog that confirms it (declining that dialog cancels the start; run `/autofix-pr <n>` again). Its agent runs as one of a [YOLO](./approval-mode.md) session would: with your `git` and `gh` credentials, able to reach files outside the worktree, past your ask rules; your deny rules still apply. That lasts until the watch is stopped, started again with plain **Start** (or `--yes`), or the session exits or is cleared; `/autofix-pr resume` asks again. Choose plain **Start**, and in the default [approval mode](./approval-mode.md) each of its commands asks first, which suits a watch you keep an eye on. Taking a watch over and `/autofix-pr resume` offer the same choice. Only you answer that dialog: no saved rule, [Auto Mode](./auto-mode.md)'s classifier or `--yes` does, and the choice is refused in an untrusted folder and to a program driving Qwen Code through stream-json. A scheduled round of such a watch runs its fix agent in the background, so the session stays usable while it works; it stays in the foreground in a YOLO session (which records no such choice), for `--once`, for a round that restarted in its turn because the PR moved, and for the round that redoes a discarded background fix; the agent that merges someone else's push before the round pushes always runs in the foreground. The round goes on — re-runs, the push and the replies — when the agent's completion notification arrives. Meanwhile the PR's helpers refuse until it ends and its gate stays quiet; `/autofix-pr status` shows the fix running; `/autofix-pr stop <n>` in this session stops the agent first, while from another session stop and resume are refused until it ends — at most 45 minutes. Starting or resuming the watch again is refused while its fix runs; `/autofix-pr stop <n>` stops it. Meanwhile your own edits of files in its worktree (`.qwen/tmp/autofix-pr-<n>/`) ask first whatever the approval mode, as the fix agent goes on building and running what is there, and an agent this session starts from inside that worktree is refused. Only the session running the fix knows of it: an agent of another session on the same clone is not refused, so do not work in that worktree from a second session while a fix runs. A fix whose round never went on (the session ended, or no claim came within 40 minutes of its start) is discarded by the next round, which handles its items again in the foreground. Where the `autofix_pr` tool is not available (a tool allowlist in your settings can leave it out), the helpers run through the shell and each asks first.
 - A PR whose author cannot push to the repository runs someone else's code, with your `gh` and `git` credentials in reach, when a fix is verified. Such a PR is never watched: only `--once` is offered, after a confirmation that says so and that `--yes` does not skip.
 
-When it starts, it asks once to confirm where it will push and that it will reply on the PR, and whether the fixes may run their commands without asking.
+When it starts, it asks once to confirm where it will push and that it will reply on the PR, and whether the fixes may run their commands without asking. The same question says that it gets the PR ready to merge and no further: it never approves, changes the review state, merges or turns on auto-merge.
 
 ## What a check does
 
@@ -34,7 +34,7 @@ A watch is a [scheduled task](./scheduled-tasks.md) whose gate runs `qwen autofi
 2. The failed checks, the new comments from trusted authors and a merge conflict go to one fix agent, working in the PR worktree — in the background when the fixes run without asking. For a failed check it reads the job log; a failure outside the PR (network, runner) is re-run once instead of fixed. When checks fail while the branch is behind its base, the base is merged in first: the failure may be one the base already fixed.
 3. The agent verifies its change with the repository's own checks and commits only when they pass.
 4. The commits are pushed as a fast-forward of the PR head, never forced. If someone pushed meanwhile, their work is merged first.
-5. Each review thread it handled gets a reply — `Fixed in <sha>: …`, `Not changed: …` or `Needs a human decision: …` — and each push gets one summary comment.
+5. Each review thread it handled gets a reply — `Fixed in <sha>: …`, `Not changed: …` or `Needs a human decision: …` — and each push gets one summary comment. A round that pushed nothing but left something for a person posts a summary too, saying what it attempted and what blocks it, so the PR shows the watch stopped instead of going quiet. That one goes out once per head, and again only when a later round leaves something new for you.
 
 A round never asks you anything. What needs a person is answered on the PR as "Needs a human decision", reported in the session and listed by `/autofix-pr status`.
 
@@ -73,13 +73,14 @@ Comments are acted on when their author is an owner, member or collaborator of t
 
 ## Limits
 
-| Limit                                 | Value | Then                     |
-| ------------------------------------- | ----- | ------------------------ |
-| Pushes per watch                      | 10    | the watch stops          |
-| Re-runs of a failed check on one head | 1     | the next failure is real |
-| Attempts per review comment           | 1     | not offered again        |
-| Pushes by someone else within a round | 2     | the watch stops          |
-| Minutes a background fix may run      | 30    | its agent is stopped     |
+| Limit                                 | Value | Then                                                     |
+| ------------------------------------- | ----- | -------------------------------------------------------- |
+| Pushes per watch                      | 10    | the watch stops                                          |
+| Pushes that leave a failed check red  | 3     | left for a person until it passes or someone else pushes |
+| Re-runs of a failed check on one head | 1     | the next failure is real                                 |
+| Attempts per review comment           | 1     | not offered again                                        |
+| Pushes by someone else within a round | 2     | the watch stops                                          |
+| Minutes a background fix may run      | 30    | its agent is stopped                                     |
 
 ## Stopping and files
 

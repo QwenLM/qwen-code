@@ -892,6 +892,8 @@ export default {
   'disabled (bare mode)': '無効（ベアモード）',
   'disabled (safe mode)': '無効（セーフモード）',
   'disabled (disableAllHooks)': '無効（disableAllHooks）',
+  'disabled (not approved)': '無効（未承認）',
+  'disabled (rejected)': '無効（拒否済み）',
   'disabled (folder not trusted)': '無効（フォルダーが信頼されていません）',
   'disabled (turned off for this session)': '無効（このセッションでオフ）',
   'Server:': 'サーバー:',
@@ -1985,6 +1987,8 @@ export default {
   out: '出力',
   'In/Out': '入力/出力',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    '指定バージョンへの更新にはスタンドアロン版が必要です。現在のインストール方法でバージョン {{version}} を手動インストールしてください。',
   'Check for Qwen Code updates and install if available':
     'Qwen Codeのアップデートを確認し、利用可能な場合はインストールします',
   'Qwen Code update available! {{current}} → {{latest}}':
