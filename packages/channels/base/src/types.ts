@@ -118,6 +118,25 @@ export interface Envelope {
   channelName: string;
   senderId: string;
   senderName: string;
+  /**
+   * Adapter-supplied marker identifying an automated sender (e.g. a peer bot
+   * in a bot-to-bot conversation), rendered as `[tag] ` in front of the
+   * sender attribution.
+   *
+   * Carried on the envelope instead of inside `text` because ChannelBase owns
+   * the sender prefix only after message routing and prompt sanitization run:
+   * a leading `[tag]` in `text` would either stop `matchMessageRoute` from
+   * matching (the route prefix must lead the text) or lose its brackets to
+   * `unwrapStartOfLineTags`. ChannelBase renders it only where it composes
+   * that prefix; self-prefixing adapters (`alreadyPrefixed`) render it
+   * themselves.
+   *
+   * A tagged envelope's text is prose, never a command: slash-command
+   * dispatch, `!` shell execution and channel-memory intents are skipped for
+   * it, because an automated peer is not an operator and its command-shaped
+   * text is model input.
+   */
+  senderTag?: string;
   chatId: string;
   chatName?: string;
   text: string;
