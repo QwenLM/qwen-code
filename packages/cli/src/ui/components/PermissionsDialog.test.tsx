@@ -324,9 +324,7 @@ describe('PermissionsDialog scope rows', () => {
       // is the barrier the fixed sleep below used to stand in for.
       await waitFor(
         () =>
-          expect(stripAnsi(lastFrame())).not.toContain(
-            'Enter permission rule',
-          ),
+          expect(stripAnsi(lastFrame())).not.toContain('Enter permission rule'),
         { timeout: 3000 },
       );
       await new Promise((resolve) => setTimeout(resolve, 300));
