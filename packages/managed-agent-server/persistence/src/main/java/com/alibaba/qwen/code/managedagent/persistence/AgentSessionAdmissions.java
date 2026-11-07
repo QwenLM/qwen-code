@@ -151,18 +151,17 @@ final class AgentSessionAdmissions {
             String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest,
             SessionModelConfig modelConfig) {
-        if (principal == null) {
-            throw new ManagedAgentException(401,
-                    "actor_required", "A trusted actor is required.");
+        if (principal != null) {
+            ManagedSessionPrincipal.requireTenant(tenantId, principal);
         }
-        ManagedSessionPrincipal.requireTenant(tenantId, principal);
         requireModelConfiguration(modelConfig);
         AgentSessionPolicies.AgentPin pin = sessionPolicies.resolveAgentPin(tenantId, agentId, requestedRevision,
                 false);
         requireCreationScope(tenantId, idempotencyKey, false);
         Admission admission = insertSession(tenantId, operation, idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
-                null, principal.userId(), pin, null, false, null, principal);
+                null, principal == null ? null : principal.userId(), pin, null,
+                false, null, principal);
         if (modelConfig != null) {
             modelConfigs.save(tenantId, admission.sessionId(), modelConfig);
         }
@@ -889,12 +888,6 @@ final class AgentSessionAdmissions {
             SessionPrincipal principal) {
         ContextBinding workspace = resolved == null ? null
                 : resolved.binding();
-        // An unbound Session is created only under its exact durable owner;
-        // bound and CSI creations carry the Workspace identity instead.
-        if (resolved == null && principal == null) {
-            throw new ManagedAgentException(401,
-                    "actor_required", "A trusted actor is required.");
-        }
         long now = clock.millis();
         String sessionId = UUID.randomUUID().toString();
         String runtimeRequestKey =
@@ -946,11 +939,17 @@ final class AgentSessionAdmissions {
                     payloadDigest, now);
         }
         if (resolved == null) {
-            ManagedSessionPrincipal.insert(jdbc, tenantId, sessionId,
-                    principal, now);
+            // A present principal writes the durable ownership row; the legacy
+            // actorless arm (legacy_create) creates without one and stamps the
+            // command receipt with the nullable creator key.
+            if (principal != null) {
+                ManagedSessionPrincipal.insert(jdbc, tenantId, sessionId,
+                        principal, now);
+            }
             sessionCommands.insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                     sessionId, turnId, "COMPLETED", null,
-                    ManagedSessionPrincipal.actorKey(principal), now);
+                    principal == null ? actorKey
+                            : ManagedSessionPrincipal.actorKey(principal), now);
         } else {
             ManagedReceipts.insertCreation(jdbc, tenantId, actorKey,
                     idempotencyKey, requestDigest, sessionId, turnId, now);

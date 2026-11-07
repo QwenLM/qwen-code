@@ -97,7 +97,7 @@ final class AgentSessionCommands {
         sessionPolicies.requirePublicChildImmutable(session);
         if (session.workspace() == null) {
             principal = resolveWritePrincipal(tenantId, sessionId, principal);
-            actorId = principal.userId();
+            actorId = principal == null ? null : principal.userId();
         }
         // A bound Session's later Turn needs the same deployment opt-in as
         // its initial one; the service admits any caller holding OPERATOR
@@ -177,7 +177,8 @@ final class AgentSessionCommands {
         insertTurn(tenantId, sessionId, turnId,
                 UUID.randomUUID().toString(), input, payloadDigest, now);
         byte[] actorKey = session.workspace() == null
-                ? ManagedSessionPrincipal.actorKey(principal)
+                ? (principal == null ? null
+                        : ManagedSessionPrincipal.actorKey(principal))
                 : commandActorKey(tenantId, actorId);
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, turnId, "COMPLETED", null, actorKey, now);
@@ -206,7 +207,7 @@ final class AgentSessionCommands {
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
             principal = resolveWritePrincipal(tenantId, sessionId, principal);
-            actorId = principal.userId();
+            actorId = principal == null ? null : principal.userId();
         }
         if (session.workspace() != null && !workspaceFilesEnabled) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
@@ -214,7 +215,8 @@ final class AgentSessionCommands {
         TurnRecord turn = storeRows.requireTurn(tenantId, sessionId, turnId);
         long now = clock.millis();
         byte[] actorKey = session.workspace() == null
-                ? ManagedSessionPrincipal.actorKey(principal)
+                ? (principal == null ? null
+                        : ManagedSessionPrincipal.actorKey(principal))
                 : commandActorKey(tenantId, actorId);
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, turnId, "COMPLETED", null, actorKey, now);
@@ -740,8 +742,17 @@ final class AgentSessionCommands {
     // Background execution continues already-admitted work through its
     // operation and lease APIs. New commands on an unbound Session must
     // carry the exact durable owner; a missing principal cannot borrow it.
+    // The legacy tenant-header arm (null principal) may still write a Session
+    // that has no ownership row, but never one that has a durable owner.
     private SessionPrincipal resolveWritePrincipal(String tenantId,
             String sessionId, SessionPrincipal principal) {
+        if (principal == null) {
+            if (ManagedSessionPrincipal.find(jdbc, tenantId, sessionId) != null) {
+                throw new ManagedAgentException(404, "session_not_found",
+                        "The Session was not found.");
+            }
+            return null;
+        }
         ManagedSessionPrincipal.requireOwnership(jdbc, tenantId, sessionId,
                 principal);
         return principal;

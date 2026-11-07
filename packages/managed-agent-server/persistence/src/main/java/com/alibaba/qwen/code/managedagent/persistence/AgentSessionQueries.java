@@ -273,6 +273,11 @@ final class AgentSessionQueries {
             arguments.add(principal.actorPresent());
             arguments.add(principal.actorSubjectId());
             arguments.add(principal.actorSubjectId());
+        } else {
+            // The legacy tenant-header arm lists unbound Sessions tenant-wide
+            // (the pre-ownership workspace_id IS NULL arm); a present principal
+            // keeps the exact-ownership filter above.
+            ownershipClause = " OR ma_session.workspace_id IS NULL";
         }
         String ownerClause = "";
         if (ownerOnly) {
