@@ -81,6 +81,8 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // (QwenLM/qwen-code#10270)
   // -------------------
   [/^deepseek-.*vision/, { image: true }],
+  // DeepSeek-VL / DeepSeek-VL2 open-weight vision models.
+  [/^deepseek-vl/, { image: true }],
   [/^deepseek-flash$/, { image: true }],
   [/^deepseek/, {}],
 
@@ -98,6 +100,8 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // MiniMax — M3 supports image + video input; older models default to text-only
   // -------------------
   [/^minimax-m3/i, { image: true, video: true }],
+  // MiniMax-VL-01 is the vision model of the 01 series.
+  [/^minimax-vl/, { image: true }],
   [/^minimax-/, {}],
 
   // -------------------
@@ -109,6 +113,8 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^(?:kimi-)?k3-256k/, { image: true }],
   [/^(?:kimi-)?k3/, { image: true, video: true }],
   [/^kimi-k2\./, { image: true, video: true }],
+  // Kimi-VL open-weight vision models (Kimi-VL-A3B-Instruct / -Thinking).
+  [/^kimi-vl/, { image: true }],
   [/^kimi-/, {}],
 
   // -------------------

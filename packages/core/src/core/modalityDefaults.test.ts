@@ -199,6 +199,11 @@ describe('defaultModalities', () => {
     it('returns image for the official deepseek-flash', () => {
       IMAGE_NO_PDF('deepseek-flash');
     });
+
+    casesFor('returns image for', [
+      ['DeepSeek-VL2', IMAGE_NO_PDF, 'deepseek-ai/deepseek-vl2'],
+      ['DeepSeek-VL2-Small', IMAGE_NO_PDF, 'deepseek-ai/deepseek-vl2-small'],
+    ]);
   });
 
   describe('Zhipu GLM', () => {
@@ -225,6 +230,10 @@ describe('defaultModalities', () => {
     it('returns text-only for MiniMax-M2.5', () => {
       TEXT_ONLY('MiniMax-M2.5');
     });
+
+    it('returns image for MiniMax-VL-01', () => {
+      IMAGE_NO_PDF('MiniMaxAI/MiniMax-VL-01');
+    });
   });
 
   describe('Kimi', () => {
@@ -244,6 +253,11 @@ describe('defaultModalities', () => {
     it('returns text-only for kimi-k2', () => {
       TEXT_ONLY('kimi-k2');
     });
+
+    casesFor('returns image for', [
+      ['Kimi-VL-A3B-Instruct', IMAGE_NO_PDF, 'moonshotai/Kimi-VL-A3B-Instruct'],
+      ['Kimi-VL-A3B-Thinking', IMAGE_NO_PDF, 'moonshotai/Kimi-VL-A3B-Thinking'],
+    ]);
   });
 
   describe('ByteDance Doubao', () => {
