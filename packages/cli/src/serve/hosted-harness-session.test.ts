@@ -22257,6 +22257,17 @@ describe('Hosted Harness no-tool session', () => {
           hooks?: HostedHookSession;
           cleanupRetry?: Promise<void>;
           heldRuntimeTurns: Set<string>;
+          shell?: {
+            monitorLoops?: Map<
+              string,
+              {
+                prepareLifecycle: () => void;
+                stop: (
+                  settle?: 'stop_requested' | 'runtime_lost',
+                ) => Promise<void>;
+              }
+            >;
+          };
           hooksBusy?: boolean;
           recoveredTurn?: string;
           mcpClosing?: boolean;
@@ -22503,6 +22514,56 @@ describe('Hosted Harness no-tool session', () => {
       })
       .expect(200);
     expect(drained).toContain(hostedRuntimeSessionId(PROMPT_ID));
+  });
+
+  it('closes a v2 Session whose held Runtime the restarted Broker cannot prove (R25-1)', async () => {
+    const toolProfile = 'hosted-workspace-shell/1';
+    const f = await recoveryFileSession(toolProfile);
+    await f.submit();
+    await f.idle();
+    f.resident.monitorWake?.close();
+    expect(hasHostedCleanupDebt(f.resident.managed)).toBe(false);
+    f.resident.heldRuntimeTurns.add(PROMPT_ID);
+    // A Broker that restarted beside the Harness holds no resident Session and
+    // cannot prove the release. Throwing here would skip hooks.close, the lease
+    // release, both loop stops and both publisher closes on every retry, and
+    // the reloaded id is re-seeded each time — the Session could never close.
+    vi.mocked(HostedWorkspaceBroker.prototype.release).mockImplementation(
+      async function (this: HostedWorkspaceBroker, opts) {
+        if (
+          opts?.drain &&
+          this.runtimeSessionId === hostedRuntimeSessionId(PROMPT_ID)
+        )
+          throw new HostedWorkspaceBrokerRejection(
+            503,
+            'runtime_reconciliation_required',
+          );
+      },
+    );
+    // The drain proved nothing, so the loop must not settle as a confirmed
+    // stop. Inject a loop and assert it actually ran, so a failed injection
+    // fails the test instead of passing vacuously.
+    const stop = vi.fn(
+      async (_settle?: 'stop_requested' | 'runtime_lost') => {},
+    );
+    const shell = (f.resident.shell ??= {});
+    shell.monitorLoops = new Map([
+      ['m1', { prepareLifecycle: () => {}, stop }],
+    ]);
+    await f
+      .authorize(supertest(f.server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send({
+        protocolVersion: 2,
+        phase: 'settle_resources',
+        kind: 'close',
+        toolProfile,
+        sessionKey: f.resident.managed.authority.sessionHeader.sessionKey,
+        authority: { operationId: 'close-unproven-drain', claimGeneration: 1 },
+      })
+      .expect(200);
+    // Tolerated, not re-seeded: a retry must not attempt the same stop again.
+    expect(f.resident.heldRuntimeTurns.has(PROMPT_ID)).toBe(false);
+    expect(stop).toHaveBeenCalledWith('runtime_lost');
   });
 
   it.each([false, true])(

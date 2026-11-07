@@ -8359,6 +8359,7 @@ export function registerHostedHarnessSessionRoutes(
           // it. Its background run is owed client-side as a held Runtime, and
           // only stopping that run lifts the release-mount busy guard below
           // (R24-1). Drain it here, where the v1 close already does.
+          let heldDrainUnproven = false;
           if (brokerOptions)
             for (const heldTurn of [...session.heldRuntimeTurns]) {
               try {
@@ -8369,18 +8370,29 @@ export function registerHostedHarnessSessionRoutes(
                 ).release({ drain: true });
                 session.heldRuntimeTurns.delete(heldTurn);
               } catch (cause) {
-                // Nothing remains to stop, so the turn owes nothing and the
-                // handback may proceed — the tolerance the v1 drain carries.
+                // Both tolerances the v1 drain carries (R25-1). A 404 means
+                // nothing remains to stop. A Broker that restarted beside the
+                // Harness holds no resident Session and answers the
+                // declared-retryable 503; throwing there would skip the owner
+                // close, the lease release, the loop stops and the publisher
+                // closes on every attempt while the reload re-seeds the same
+                // id, so the Session could never close. The Workspace cascade
+                // owns that Runtime instead — but the stop stays unproven, so
+                // the loops below must not settle it as confirmed.
                 if (
                   cause instanceof HostedWorkspaceBrokerRejection &&
-                  cause.status === 404 &&
-                  cause.code === 'runtime_session_not_found'
+                  ((cause.status === 404 &&
+                    cause.code === 'runtime_session_not_found') ||
+                    (cause.status === 503 &&
+                      cause.code === 'runtime_reconciliation_required'))
                 ) {
                   session.heldRuntimeTurns.delete(heldTurn);
+                  if (cause.status === 503) heldDrainUnproven = true;
                   continue;
                 }
-                // Any other refusal left the run unproven. Park honestly rather
-                // than hand the mount back over a writer that may still live.
+                // Any other refusal left the run unproven with no cascade to
+                // hand it to. Park rather than hand the mount back over a
+                // writer that may still live.
                 throw cause;
               }
             }
@@ -8388,11 +8400,17 @@ export function registerHostedHarnessSessionRoutes(
           // re-acquirable across the reload (R14-1).
           await session.hooks?.close({ terminal: kind === 'delete' });
           await releaseLeaseNow(session);
+          // A drain the restarted Broker could not prove is not a confirmed
+          // stop: settle the loops on the runtime_lost line so the record
+          // keeps an honest rebuild path (R25-1, matching the v1 close).
+          const stopSettle = heldDrainUnproven
+            ? 'runtime_lost'
+            : 'stop_requested';
           for (const loop of session.shell?.monitorLoops?.values() ?? [])
-            await loop.stop('stop_requested');
+            await loop.stop(stopSettle);
           for (const loop of session.backgroundLane?.monitorLoops?.values() ??
             [])
-            await loop.stop('stop_requested');
+            await loop.stop(stopSettle);
           await session.shell?.publisher?.close();
           await session.backgroundLane?.publisher?.close();
           await session.mcp?.closeResources({ terminal: kind === 'delete' });
