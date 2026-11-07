@@ -1349,7 +1349,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const heartbeatFailureStateRef = useRef<HeartbeatFailureState>({
     consecutiveFailures: 0,
   });
-  const manualSessionClearRef = useRef(false);
+  const manualSessionClearRef = useRef<boolean | Promise<void>>(false);
+  const pendingStrictDetachRef = useRef<Promise<void> | undefined>(undefined);
   const skipNextCleanupDetachSessionRef = useRef<
     DaemonSessionClient | undefined
   >(undefined);
@@ -2038,6 +2039,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let stopPersistenceUnconfirmed = false;
 
       while (!disposed && !abort.signal.aborted) {
+        if (pendingStrictDetachRef.current) {
+          await pendingStrictDetachRef.current.catch(() => undefined);
+          if (manualSessionClearRef.current) return;
+        }
         try {
           if (availabilityRef.current) {
             await availabilityRef.current.waitUntilAvailable(abort.signal);
@@ -2045,7 +2050,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         } catch {
           return;
         }
-        if (disposed || abort.signal.aborted) return;
+        if (
+          disposed ||
+          abort.signal.aborted ||
+          (session && sessionRef.current !== session)
+        ) {
+          return;
+        }
         const availabilityGeneration = availabilityRef.current?.getGeneration();
         const skipMetadataRefreshThisIteration = skipMetadataRefresh;
         skipMetadataRefresh = false;
@@ -3879,6 +3890,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ),
             }));
           };
+          if (pendingStrictDetachRef.current) {
+            await pendingStrictDetachRef.current.catch(() => undefined);
+          }
+          if (
+            disposed ||
+            abort.signal.aborted ||
+            sessionRef.current !== activeSession
+          ) {
+            return;
+          }
           const eventStreamController = new AbortController();
           eventStream = {
             sessionId: activeSession.sessionId,
@@ -3967,7 +3988,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             onEpoch: () => requestInitialConfigRead(),
             ...(sseConnectReason ? { sseConnectReason } : {}),
           })) {
-            if (sessionRef.current !== activeSession) {
+            if (
+              event.type === 'state_resync_required' &&
+              pendingStrictDetachRef.current
+            ) {
+              // Decide leave vs recovery before resync discards the attachment.
+              await pendingStrictDetachRef.current.catch(() => undefined);
+            }
+            if (
+              disposed ||
+              abort.signal.aborted ||
+              sessionRef.current !== activeSession
+            ) {
               break;
             }
             if (event.type === 'replay_complete') acceptingConfig = true;
@@ -4699,6 +4731,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }));
             return;
           }
+          if (pendingStrictDetachRef.current) {
+            // clearSession owns detach errors and attachment teardown. If it
+            // fails, keep this runner alive to resume the existing stream.
+            await pendingStrictDetachRef.current.catch(() => undefined);
+            if (
+              disposed ||
+              abort.signal.aborted ||
+              sessionRef.current !== activeSession
+            ) {
+              return;
+            }
+          }
           if (manualSessionClearRef.current) {
             session = undefined;
             sessionRef.current = undefined;
@@ -4747,6 +4791,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             trajectoryLiveStore.invalidate(runnerSession, 'stream_error');
           const restartRequested = eventStream?.restartRequested === true;
           clearEventStream();
+          if (pendingStrictDetachRef.current) {
+            await pendingStrictDetachRef.current.catch(() => undefined);
+            // A completed clear settles pending loads before releasing the
+            // attachment. Their stale errors must not replace the fresh draft.
+            if (
+              manualSessionClearRef.current === true &&
+              sessionRef.current === undefined &&
+              pendingSessionLoadRef.current === undefined
+            ) {
+              clearPendingTranscriptEvents();
+              return;
+            }
+          }
           if (session && sessionRef.current !== session) {
             clearPendingTranscriptEvents();
             return;
@@ -5390,7 +5447,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
             if (sessionRef.current === session) {
-              if (missingSession) {
+              if (missingSession && !pendingStrictDetachRef.current) {
                 manualSessionClearRef.current = true;
               }
               sessionRef.current = undefined;
@@ -5482,6 +5539,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         sessionRecoveryGeneration: sessionRecoveryGenerationRef.current,
         heartbeatSupportedRef,
         manualSessionClearRef,
+        pendingStrictDetachRef,
         skipNextCleanupDetachSessionRef,
         passiveAssistantDoneTimerRef,
         daemonActivePromptRef,
