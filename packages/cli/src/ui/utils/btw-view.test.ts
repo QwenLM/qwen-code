@@ -294,6 +294,34 @@ describe('btw view', () => {
     ]);
   });
 
+  it('leaves a plain c or x to the composer until browse mode starts', async () => {
+    const { session, pending } = makeSession();
+    const view = makeUi();
+    for (const question of ['one?', 'two?']) {
+      const request = session.ask(question);
+      pending.at(-1)!.resolve({ text: `answer ${question}` });
+      await request.done;
+    }
+    showBtwRequest(view.ui, session, session.getSnapshot().exchanges[1].id);
+    vi.mocked(copyToClipboard).mockClear();
+
+    expect(handleBtwViewKey(key({ name: 'c', sequence: 'c' }))).toBe(false);
+    expect(copyToClipboard).not.toHaveBeenCalled();
+    expect(handleBtwViewKey(key({ name: 'x', sequence: 'x' }))).toBe(false);
+    expect(session.getSnapshot().exchanges).toHaveLength(2);
+
+    // Browse mode starts with an arrow and ends on the next typed character.
+    expect(handleBtwViewKey(key({ name: 'left' }))).toBe(true);
+    expect(handleBtwViewKey(key({ name: 'c', sequence: 'c' }))).toBe(true);
+    expect(copyToClipboard).toHaveBeenCalledWith('answer one?');
+
+    expect(handleBtwViewKey(key({ name: 'left' }))).toBe(true);
+    expect(handleBtwViewKey(key({ name: 'a', sequence: 'a' }))).toBe(false);
+    vi.mocked(copyToClipboard).mockClear();
+    expect(handleBtwViewKey(key({ name: 'c', sequence: 'c' }))).toBe(false);
+    expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
   it('shows a localized notice when the model only tried to call a tool', async () => {
     const { session, pending } = makeSession();
     const view = makeUi();

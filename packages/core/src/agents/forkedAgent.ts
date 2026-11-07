@@ -64,6 +64,7 @@ import {
   resolveModelId,
   type ResolvedModelId,
 } from '../utils/modelId.js';
+import { AuthType } from '../utils/auth-type.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { getFunctionResponseParts } from '../services/compactionInputSlimming.js';
 import { runWithChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
@@ -249,6 +250,7 @@ export function createForkedChat(
 
 interface ForkedModelRuntime {
   model: string;
+  authType?: AuthType;
   runtimeView?: RuntimeContentGeneratorView;
 }
 
@@ -279,7 +281,12 @@ async function buildForkedModelRuntime(
     registryBaseUrl,
   );
 
-  return { model, runtimeView };
+  return {
+    model,
+    authType:
+      resolvedModel?.authType ?? base.getContentGeneratorConfig?.()?.authType,
+    runtimeView,
+  };
 }
 
 async function buildForkedRuntimeContentGeneratorView(
@@ -588,7 +595,16 @@ export async function runForkedAgent(
     return runWithForkedModelRuntime(modelRuntime, async (model) => {
       const chat = createForkedChat(config, cacheSafeParams, { fullHistory });
 
-      const requestConfig: GenerateContentConfig = preserveTools
+      // Anthropic has no `tool_choice: none`, so preserving its tools cannot
+      // disable calls; strip them instead of leaving tool choice on `auto`.
+      const preserveParentTools =
+        preserveTools &&
+        !(
+          disableFunctionCalls &&
+          !jsonSchema &&
+          modelRuntime.authType === AuthType.USE_ANTHROPIC
+        );
+      const requestConfig: GenerateContentConfig = preserveParentTools
         ? {}
         : { ...NO_TOOLS };
       if (abortSignal) requestConfig.abortSignal = abortSignal;
@@ -613,7 +629,7 @@ export async function runForkedAgent(
             allowedFunctionNames: ['respond_in_schema'],
           },
         };
-      } else if (preserveTools && disableFunctionCalls) {
+      } else if (preserveParentTools && disableFunctionCalls) {
         requestConfig.toolConfig = {
           functionCallingConfig: { mode: FunctionCallingConfigMode.NONE },
         };

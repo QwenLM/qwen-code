@@ -125,6 +125,49 @@ describe('executeBtwGeneration', () => {
     ]);
   });
 
+  it('emits the notice when a retried attempt only tries to call a tool', async () => {
+    runner.mockImplementation(async (params) => {
+      await params.onText('partial');
+      await params.onRetry({ restart: true });
+      return { text: null, toolCallName: 'shell' };
+    });
+    const emit = vi.fn().mockResolvedValue(undefined);
+
+    await executeBtwGeneration(
+      config,
+      'Why?',
+      new AbortController().signal,
+      emit,
+    );
+
+    expect(emit).toHaveBeenLastCalledWith({
+      type: 'delta',
+      seq: 1,
+      text: expect.stringContaining('tried to call shell'),
+    });
+  });
+
+  it('emits the notice when the only streamed text is whitespace', async () => {
+    runner.mockImplementation(async (params) => {
+      await params.onText(' ');
+      return { text: ' ', toolCallName: 'shell' };
+    });
+    const emit = vi.fn().mockResolvedValue(undefined);
+
+    await executeBtwGeneration(
+      config,
+      'Why?',
+      new AbortController().signal,
+      emit,
+    );
+
+    expect(emit).toHaveBeenLastCalledWith({
+      type: 'delta',
+      seq: 1,
+      text: expect.stringContaining('tried to call shell'),
+    });
+  });
+
   it('streams the notice when the model only tried to call a tool', async () => {
     runner.mockResolvedValue({ text: null, toolCallName: 'shell' });
     const emit = vi.fn().mockResolvedValue(undefined);

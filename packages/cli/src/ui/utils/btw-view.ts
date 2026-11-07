@@ -41,6 +41,8 @@ interface BtwView {
   requestId: string;
   /** Index into the browsable exchanges, or null for the request itself. */
   browseIndex: number | null;
+  /** True after ←/→ enables `c`/`x` until the next other key. */
+  shortcuts: boolean;
   notice?: string;
   noticeTimer?: ReturnType<typeof setTimeout>;
   retryTimer?: ReturnType<typeof setTimeout>;
@@ -64,6 +66,7 @@ export function showBtwRequest(
     session,
     requestId,
     browseIndex: null,
+    shortcuts: false,
     detach: () => {
       unsubscribe();
       controller.signal.removeEventListener('abort', onAbort);
@@ -86,21 +89,35 @@ export function showBtwRequest(
 
 /**
  * Handles a key typed into the empty prompt while a btw item is shown:
- * ←/→ browse, `c` copies, `x` clears earlier answers, Space/Enter dismiss a
- * settled item. Returns true when the key was consumed.
+ * ←/→ enter browse mode, `c` copies and `x` clears earlier answers while in
+ * that mode, Space/Enter dismiss a settled item. The first other key leaves
+ * browse mode and is handled as normal input, so a prompt that starts with
+ * `c` or `x` is no longer swallowed. Returns true when the key was consumed.
  */
 export function handleBtwViewKey(key: Key): boolean {
   const view = activeView;
-  if (!view || key.ctrl || key.meta || key.paste) return false;
-  if (key.name === 'left') return browseBtwHistory('older');
-  if (key.name === 'right') return browseBtwHistory('newer');
-  if (key.sequence === 'c') return copyBtwAnswer();
-  if (key.sequence === 'x') return clearBtwHistory();
+  if (!view) return false;
+  if (key.ctrl || key.meta || key.paste) {
+    view.shortcuts = false;
+    return false;
+  }
+  if (key.name === 'left' || key.name === 'right') {
+    view.shortcuts = true;
+    return browseBtwHistory(key.name === 'left' ? 'older' : 'newer');
+  }
+  if (view.shortcuts) {
+    if (key.sequence === 'c' && copyBtwAnswer()) return true;
+    if (key.sequence === 'x' && clearBtwHistory()) return true;
+  }
   if (key.name === 'return' || key.sequence === ' ') {
-    if (project(view)?.isPending !== false) return false;
+    if (project(view)?.isPending !== false) {
+      view.shortcuts = false;
+      return false;
+    }
     dismissBtwView();
     return true;
   }
+  view.shortcuts = false;
   return false;
 }
 

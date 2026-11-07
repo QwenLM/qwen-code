@@ -596,6 +596,64 @@ describe('runForkedAgent (cache path)', () => {
     expect(sentConfig(send).tools).toBeUndefined();
   });
 
+  it('strips tools when the provider cannot disable function calls', async () => {
+    saveCacheSafeParams(
+      {
+        systemInstruction: 'You are helpful',
+        tools: parentTools('edit', 'shell'),
+      },
+      [userText('hello')],
+      'test-model',
+    );
+    const send = mockForkStream([modelChunk([{ text: 'answer' }])]);
+    const config = {
+      getModel: () => 'test-model',
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: AuthType.USE_ANTHROPIC,
+      }),
+    } as unknown as Config;
+
+    await runFork({
+      config,
+      preserveTools: true,
+      disableFunctionCalls: true,
+    });
+
+    expect(sentConfig(send).tools).toEqual([]);
+    expect(sentConfig(send).toolConfig).toBeUndefined();
+  });
+
+  it('keeps tools with NONE mode where the provider supports it', async () => {
+    saveCacheSafeParams(
+      {
+        systemInstruction: 'You are helpful',
+        tools: parentTools('edit', 'shell'),
+      },
+      [userText('hello')],
+      'test-model',
+    );
+    const send = mockForkStream([modelChunk([{ text: 'answer' }])]);
+    const config = {
+      getModel: () => 'test-model',
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+      }),
+    } as unknown as Config;
+
+    await runFork({
+      config,
+      preserveTools: true,
+      disableFunctionCalls: true,
+    });
+
+    expect(sentConfig(send).tools).toBeUndefined();
+    expect(sentConfig(send).toolConfig).toEqual({
+      functionCallingConfig: { mode: 'NONE' },
+    });
+  });
+
   it('strips tools when preserveTools is explicitly false', async () => {
     saveCacheSafeParams({ tools: parentTools('edit') }, [], 'test-model');
     const send = mockForkStream([modelChunk([{ text: 'ok' }])]);
