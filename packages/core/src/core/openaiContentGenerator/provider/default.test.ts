@@ -354,6 +354,88 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(build(request).max_tokens).toBe(expected);
     });
 
+    describe('GPT-5 / o-series budget key', () => {
+      // These families reject `max_tokens` on Chat Completions and only take
+      // `max_completion_tokens`; the clamp must emit that key and never both.
+      it.each([
+        'gpt-5.5',
+        'gpt-5.6-luna',
+        'o3',
+        'openai.gpt-5.5',
+        'openai.o3',
+        'openai/gpt-5.5-pro:batch',
+      ])('sets the default budget as max_completion_tokens for %s', (model) => {
+        const result = build(hello(model));
+        expect(typeof result.max_completion_tokens).toBe('number');
+        expect(result.max_completion_tokens).toBeGreaterThan(0);
+        expect(result).not.toHaveProperty('max_tokens');
+      });
+
+      it('re-keys a budget that arrived as max_tokens for a GPT-5 id', () => {
+        const result = build(hello('gpt-5.5', { max_tokens: 500 }));
+        expect(result.max_completion_tokens).toBe(500);
+        expect(result).not.toHaveProperty('max_tokens');
+      });
+
+      it('caps a user max_completion_tokens at a known model output limit', () => {
+        const result = build(
+          hello('gpt-5', { max_completion_tokens: 10_000_000 }),
+        );
+        // gpt-5's output limit (128K), not the 64K auto ceiling: a budget
+        // routed through defaultOutputCeiling instead of the model limit
+        // would emit 64_000 and must fail here.
+        expect(result.max_completion_tokens).toBe(131_072);
+        expect(result).not.toHaveProperty('max_tokens');
+      });
+
+      it('leaves other families on max_tokens', () => {
+        for (const model of [
+          'gpt-4.1',
+          'gpt-oss-120b',
+          'openai.gpt-oss-120b',
+        ]) {
+          const result = build(hello(model));
+          expect(typeof result.max_tokens).toBe('number');
+          expect(result).not.toHaveProperty('max_completion_tokens');
+        }
+      });
+
+      it('lets a budget spelled in extra_body replace the family key instead of pairing with it', () => {
+        // extra_body is merged last and is the user's wire shape: a
+        // `max_tokens` written there for a GPT-5 id ships alone, exactly as
+        // it did before the family re-key existed.
+        const result = build(
+          hello('gpt-5.5'),
+          providerWith({ extra_body: { max_tokens: 4096 } }),
+        );
+        expect(result.max_tokens).toBe(4096);
+        expect(result).not.toHaveProperty('max_completion_tokens');
+        // Same contract for the other key on a family that reads max_tokens.
+        const gpt41 = build(
+          hello('gpt-4.1'),
+          providerWith({ extra_body: { max_completion_tokens: 4096 } }),
+        );
+        expect(gpt41.max_completion_tokens).toBe(4096);
+        expect(gpt41).not.toHaveProperty('max_tokens');
+        // Control: the pre-existing single-key case is unchanged.
+        const control = build(
+          hello('gpt-4.1'),
+          providerWith({ extra_body: { max_tokens: 4096 } }),
+        );
+        expect(control.max_tokens).toBe(4096);
+        expect(control).not.toHaveProperty('max_completion_tokens');
+      });
+
+      it('keeps the family key when extra_body names no budget', () => {
+        const result = build(
+          hello('gpt-5.5'),
+          providerWith({ extra_body: { reasoning_effort: 'low' } }),
+        );
+        expect(typeof result.max_completion_tokens).toBe('number');
+        expect(result).not.toHaveProperty('max_tokens');
+      });
+    });
+
     it('should ignore malformed QWEN_CODE_MAX_OUTPUT_TOKENS values', () => {
       const request = hello('gpt-4');
 

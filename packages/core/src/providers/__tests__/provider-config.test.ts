@@ -1143,3 +1143,199 @@ describe('resolveMetadataKey dotted-id guard', () => {
     expect(() => resolveMetadataKeySrc(config)).toThrow(/must not contain/);
   });
 });
+
+describe('output budget key written by the installer', () => {
+  // The provider-setup "Max output tokens" field becomes a samplingParams
+  // entry, and samplingParams passes through to the wire verbatim, so on
+  // Chat Completions it has to use the key the model family accepts (GPT-5 /
+  // o-series reject `max_tokens`, #16343). The Responses wire reads
+  // `max_tokens` and maps it to `max_output_tokens`, so it keeps that key.
+  const budgetsOf = (
+    modelIds: string[],
+    extra: Partial<ProviderSetupInputs> = {},
+  ) =>
+    modelsOf(
+      buildInstallPlanSrc(customProvider, {
+        ...customInputs(modelIds),
+        protocol: AuthType.USE_OPENAI,
+        advancedConfig: { maxTokens: 32000 },
+        ...extra,
+      }),
+    ).map((model) => model.generationConfig?.samplingParams);
+
+  it('writes max_completion_tokens for GPT-5 / o-series ids on Chat Completions and max_tokens for the rest', () => {
+    expect(
+      budgetsOf(['openai.gpt-5.5', 'o3', 'gpt-4.1', 'xai.grok-4.3']),
+    ).toEqual([
+      { max_completion_tokens: 32000 },
+      { max_completion_tokens: 32000 },
+      { max_tokens: 32000 },
+      { max_tokens: 32000 },
+    ]);
+  });
+
+  it('keeps max_tokens for every family on the Responses wire', () => {
+    expect(
+      budgetsOf(['openai.gpt-5.5', 'gpt-4.1'], { wireApi: 'responses' }),
+    ).toEqual([{ max_tokens: 32000 }, { max_tokens: 32000 }]);
+  });
+
+  it('clears an installed max_completion_tokens on replaceExisting like max_tokens', () => {
+    const inputs = {
+      ...customInputs(['openai.gpt-5.5']),
+      protocol: AuthType.USE_OPENAI,
+    };
+    const existing = modelsOf(
+      buildInstallPlanSrc(customProvider, {
+        ...inputs,
+        advancedConfig: { maxTokens: 32000 },
+      }),
+    );
+    expect(existing[0]!.generationConfig?.samplingParams).toEqual({
+      max_completion_tokens: 32000,
+    });
+    const cleared = modelsOf(
+      buildInstallPlanSrc(
+        customProvider,
+        { ...inputs, advancedConfig: { replaceExisting: true } },
+        existing,
+      ),
+    )[0]!;
+    expect(cleared.generationConfig?.samplingParams).toBeUndefined();
+  });
+
+  it('replaces an older max_tokens budget on re-install without replaceExisting instead of keeping both keys', () => {
+    // An entry an earlier installer wrote as `max_tokens` for a GPT-5 id must
+    // not come out of a plain re-run as `{ max_tokens, max_completion_tokens }`:
+    // the pipeline would keep `max_tokens` as the wire key and the endpoint
+    // would still reject it. Only the budget key is swapped; the other
+    // preserved samplingParams stay.
+    const inputs = {
+      ...customInputs(['openai.gpt-5.5']),
+      protocol: AuthType.USE_OPENAI,
+    };
+    const existing = modelsOf(
+      buildInstallPlanSrc(customProvider, {
+        ...inputs,
+        advancedConfig: { maxTokens: 32000 },
+      }),
+    );
+    existing[0]!.generationConfig!.samplingParams = {
+      max_tokens: 32000,
+      temperature: 0.2,
+    };
+    const rerun = (
+      advancedConfig: NonNullable<ProviderSetupInputs['advancedConfig']>,
+    ) =>
+      modelsOf(
+        buildInstallPlanSrc(
+          customProvider,
+          { ...inputs, advancedConfig },
+          existing,
+        ),
+      )[0]!.generationConfig?.samplingParams;
+    expect(rerun({ maxTokens: 32000 })).toEqual({
+      temperature: 0.2,
+      max_completion_tokens: 32000,
+    });
+    // No new budget submitted: the stale key is still migrated, since the
+    // pipeline forwards an explicit `max_tokens` verbatim and the endpoint
+    // would keep rejecting it. The other preserved knobs stay.
+    expect(rerun({})).toEqual({
+      temperature: 0.2,
+      max_completion_tokens: 32000,
+    });
+  });
+
+  it('migrates a preserved max_tokens onto max_completion_tokens for a GPT-5 id on a plain re-run', () => {
+    // A plain re-run of provider setup passes no advancedConfig at all; an
+    // entry an earlier build persisted as `max_tokens` must still come out
+    // repaired, not pinned.
+    const inputs = {
+      ...customInputs(['openai.gpt-5.5']),
+      protocol: AuthType.USE_OPENAI,
+    };
+    const existing = modelsOf(buildInstallPlanSrc(customProvider, inputs));
+    existing[0]!.generationConfig = {
+      samplingParams: { max_tokens: 32000, temperature: 0.2 },
+    };
+    const refreshed = modelsOf(
+      buildInstallPlanSrc(customProvider, inputs, existing),
+    )[0]!;
+    expect(refreshed.generationConfig?.samplingParams).toEqual({
+      temperature: 0.2,
+      max_completion_tokens: 32000,
+    });
+  });
+
+  it('leaves a preserved budget alone when the endpoint accepts its key', () => {
+    const budgetAfterRerun = (
+      modelId: string,
+      samplingParams: Record<string, unknown>,
+      extra: Partial<ProviderSetupInputs> = {},
+    ) => {
+      const inputs = {
+        ...customInputs([modelId]),
+        protocol: AuthType.USE_OPENAI,
+        ...extra,
+      };
+      const existing = modelsOf(buildInstallPlanSrc(customProvider, inputs));
+      existing[0]!.generationConfig = { samplingParams };
+      return modelsOf(buildInstallPlanSrc(customProvider, inputs, existing))[0]!
+        .generationConfig?.samplingParams;
+    };
+    // GPT-4.1 reads either key: a hand-written max_completion_tokens stays.
+    expect(
+      budgetAfterRerun('gpt-4.1', { max_completion_tokens: 4096 }),
+    ).toEqual({ max_completion_tokens: 4096 });
+    // max_tokens is the right key for every other family.
+    expect(budgetAfterRerun('xai.grok-4.3', { max_tokens: 4096 })).toEqual({
+      max_tokens: 4096,
+    });
+    // The Responses wire translates max_tokens itself; nothing to migrate.
+    expect(
+      budgetAfterRerun(
+        'openai.gpt-5.5',
+        { max_tokens: 4096 },
+        { wireApi: 'responses' },
+      ),
+    ).toEqual({ max_tokens: 4096 });
+    // A pair is never produced: a stale max_tokens next to an existing
+    // max_completion_tokens is not re-keyed on top of it.
+    expect(
+      budgetAfterRerun('openai.gpt-5.5', {
+        max_tokens: 1000,
+        max_completion_tokens: 4096,
+      }),
+    ).toEqual({ max_tokens: 1000, max_completion_tokens: 4096 });
+  });
+
+  it('replaces a preserved family key with a new max_tokens value on a model that reads max_tokens', () => {
+    // The "new budget replaces the preserved keys" guard, in the shape the
+    // stale-key migration does not cover: the migration only moves
+    // `max_tokens` onto `max_completion_tokens` for GPT-5 / o-series ids, so
+    // a preserved `max_completion_tokens` (or `max_new_tokens`) on gpt-4.1
+    // plus a new value relies on the guard alone. Without it the entry
+    // would come out as `{ max_completion_tokens: 4096, max_tokens: 8000 }`,
+    // the pair the endpoint rejects.
+    const inputs = {
+      ...customInputs(['gpt-4.1']),
+      protocol: AuthType.USE_OPENAI,
+    };
+    const rerunOver = (samplingParams: Record<string, unknown>) => {
+      const existing = modelsOf(buildInstallPlanSrc(customProvider, inputs));
+      existing[0]!.generationConfig = { samplingParams };
+      return modelsOf(
+        buildInstallPlanSrc(
+          customProvider,
+          { ...inputs, advancedConfig: { maxTokens: 8000 } },
+          existing,
+        ),
+      )[0]!.generationConfig?.samplingParams;
+    };
+    expect(
+      rerunOver({ max_completion_tokens: 4096, temperature: 0.2 }),
+    ).toEqual({ temperature: 0.2, max_tokens: 8000 });
+    expect(rerunOver({ max_new_tokens: 2048 })).toEqual({ max_tokens: 8000 });
+  });
+});

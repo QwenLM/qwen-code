@@ -4264,6 +4264,148 @@ describe('ContentGenerationPipeline', () => {
       expect(call).not.toHaveProperty('max_tokens');
     });
 
+    describe('output budget key by model family', () => {
+      /** Executes `model` with the given samplingParams; returns the SDK body. */
+      async function executeAs(
+        model: string,
+        samplingParams: Record<string, unknown> | undefined,
+        config: GenerateContentParameters['config'],
+      ) {
+        mockContentGeneratorConfig.samplingParams =
+          samplingParams as ContentGeneratorConfig['samplingParams'];
+        pipeline = new ContentGenerationPipeline(mockConfig);
+        await executeOk(userRequest(model, config), 'prompt-id', []);
+        return sentBody();
+      }
+
+      // GPT-5+ and o-series reject `max_tokens` on Chat Completions
+      // (`unsupported_parameter` ... "Use 'max_completion_tokens' instead"),
+      // and gateways that namespace models by publisher send the same ids
+      // with a vendor prefix (OCI Generative AI `openai.gpt-5.5`).
+      it.each([
+        'gpt-5',
+        'gpt-5.5',
+        'gpt-5.6-luna',
+        'gpt-6-astra',
+        'o3',
+        'o4-mini',
+        'openai.gpt-5.5',
+        'openai.gpt-6.1-sol',
+        'openai.o3',
+        'openai/gpt-5.4',
+        'openai/gpt-5.5-pro:batch',
+        'o3:batch',
+        // Bedrock build-tag shape: without the `:<digits>` pre-strip,
+        // normalize() keeps "0" and this row falls back to max_tokens.
+        'openai.gpt-5-1:0',
+      ])(
+        'sends the clamped budget as max_completion_tokens for %s',
+        async (model) => {
+          const body = await executeAs(model, undefined, {
+            maxOutputTokens: 1000,
+          });
+          expect(body.max_completion_tokens).toBe(1000);
+          expect(body).not.toHaveProperty('max_tokens');
+        },
+      );
+
+      // Everything else keeps `max_tokens`, including gpt-oss and GPT-4.x,
+      // which accept either key, and the same names behind a vendor prefix.
+      it.each([
+        'gpt-4.1',
+        'gpt-4o',
+        'gpt-oss-120b',
+        'openai.gpt-oss-120b',
+        'openai.gpt-oss-120b-1:0',
+        'openai.gpt-4.1',
+        'xai.grok-4.3',
+        'google/gemini-2.5-flash:batch',
+        'meta.llama-3.3-70b-instruct',
+        'qwen3-coder-plus',
+        'deepseek-chat',
+        'test-model',
+      ])('keeps max_tokens for %s', async (model) => {
+        const body = await executeAs(model, undefined, {
+          maxOutputTokens: 1000,
+        });
+        expect(body.max_tokens).toBe(1000);
+        expect(body).not.toHaveProperty('max_completion_tokens');
+      });
+
+      it('injects the window budget as max_completion_tokens when a GPT-5 entry configures only other samplingParams', async () => {
+        const body = await executeAs(
+          'openai.gpt-5.5',
+          { temperature: 1 },
+          { maxOutputTokens: 1000 },
+        );
+        expect(body).toMatchObject({
+          temperature: 1,
+          max_completion_tokens: 1000,
+        });
+        expect(body).not.toHaveProperty('max_tokens');
+      });
+
+      it('treats samplingParams.max_tokens: null as unset and does not forward it next to max_completion_tokens', async () => {
+        const body = await executeAs(
+          'openai.gpt-5.5',
+          { max_tokens: null, temperature: 1 },
+          { maxOutputTokens: 1000 },
+        );
+        expect(body).toMatchObject({
+          temperature: 1,
+          max_completion_tokens: 1000,
+        });
+        expect(body).not.toHaveProperty('max_tokens');
+      });
+
+      it('clamps an installer-written samplingParams.max_completion_tokens to the window without adding max_tokens', async () => {
+        // buildAdvancedGenerationConfig() writes this shape for a GPT-5 /
+        // o-series entry installed on Chat Completions.
+        const body = await executeAs(
+          'openai.gpt-5.5',
+          { max_completion_tokens: 32000 },
+          { maxOutputTokens: 1000 },
+        );
+        expect(body.max_completion_tokens).toBe(1000);
+        expect(body).not.toHaveProperty('max_tokens');
+      });
+
+      it('passes an explicit samplingParams.max_tokens through verbatim even for a GPT-5 id', async () => {
+        // samplingParams is the source of truth; a user who spelled out
+        // `max_tokens` gets exactly that on the wire.
+        const body = await executeAs(
+          'gpt-5.5',
+          { max_tokens: 64 },
+          { maxOutputTokens: 1000 },
+        );
+        expect(body.max_tokens).toBe(64);
+        expect(body).not.toHaveProperty('max_completion_tokens');
+      });
+
+      it('clamps an injected max_completion_tokens to the window like max_tokens', async () => {
+        const body = await executeAs('o3', undefined, { maxOutputTokens: 256 });
+        expect(body.max_completion_tokens).toBe(256);
+      });
+
+      it('keeps max_completion_tokens through the real default provider for a prefixed GPT-5 id', async () => {
+        // DefaultOpenAICompatibleProvider.applyOutputTokenLimit() rewrites the
+        // budget on the final body; it must not reintroduce `max_tokens` next
+        // to (or instead of) the key the pipeline chose.
+        mockContentGeneratorConfig = {
+          ...mockContentGeneratorConfig,
+          samplingParams: undefined,
+        } as ContentGeneratorConfig;
+        pipelineOnProvider(DefaultOpenAICompatibleProvider);
+        await executeOk(
+          userRequest('openai.gpt-5.5', { maxOutputTokens: 1000 }),
+          'prompt-id',
+        );
+        const body = sentBody();
+        expect(body.max_completion_tokens).toBe(1000);
+        expect(body).not.toHaveProperty('max_tokens');
+      });
+    });
+
     describe('wire output budget recorded for truncation corroboration', () => {
       // The converter may only attribute incomplete tool-call JSON to
       // max_tokens after checking it against the budget that actually went out
