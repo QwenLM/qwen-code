@@ -110,13 +110,10 @@ P01_ROLE_${role.toUpperCase()}
           rig.createFile(`${role}.txt`, `${role} marker\n`),
         ]),
       );
-      const emptySettings = rig.createFile('system.json', '{}');
       for (const [key, value] of Object.entries({
         HOME: join(rig.testDir!, 'home'),
         QWEN_HOME: join(rig.testDir!, '.qwen-home'),
         QWEN_RUNTIME_DIR: join(rig.testDir!, 'runtime'),
-        QWEN_CODE_SYSTEM_SETTINGS_PATH: emptySettings,
-        QWEN_CODE_SYSTEM_DEFAULTS_PATH: emptySettings,
         NO_PROXY: '127.0.0.1,localhost',
         no_proxy: '127.0.0.1,localhost',
       })) {

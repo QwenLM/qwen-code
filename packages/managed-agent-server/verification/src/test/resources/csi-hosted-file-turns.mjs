@@ -8,7 +8,6 @@ import { pathToFileURL } from 'node:url';
 
 export async function runHostedFileTurn({
   root,
-  output,
   session,
   promptId,
   prompt,
@@ -128,16 +127,6 @@ export async function runHostedFileTurn({
         model: { name: 'owned-model', skipNextSpeakerCheck: true },
         telemetry: { enabled: false },
       }),
-    );
-    for (const name of ['system', 'defaults'])
-      await fs.writeFile(path.join(output, `${name}.json`), '{"$version":4}');
-    process.env.QWEN_CODE_SYSTEM_SETTINGS_PATH = path.join(
-      output,
-      'system.json',
-    );
-    process.env.QWEN_CODE_SYSTEM_DEFAULTS_PATH = path.join(
-      output,
-      'defaults.json',
     );
     process.env.OPENAI_API_KEY = 'owned-dummy-key';
     process.env.OPENAI_MODEL = 'owned-model';

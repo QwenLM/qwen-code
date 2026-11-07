@@ -49,7 +49,6 @@ describe(`DW04: ${renderer === 'opentui' ? 'OpenTUI' : 'Ink'} session Workflow m
       settings: { general: { chatRecording: true } },
     });
     rig.mkdir('home');
-    rig.createFile('system.json', '{}');
     rig.createFile(
       'home/settings.json',
       JSON.stringify({
@@ -79,8 +78,6 @@ describe(`DW04: ${renderer === 'opentui' ? 'OpenTUI' : 'Ink'} session Workflow m
       env: {
         QWEN_HOME: join(rig.testDir!, 'home'),
         QWEN_RUNTIME_DIR: join(rig.testDir!, 'runtime'),
-        QWEN_CODE_SYSTEM_SETTINGS_PATH: join(rig.testDir!, 'system.json'),
-        QWEN_CODE_SYSTEM_DEFAULTS_PATH: join(rig.testDir!, 'system.json'),
         QWEN_CODE_DISABLE_WORKFLOWS: '0',
         QWEN_CODE_DISABLE_CRON: '1',
         QWEN_CODE_LANG: 'en',
