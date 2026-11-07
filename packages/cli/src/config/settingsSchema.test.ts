@@ -348,6 +348,45 @@ describe('SettingsSchema', () => {
       });
     });
 
+    // The declared defaults are literals, so without the widening in
+    // `InferSettings` these keys infer the default's own type and a caller
+    // cannot assign any other value. Pin the widened property types and a
+    // non-default assignment; the runtime read path accepts both.
+    it('should keep every model.chatCompression knob writable', () => {
+      type Compaction = NonNullable<
+        NonNullable<Settings['model']>['chatCompression']
+      >;
+      expectTypeOf<Compaction['imagePayloadThreshold']>().toEqualTypeOf<
+        number | undefined
+      >();
+      expectTypeOf<Compaction['maxRecentImagesToRetain']>().toEqualTypeOf<
+        number | undefined
+      >();
+      expectTypeOf<Compaction['screenshotTriggerThreshold']>().toEqualTypeOf<
+        number | undefined
+      >();
+
+      const writable: Compaction = {
+        imagePayloadThreshold: 0,
+        maxRecentImagesToRetain: 9,
+        screenshotTriggerThreshold: 12345,
+      };
+      expect(writable.imagePayloadThreshold).toBe(0);
+    });
+
+    it('should mark every model.chatCompression knob restart-scoped', () => {
+      const properties =
+        getSettingsSchema().model.properties.chatCompression.properties;
+      // core's Config captures this snapshot at boot, so a `/config set`
+      // only lands on the next launch and the flag must say so.
+      for (const [name, definition] of Object.entries(properties)) {
+        expect({ name, requiresRestart: definition.requiresRestart }).toEqual({
+          name,
+          requiresRestart: true,
+        });
+      }
+    });
+
     it('should have sandboxImage setting under tools', () => {
       expect(getSettingsSchema().tools.properties.sandboxImage).toBeDefined();
       expect(getSettingsSchema().tools.properties.sandboxImage.type).toBe(
