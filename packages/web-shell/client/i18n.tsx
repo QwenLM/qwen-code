@@ -2583,6 +2583,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
   'sidebar.archiveRunningDisabled':
     'A running session cannot be archived; archiving would stop its work',
+  'sidebar.archiveBusy':
+    'This session is working again, so it was not archived; stop it first',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.standaloneLoadFailed': 'Failed to load recent conversations',
   'sidebar.standaloneActionFailed': 'Conversation action failed',
@@ -2604,6 +2606,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Open another chat first to delete the current no-workspace session',
   'sidebar.deleteConfirmDescription': (v) =>
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
+  'sidebar.archiveConfirmDescription': (v) =>
+    `Archive "${v?.name ?? ''}" and leave this conversation? You can restore it from Archived later.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
   'sidebar.activeWork': 'Active work',
@@ -7483,9 +7487,10 @@ const ZH: Messages = {
   'sidebar.archive': '归档',
   'sidebar.unarchive': '恢复',
   'sidebar.moreActions': '更多操作',
-  'sidebar.archiveCurrentDisabled': '不能归档当前会话',
+  'sidebar.archiveCurrentDisabled': '当前会话无法归档',
   'sidebar.archiveRunningDisabled':
     '不能归档运行中的会话，归档会终止其正在执行的工作',
+  'sidebar.archiveBusy': '该会话又有任务在跑，已取消归档；请先停止',
   'sidebar.archivedTitle': '已归档',
   'sidebar.standaloneLoadFailed': '最近会话加载失败',
   'sidebar.standaloneActionFailed': '会话操作失败',
@@ -7505,6 +7510,8 @@ const ZH: Messages = {
     '请先打开另一个对话，再删除当前无工作区会话',
   'sidebar.deleteConfirmDescription': (v) =>
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
+  'sidebar.archiveConfirmDescription': (v) =>
+    `归档“${v?.name ?? ''}”并离开当前对话？之后可从“已归档”中恢复。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
   'sidebar.activeWork': '有活动任务',
