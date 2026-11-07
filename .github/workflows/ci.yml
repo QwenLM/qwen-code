@@ -479,11 +479,20 @@ jobs:
           POC_SOURCE: '${{ github.workspace }}/linux-unit-poc-${{ github.run_id }}-${{ github.run_attempt }}'
           POC_SHA: '${{ github.event.inputs.branch_ref }}'
           POC_CONTAINER: 'qwen-unit-poc-${{ github.run_id }}-${{ github.run_attempt }}'
+          POC_NETWORK: 'qwen-unit-poc-net-${{ github.run_id }}-${{ github.run_attempt }}'
           POC_IMAGE: 'qwen-code-linux-unit-poc:local'
         run: |-
           set -euo pipefail
           cleanup() {
             docker rm --volumes --force "${POC_CONTAINER}" >/dev/null 2>&1 || true
+            for endpoint in 169.254.169.254 100.100.100.200; do
+              if [ -n "${bridge:-}" ]; then
+                sudo -n iptables -D DOCKER-USER -i "${bridge}" -d "${endpoint}" -j REJECT >/dev/null 2>&1 || true
+              fi
+            done
+            if [ -n "${network_id:-}" ]; then
+              docker network rm "${network_id}" >/dev/null 2>&1 || true
+            fi
           }
           trap cleanup EXIT
           image_context="$(mktemp -d "${RUNNER_TEMP}/qwen-unit-poc-image-XXXXXX")"
@@ -493,10 +502,17 @@ jobs:
           IMAGE
           docker build --file "${image_context}/Dockerfile" --tag "${POC_IMAGE}" "${image_context}"
           rm -rf -- "${image_context}"
+          network_id="$(docker network create "${POC_NETWORK}")"
+          bridge="br-${network_id:0:12}"
+          sudo -n iptables --version
+          for endpoint in 169.254.169.254 100.100.100.200; do
+            sudo -n iptables -I DOCKER-USER 1 -i "${bridge}" -d "${endpoint}" -j REJECT
+          done
           # A job `container:` receives the host Docker socket automatically.
           # Keep the socket out of this explicitly created untrusted-code container.
           docker create \
             --name "${POC_CONTAINER}" \
+            --network "${POC_NETWORK}" \
             --init \
             --user node \
             --cap-drop ALL \
@@ -565,7 +581,17 @@ jobs:
             echo "::error::The disposable container still exists"
             exit 1
           fi
-          echo "Disposable container removed: ${POC_CONTAINER}"
+          for endpoint in 169.254.169.254 100.100.100.200; do
+            if sudo -n iptables -C DOCKER-USER -i "${bridge}" -d "${endpoint}" -j REJECT; then
+              echo "::error::Metadata firewall rule survived cleanup: ${endpoint}"
+              exit 1
+            fi
+          done
+          if docker network inspect "${network_id}" >/dev/null 2>&1; then
+            echo "::error::Disposable Docker network still exists: ${POC_NETWORK}"
+            exit 1
+          fi
+          echo "Disposable container, network, and metadata rules removed: ${POC_CONTAINER}"
       - name: 'Clean the PoC checkout'
         if: '${{ always() }}'
         env:

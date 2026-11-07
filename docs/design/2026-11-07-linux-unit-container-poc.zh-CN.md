@@ -20,6 +20,10 @@
 
 那次尝试在隔离探针处停止，**没有执行依赖安装、构建或单测**。其 checkout 清理及 runner 驱动的容器删除均成功。普通 `test_build`、`test`、`lint_and_static` 已恢复为 PoC 前的原状。
 
+后续 [`42354027932`](https://github.com/QwenLM/qwen-code/actions/runs/42354027932) 已移除 socket，但从阿里云 metadata `100.100.100.200` 得到 `HTTP 200`，因而在依赖安装前拒绝执行源码脚本，构建和单测同样未开始。这证明 UID/capability 限制本身不足以隔离云凭据。
+
+在仅本次 PoC 的授权下，驱动创建专用 Docker bridge，并在宿主 `DOCKER-USER` 链上为该 bridge 对 `169.254.169.254` 和 `100.100.100.200` 加入 `REJECT`。同一个 `EXIT` trap 删除容器、bridge 和对应规则，并复核规则与网络均不存在。缺少 sudo 或链支持时前置失败，不从源码处回到更弱边界。
+
 ## 范围
 
 范围内：

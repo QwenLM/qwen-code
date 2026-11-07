@@ -20,6 +20,10 @@ That mount appears automatically for this runner version together with `/__w`, `
 
 That attempt stopped at its isolation probe; **it did not run the dependency install, build, or unit tests**. Its checkout cleanup and runner-driven container removal did succeed. Ordinary `test_build`, `test`, and `lint_and_static` have now returned to their exact pre-PoC shape.
 
+The follow-up [`42354027932`](https://github.com/QwenLM/qwen-code/actions/runs/42354027932) removed the socket but showed `HTTP 200` from Alibaba Cloud metadata at `100.100.100.200`, refusing to run source scripts before installation. This stopped again before dependency installation, build, or unit tests. It proved that container UID/capability restrictions alone are insufficient here.
+
+With authorization for this PoC only, the driver therefore creates a dedicated Docker bridge and inserts two `REJECT` rules into the host's `DOCKER-USER` chain, scoped to that bridge, for `169.254.169.254` and `100.100.100.200`. The same `EXIT` trap deletes the container, bridge, and exact rules. Successful cleanup is verified by absence checks for the rules and network; missing sudo or chain support fails before untrusted scripts, not into a weaker boundary.
+
 ## Scope
 
 In scope:

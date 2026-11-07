@@ -1734,6 +1734,29 @@ describe('manual Linux unit container PoC', () => {
     );
   });
 
+  it('deletes only the isolated network and its metadata rules on cleanup', () => {
+    assert.match(driver.run, /network_id="\$\(docker network create/);
+    assert.match(driver.run, /bridge="br-\$\{network_id:0:12\}"/);
+    for (const fragment of [
+      'sudo -n iptables -I DOCKER-USER 1 -i "${bridge}"',
+      'sudo -n iptables -D DOCKER-USER -i "${bridge}"',
+      'sudo -n iptables -C DOCKER-USER -i "${bridge}"',
+      '--network "${POC_NETWORK}"',
+      'docker network rm',
+      'docker network inspect',
+    ]) {
+      assert.ok(driver.run.includes(fragment), fragment);
+    }
+    const createIndex = driver.run.indexOf('docker create');
+    for (const endpoint of ['169.254.169.254', '100.100.100.200']) {
+      const rule = `iptables -I DOCKER-USER 1 -i "\${bridge}" -d "${endpoint}" -j REJECT`;
+      assert.ok(
+        driver.run.indexOf(rule) < createIndex,
+        `${endpoint} must be blocked before container creation`,
+      );
+    }
+  });
+
   it('destroys the disposable container and the dedicated checkout', () => {
     assert.match(driver.run, /trap cleanup EXIT/);
     assert.match(driver.run, /docker rm --volumes --force/);
