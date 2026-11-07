@@ -791,6 +791,83 @@ describe('qwen-triage: runner routing under token isolation', () => {
     assert.doesNotMatch(authorizeRunsOn, /needs\./);
   });
 
+  it('routes the payload-less command triggers to ECS and keeps the gate hardened', () => {
+    // Same fix as qwen-code-pr-review.yml's authorize: issue_comment
+    // (/triage, /tmux, /verify) and workflow_dispatch carry no
+    // github.event.pull_request payload, so the same-repo guard alone fell
+    // through to ubuntu-latest for every command. Route them to the pool,
+    // keeping the hosted fallback and the kill switch.
+    // Exact pin, not substrings: a regrouping that defeats the repo guard or
+    // the kill switch must red this, like the review-workflow gate pin.
+    assert.equal(
+      authorizeRunsOn,
+      "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch')) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}",
+    );
+    // The gate stays checkout-free and splices no event value into a shell
+    // (everything arrives through env:). Pin the step inventory too, so a new
+    // step cannot be added unnoticed.
+    assert.deepEqual(
+      authorizeJob.steps.map((s) => s.name),
+      [
+        'Sanitize the triage budget',
+        'Check principal write permission',
+        'Acknowledge verify request',
+        'Report disabled verify lane',
+      ],
+    );
+    assert.ok(authorizeJob.steps.every((s) => s.uses === undefined));
+    for (const s of authorizeJob.steps) {
+      assert.ok(
+        !String(s.run ?? '').includes('${{'),
+        `step splices an expression into the shell: ${s.name}`,
+      );
+      // No step may execute repository code: on the pool the cwd is the
+      // reused $GITHUB_WORKSPACE, which other lanes fill with contributor
+      // files. This holds for EVERY step, not just the PAT-bearing ones —
+      // even a credential-free step that runs a planted file leaves a
+      // survivor on the persistent host. Evaluate the live
+      // (comment-stripped) lines so a commented-out example cannot red
+      // this, and a live execution line cannot hide behind a comment.
+      const live = String(s.run ?? '')
+        .split('\n')
+        .filter((l) => !l.trim().startsWith('#'))
+        .join('\n');
+      assert.doesNotMatch(live, /(^|[\s;&|(`'"])(\.{1,2}\/)/m, s.name);
+      assert.doesNotMatch(
+        live,
+        /(^|[\s;&|(`])(?:[^\s;&|()`'"]*\/)?(source|bash|sh|node|python[0-9.]*|npx|npm|pnpm|yarn)(\s|$)/m,
+        s.name,
+      );
+    }
+    // Every step that spends CI_BOT_PAT on gh pins gh's config resolution
+    // (GH_HOST + a private, guarded GH_CONFIG_DIR), like the sibling pool
+    // jobs; a planted shared ~/.config/gh must not receive the PAT.
+    // Identify PAT-spending steps by the credential in their env, not by the
+    // spelling of a gh subcommand, so a differently-spelled gh call cannot
+    // slip past the hardening check.
+    const ghSteps = authorizeJob.steps.filter((s) => s.env && s.env.GH_TOKEN);
+    assert.ok(ghSteps.length >= 1, 'expected at least one PAT-bearing step');
+    const guard =
+      'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/triage-authorize-gh-config.XXXXXX")"; then';
+    for (const s of ghSteps) {
+      // Evaluate the live (comment-stripped) lines, not mere substrings: an
+      // unguarded mktemp one-liner or a preamble moved below the first gh
+      // call must red this. (The no-repository-code invariant above covers
+      // every step, including this one.)
+      const live = String(s.run)
+        .split('\n')
+        .filter((l) => !l.trim().startsWith('#'))
+        .join('\n');
+      assert.ok(live.includes('export GH_HOST=github.com'), s.name);
+      assert.ok(live.includes(guard), s.name);
+      assert.match(live, /exit 1\n\s*fi\n\s*export GH_CONFIG_DIR\n/, s.name);
+      const firstGh = live.search(/gh (api|pr) /);
+      assert.ok(firstGh > -1, s.name);
+      assert.ok(live.indexOf('export GH_HOST=github.com') < firstGh, s.name);
+      assert.ok(live.indexOf(guard) < firstGh, s.name);
+    }
+  });
+
   it('retires author_can_write (its only consumer was triage routing)', () => {
     assert.equal(authorizeJob.outputs.author_can_write, undefined);
     const perm = authorizeJob.steps.find((s) => s.id === 'perm');

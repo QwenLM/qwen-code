@@ -9969,7 +9969,9 @@ export function languageLabel(language: WebShellLanguage): string {
 }
 
 export function getTranslator(language: WebShellLanguage) {
-  const messages = MESSAGES[language];
+  // The runtime value is not checked: an unshipped locale falls back to the
+  // EN table instead of crashing on the first key lookup.
+  const messages = MESSAGES[language] ?? EN;
   return (key: string, vars?: Record<string, string | number>) => {
     const message = messages[key] ?? EN[key] ?? key;
     return typeof message === 'function' ? message(vars) : message;

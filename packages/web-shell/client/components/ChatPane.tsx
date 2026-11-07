@@ -779,6 +779,8 @@ export function ChatPane({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canQueryPendingPrompts:
+      connection.capabilities?.features.includes('session_prompt') === true,
     canInjectMidTurnMedia,
     workspaceFileActions: attachmentWorkspaceTarget?.actions,
     streamingState,
@@ -794,6 +796,12 @@ export function ChatPane({
   // timestamp) rather than letting StreamingStatus fall back to "now" — so a
   // pane opened mid-turn shows the real elapsed time, not a reset-to-zero clock.
   const activeTurnStartedAt = useMemo(() => {
+    if (
+      connection.localPrompt &&
+      connection.localPrompt.sessionId === connection.sessionId
+    ) {
+      return connection.localPrompt.startedAt;
+    }
     if (connection.backgroundTurn) return connection.backgroundTurn.startedAt;
     if (!isResponding) return undefined;
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -801,7 +809,13 @@ export function ChatPane({
       if (message?.role === 'user') return message.timestamp;
     }
     return undefined;
-  }, [messages, isResponding, connection.backgroundTurn]);
+  }, [
+    messages,
+    isResponding,
+    connection.backgroundTurn,
+    connection.localPrompt,
+    connection.sessionId,
+  ]);
 
   const controlGoal = useCallback(
     async (

@@ -125,7 +125,12 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
       encoding: 'utf-8',
       mode: 0o600,
     });
-    chmodSync(tmp, 0o600);
+    try {
+      chmodSync(tmp, 0o600);
+    } catch {
+      // A mode we cannot tighten (a mount without Unix permissions) must
+      // not block the cursor write; the rename below still publishes it.
+    }
     renameSync(tmp, path);
   }
 

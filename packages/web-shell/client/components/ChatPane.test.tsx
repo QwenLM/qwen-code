@@ -3225,6 +3225,20 @@ describe('ChatPane', () => {
     );
   });
 
+  it('uses this local send clock while the server user echo has not arrived', () => {
+    streamingStateValue = 'waiting';
+    messagesState = [
+      { id: 'old-user', role: 'user', content: 'old', timestamp: 1000 },
+    ];
+    Object.assign(connectionState, {
+      localPrompt: { sessionId: connectionState.sessionId, startedAt: 9000 },
+    });
+    render();
+    expect(testid('pane-streaming')?.getAttribute('data-started-at')).toBe(
+      '9000',
+    );
+  });
+
   it('enables the interactive composer controls', () => {
     connectionState.tokenCount = 1200;
     connectionState.contextWindow = 8192;
