@@ -319,9 +319,16 @@ describe('PermissionsDialog scope rows', () => {
         { timeout: 3000 },
       );
       stdin.write('Bash');
-      await waitFor(() => expect(stripAnsi(lastFrame())).toContain('Bash'), {
-        timeout: 3000,
-      });
+      // `Bash` is already on screen in the example line, so waiting for it
+      // proves nothing. The typed text replaces the input's placeholder, which
+      // is the barrier the fixed sleep below used to stand in for.
+      await waitFor(
+        () =>
+          expect(stripAnsi(lastFrame())).not.toContain(
+            'Enter permission rule',
+          ),
+        { timeout: 3000 },
+      );
       await new Promise((resolve) => setTimeout(resolve, 300));
       stdin.write('\r');
       await waitFor(
