@@ -4160,6 +4160,15 @@ export const ChatEditor = memo(
                             error,
                           );
                         }
+                        // A quote chip shows its full fragment on hover:
+                        // the chip display truncates the value.
+                        if (
+                          tooltip === undefined &&
+                          tag.kind === 'quote' &&
+                          tag.value
+                        ) {
+                          tooltip = tag.value;
+                        }
                         return (
                           <TopComposerTag
                             key={tag.id}

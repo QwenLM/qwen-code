@@ -6,6 +6,7 @@ import { SelectionCopyMenu } from './SelectionCopyMenu';
 import { SelectionCopyMenu as TranscriptSelectionCopyMenu } from './SelectionCopyMenu.transcript-stub';
 import { I18nProvider } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
+import { QuoteToComposerContext } from './quoteToComposerContext';
 
 let root: Root;
 let container: HTMLDivElement;
@@ -22,6 +23,7 @@ function mount(
   enabled = true,
   content = 'reply',
   language: 'en' | 'zh-CN' = 'en',
+  onQuote?: (text: string) => void,
 ) {
   if (!container) container = document.createElement('div');
   if (!portal) portal = document.createElement('div');
@@ -32,15 +34,17 @@ function mount(
       root.render(
         <I18nProvider language={language}>
           <WebShellPortalRootContext.Provider value={portal}>
-            <SelectionCopyMenu
-              className="reply-body"
-              content={value}
-              enabled={enabled}
-            >
-              <p>
-                Before <strong>bold text</strong> after
-              </p>
-            </SelectionCopyMenu>
+            <QuoteToComposerContext.Provider value={onQuote ?? null}>
+              <SelectionCopyMenu
+                className="reply-body"
+                content={value}
+                enabled={enabled}
+              >
+                <p>
+                  Before <strong>bold text</strong> after
+                </p>
+              </SelectionCopyMenu>
+            </QuoteToComposerContext.Provider>
           </WebShellPortalRootContext.Provider>
         </I18nProvider>,
       ),
@@ -420,6 +424,29 @@ describe('SelectionCopyMenu', () => {
       expect(buttons[1].disabled).toBe(false);
     },
   );
+  it.each(['', ' '])(
+    'disables the quote button for an image-only selection (prefix=%j)',
+    async (prefix) => {
+      mount(true, 'reply', 'en', vi.fn());
+      const paragraph = container.querySelector('p')!;
+      paragraph.innerHTML = `${prefix}<img src="https://example.com/image.png" alt="">`;
+      for (const type of ['pointerdown', 'pointerup']) {
+        if (type === 'pointerup') {
+          const range = document.createRange();
+          range.selectNodeContents(paragraph);
+          window.getSelection()!.addRange(range);
+        }
+        const event = new MouseEvent(type, { bubbles: true, button: 0 });
+        Object.defineProperty(event, 'pointerType', { value: 'mouse' });
+        await act(async () => paragraph.dispatchEvent(event));
+      }
+      const quote = [...portal.querySelectorAll('button')].find(
+        (item) => item.textContent === 'Quote to composer',
+      )!;
+      expect(quote).toBeDefined();
+      expect(quote.disabled).toBe(true);
+    },
+  );
   it('closes when only the selection end changes', async () => {
     mount();
     await choose();
@@ -462,5 +489,39 @@ describe('SelectionCopyMenu', () => {
     expect(button).toBeDefined();
     await act(async () => button.click());
     expect(write).toHaveBeenCalledWith('```python\nanswer = 42\n```');
+  });
+  it('hides the quote button when the chat provides no quote action', async () => {
+    mount();
+    await choose();
+    const texts = [...portal.querySelectorAll('button')].map(
+      (item) => item.textContent,
+    );
+    expect(texts).toContain('Copy plain text');
+    expect(texts).not.toContain('Quote to composer');
+  });
+  it('shows the quote button when the chat provides a quote action', async () => {
+    mount(true, 'reply', 'en', vi.fn());
+    await choose();
+    const texts = [...portal.querySelectorAll('button')].map(
+      (item) => item.textContent,
+    );
+    expect(texts).toContain('Quote to composer');
+    const quote = [...portal.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Quote to composer',
+    )!;
+    expect(quote.disabled).toBe(false);
+  });
+  it('sends the selected text to the quote action and closes the menu', async () => {
+    const onQuote = vi.fn();
+    mount(true, 'reply', 'en', onQuote);
+    await choose();
+    const button = [...portal.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Quote to composer',
+    )!;
+    expect(button).toBeDefined();
+    await act(async () => button.click());
+    expect(onQuote).toHaveBeenCalledTimes(1);
+    expect(onQuote).toHaveBeenCalledWith('bold');
+    expect(portal.querySelector('[data-slot="popover-content"]')).toBeNull();
   });
 });

@@ -36,6 +36,9 @@ vi.mock('./hooks/useApprovalModes', async () => {
 });
 
 const editorAddTags = vi.hoisted(() => vi.fn());
+const editorInsertQuote = vi.hoisted(() =>
+  vi.fn((_tag: { kind?: string; serialized?: string }) => true),
+);
 import type {
   ContextUsageControls,
   RegisterContextUsageControls,
@@ -946,6 +949,10 @@ const {
       backgroundDetails: undefined as
         | ((turn: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn) => void)
         | undefined,
+      latestQuoteToComposer: undefined as
+        | ((text: string) => void)
+        | null
+        | undefined,
       latestMessageListProps: null as {
         onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
         messages?: Array<{
@@ -1437,6 +1444,7 @@ vi.mock('./components/ChatEditor', async () => {
         ref: React.ForwardedRef<{
           clear: () => void;
           addTags: (tags: unknown, options?: unknown) => void;
+          insertQuote: (tag: { kind?: string; serialized?: string }) => boolean;
           hasAttachments: () => boolean;
           hasInput: () => boolean;
           insertText: (text: string) => void;
@@ -1488,6 +1496,7 @@ vi.mock('./components/ChatEditor', async () => {
             ),
           hasInput: () => testState.prompt.trim().length > 0,
           addTags: editorAddTags,
+          insertQuote: editorInsertQuote,
           insertText: editorInsertText,
           getText: () => testState.prompt,
           setText: (text) => {
@@ -1594,6 +1603,9 @@ vi.mock('./components/TranscriptViewport', async () => {
   const { useInteractionBlocker } = await import('./interactionBlockContext');
   const { useSubagentDetails } = await import('./subagentDetailsContext');
   const { useOpenTurnCalls } = await import('./turnCallsContext');
+  const { QuoteToComposerContext } = await import(
+    './components/messages/quoteToComposerContext'
+  );
   function InteractionBlockerProbe() {
     const registerInteractionBlocker = useInteractionBlocker();
     const releaseRef = React.useRef<(() => void) | null>(null);
@@ -1641,6 +1653,9 @@ vi.mock('./components/TranscriptViewport', async () => {
       ref: React.ForwardedRef<{ scrollToBottom: () => void }>,
     ) {
       testState.latestMessageListProps = props;
+      testState.latestQuoteToComposer = React.useContext(
+        QuoteToComposerContext,
+      );
       testState.backgroundDetails = useSubagentDetails()?.onOpenBackground;
       testState.openTurnCalls = useOpenTurnCalls();
       React.useImperativeHandle(ref, () => ({
@@ -12541,6 +12556,7 @@ beforeEach(() => {
   testState.latestStatusBarHideSettings = false;
   testState.latestStatusBarOnSelectModel = null;
   testState.latestMessageListProps = null;
+  testState.latestQuoteToComposer = undefined;
   testState.backgroundDetails = undefined;
   testState.openTurnCalls = undefined;
   testState.latestBtwMessageProps = null;
@@ -12587,6 +12603,7 @@ beforeEach(() => {
   editorRestoreFiles.mockClear();
   editorRestoreInputAnnotations.mockClear();
   editorInsertText.mockClear();
+  editorInsertQuote.mockClear();
   mockStore.appendLocalUserMessage.mockReset();
   settingsReload.mockClear();
   settingsReload.mockResolvedValue(undefined);
@@ -28004,6 +28021,43 @@ describe('App session callbacks', () => {
       document.querySelector('[data-testid="approval-overlay"]'),
     ).not.toBeNull();
     expect(testState.latestToolApprovalKeyboardActive).toBe(true);
+  });
+
+  it('quotes a transcript selection into the main composer', async () => {
+    renderApp();
+    await flush();
+    expect(testState.latestQuoteToComposer).toBeTypeOf('function');
+
+    act(() => testState.latestQuoteToComposer!('quoted\ntext'));
+
+    expect(editorInsertQuote).toHaveBeenCalledTimes(1);
+    expect(editorInsertQuote.mock.calls[0]![0]).toMatchObject({
+      kind: 'quote',
+      serialized: '<quoted-message>quoted text</quoted-message>',
+    });
+  });
+
+  it('offers no Quote action while a tool approval overlay owns the composer', async () => {
+    const { rerender } = renderApp();
+    await flush();
+    expect(testState.latestQuoteToComposer).toBeTypeOf('function');
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(testState.latestQuoteToComposer).toBeNull();
+
+    await act(async () => {
+      testState.blocks = [];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(testState.latestQuoteToComposer).toBeTypeOf('function');
   });
 
   it('hides the composer while a tool approval overlay is pending and restores it after resolution', async () => {
