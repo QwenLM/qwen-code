@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -17,9 +18,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 
 const workflowPath = join(
@@ -61,26 +62,23 @@ const publisherPath = join(
   'triage-publish.mjs',
 );
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
-// Hoisted so the scanner itself can be fixture-pinned: Prettier wraps
-// imports at 80 columns, and a layout-blind scanner silently misses both
-// wrapped bare specifiers (false green) and wrapped relative ones (false
-// red on the sparse-list comparison).
-const specifiersOf = (file) => {
-  const src = readFileSync(file, 'utf8');
-  const found = [];
-  // Span newlines: Prettier wraps `import { … } from '…'` at 80 columns, and
-  // a single-line pattern sees neither the wrapped bare specifier nor the
-  // wrapped relative one. The bounded [\s\S] keeps a stray `from` in prose
-  // from pairing with an unrelated quote further down the file.
-  const fromRe =
-    /(?:^|\n)\s*(?:import|export)[\s\S]{0,400}?\bfrom\s*['"]([^'"]+)['"]/g;
-  const sideEffectRe = /(?:^|\n)\s*import\s*['"]([^'"]+)['"]/g;
-  const dynamicRe = /\b(?:import|require)\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
-  for (const re of [fromRe, sideEffectRe, dynamicRe]) {
-    let m;
-    while ((m = re.exec(src)) !== null) found.push(m[1]);
-  }
-  return found;
+const repoRoot = join(scriptsDir, '..', '..');
+// The sparse-checkout list is the pool job's entire world: it carries no
+// node_modules, so anything the publisher needs must be listed. Read the
+// list once; the guard below materializes exactly it and loads the module.
+const sparseCheckoutEntries = () => {
+  const checkout = publishTriageJob.steps.find((s) => /^Checkout/.test(s.name));
+  assert.ok(checkout, 'publish-triage must checkout its scripts');
+  assert.equal(
+    checkout.with['sparse-checkout-cone-mode'],
+    false,
+    'the sparse list is a set of exact paths, not cone-mode directories',
+  );
+  return String(checkout.with['sparse-checkout'])
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort();
 };
 // The triage agent is a direct CLI launch now; its settings travel as the
 // heredoc the host writes into the fresh per-run QWEN_HOME. Extract and parse
@@ -981,106 +979,104 @@ describe('qwen-triage: token isolation contract', () => {
   });
 });
 
-describe('qwen-triage: publisher import closure', () => {
-  // The pool argument in the publish-triage header rests on the publisher
-  // importing only node builtins plus relative helpers that the sparse
-  // checkout carries. Nothing else pins that: the unit suite imports the
-  // module from a full checkout where resolution always succeeds. A new
-  // bare specifier (or a helper missing from the sparse list) would stay
-  // green everywhere and die ERR_MODULE_NOT_FOUND in the real job, so the
-  // closure is scanned here and matched against the sparse-checkout list.
-  it('imports only node builtins and relative helpers, all carried by the sparse checkout', () => {
-    const entry = join(scriptsDir, 'triage-publish.mjs');
-    const closure = new Set();
-    const queue = [entry];
-    while (queue.length > 0) {
-      const file = queue.shift();
-      const rel = file.slice(scriptsDir.length + 1);
-      if (closure.has(rel)) continue;
-      closure.add(rel);
-      for (const spec of specifiersOf(file)) {
-        if (spec.startsWith('node:')) continue;
-        assert.ok(
-          spec.startsWith('./') || spec.startsWith('../'),
-          `publisher closure must stay bare-specifier-free; found "${spec}" in ${rel} — a reused pool workspace has no node_modules to resolve it`,
-        );
-        const resolved = join(dirname(file), spec);
-        assert.ok(
-          existsSync(resolved),
-          `relative import "${spec}" in ${rel} must exist`,
-        );
-        queue.push(resolved);
-      }
-    }
-    // The runtime also reads the owner policy next to the scripts; it is
-    // not an import, so pin its presence in the sparse list separately.
-    const publisherSrc = readFileSync(entry, 'utf8');
-    assert.match(publisherSrc, /\.\.\/issue-owners\.json/);
-    const checkout = publishTriageJob.steps.find((s) =>
-      /^Checkout/.test(s.name),
-    );
-    const sparse = String(checkout.with['sparse-checkout'])
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .sort();
-    const expected = [
-      ...[...closure].map((rel) => `/.github/scripts/${rel}`),
-      '/.github/issue-owners.json',
-    ].sort();
-    assert.deepEqual(
-      sparse,
-      expected,
-      'the sparse checkout must carry exactly the import closure plus the owner policy',
-    );
-    assert.equal(checkout.with['sparse-checkout-cone-mode'], false);
-  });
-});
+describe('qwen-triage: the sparse checkout is exactly what the publisher needs', () => {
+  // No model of JS syntax here. The pool job checks out ONLY the sparse list
+  // into a workspace with no node_modules, so the guard recreates that world
+  // and loads the publisher in it: a bare specifier, a wrapped import of any
+  // length, an out-of-tree helper, and a helper missing from the list all
+  // fail the load with ERR_MODULE_NOT_FOUND — the job's actual failure mode.
+  // A regex scanner previously stood in for this and kept finding new holes
+  // (statement layout, length bounds, prose that looks like an import).
+  const entryPath = '/.github/scripts/triage-publish.mjs';
 
-describe('qwen-triage: import scanner is layout-independent', () => {
-  // Prettier wraps imports at this repo's 80-column width, so the scanner
-  // must not depend on statement layout. Both directions bite: a wrapped
-  // BARE specifier that goes unseen keeps the closure test green while the
-  // real pool job dies ERR_MODULE_NOT_FOUND, and a wrapped RELATIVE one that
-  // goes unseen drops a needed entry from `expected` and turns the exact
-  // sparse-list comparison falsely red. These fixtures pin the scanner
-  // itself so a future tightening cannot regress silently.
-  const scan = (source) => {
-    const dir = mkdtempSync(join(tmpdir(), 'qwen-import-scan-'));
-    try {
-      const file = join(dir, 'fixture.mjs');
-      writeFileSync(file, source);
-      return specifiersOf(file);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+  // A node_modules anywhere above the temp tree would silently satisfy a
+  // bare specifier and make the sufficiency check falsely green.
+  const assertNoResolvableModules = (root) => {
+    for (let dir = root; ; dir = dirname(dir)) {
+      assert.ok(
+        !existsSync(join(dir, 'node_modules')),
+        `${join(dir, 'node_modules')} exists above the isolated tree; the sparse-checkout guard cannot prove bare-specifier freedom here`,
+      );
+      if (dirname(dir) === dir) break;
     }
   };
 
-  it('sees a wrapped relative specifier', () => {
-    const found = scan(
-      "import {\n  loadPolicy,\n  matchArea,\n} from './assign-issue-owner.mjs';\n",
-    );
-    assert.ok(
-      found.includes('./assign-issue-owner.mjs'),
-      `a wrapped relative import must be scanned; got ${JSON.stringify(found)}`,
-    );
+  const withSparseTree = async (entries, body) => {
+    const root = mkdtempSync(join(tmpdir(), 'qwen-sparse-'));
+    try {
+      assertNoResolvableModules(root);
+      for (const entry of entries) {
+        const from = join(repoRoot, entry);
+        assert.ok(
+          existsSync(from),
+          `sparse-checkout entry ${entry} does not exist in the repository`,
+        );
+        const to = join(root, entry);
+        mkdirSync(dirname(to), { recursive: true });
+        copyFileSync(from, to);
+      }
+      // Each tree gets a unique URL, so the ESM cache never serves a
+      // previous case's module.
+      return await body(pathToFileURL(join(root, entryPath)).href);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  it('loads the publisher with exactly the sparse set and nothing else', async () => {
+    const entries = sparseCheckoutEntries();
+    assert.ok(entries.includes(entryPath), 'the publisher must be listed');
+    await withSparseTree(entries, async (url) => {
+      await assert.doesNotReject(
+        import(url),
+        /ERR_MODULE_NOT_FOUND|ERR_UNSUPPORTED/,
+        'the sparse checkout must be sufficient to load the publisher: the pool workspace has no node_modules, so a bare specifier or an unlisted helper dies here',
+      );
+    });
   });
 
-  it('sees a wrapped bare specifier', () => {
-    const found = scan("import {\n  stringify,\n} from 'yaml';\n");
-    assert.ok(
-      found.includes('yaml'),
-      `a wrapped bare import must be scanned so the closure test can reject it; got ${JSON.stringify(found)}`,
-    );
+  it('every sparse entry is load-bearing', async () => {
+    const entries = sparseCheckoutEntries();
+    // The owner policy is read at call time, not import time; its necessity
+    // is pinned by the resolved-path test below instead.
+    const modules = entries.filter((entry) => entry.endsWith('.mjs'));
+    assert.ok(modules.length >= 2, 'expected the publisher and its helper');
+    for (const omitted of modules) {
+      await withSparseTree(
+        entries.filter((entry) => entry !== omitted),
+        async (url) => {
+          await assert.rejects(
+            import(url),
+            /ERR_MODULE_NOT_FOUND/,
+            `${omitted} is listed in the sparse checkout but the publisher loads without it; drop the stale entry`,
+          );
+        },
+      );
+    }
   });
 
-  it('sees the publisher own wrapped node:fs import', () => {
-    // triage-publish.mjs already carries a multi-line `import { … } from
-    // 'node:fs'`; node: specifiers are skipped downstream, so only a direct
-    // scanner assertion can tell whether it is seen at all.
+  it('carries the owner policy at the path the publisher resolves', async () => {
+    // Tie the two together instead of hard-coding the expected entry: read
+    // the URL literal the publisher resolves against its own module URL,
+    // resolve it the same way, and require that exact path in the list.
+    const src = readFileSync(publisherPath, 'utf8');
+    const literals = [
+      ...src.matchAll(/new URL\(\s*'([^']+)'\s*,\s*import\.meta\.url\s*\)/g),
+    ]
+      .map((m) => m[1])
+      .filter((spec) => spec.endsWith('.json'));
+    assert.equal(
+      literals.length,
+      1,
+      'expected exactly one owner-policy URL literal in the publisher',
+    );
+    const resolved = fileURLToPath(
+      new URL(literals[0], pathToFileURL(publisherPath)),
+    );
+    const repoRelative = `/${relative(repoRoot, resolved).split(sep).join('/')}`;
     assert.ok(
-      specifiersOf(publisherPath).includes('node:fs'),
-      'the scanner must see the multi-line node:fs import in triage-publish.mjs',
+      sparseCheckoutEntries().includes(repoRelative),
+      `the sparse checkout must carry the owner policy the publisher resolves (${repoRelative})`,
     );
   });
 });
