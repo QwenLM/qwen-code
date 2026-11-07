@@ -6036,6 +6036,68 @@ describe('createServeApp', () => {
       expect(managed.body.features).toContain('scheduled_task_session_reuse');
     });
 
+    it('advertises workspace runtime stop only with the full managed stop wiring', async () => {
+      const bridge = Object.assign(fakeBridge(), {
+        stopWorkspaceRuntime: vi.fn(),
+        getRuntimeStopCompletion: vi.fn(),
+        getRuntimeStopSnapshot: vi.fn(),
+      });
+      const workspaceRegistry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge,
+        }),
+      ]);
+      const runtimeRemoval = {
+        beginDrain: vi.fn(),
+        cancelDrain: vi.fn(),
+        completeDrain: vi.fn(),
+        disposeRuntime: vi.fn().mockResolvedValue(undefined),
+        getActivity: vi.fn(() => ({
+          pendingSessionStarts: 0,
+          channelWorkers: 0,
+          voiceSessions: 0,
+        })),
+      };
+      const wiredDeps = {
+        bridge,
+        workspaceRegistry,
+        managedChildProcesses: {
+          registry: new ProcessRegistry(),
+          policy: createChildHeapPolicy({
+            budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+            mode: 'admit',
+          }),
+        },
+        workspaceRuntimeRemoval: runtimeRemoval,
+        voiceCoordinator: new WorkspaceVoiceCoordinator(),
+        getSessionBridges: () => [bridge],
+        manageScheduledTaskSessions: true,
+      };
+
+      // Every leg of the boot-time conjunction is present: the capabilities
+      // route must advertise the stop surface from that production wiring.
+      const wired = await request(
+        createServeApp(baseOpts, undefined, wiredDeps),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(wired.body.features).toContain('workspace_runtime_stop');
+
+      // Drop exactly one required leg and the same route must stop
+      // advertising it, so a regression in any single leg is observable.
+      const { manageScheduledTaskSessions: _dropped, ...partialDeps } =
+        wiredDeps;
+      const missingLeg = await request(
+        createServeApp(baseOpts, undefined, partialDeps),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(missingLeg.body.features).not.toContain('workspace_runtime_stop');
+    });
+
     it('refuses scheduled task sessions in the Hosted Harness profile', () => {
       expect(() =>
         createServeApp(
@@ -46057,6 +46119,53 @@ describe('Live conversation runtime lifecycle', () => {
       },
     };
   }
+
+  it.each([
+    ['qwen3.8-max(qwen-subscription)', 'standalone-client', 200],
+    ['qwen3.8-max(qwen-subscription)', 'unregistered-client', 400],
+    ['existing(openai)', 'standalone-client', 200],
+  ] as const)(
+    'switches standalone model %s through its owner for %s',
+    async (modelId, clientId, expectedStatus) => {
+      const sessionId = 'standalone-subscription';
+      const reloadModelProviders = vi.fn(async () => ({ status: 'failed' }));
+      const setup = setupLiveRuntime({
+        summaryImpl: (id) => ({
+          sessionId: id,
+          workspaceCwd: setup.root.canonicalRoot,
+          createdAt: '2026-11-06T00:00:00.000Z',
+          sourceType: 'standalone',
+          clientCount: 0,
+          hasActivePrompt: false,
+        }),
+        setModelImpl: async (id, _params, context) => {
+          expect(id).toBe(sessionId);
+          expect(context?.clientId).toBe(clientId);
+          if (context?.clientId !== 'standalone-client') {
+            throw new InvalidClientIdError(id, clientId);
+          }
+          return {};
+        },
+      });
+      Object.assign(setup.liveRuntime.workspaceService, {
+        reloadModelProviders,
+      });
+      setup.registry.add(setup.liveRuntime);
+
+      const response = await request(setup.app)
+        .post(`/session/${sessionId}/model`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ modelId });
+
+      expect(response.status).toBe(expectedStatus);
+      if (expectedStatus === 400)
+        expect(response.body.code).toBe('invalid_client_id');
+      expect(reloadModelProviders).not.toHaveBeenCalled();
+      expect(setup.liveBridge.setModelCalls).toHaveLength(1);
+      expect(setup.primaryBridge.setModelCalls).toHaveLength(0);
+    },
+  );
 
   it('mounts and advertises standalone sessions only with complete runtime dependencies', async () => {
     const partial = createServeApp(baseOpts, undefined, {

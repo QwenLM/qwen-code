@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker.protocol;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
+import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
@@ -13,6 +14,8 @@ import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -88,7 +91,7 @@ public final class ManagedContextProtocol {
     }
 
     public static void validateBoot(Map<String, Object> boot) {
-        java.util.Set<String> expectedKeys = new java.util.HashSet<>(BOOT_KEYS);
+        Set<String> expectedKeys = new HashSet<>(BOOT_KEYS);
         if (boot.containsKey("managedExtensions")) {
             expectedKeys.add("managedExtensions");
         }
@@ -112,17 +115,17 @@ public final class ManagedContextProtocol {
                 .matches("sha256:[0-9a-f]{64}"));
         require(Set.of("session", "workspace")
                 .contains(string(boot, "isolationClass")));
-        boolean extended = com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.admits(string(boot, "capabilityDigest"));
+        boolean extended = ManagedExtensionExecutionProfile.admits(string(boot, "capabilityDigest"));
         require(extended == boot.containsKey("managedExtensions"));
         if (extended) {
             require(boot.get("managedExtensions") instanceof Map<?, ?>);
             Map<?, ?> config = (Map<?, ?>) boot.get("managedExtensions");
-            if (com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST.equals(string(boot, "capabilityDigest"))) {
-                require(config.get("cgroupRoot") instanceof String cgroup && java.nio.file.Path.of(cgroup).isAbsolute());
+            if (ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST.equals(string(boot, "capabilityDigest"))) {
+                require(config.get("cgroupRoot") instanceof String cgroup && Path.of(cgroup).isAbsolute());
             }
             require((config.keySet().equals(Set.of("enabled", "mode", "cacheDirectory")) || config.keySet().equals(Set.of("enabled", "mode", "cacheDirectory", "cgroupRoot"))) && Boolean.TRUE.equals(config.get("enabled"))
-                    && com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.mode(string(boot, "capabilityDigest")).equals(config.get("mode"))
-                    && config.get("cacheDirectory") instanceof String directory && java.nio.file.Path.of(directory).isAbsolute());
+                    && ManagedExtensionExecutionProfile.mode(string(boot, "capabilityDigest")).equals(config.get("mode"))
+                    && config.get("cacheDirectory") instanceof String directory && Path.of(directory).isAbsolute());
         }
     }
 

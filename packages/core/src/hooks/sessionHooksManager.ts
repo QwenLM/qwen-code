@@ -66,6 +66,8 @@ interface SessionHooksStorage {
 export class SessionHooksManager {
   private readonly sessions: Map<string, SessionHooksStorage> = new Map();
 
+  constructor(private readonly onHooksChanged?: (sessionId: string) => void) {}
+
   /**
    * Get or create session storage
    */
@@ -130,6 +132,7 @@ export class SessionHooksManager {
     const eventHooks = storage.hooks.get(event) || [];
     eventHooks.push(entry);
     storage.hooks.set(event, eventHooks);
+    this.onHooksChanged?.(sessionId);
 
     debugLogger.debug(
       `Added function hook ${hookId} for session ${sessionId} on event ${event}`,
@@ -173,6 +176,7 @@ export class SessionHooksManager {
     const eventHooks = storage.hooks.get(event) || [];
     eventHooks.push(entry);
     storage.hooks.set(event, eventHooks);
+    this.onHooksChanged?.(sessionId);
 
     debugLogger.debug(
       `Added session hook ${hookId} for session ${sessionId} on event ${event}`,
@@ -209,6 +213,7 @@ export class SessionHooksManager {
     }
 
     eventHooks.splice(index, 1);
+    this.onHooksChanged?.(sessionId);
     debugLogger.debug(
       `Removed hook ${hookId} from session ${sessionId} on event ${event}`,
     );
@@ -232,6 +237,7 @@ export class SessionHooksManager {
       const index = eventHooks.findIndex((entry) => entry.hookId === hookId);
       if (index !== -1) {
         eventHooks.splice(index, 1);
+        this.onHooksChanged?.(sessionId);
         debugLogger.debug(
           `Removed hook ${hookId} from session ${sessionId} on event ${event}`,
         );
@@ -325,6 +331,7 @@ export class SessionHooksManager {
    */
   clearSessionHooks(sessionId: string): void {
     this.sessions.delete(sessionId);
+    this.onHooksChanged?.(sessionId);
     debugLogger.debug(`Cleared all hooks for session ${sessionId}`);
   }
 

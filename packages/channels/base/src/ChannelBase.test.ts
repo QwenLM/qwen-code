@@ -231,6 +231,13 @@ class TestChannel extends ChannelBase {
     }
   }
 
+  preflightForTest(
+    envelope: Envelope,
+    options: { waiveGroupMention?: boolean } = {},
+  ): Promise<boolean> {
+    return Promise.resolve(this.preflightInbound(envelope, options));
+  }
+
   enableCancelCommand(): void {
     this.registerCancelCommand();
   }
@@ -915,6 +922,73 @@ describe('ChannelBase', () => {
           'result',
         ),
       ).rejects.toBe(error);
+    });
+  });
+
+  describe('waiving the group mention requirement', () => {
+    const groupMessage = (overrides: Partial<Envelope> = {}) =>
+      envelope({ isGroup: true, chatId: 'g1', ...overrides });
+
+    it('admits an unmentioned group message only on request', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        groups: { '*': { requireMention: true } },
+      });
+
+      expect(await ch.preflightForTest(groupMessage())).toBe(false);
+      expect(
+        await ch.preflightForTest(groupMessage(), { waiveGroupMention: true }),
+      ).toBe(true);
+    });
+
+    it.each([
+      ['a disabled group policy', { groupPolicy: 'disabled' as const }],
+      [
+        'a group missing from the allowlist',
+        { groupPolicy: 'allowlist' as const, groups: { other: {} } },
+      ],
+      [
+        'a sender outside the group allowlist',
+        {
+          groupPolicy: 'open' as const,
+          groups: {
+            '*': {
+              requireMention: true,
+              senders: 'allowlist' as const,
+              allowedUsers: ['someone-else'],
+            },
+          },
+        },
+      ],
+    ])('still rejects %s', async (_label, config) => {
+      const ch = createChannel(config);
+
+      expect(
+        await ch.preflightForTest(groupMessage(), { waiveGroupMention: true }),
+      ).toBe(false);
+    });
+
+    it('neither admits nor opens a pairing request for an unapproved paired group', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-waive-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const ch = createChannel({
+          groupPolicy: 'pairing',
+          groups: { '*': { requireMention: true } },
+        });
+
+        expect(
+          await ch.preflightForTest(groupMessage(), {
+            waiveGroupMention: true,
+          }),
+        ).toBe(false);
+        expect(new PairingStore('test-chan', '/tmp').listPending()).toEqual([]);
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
     });
   });
 
@@ -16608,6 +16682,121 @@ describe('ChannelBase', () => {
   });
 
   describe('response delivery', () => {
+    it.each(['', 'Answer'])(
+      'delivers a turn notice separately from %j',
+      async (body) => {
+        const events = bridge as unknown as EventEmitter;
+        vi.mocked(bridge.prompt).mockImplementation(async (sid) => {
+          events.emit('turnNotice', 'another-session', 'Unrelated notice');
+          events.emit('turnNotice', sid, 'Overflow notice');
+          if (body) events.emit('textChunk', sid, body);
+          return body ? `Overflow notice\n\n${body}` : 'Overflow notice';
+        });
+        const ch = createChannel();
+
+        await ch.handleInbound(envelope());
+
+        expect(ch.responseChunks.map(({ chunk }) => chunk)).toEqual(
+          body ? [body] : [],
+        );
+        expect(ch.sent).toEqual([
+          ...(body ? [{ chatId: 'chat1', text: body }] : []),
+          { chatId: 'chat1', text: 'Overflow notice' },
+        ]);
+        expect(events.listenerCount('turnNotice')).toBe(0);
+      },
+    );
+
+    it('keeps the turn completed when notice delivery fails', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const events = bridge as unknown as EventEmitter;
+      vi.mocked(bridge.prompt).mockImplementation(async (sid) => {
+        events.emit('turnNotice', sid, 'Overflow notice');
+        events.emit('textChunk', sid, 'Answer');
+        return 'Overflow notice\n\nAnswer';
+      });
+      const ch = createChannel();
+      const sendMessage = ch.sendMessage.bind(ch);
+      let failNotice = true;
+      ch.sendMessage = async (chatId, text) => {
+        if (failNotice && text.includes('Overflow notice')) {
+          failNotice = false;
+          throw new Error('secret notice detail');
+        }
+        await sendMessage(chatId, text);
+      };
+      try {
+        await ch.handleInbound(envelope({ messageId: 'notice-failure' }));
+
+        // The answer was delivered before the notice send failed, and the
+        // failure never reaches a user-visible message.
+        expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'Answer' }]);
+        expect(
+          ch.sent.some(({ text }) => text.includes('secret notice detail')),
+        ).toBe(false);
+        // Once delivery started the turn's outcome is fixed: a failing notice
+        // must not rewrite completed into failed.
+        expect(ch.taskEvents).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'completed',
+              messageId: 'notice-failure',
+            }),
+          ]),
+        );
+        expect(ch.taskEvents.some(({ type }) => type === 'failed')).toBe(false);
+        // The failure is logged for developers instead.
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining('turn notice delivery failed'),
+        );
+        // The notice was sliced out of the answer, so the log must still carry
+        // what the user never received.
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining('dropped notice: Overflow notice'),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('fails the turn when the notice is the only delivery and its send fails', async () => {
+      const events = bridge as unknown as EventEmitter;
+      vi.mocked(bridge.prompt).mockImplementation(async (sid) => {
+        events.emit('turnNotice', sid, 'Overflow notice');
+        return 'Overflow notice';
+      });
+      const ch = createChannel();
+      const sendMessage = ch.sendMessage.bind(ch);
+      ch.sendMessage = async (chatId, text) => {
+        if (text.includes('Overflow notice')) {
+          throw new Error('rate limited (429)');
+        }
+        await sendMessage(chatId, text);
+      };
+
+      await expect(
+        ch.handleInbound(envelope({ messageId: 'notice-only-failure' })),
+      ).rejects.toThrow('rate limited (429)');
+
+      // The prompt result was the notice itself, so nothing reached the user:
+      // the turn must fail instead of reporting completed.
+      expect(ch.sent).toEqual([]);
+      expect(ch.taskEvents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'failed',
+            phase: 'delivery',
+            messageId: 'notice-only-failure',
+          }),
+        ]),
+      );
+      expect(ch.taskEvents.some(({ type }) => type === 'completed')).toBe(
+        false,
+      );
+    });
+
     it('keeps partial paragraphs in adapter updates until the final response', async () => {
       vi.useFakeTimers();
       try {
