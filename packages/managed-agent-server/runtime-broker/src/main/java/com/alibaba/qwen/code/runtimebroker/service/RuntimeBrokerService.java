@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations;
 import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeExtensionCommandVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -31,6 +32,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.BindingContext;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
@@ -45,9 +47,11 @@ import org.apache.commons.codec.digest.DigestUtils;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -83,7 +87,7 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.u
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unwrap;
 
 /** Repository-backed orchestration for the private Managed Runtime contract. */
-public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations {
+public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerOperations {
     /**
      * Floor for {@code v3ResultWindow}: refuses sub-second durations. The
      * managed-agent-server property declares {@code @DurationUnit(SECONDS)},
@@ -345,7 +349,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
             if (current == null || !current.getBindingId().equals(binding.getBindingId())
                     || current.getGeneration() != binding.getGeneration() || current.getState() != RuntimeBindingRecord.State.READY
                     || current.isDrainRequested() || !current.hasSameLease(binding.getLease())
-                    || !java.util.Objects.equals(current.getResourceHandle(), binding.getResourceHandle())
+                    || !Objects.equals(current.getResourceHandle(), binding.getResourceHandle())
                     || sessionRepository.countActiveByBinding(binding.getBindingId(), binding.getGeneration()) != 0
                     || executionRepository.hasActiveByBinding(binding.getBindingId(), binding.getGeneration())) {
                 return failed(conflict("workspace_close_execution_unsettled", "Original resident work remains unsettled"));
@@ -709,7 +713,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     }
 
     private CompletionStage<Void> acknowledgeDrainedTools(RuntimeBindingRecord binding, String cursor) {
-        if (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind()) || binding.getLease() == null) {
+        if (!RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind()) || binding.getLease() == null) {
             return CompletableFuture.completedFuture(null);
         }
         var batch = executionRepository.findByBinding(binding.getBindingId(), binding.getGeneration(), cursor, 100);
@@ -722,7 +726,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     }
 
     private CompletionStage<RuntimeDrainReceipt> stopAcknowledgedRuntime(RuntimeBindingRecord binding) {
-        if (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind()) || binding.getLease() == null) {
+        if (!RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind()) || binding.getLease() == null) {
             return acknowledgeDrainedTools(binding, null).thenCompose(ignored -> provisioner.stopDrained(binding));
         }
         return safeStage(() -> provisioner.reconcile(binding.getRequest(), binding.getProvisionSeed(),
@@ -1191,7 +1195,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     }
 
     public void configureExtensionCommandVerifier(RuntimeExtensionCommandVerifier verifier) {
-        this.extensionCommandVerifier = java.util.Objects.requireNonNull(verifier, "verifier");
+        this.extensionCommandVerifier = Objects.requireNonNull(verifier, "verifier");
     }
 
     public CompletionStage<Object> control(String harnessSessionId,
@@ -2354,7 +2358,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                     || executionRepository.hasActiveByRuntimeSession(
                             context.binding().getBindingId(), context.binding().getGeneration(),
                             context.session().getRuntimeSessionId(),
-                            new java.util.HashSet<>(context.backgroundProcesses()))) {
+                            new HashSet<>(context.backgroundProcesses()))) {
                 throw conflict("runtime_session_busy",
                         "Runtime Session has an active operation");
             }

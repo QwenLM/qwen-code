@@ -23,6 +23,7 @@ import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService.BindingR
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -1250,7 +1251,7 @@ final class RuntimeBindingProvisioning {
                 && lease.getLeaseId().equals(attestation.getLeaseId())
                 && lease.getEpoch() == attestation.getEpoch()
                 && request.getScope().equals(attestation.getScope())
-                && java.util.Objects.equals(request.getStorageId(),
+                && Objects.equals(request.getStorageId(),
                         attestation.getStorageId())
                 && seed.getProvisionRequestId().equals(
                         attestation.getProvisionRequestId());
