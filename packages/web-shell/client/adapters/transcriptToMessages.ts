@@ -319,8 +319,7 @@ function getSessionBranchDisplayName(data: unknown): string | null {
 function getMidTurnInjectedImages(
   data: unknown,
 ):
-  | Array<{ data: string; mimeType: string; attachmentId?: string }>
-  | undefined {
+  Array<{ data: string; mimeType: string; attachmentId?: string }> | undefined {
   if (!data || typeof data !== 'object') return undefined;
   const items = (data as { items?: unknown }).items;
   if (!Array.isArray(items) || items.length === 0) return undefined;
@@ -573,6 +572,27 @@ export function transcriptBlocksToDaemonMessages(
     ),
   );
   const completedTaskIds = new Set<string>();
+  // Teammate identity by background task id, built over the whole block list
+  // before any row is projected: on the live wire the turn-started marker can
+  // arrive before the display frame carrying the identity, so filling this
+  // inside the loop leaves the marker row — the row the user actually sees —
+  // anonymous.
+  const teammateByTask = new Map<string, { name: string }>();
+  for (const scan of blocks) {
+    const scanTeammate = teammateOfAgent(
+      'agent' in scan ? scan.agent : undefined,
+    );
+    if (!scanTeammate) continue;
+    const scanTaskId = getString(
+      getRecord(
+        scan.kind === 'status'
+          ? scan.data
+          : getRecord((scan as { meta?: unknown }).meta)?.['backgroundTask'],
+      ),
+      'taskId',
+    );
+    if (scanTaskId) teammateByTask.set(scanTaskId, scanTeammate);
+  }
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
@@ -586,6 +606,33 @@ export function transcriptBlocksToDaemonMessages(
     const backgroundTurn = parseDaemonBackgroundTurn(
       block.backgroundTurn ?? blockMeta?.['backgroundTurn'],
     );
+    const blockTeammate = teammateOfAgent(
+      (block as DaemonTextTranscriptBlock).agent,
+    );
+    if (block.kind === 'status' && block.source === 'teammate_activity') {
+      const activityData = getRecord(block.data);
+      // On an inter-agent message the wire's `agent` names the *recipient*; the
+      // author travels structurally in `data.author` (the frame's own text is
+      // already `author → recipient`). Chip the author so the chip and the row
+      // text cannot disagree, and chip nothing when a message row has no
+      // trustworthy author — never fall back to the recipient.
+      const activityTeammate =
+        activityData?.['status'] === 'message'
+          ? teammateOfAuthor(activityData['author'])
+          : (teammateOfAuthor(activityData?.['author']) ?? blockTeammate);
+      messages.push({
+        id: block.id,
+        role: 'system',
+        content: block.text,
+        variant: 'info',
+        source: block.source,
+        data: activityData,
+        ...(activityTeammate ? { teammate: activityTeammate } : {}),
+        timestamp: blockTime,
+        sourceBlockIds: [block.id],
+      });
+      continue;
+    }
     const promptId = backgroundTurn?.turnId ?? block.promptId;
     if (
       promptId !== undefined &&
@@ -607,6 +654,9 @@ export function transcriptBlocksToDaemonMessages(
       !backgroundResultMarkers.has(backgroundTurn.turnId)
     ) {
       backgroundResultMarkers.add(backgroundTurn.turnId);
+      const turnTeammate = teammateByTask.get(
+        (backgroundTurn as { taskId?: string }).taskId ?? '',
+      );
       messages.push({
         id: `background-turn:${backgroundTurn.turnId}`,
         role: 'system',
@@ -617,6 +667,7 @@ export function transcriptBlocksToDaemonMessages(
           ...backgroundTurn,
           backgroundTask: backgroundTasksByExecution.get(backgroundTurn.turnId),
         },
+        ...(turnTeammate ? { teammate: turnTeammate } : {}),
         backgroundTurn,
         timestamp: backgroundTurn.startedAt,
         sourceBlockIds: [block.id],
@@ -660,6 +711,7 @@ export function transcriptBlocksToDaemonMessages(
           ...task,
           awaitingProcessing,
         },
+        ...(blockTeammate ? { teammate: blockTeammate } : {}),
         timestamp: blockTime,
         sourceBlockIds: [block.id],
       });
@@ -695,6 +747,7 @@ export function transcriptBlocksToDaemonMessages(
             variant: 'info',
             source: 'background_notification',
             data: getBackgroundNotificationData(textBlock),
+            ...(blockTeammate ? { teammate: blockTeammate } : {}),
             timestamp: blockTime,
             sourceBlockIds: [block.id],
           });
@@ -782,8 +835,9 @@ export function transcriptBlocksToDaemonMessages(
             role: 'system',
             content: textBlock.text,
             variant: 'info',
-            source: 'background_notification',
+            source: notice.source,
             data: notice.data,
+            ...(blockTeammate ? { teammate: blockTeammate } : {}),
             timestamp: blockTime,
             sourceBlockIds: [block.id],
           });
@@ -1892,6 +1946,33 @@ function getToolCallRawInput(
   );
 }
 
+/**
+ * Teammate author of an inter-agent message, from the frame's structured
+ * `data.author`. The leader (`kind: 'root'`) and an unknown sender stay
+ * unchipped, the same way subagent frames do.
+ */
+function teammateOfAuthor(value: unknown): { name: string } | undefined {
+  const author = getRecord(value);
+  if (!author || author['kind'] !== 'teammate') return undefined;
+  const agentName = author['agentName'];
+  if (typeof agentName !== 'string') return undefined;
+  const name = agentName.split('/').filter(Boolean).pop();
+  return name ? { name } : undefined;
+}
+
+/**
+ * Teammate (Agent Team peer) author of a projected notification, from the
+ * daemon-minted identity. Peer reports and roster changes carry
+ * `_meta.agent.kind === 'teammate'`; tasks and subagents stay unchipped.
+ */
+function teammateOfAgent(
+  agent: DaemonTextTranscriptBlock['agent'],
+): { name: string } | undefined {
+  if (!agent || agent.kind !== 'teammate') return undefined;
+  const name = agent.agentName.split('/').filter(Boolean).pop();
+  return name ? { name } : undefined;
+}
+
 function isBackgroundAgentBlock(
   block: DaemonToolTranscriptBlock,
   rawOutput: unknown,
@@ -2139,8 +2220,7 @@ type ParsedInsight =
   | { type: 'insight_error'; error: string };
 
 type InsightSegment =
-  | { kind: 'text'; text: string }
-  | { kind: 'insight'; data: ParsedInsight };
+  { kind: 'text'; text: string } | { kind: 'insight'; data: ParsedInsight };
 
 const INSIGHT_PREFIXES = [
   '"insight_progress":',

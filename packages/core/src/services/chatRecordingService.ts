@@ -633,11 +633,35 @@ export interface NotificationRecordPayload {
     kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
     toolUseId?: string;
     sourceTurnId?: string;
+    /**
+     * Producer identity for `peer` items: the teammate whose report this is.
+     * Persisted so replay attributes the message structurally, the same way
+     * the live wire's `_meta.agent` does, instead of parsing the text.
+     */
+    agent?: {
+      agentName: string;
+      depth: number;
+      kind: 'teammate' | 'subagent';
+    };
     /** Structured fields for i18n rendering (persisted for page refresh). */
     description?: string;
     commandLabel?: string;
     eventCount?: number;
     droppedLines?: number;
+    /**
+     * Author of an inter-agent message, when the row is one. The wire's
+     * `agent` names the recipient for such a row, so the author travels here
+     * instead of being parsed out of the text.
+     */
+    author?: {
+      agentName: string;
+      depth: number;
+      kind: 'root' | 'teammate';
+    };
+    /** Tool activity fields: what ran, which phase, and whether it failed. */
+    toolName?: string;
+    phase?: 'call' | 'result';
+    success?: boolean;
   };
 }
 
@@ -856,9 +880,7 @@ export function isValidSessionApprovalModePayload(
   payload: unknown,
 ): payload is SessionApprovalModeRecordCandidate {
   const candidate = payload as
-    | SessionApprovalModeRecordCandidate
-    | null
-    | undefined;
+    SessionApprovalModeRecordCandidate | null | undefined;
   if (!isApprovalMode(candidate?.mode)) return false;
   if (candidate.mode !== ApprovalMode.PLAN) return true;
   return (
@@ -1261,11 +1283,8 @@ export class ChatRecordingService {
   /** Session identity pinned by `pinSessionIdentity` at rotation time. */
   private pinnedSessionId: string | undefined;
   private state:
-    | 'inactive'
-    | 'active'
-    | 'closing'
-    | 'closed'
-    | 'integrity_failed' = 'inactive';
+    'inactive' | 'active' | 'closing' | 'closed' | 'integrity_failed' =
+    'inactive';
   private binding:
     | {
         readonly sessionId: string;
@@ -1291,8 +1310,7 @@ export class ChatRecordingService {
    */
   private externalRecordIndex: Map<string, ExternalAgentRecordRef> | undefined;
   private externalRecordIndexLoad:
-    | Promise<Map<string, ExternalAgentRecordRef>>
-    | undefined;
+    Promise<Map<string, ExternalAgentRecordRef>> | undefined;
   /** Bumped whenever recorder state is rebuilt; a stale index load is dropped. */
   private externalRecordIndexGeneration = 0;
   /** In-memory cache of the current session's custom title (for re-append on exit) */
@@ -1366,8 +1384,7 @@ export class ChatRecordingService {
    */
   private lastAttributionSnapshotJson: string | undefined;
   private cachedGitBranch:
-    | { cwd: string; branch: string | undefined }
-    | undefined;
+    { cwd: string; branch: string | undefined } | undefined;
 
   /**
    * Approximate bytes of JSONL content accepted after the last
@@ -1421,8 +1438,7 @@ export class ChatRecordingService {
   }
 
   private readPersistedTitleInfo():
-    | { title?: string; source?: TitleSource }
-    | undefined {
+    { title?: string; source?: TitleSource } | undefined {
     try {
       return this.config
         .getSessionService()
@@ -1622,8 +1638,7 @@ export class ChatRecordingService {
       if (record.type !== 'system') continue;
       if (record.subtype === 'custom_title') {
         const payload = record.systemPayload as
-          | CustomTitleRecordPayload
-          | undefined;
+          CustomTitleRecordPayload | undefined;
         this.currentCustomTitle = payload?.customTitle;
         this.currentTitleSource = payload?.titleSource;
       } else if (record.subtype === 'parent_session') {
@@ -1632,8 +1647,7 @@ export class ChatRecordingService {
         )?.parentSessionId;
       } else if (record.subtype === 'session_source') {
         const payload = record.systemPayload as
-          | SessionSourceRecordPayload
-          | undefined;
+          SessionSourceRecordPayload | undefined;
         this.currentSourceType = payload?.sourceType;
         this.currentSourceId = payload?.sourceId;
       } else if (record.subtype === 'session_model') {
@@ -3369,8 +3383,7 @@ export class ChatRecordingService {
         : []),
     ];
     let recordingToolCallResult:
-      | (Partial<ToolCallResponseInfo> & { status: Status })
-      | undefined;
+      (Partial<ToolCallResponseInfo> & { status: Status }) | undefined;
     if (toolCallResult) {
       const recordableToolCallResult = { ...toolCallResult };
       delete recordableToolCallResult.persistedOutputFiles;

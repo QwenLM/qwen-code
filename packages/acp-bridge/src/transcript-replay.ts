@@ -1410,6 +1410,13 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
                     source: 'background_notification',
                     qwenDiscreteMessage: true,
                     ...(backgroundTask ? { backgroundTask } : {}),
+                    // Peer notices persisted their producer inside
+                    // `backgroundTask.agent`; hoist it to the frame level so
+                    // the block reducer's `block.agent` path — the same one
+                    // the live wire feeds — attributes the message.
+                    ...(isTeammateAgentRecord(backgroundTask?.['agent'])
+                      ? { agent: backgroundTask['agent'] }
+                      : {}),
                   },
                 }
               : record.subtype === 'cron'
@@ -1826,6 +1833,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         ? record.systemPayload
         : undefined;
       if (!payload || typeof payload['displayText'] !== 'string') return;
+      const completedTask = isObjectRecord(payload['backgroundTask'])
+        ? payload['backgroundTask']
+        : undefined;
       yield emit(
         createTranscriptMessageUpdate({
           role: 'assistant',
@@ -1834,8 +1844,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           extra: {
             source: 'background_task_completed',
             qwenDiscreteMessage: true,
-            ...(isObjectRecord(payload['backgroundTask'])
-              ? { backgroundTask: payload['backgroundTask'] }
+            ...(completedTask ? { backgroundTask: completedTask } : {}),
+            ...(isTeammateAgentRecord(completedTask?.['agent'])
+              ? { agent: completedTask['agent'] }
               : {}),
           },
         }),
@@ -2692,6 +2703,20 @@ function normalizeTodos(values: readonly unknown[]): TranscriptTodoItem[] {
   });
 }
 
+function isTeammateAgentRecord(value: unknown): value is {
+  agentName: string;
+  depth: number;
+  kind: 'teammate';
+} {
+  return (
+    isObjectRecord(value) &&
+    typeof value['agentName'] === 'string' &&
+    value['agentName'].length > 0 &&
+    typeof value['depth'] === 'number' &&
+    value['kind'] === 'teammate'
+  );
+}
+
 function agentIdentityFromTaskExecution(
   display: Record<string, unknown>,
 ): { agentName: string; depth: number; kind: 'subagent' } | undefined {
@@ -2730,6 +2755,7 @@ function agentIdentityFromTaskExecution(
   // still requires the live wire.
   return { agentName: `/root/${subagentName}`, depth: 1, kind: 'subagent' };
 }
+
 function isTaskExecutionDisplay(
   value: unknown,
 ): value is Record<string, unknown> {
