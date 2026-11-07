@@ -55,6 +55,7 @@ export function command(
           `${program} failed (exit ${code}${status ? `, HTTP ${status}` : ''})`,
         );
         error.status = status;
+        error.exitCode = code;
         reject(error);
       }
     });
@@ -342,6 +343,7 @@ export function createManager(config, dependencies = {}) {
   }
 
   async function cycle(slot) {
+    let earlyExit = false;
     let state = await load(slot);
     if (
       state ||
@@ -465,24 +467,42 @@ export function createManager(config, dependencies = {}) {
       if (!id) throw new Error('Docker returned no container ID');
       if (!stopping) {
         await run('docker', ['start', id]);
+        const startedAt = Date.now();
         log(
           `slot ${slot}: started runner ${state.name}, id ${state.runnerId}, container ${id}`,
         );
         const deadline = Date.now() + config.ttlSeconds * 1000;
+        let exitCode;
         const watching = run('docker', ['wait', id], {
           timeout: (config.ttlSeconds + 10) * 1000,
         }).then(
-          () => true,
-          () => true,
+          () => {
+            exitCode = 0;
+            return true;
+          },
+          (error) => {
+            exitCode = error.exitCode ?? null;
+            return true;
+          },
         );
         while (Date.now() < Math.min(deadline, stopAt)) {
           if (await Promise.race([watching, wait(1000).then(() => false)]))
             break;
         }
+        if (exitCode !== undefined) {
+          const uptimeMs = Date.now() - startedAt;
+          if (exitCode !== 0 || uptimeMs < 30000) {
+            earlyExit = true;
+            log(
+              `slot ${slot}: runner exited before serving a job (exit ${exitCode ?? 'unknown'}, uptime ${uptimeMs} ms); next JIT request is delayed`,
+            );
+          }
+        }
       }
     } finally {
       await cleanup(slot, state);
     }
+    return { earlyExit };
   }
 
   async function acquireLock() {
@@ -552,7 +572,11 @@ export function createManager(config, dependencies = {}) {
           const slot = i + 1;
           while (!stopping) {
             try {
-              await cycle(slot);
+              const result = await cycle(slot);
+              if (result?.earlyExit && !stopping) {
+                log(`slot ${slot}: backing off 60 s before replenishing`);
+                await wait(60000);
+              }
             } catch (error) {
               log(
                 `slot ${slot}: ${error.message}; retrying without replenishing`,
