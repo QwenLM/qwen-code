@@ -2,6 +2,8 @@
 
 mod desktop_state;
 mod runtime;
+#[cfg(target_os = "macos")]
+mod turn_notification;
 
 use command_group::GroupChild;
 use desktop_state::{default_window_size, restore_window, zoom_after, SettingsStore, DEFAULT_ZOOM};
@@ -104,6 +106,11 @@ const ZOOM_HOTKEY_SCRIPT: &str = r#"
 "#;
 #[cfg(target_os = "macos")]
 const MACOS_TITLEBAR_INIT_SCRIPT: &str = "window.__QWEN_CODE_MACOS_TITLEBAR__ = true;";
+// Tells the daemon-served Web Shell it runs in the macOS host, which posts
+// turn notifications itself (see show_turn_notification). A compile-time
+// platform fact rather than a user-agent guess in the page.
+#[cfg(target_os = "macos")]
+const MACOS_PLATFORM_INIT_SCRIPT: &str = "window.__QWEN_CODE_DESKTOP_PLATFORM__ = 'macos';";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -175,6 +182,8 @@ fn main() {
             open_logs,
             restart_runtime,
             install_update,
+            request_turn_notification_authorization,
+            show_turn_notification,
         ])
         .setup(setup_app);
 
@@ -332,7 +341,8 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let window_builder = window_builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
-        .initialization_script(MACOS_TITLEBAR_INIT_SCRIPT);
+        .initialization_script(MACOS_TITLEBAR_INIT_SCRIPT)
+        .initialization_script(MACOS_PLATFORM_INIT_SCRIPT);
     let window = window_builder.build()?;
     restore_window(&window, window_state.as_ref());
     // Applied before the first document loads; on_page_load re-applies it for
@@ -423,6 +433,30 @@ fn change_zoom(
     state.settings.stage_zoom(zoom);
     state.window_dirty.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+// WebKit never grants Web Notification permission to the embedded web shell,
+// so on macOS the host posts the system notification itself and the
+// daemon-served Web Shell triggers it over IPC. Non-macOS builds no-op (the
+// Web Shell keeps the standard Web Notification path there).
+//
+// Authorization is requested only when the user turns task notifications on
+// in the Web Shell, never at launch: the notification bodies carry prompt and
+// reply excerpts, so the OS prompt follows an explicit opt-in.
+#[tauri::command]
+fn request_turn_notification_authorization() {
+    #[cfg(target_os = "macos")]
+    turn_notification::request_authorization();
+}
+
+#[tauri::command]
+fn show_turn_notification(title: String, body: String) {
+    #[cfg(target_os = "macos")]
+    turn_notification::show(&title, &body);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (title, body);
+    }
 }
 
 #[tauri::command]
