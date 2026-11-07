@@ -641,9 +641,12 @@ export class HostedWorkspaceBroker {
       } catch (error) {
         if (
           error instanceof HostedWorkspaceBrokerRejection &&
-          error.status === 409 &&
-          (error.code === 'runtime_idempotency_conflict' ||
-            error.code === 'runtime_execution_conflict')
+          ((error.status === 409 &&
+            (error.code === 'runtime_idempotency_conflict' ||
+              error.code === 'runtime_execution_conflict')) ||
+            // A payload the Broker refused to parse never became an
+            // invocation, so no poll can turn it into a reply.
+            (error.status === 400 && error.code === 'runtime_payload_invalid'))
         )
           throw error;
         // A lost start reply is not permission to start another invocation.

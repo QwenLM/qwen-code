@@ -8375,7 +8375,7 @@ class FakeManagedSessionStore {
   private readonly resources = new Map<
     string,
     {
-      bytes: Buffer;
+      bytes: Buffer<ArrayBuffer>;
       kind: string;
       schemaVersion: number;
       digest: string;
