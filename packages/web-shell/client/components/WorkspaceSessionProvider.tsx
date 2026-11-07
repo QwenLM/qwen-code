@@ -32,6 +32,7 @@ import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Spinner } from './ui/spinner';
 import { WorkspaceUnavailableState } from './WorkspaceUnavailableState';
 import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
+import { managedSelectionFromRoute } from './managed/managed-session-storage';
 
 function surfaceTheme(theme: WebShellTheme | undefined): WebShellTheme {
   return theme ?? WebShellThemeId.Dark;
@@ -53,6 +54,24 @@ function withChrome(
     theme: props.theme ?? theme,
     language: props.language ?? language,
   };
+}
+
+/**
+ * 宿主省略 `urlNavigation` 时这条路径上没有路由，选择态只能由宿主自己给的目标决定：
+ * 只要带了显式本地目标就是本地视图，门禁不得豁免。
+ */
+function hasLocalTarget(props: {
+  sessionId?: string;
+  workspaceId?: string;
+  workspaceCwd?: string;
+  sessionContext?: DaemonProductSessionContext;
+}): boolean {
+  return (
+    props.sessionId !== undefined ||
+    props.workspaceId !== undefined ||
+    props.workspaceCwd !== undefined ||
+    props.sessionContext !== undefined
+  );
 }
 
 interface WorkspaceSessionProviderProps {
@@ -319,8 +338,19 @@ function WorkspaceSessionProviderWorkspace({
     lockWorkspaceCwd,
   ]);
 
+  // Managed 的工作区/会话由 managedAgentProvider 经宿主 HTTP provider 提供，不存在 daemon workspace/capabilities；
+  // 但这些门禁不能被「宿主注入了 provider」整体关掉——本组件在 App 之上，普通本地会话分支同样经过这里。
+  // 因此按 App 的同一份选择规则判定当前渲染的是不是 managed 视图（managed=1，或在默认为 managed home 的
+  // 页面且 URL 未写 managed=0）；本地会话目标（chat 页 + 会话 id）永远保留 daemon 门禁。
+  const managedProvided =
+    appProps.managedAgentProvider !== undefined &&
+    managedSelectionFromRoute(
+      navigation?.route,
+      hasLocalTarget({ sessionId, workspaceId, workspaceCwd, sessionContext }),
+    ).open;
   // Keep an unscoped session mounted when a later refresh fails.
   if (
+    !managedProvided &&
     (effectiveWorkspaceCwd ||
       effectiveWorkspaceId ||
       (effectiveSessionId && !workspace.capabilities)) &&
@@ -348,6 +378,7 @@ function WorkspaceSessionProviderWorkspace({
     );
   }
   if (
+    !managedProvided &&
     (effectiveSessionId || effectiveWorkspaceCwd || effectiveWorkspaceId) &&
     !workspace.capabilities
   ) {
@@ -364,7 +395,11 @@ function WorkspaceSessionProviderWorkspace({
       </div>
     );
   }
-  if (lockWorkspaceCwd && registrationErrorCwd === lockWorkspaceCwd) {
+  if (
+    !managedProvided &&
+    lockWorkspaceCwd &&
+    registrationErrorCwd === lockWorkspaceCwd
+  ) {
     return (
       <WorkspaceUnavailableState
         title={t('workspace.loadFailed')}
@@ -379,7 +414,7 @@ function WorkspaceSessionProviderWorkspace({
       />
     );
   }
-  if (lockWorkspaceCwd && !targetWorkspace) {
+  if (!managedProvided && lockWorkspaceCwd && !targetWorkspace) {
     return (
       <div
         data-web-shell-root
@@ -393,7 +428,13 @@ function WorkspaceSessionProviderWorkspace({
       </div>
     );
   }
-  if ((effectiveWorkspaceCwd || effectiveWorkspaceId) && !targetWorkspace) {
+  // Managed 的工作区由 managedAgentProvider 经宿主 HTTP provider 提供（session.workspace 已 ready），
+  // 不存在 daemon targetWorkspace；沿用此门禁会把可用会话误报成「工作区不存在」。
+  if (
+    !managedProvided &&
+    (effectiveWorkspaceCwd || effectiveWorkspaceId) &&
+    !targetWorkspace
+  ) {
     return (
       <WorkspaceUnavailableState
         title={t('workspace.notFound')}
@@ -586,7 +627,18 @@ function StandaloneSessionGate({
   }
 
   const capabilities = workspace.capabilities;
-  if (workspace.status === 'error') {
+  // 与 workspace 分支同口径：只有 managed 视图才豁免 daemon 门禁，本地会话目标始终保留。
+  const managedProvided =
+    appProps.managedAgentProvider !== undefined &&
+    managedSelectionFromRoute(
+      navigation?.route,
+      hasLocalTarget({
+        ...workspaceProviderProps,
+        sessionId,
+        sessionContext,
+      }),
+    ).open;
+  if (!managedProvided && workspace.status === 'error') {
     return (
       <WorkspaceUnavailableState
         title={t('session.loadFailed')}
@@ -604,7 +656,7 @@ function StandaloneSessionGate({
       />
     );
   }
-  if (!capabilities) {
+  if (!managedProvided && !capabilities) {
     return (
       <div
         data-web-shell-root
@@ -618,7 +670,7 @@ function StandaloneSessionGate({
       </div>
     );
   }
-  if (!standaloneSupported) {
+  if (!managedProvided && !standaloneSupported) {
     return (
       <WorkspaceUnavailableState
         title={t('session.standaloneUnavailable')}

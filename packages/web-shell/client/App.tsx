@@ -259,6 +259,7 @@ import type {
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
 import { DropdownMenuItem } from './components/ui/dropdown-menu';
 import {
+  managedSelectionFromRoute,
   managedSelectionFromUrl,
   saveManagedSelection,
 } from './components/managed/managed-session-storage';
@@ -1682,6 +1683,15 @@ export interface WebShellProps {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Artifact-card rendering overrides. */
   artifact?: WebShellArtifactCustomization;
+  /**
+   * 与普通会话对齐 Managed 对话区文案与能力提示口径（宿主已有外壳时置 true）。
+   */
+  alignManagedChatWithHost?: boolean;
+  /**
+   * 宿主外壳已展示会话身份（如宿主侧栏）时置 false，Managed 对话区不重复渲染
+   * 自有的会话标题 / 工作区 / 状态徽章。默认 true 保持独立整页行为。
+   */
+  showManagedSessionHeader?: boolean;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
@@ -3592,6 +3602,10 @@ export function App({
   artifact,
   fileDropAction,
   renderToolHeaderExtra,
+  alignManagedChatWithHost,
+
+  showManagedSessionHeader,
+
   renderWelcomeHeader,
   renderWelcomeFooter,
   mobileWelcomeFooterMiddle = false,
@@ -3683,9 +3697,7 @@ export function App({
   const [managedHome, setManagedHome] = useState(
     () =>
       managedAgentProvider !== undefined &&
-      managedSelectionFromUrl(
-        navigation?.route.page !== 'chat' || !navigation.route.sessionId,
-      ).open,
+      managedSelectionFromRoute(navigation?.route).open,
   );
   const managedMode = managedAgentProvider !== undefined && managedHome;
   const managedModeRef = useRef(managedMode);
@@ -3976,6 +3988,8 @@ export function App({
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
+      alignManagedChatWithHost,
+      showManagedSessionHeader,
       renderWelcomeHeader,
       renderWelcomeFooter,
       parseUserMessageContent,
@@ -4013,6 +4027,8 @@ export function App({
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
+      alignManagedChatWithHost,
+      showManagedSessionHeader,
       renderWelcomeHeader,
       renderWelcomeFooter,
       parseUserMessageContent,
@@ -10441,9 +10457,7 @@ export function App({
   if (managedHistoryRevision !== navigation?.historyRevision) {
     setManagedHistoryRevision(navigation?.historyRevision);
     if (managedAgentProvider) {
-      const selection = managedSelectionFromUrl(
-        navigation?.route.page !== 'chat' || !navigation.route.sessionId,
-      );
+      const selection = managedSelectionFromRoute(navigation?.route);
       setManagedHome(selection.open);
       if (managedSessionId !== selection.sessionId) {
         setManagedWorkspaceId(undefined);
@@ -24648,10 +24662,13 @@ export function App({
                       managedAgentProvider={managedAgentProvider}
                       creationSkills={managedCreationSkills}
                       interactive={managedChatVisible}
+                      // sidebar:false 表示外壳由宿主提供（宿主外壳即如此）。此处传 null 而非 undefined：
+                      // 按 navigationTarget 的既有约定，null 保持 home 布局但不挂载内置侧栏槽位，
+                      // 托管页因此与 ChatPane 一样不渲染自己的导航与「新建/刷新」工具条。
                       navigationTarget={
                         sidebarOptions.enabled
                           ? managedNavigationTarget
-                          : undefined
+                          : null
                       }
                       archivedNavigationTarget={managedArchivedNavigationTarget}
                       onArchivedSessionsStatusChange={setManagedArchivedStatus}
