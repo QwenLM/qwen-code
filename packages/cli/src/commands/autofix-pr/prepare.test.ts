@@ -107,6 +107,11 @@ import {
   writeState,
 } from './state.js';
 import { requireWorktree } from './worktree.js';
+import { refusalOf, type RefusalCode } from './refusal.js';
+
+/** A refusal with its code: what the skill acts on. */
+const refused = (code: RefusalCode, message: RegExp) =>
+  expect.objectContaining({ code, message: expect.stringMatching(message) });
 
 function prView(overrides: Partial<PrView> = {}): PrView {
   return {
@@ -1076,9 +1081,18 @@ describe('runPrepare (real git)', () => {
           )
         : answer(...args),
     );
-    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
-      /head repository no longer exists/,
-    );
+    // An open PR: `failed`, never the `pr_closed` a resume stops a watch
+    // on.
+    let thrown: unknown;
+    try {
+      runPrepare({ pr: 7, repo: 'o/r' });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(refusalOf('prepare', thrown)).toMatchObject({
+      refused: 'failed',
+      message: expect.stringMatching(/head repository no longer exists/),
+    });
   });
 
   it("derives a resumed watch's remotes from the clone, not from its state file", () => {
@@ -1233,7 +1247,19 @@ describe('runPrepare (real git)', () => {
       rerunChecks: [`run:1:2:push:Test@${headSha}`],
       handledConflictSha: headSha,
       pushCount: 4,
+      // The head is the watch's own push: the checks keep their count.
+      pushedShas: [headSha],
       summarizedSha: headSha,
+      failingChecks: [
+        {
+          identity: 'run:1:2:push:Test',
+          check: 'Test',
+          head: headSha,
+          pushes: 2,
+          lastPush: headSha,
+          unanswered: [{ sha: 'f'.repeat(40), pushes: 1 }],
+        },
+      ],
       // `resume` starts this task again after the rebuild.
       watch: { every: 5, reply: false, instructions: 'keep the API' },
       needsHuman: [{ sha: headSha, at: '2026-10-25T00:00:00.000Z', text: 'x' }],
@@ -1253,6 +1279,46 @@ describe('runPrepare (real git)', () => {
     });
     // A start that is cancelled now must not clean the watch up.
     expect(lastReport()).toMatchObject({ resumed: false, recreated: true });
+  });
+
+  it("gives every check its fix pushes back when it recreates the worktree at someone else's push", () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    const pushed = 'e'.repeat(40);
+    execFileSync('git', ['worktree', 'remove', '--force', paths.worktreePath], {
+      cwd: clone,
+    });
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      pushedShas: [pushed],
+      failingChecks: [
+        {
+          identity: 'run:1:2:push:Test',
+          check: 'Test',
+          head: pushed,
+          pushes: 3,
+          lastPush: pushed,
+          unanswered: [{ sha: 'f'.repeat(40), pushes: 2 }],
+        },
+      ],
+    });
+    // The PR head is no push of the watch's, as `sync` adopting it would see.
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(readState(paths.statePath)).toMatchObject({
+      lastKnownHeadSha: headSha,
+      failingChecks: [
+        {
+          identity: 'run:1:2:push:Test',
+          check: 'Test',
+          head: pushed,
+          pushes: 0,
+          lastPush: pushed,
+        },
+      ],
+    });
+    expect(readState(paths.statePath)!.failingChecks![0]).not.toHaveProperty(
+      'unanswered',
+    );
   });
 
   it("reports whether the PR's author could push", () => {
@@ -1475,7 +1541,7 @@ describe('runPrepare (real git)', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
     expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
-      /watched by another session \(session-a\)/,
+      refused('watched_elsewhere', /watched by another session \(session-a\)/),
     );
   });
 
@@ -1626,12 +1692,25 @@ describe('runPrepare (real git)', () => {
     expect(existsSync(autofixPrPaths(clone, 7).statePath)).toBe(false);
   });
 
+  it('refuses an open PR it may not push to as failed, not pr_closed', () => {
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') return JSON.stringify(prView());
+      return JSON.stringify({ ...writable, viewerPermission: 'READ' });
+    });
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+      refused('failed', /cannot push to this repository \(permission: READ\)/),
+    );
+    expect(existsSync(autofixPrPaths(clone, 7).statePath)).toBe(false);
+  });
+
   it('refuses an ineligible PR before creating anything', () => {
     mocks.gh.mockImplementation((...args: string[]) => {
       if (args[0] === 'pr') return JSON.stringify(prView({ state: 'MERGED' }));
       return JSON.stringify(writable);
     });
-    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(/is merged/);
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+      refused('pr_closed', /is merged/),
+    );
     expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(false);
   });
 

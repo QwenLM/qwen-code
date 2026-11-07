@@ -111,7 +111,10 @@ import { consumeLastRenderError } from './opentui-error-boundary.js';
 import { createExitGuard, exitGuardHint } from './exit-guard.js';
 import { exitSession } from './exit-lifecycle.js';
 import { Command, matchesCommand } from './key-map.js';
-import type { OpenTuiComposerHandle } from './input-submission.js';
+import {
+  returnToComposer,
+  type OpenTuiComposerSlot,
+} from './input-submission.js';
 import { buildUiHistoryItems } from './session-switch.js';
 import { projectHistoryToStreamEvents } from './item-projection.js';
 import {
@@ -162,10 +165,16 @@ function OpenTuiEntryApp({
   }, [config, renderer, width]);
   const { stats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, config.getSessionId());
+  // A prompt handed back while a dialog has the composer unmounted waits in
+  // the slot's `returned`.
+  const composerHandle: OpenTuiComposerSlot =
+    useRef<OpenTuiComposerSlot['current']>(null);
   const live = useOpenTuiLiveTurn({
     config,
     logger,
     dualOutput: runtime.dualOutputBridge,
+    onPromptReturned: (submission) =>
+      returnToComposer(composerHandle, submission),
   });
   const { applyEvent, submit, interrupt, resetTranscript, settleWaitingCall } =
     live;
@@ -254,7 +263,6 @@ function OpenTuiEntryApp({
   const getSessionStats = useCallback(() => statsRef.current, []);
 
   // --- early-input injection (ink initialCapturedInput parity) -------------
-  const composerHandle = useRef<OpenTuiComposerHandle | null>(null);
   const vimComposerBuffer = useRef<VimBuffer | null>(null);
   const vimBuffer = useMemo(
     () => createVimBuffer(() => vimComposerBuffer.current!),
@@ -609,12 +617,9 @@ export async function startOpenTuiUI(
     // over stdin; the decoded text is injected into the composer after mount.
     const capturedText = drainCapturedInputAsText();
 
-    // U-6: ink's boot auto-open is "unauthenticated" (useAuth initial state)
-    // plus the one-shot startup authError (useInitializationAuthError);
-    // shouldOpenAuthDialog is never read in ink's production code, so the
-    // behavior contract is exactly these two.
     const initialDialog: OpenTuiDialogRequest | null =
-      initializationResult.authError || config.getAuthType() === undefined
+      !initializationResult.skipStartupAuthDialog &&
+      (initializationResult.authError || config.getAuthType() === undefined)
         ? {
             dialog: 'auth',
             initialError: initializationResult.authError ?? undefined,

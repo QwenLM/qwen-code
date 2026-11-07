@@ -1,17 +1,25 @@
 package com.alibaba.qwen.code.managedagent.contracts.workspace;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.contracts.runtime.ProtectionIdentity;
+import com.alibaba.qwen.code.managedagent.contracts.runtime.WorkerArtifact;
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+
 import java.util.List;
+import java.util.Objects;
 
 public record ResidentWorkspaceSnapshot(
         String workspaceId,
         long workspaceGeneration,
-        com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration
+        WorkspaceCsiRegistration
                 registration,
-        com.alibaba.qwen.code.managedagent.contracts.runtime.ProtectionIdentity protection,
+        ProtectionIdentity protection,
         String image,
         List<String> command,
-        List<com.alibaba.qwen.code.managedagent.contracts.runtime.WorkerArtifact> artifacts)
-        implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.RuntimeBroker
+        List<WorkerArtifact> artifacts)
+        implements ManagedAgentSettings.RuntimeBroker
                 .ResidentWorkspace {
     public ResidentWorkspaceSnapshot {
         if (registration == null
@@ -33,7 +41,7 @@ public record ResidentWorkspaceSnapshot(
                                                 || value.indexOf('\0') >= 0)
                 || artifacts == null
                 || artifacts.size() > 48
-                || artifacts.stream().anyMatch(java.util.Objects::isNull)
+                || artifacts.stream().anyMatch(Objects::isNull)
                 || artifacts.stream()
                                 .map(
                                         com.alibaba.qwen.code.managedagent.contracts.runtime
@@ -44,13 +52,13 @@ public record ResidentWorkspaceSnapshot(
                         != artifacts.size()) {
             throw new IllegalArgumentException("Invalid resident Workspace configuration");
         }
-        new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+        new ContextBinding(
                 registration.tenantId(),
                 workspaceId,
                 workspaceGeneration,
                 registration.storageId(),
                 ".",
-                com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
+                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
                 1);
         command = List.copyOf(command);
         artifacts = List.copyOf(artifacts);

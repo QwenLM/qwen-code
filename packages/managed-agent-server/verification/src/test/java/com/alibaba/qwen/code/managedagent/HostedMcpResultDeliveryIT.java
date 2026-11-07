@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
@@ -19,9 +20,7 @@ import org.springframework.boot.web.servlet.context.ServletWebServerApplicationC
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -42,6 +41,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -347,10 +347,14 @@ class HostedMcpResultDeliveryIT {
 
     private SessionRef createSession() throws Exception {
         String key = uuid();
-        String session = store.insertWorkspaceSessionCommand(tenant, "actor",
-                "create-" + key, "sha256:" + "a".repeat(64), "qwen-code",
-                null, null, List.of(), null,
-                new WorkspaceSelection("workspace", "child")).sessionId();
+        String session = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor")
+                .idempotencyKey("create-" + key)
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", "child"))
+                .build()).sessionId();
         Map<String, Object> store = new LinkedHashMap<>();
         store.put("baseUrl", "http://127.0.0.1:" + port);
         store.put("tenantId", tenant);
@@ -446,16 +450,9 @@ class HostedMcpResultDeliveryIT {
                 + json.writeValueAsString(cli.toString())
                 + "; await import("
                 + json.writeValueAsString(cli.toUri().toString()) + ");\n");
-        try (var control = new ServerSocket(0, 1,
-                InetAddress.getByName("127.0.0.1"));
-                var hosted = new ServerSocket(0, 1,
-                        InetAddress.getByName("127.0.0.1"));
-                var runtime = new ServerSocket(0, 1,
-                        InetAddress.getByName("127.0.0.1"))) {
-            port = control.getLocalPort();
-            harnessPort = hosted.getLocalPort();
-            brokerPort = runtime.getLocalPort();
-        }
+        port = reservePort();
+        harnessPort = reservePort();
+        brokerPort = reservePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
         model.setExecutor(modelExecutor);

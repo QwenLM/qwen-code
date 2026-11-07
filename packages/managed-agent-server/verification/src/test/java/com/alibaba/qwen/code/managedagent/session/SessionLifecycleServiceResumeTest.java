@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -31,7 +32,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
-import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -49,6 +49,7 @@ import static org.mockito.Mockito.when;
  * protocol 0 and the parked v1 fence row is never rebound.
  */
 class SessionLifecycleServiceResumeTest {
+    private WorkspaceLifecycleStore lifecycle;
     private static final String TENANT = "lifecycle-resume";
     private final AtomicLong now = new AtomicLong(1_000);
     private JdbcTemplate jdbc;
@@ -60,9 +61,14 @@ class SessionLifecycleServiceResumeTest {
         var transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
         String sessionId = transactions.execute(ignored ->
-                store.insertWorkspaceSessionCommand(TENANT, "owner", "create",
-                        "digest", "qwen-code", null, null, List.of(), null,
-                        new WorkspaceSelection("workspace", ".")).sessionId());
+                store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(TENANT)
+                        .actorId("owner")
+                        .idempotencyKey("create")
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build()).sessionId());
         // The first close runs v1 and fails terminally: the Session parks in
         // CLOSING and the fence row keeps the claim released.
         String firstOperation = store.beginWorkspaceLifecycle(TENANT,
@@ -122,9 +128,14 @@ class SessionLifecycleServiceResumeTest {
         var transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
         String sessionId = transactions.execute(ignored ->
-                store.insertWorkspaceSessionCommand(TENANT, "owner", "create",
-                        "digest", "qwen-code", null, null, List.of(), null,
-                        new WorkspaceSelection("workspace", ".")).sessionId());
+                store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(TENANT)
+                        .actorId("owner")
+                        .idempotencyKey("create")
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build()).sessionId());
         // The first delete runs v1 against the ACTIVE Session and fails
         // terminally: the Session parks in DELETING and the fence row keeps
         // the claim released.
@@ -183,21 +194,18 @@ class SessionLifecycleServiceResumeTest {
     // effects receipt, so the resumed close can finish.
     @Test
     void aFailedCloseWhoseEffectsReachedDrainingResumesAndFinishes() {
-        ManagedAgentStore store = workspaceStore();
-        ObjectProvider<RuntimeBindingRepository> bindings =
-                mock(ObjectProvider.class);
-        when(bindings.getIfAvailable())
-                .thenReturn(new JdbcRuntimeBindingRepository(dataSource,
-                        new AesGcmSecretProtector("test", new byte[32])));
-        WorkspaceLifecycleStore lifecycle = new WorkspaceLifecycleStore(jdbc,
-                new ObjectMapper(), bindings);
-        store.setWorkspaceLifecycleStore(lifecycle);
+        ManagedAgentStore store = workspaceStore(true);
         var transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
         String sessionId = transactions.execute(ignored ->
-                store.insertWorkspaceSessionCommand(TENANT, "owner", "create",
-                        "digest", "qwen-code", null, null, List.of(), null,
-                        new WorkspaceSelection("workspace", ".")).sessionId());
+                store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(TENANT)
+                        .actorId("owner")
+                        .idempotencyKey("create")
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build()).sessionId());
         // The first close runs v1, persists its effects receipt — the fence
         // moves to DRAINING — and only then fails terminally.
         String firstOperation = store.beginWorkspaceLifecycle(TENANT,
@@ -272,9 +280,13 @@ class SessionLifecycleServiceResumeTest {
     // A store with the Workspace-files deployment flag on, plus the
     // registry and access rows a bound Session's admission resolves.
     private ManagedAgentStore workspaceStore() {
+        return workspaceStore(false);
+    }
+
+    private ManagedAgentStore workspaceStore(boolean verifyLifecycle) {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        ManagedAgentStore store = store(properties);
+        ManagedAgentStore store = store(properties, verifyLifecycle);
         jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
@@ -290,12 +302,23 @@ class SessionLifecycleServiceResumeTest {
     }
 
     private ManagedAgentStore store(ManagedAgentProperties properties) {
+        return store(properties, false);
+    }
+
+    private ManagedAgentStore store(ManagedAgentProperties properties, boolean verifyLifecycle) {
         dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:lifecycle-resume-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         ManagedSchema.initialize(dataSource);
         jdbc = new ManagedSchemaJdbcTemplate(dataSource);
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), new Clock() {
+        lifecycle = null;
+        if (verifyLifecycle) {
+            ObjectProvider<RuntimeBindingRepository> bindings = mock(ObjectProvider.class);
+            when(bindings.getIfAvailable()).thenReturn(new JdbcRuntimeBindingRepository(dataSource,
+                    new AesGcmSecretProtector("test", new byte[32])));
+            lifecycle = new WorkspaceLifecycleStore(jdbc, new ObjectMapper(), bindings);
+        }
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), new Clock() {
             @Override
             public ZoneId getZone() {
                 return ZoneOffset.UTC;
@@ -310,6 +333,6 @@ class SessionLifecycleServiceResumeTest {
             public Instant instant() {
                 return Instant.ofEpochMilli(now.get());
             }
-        }, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        }, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null, lifecycle);
     }
 }

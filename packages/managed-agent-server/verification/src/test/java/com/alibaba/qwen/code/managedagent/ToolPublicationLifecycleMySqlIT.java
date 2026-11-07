@@ -4,9 +4,9 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
@@ -120,21 +120,26 @@ class ToolPublicationLifecycleMySqlIT {
 
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
-            var agents = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+
             var beans = new DefaultListableBeanFactory();
             beans.registerSingleton("bindings", journal.bindings);
             var lifecycle = new WorkspaceLifecycleStore(jdbc, JSON, beans.getBeanProvider(RuntimeBindingRepository.class));
-            agents.setWorkspaceLifecycleStore(lifecycle);
+            var agents = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
+                    new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null, lifecycle);
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state)"
                     + " VALUES ('tenant-1', 'neighbor', 1, 'storage', 'Neighbor', ?, ?, 'ACTIVE')",
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES ('tenant-1', 'neighbor', ?, 'OPERATOR')", "owner".getBytes(StandardCharsets.UTF_8));
-            String session = transaction.execute(ignored -> agents.insertWorkspaceSessionCommand("tenant-1", "owner",
-                    "create", "digest", "qwen-code", null, null, List.of(), null,
-                    new WorkspaceSelection("neighbor", ".")).sessionId());
+            String session = transaction.execute(ignored -> agents.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId("tenant-1")
+                    .actorId("owner")
+                    .idempotencyKey("create")
+                    .requestDigest("digest")
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection("neighbor", "."))
+                    .build()).sessionId());
             String operationId = transaction.execute(ignored -> agents.beginWorkspaceLifecycle("tenant-1", session,
                     OperationKind.CLOSE, "owner", "a".repeat(64), "close", "digest", true, 1).operation().operationId());
             var operation = transaction.execute(ignored -> agents.claimOperation("tenant-1", session, operationId,
@@ -206,7 +211,12 @@ class ToolPublicationLifecycleMySqlIT {
                                     (prepared, call, values) -> {
                                         boolean execute = enabled && call.getName().startsWith("execute");
                                         String role = Thread.currentThread().getName();
-                                        if (execute && "receipt".equals(role) && sql.startsWith("INSERT INTO ma_tenant_guard") && sql.contains("'runtime_placement'")) {
+                                        // An ordinary publication lane enters on the
+                                        // Session root, not the placement guard
+                                        // (#16354), so the receipt parks on the root
+                                        // statement its lane actually runs.
+                                        if (execute && "receipt".equals(role)
+                                                && sql.startsWith("SELECT tenant_id, session_id, is_csi_guard FROM ma_session")) {
                                             receiptPlacement.countDown();
                                         }
                                         try {

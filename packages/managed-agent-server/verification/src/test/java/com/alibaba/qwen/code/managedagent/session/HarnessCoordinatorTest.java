@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.session;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-import com.alibaba.qwen.code.daemon.HostedHarnessStreamIdleException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.Admission;
@@ -21,6 +20,7 @@ import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessProtocolFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessSessionRefusedFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessStreamIdleFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessTransportFailure;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.HarnessEvent;
@@ -3567,7 +3567,7 @@ class HarnessCoordinatorTest {
         SourceStream stream = mock(SourceStream.class);
         when(stream.eventEpoch()).thenReturn("epoch");
         when(stream.next()).thenThrow(
-                mock(HostedHarnessStreamIdleException.class));
+                mock(HarnessStreamIdleFailure.class));
         when(harness.stream("tenant", "session", 1, "epoch"))
                 .thenReturn(stream);
         ch.qos.logback.classic.Logger coordinatorLog =
@@ -3598,7 +3598,7 @@ class HarnessCoordinatorTest {
             assertThat(event.getLevel()).isEqualTo(Level.WARN);
             assertThat(event.getFormattedMessage())
                     .contains("will retry")
-                    .contains("failure=HostedHarnessStreamIdleException");
+                    .contains("failure=HarnessStreamIdleFailure");
         });
     }
 
@@ -3661,6 +3661,7 @@ class HarnessCoordinatorTest {
         HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
                 new HarnessEventProjector(), mock(RuntimeWarmer.class), executor,
                 Clock.systemUTC(), new ManagedAgentProperties());
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
         try {
             coordinator.dispatch("tenant", "session", "turn");
             if (terminalAtProbe) {
@@ -3673,6 +3674,8 @@ class HarnessCoordinatorTest {
                 verify(store, timeout(20_000)).markTurnRecoveryBlocked(eq("tenant"), eq("session"),
                         eq("turn"), anyString(), eq(AgentStateStore.HARNESS_RECOVERY_BLOCKED), anyString());
             }
+            assertThat(closed.await(Math.max(0, deadline - System.nanoTime()),
+                    TimeUnit.NANOSECONDS)).isTrue();
         } finally {
             coordinator.close();
             executor.shutdownNow();

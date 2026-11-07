@@ -34,6 +34,11 @@ export default defineConfig({
         __dirname,
         '../core/src/hooks/user-prompt-submit-context.ts',
       ),
+      '@qwen-code/qwen-code-core/utils/toolResultDisplayCompaction.js':
+        path.resolve(
+          __dirname,
+          '../core/src/utils/toolResultDisplayCompaction.ts',
+        ),
     },
   },
   test: {

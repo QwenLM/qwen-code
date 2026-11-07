@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.workspace;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
@@ -41,7 +41,9 @@ import java.util.concurrent.TimeUnit;
  * whether its marker landed, and it is read, never written again.
  */
 @Service
-public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence, com.alibaba.qwen.code.managedagent.contracts.workspace.SshWorkspaceFiles {
+public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence,
+        com.alibaba.qwen.code.managedagent.contracts.workspace.SshWorkspaceFiles,
+        com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeAccess {
     private final ManagedAgentSettings properties;
     private final SshWorkspaceStore store;
     private final Clock clock;
@@ -64,9 +66,12 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence, c
         this.connections = connections;
         this.clock = clock;
         Map<String, SshSettings.Node> catalog = new LinkedHashMap<>();
-        for (var node : properties.getRuntimeBroker().getSsh().getNodes()) {
-            if (catalog.putIfAbsent(node.nodeId(), node) != null) {
-                throw new IllegalArgumentException("SSH node IDs must be unique");
+        if (com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection.from(properties)
+                .includes(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS)) {
+            for (var node : properties.getRuntimeBroker().getSsh().getNodes()) {
+                if (catalog.putIfAbsent(node.nodeId(), node) != null) {
+                    throw new IllegalArgumentException("SSH node IDs must be unique");
+                }
             }
         }
         this.nodes = Map.copyOf(catalog);
@@ -82,7 +87,7 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence, c
     }
 
     public NodePage list(String tenant, String actor) {
-        boolean enabled = properties.getRuntimeBroker().getSsh().isEnabled();
+        boolean enabled = configured() && properties.getRuntimeBroker().getSsh().isEnabled();
         return new NodePage(enabled, enabled ? nodes.values().stream().filter(node -> node.admits(tenant, actor))
                 .map(node -> new NodeSummary(node.nodeId(), node.displayName())).toList() : List.of());
     }
@@ -210,7 +215,7 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence, c
     }
 
     private SshSettings.Node admit(String tenant, String actor, String id) {
-        if (!properties.getRuntimeBroker().getSsh().isEnabled()) {
+        if (!configured() || !properties.getRuntimeBroker().getSsh().isEnabled()) {
             throw new ManagedAgentException(404, "ssh_runtime_disabled", "SSH Workspace registration is disabled.");
         }
         SshSettings.Node node = nodes.get(id);
@@ -247,7 +252,8 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence, c
     }
 
     private void schedule(String tenant, String actor, Operation operation) {
-        if (!List.of("pending", "running").contains(operation.status()) || !running.add(operation.operationId())) {
+        if (!configured() || connections == null || !List.of("pending", "running").contains(operation.status())
+                || !running.add(operation.operationId())) {
             return;
         }
         try {
@@ -335,6 +341,9 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence, c
      * directory holds another registration's marker proves nothing.
      */
     private AcceptanceVerdict acceptance(Parked parked) {
+        if (!configured() || connections == null) {
+            return AcceptanceVerdict.unknown();
+        }
         if (!parked.reserved()) {
             return AcceptanceVerdict.notCommitted(parked.failureCode());
         }
@@ -357,7 +366,7 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence, c
     }
 
     @Override
-    public boolean settle(AgentStateStore ignored, ParkedOperation parked, AcceptanceVerdict verdict, long retryAt) {
+    public boolean settle(SessionLifecycleStore ignored, ParkedOperation parked, AcceptanceVerdict verdict, long retryAt) {
         return switch (verdict.acceptance()) {
             case COMMITTED -> store.completeParked(parked.tenantId(), parked.operationId());
             case NOT_COMMITTED -> store.releaseParked(parked.tenantId(), parked.operationId(), verdict.failureCode());
@@ -382,8 +391,5 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence, c
     @PreDestroy
     public void close() {
         executor.shutdownNow();
-        if (connections != null) {
-            connections.close();
-        }
     }
 }

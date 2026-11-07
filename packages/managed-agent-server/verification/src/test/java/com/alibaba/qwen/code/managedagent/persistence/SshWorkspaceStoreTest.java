@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.SshRuntimeSettings;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -41,8 +42,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class SshWorkspaceStoreTest {
-    private JdbcTemplate jdbc;
-    private SshWorkspaceStore store;
+    JdbcTemplate jdbc;
+    SshWorkspaceStore store;
 
     @BeforeEach
     void setup() {
@@ -109,16 +110,40 @@ class SshWorkspaceStoreTest {
         var transaction = new org.springframework.transaction.support.TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
         var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "Read the project"));
         var selection = new WorkspaceSelection(intent.workspaceId(), ".");
-        var admitted = transaction.execute(ignored -> sessions.insertWorkspaceSessionCommand("tenant", "actor", "create", "digest",
-                "qwen-code", null, null, input, "payload", selection));
+        var admitted = transaction.execute(ignored -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("tenant")
+                .actorId("actor")
+                .idempotencyKey("create")
+                .requestDigest("digest")
+                .agentId("qwen-code")
+                .input(input)
+                .payloadDigest("payload")
+                .selection(selection)
+                .build()));
         assertThat(admitted.turnId()).isNotNull();
         assertThat(sessions.requireSession("tenant", admitted.sessionId()).toolProfile())
                 .isEqualTo(shell ? WorkspaceToolProfiles.SHELL : WorkspaceToolProfiles.FILES);
         ssh.setEnabled(false);
-        assertThat(transaction.execute(ignored -> sessions.insertWorkspaceSessionCommand("tenant", "actor", "create", "digest",
-                "qwen-code", null, null, input, "payload", selection)).sessionId()).isEqualTo(admitted.sessionId());
-        assertThatThrownBy(() -> transaction.execute(ignored -> sessions.insertWorkspaceSessionCommand("tenant", "actor", "another", "digest",
-                "qwen-code", null, null, input, "payload", selection))).isInstanceOf(ManagedAgentException.class);
+        assertThat(transaction.execute(ignored -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("tenant")
+                .actorId("actor")
+                .idempotencyKey("create")
+                .requestDigest("digest")
+                .agentId("qwen-code")
+                .input(input)
+                .payloadDigest("payload")
+                .selection(selection)
+                .build())).sessionId()).isEqualTo(admitted.sessionId());
+        assertThatThrownBy(() -> transaction.execute(ignored -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("tenant")
+                .actorId("actor")
+                .idempotencyKey("another")
+                .requestDigest("digest")
+                .agentId("qwen-code")
+                .input(input)
+                .payloadDigest("payload")
+                .selection(selection)
+                .build()))).isInstanceOf(ManagedAgentException.class);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class)).isEqualTo(1);
         jdbc.update("UPDATE ma_turn SET status = 'COMPLETED' WHERE tenant_id = ? AND session_id = ?", "tenant", admitted.sessionId());
         assertThat(transaction.execute(ignored -> sessions.insertTurnCommand("tenant", "CREATE_TURN", "next-turn", "next-digest",
@@ -136,9 +161,12 @@ class SshWorkspaceStoreTest {
         properties.setDefinitionToolProfiles(List.of(WorkspaceToolProfiles.MCP));
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount("tenant", "local", "/local")));
-        var sessions = sessions(properties);
         var definitions = new ManagedAgentDefinitionStore(jdbc, new RequestDigests());
-        sessions.setManagedAgentDefinitionStore(definitions);
+        var registry = new ManagedWorkspaceRegistry(jdbc);
+        registry.configureSsh(properties);
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
+                jdbc, new com.fasterxml.jackson.databind.ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), definitions, null);
         var transaction = new org.springframework.transaction.support.TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
         String agent = "agent_" + "a".repeat(32);
         transaction.executeWithoutResult(ignored -> definitions.create("tenant", "definition", "digest", agent, "d".repeat(64),
@@ -146,18 +174,40 @@ class SshWorkspaceStoreTest {
                         + "\"mcp_servers\":[{\"server_id\":\"docs\",\"server_revision\":1,\"definition_digest\":\""
                         + "a".repeat(64) + "\"}]}", 1));
         var input = prompted ? List.<Map<String, Object>>of(Map.of("type", "text", "text", "Read")) : List.<Map<String, Object>>of();
-        assertThatThrownBy(() -> transaction.execute(ignored -> sessions.insertWorkspaceSessionCommand("tenant", "actor", "unsupported", "digest",
-                agent, null, null, input, "payload", new WorkspaceSelection(intent.workspaceId(), ".")))).isInstanceOf(ManagedAgentException.class);
+        assertThatThrownBy(() -> transaction.execute(ignored -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("tenant")
+                .actorId("actor")
+                .idempotencyKey("unsupported")
+                .requestDigest("digest")
+                .agentId(agent)
+                .input(input)
+                .payloadDigest("payload")
+                .selection(new WorkspaceSelection(intent.workspaceId(), "."))
+                .build()))).isInstanceOf(ManagedAgentException.class);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class)).isZero();
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                 + " VALUES ('tenant', 'local', 1, 'local', 'Local', ?, ?, 'ACTIVE')", WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES ('tenant', 'local', ?, 'OWNER')",
                 com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
-        var local = transaction.execute(ignored -> sessions.insertWorkspaceSessionCommand("tenant", "actor", "local", "digest",
-                agent, null, null, input, "payload", new WorkspaceSelection("local", ".")));
+        var local = transaction.execute(ignored -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("tenant")
+                .actorId("actor")
+                .idempotencyKey("local")
+                .requestDigest("digest")
+                .agentId(agent)
+                .input(input)
+                .payloadDigest("payload")
+                .selection(new WorkspaceSelection("local", "."))
+                .build()));
         assertThat(sessions.requireSession("tenant", local.sessionId()).toolProfile()).isEqualTo(WorkspaceToolProfiles.MCP);
-        var remote = transaction.execute(ignored -> sessions.insertWorkspaceSessionCommand("tenant", "actor", "remote", "digest",
-                "qwen-code", null, null, List.of(), null, new WorkspaceSelection(intent.workspaceId(), ".")));
+        var remote = transaction.execute(ignored -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("tenant")
+                .actorId("actor")
+                .idempotencyKey("remote")
+                .requestDigest("digest")
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection(intent.workspaceId(), "."))
+                .build()));
         jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?", WorkspaceToolProfiles.MCP, "tenant", remote.sessionId());
         assertThatThrownBy(() -> transaction.execute(ignored -> sessions.insertTurnCommand("tenant", "CREATE_TURN", "unsupported-turn", "digest",
                 remote.sessionId(), List.of(Map.of("type", "text", "text", "Read")), "payload", "actor"))).isInstanceOf(ManagedAgentException.class);
@@ -178,8 +228,8 @@ class SshWorkspaceStoreTest {
     private ManagedAgentStore sessions(ManagedAgentProperties properties) {
         var registry = new ManagedWorkspaceRegistry(jdbc);
         registry.configureSsh(properties);
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new com.fasterxml.jackson.databind.ObjectMapper(),
-                Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new com.fasterxml.jackson.databind.ObjectMapper(),
+                Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     @Test
@@ -325,6 +375,28 @@ class SshWorkspaceStoreTest {
         store.reserve(retry, "next", registration(retry));
         store.complete(retry, "next");
         assertThat(store.get("tenant", "actor", next.operationId()).status()).isEqualTo("completed");
+        assertThat(store.completeParked("tenant", intent.operationId())).isFalse();
+        assertThat(store.releaseParked("tenant", intent.operationId(), "late")).isFalse();
+        assertThat(store.verify(binding(retry))).isTrue();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "registration", "physical"})
+    void publicationRequiresItsOriginalPhysicalOwner(String mismatch) {
+        var intent = parkedReservation();
+        if ("missing".equals(mismatch)) {
+            jdbc.update("DELETE FROM ma_storage_owner");
+        } else if ("registration".equals(mismatch)) {
+            jdbc.update("UPDATE ma_storage_owner SET mount_registration_id = ?", UUID.randomUUID().toString());
+        } else {
+            jdbc.update("UPDATE ma_storage_owner SET storage_key = 'replacement', physical_key = 'replacement'");
+        }
+        assertThatThrownBy(() -> store.completeParked("tenant", intent.operationId()))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE mount_state = 'READY'", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT registration_state FROM ma_storage", String.class)).isEqualTo("FENCE_ONLY");
+        assertThat(store.parked("tenant", intent.operationId())).isPresent();
     }
 
     // A release never takes what another registration finished: it deletes
@@ -339,7 +411,7 @@ class SshWorkspaceStoreTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Integer.class)).isEqualTo(1);
     }
 
-    private SshWorkspaceStore.Intent parkedReservation() {
+    SshWorkspaceStore.Intent parkedReservation() {
         var operation = store.begin("tenant", "actor", "key", "mac", "/work/project", "Project");
         var intent = store.claim("tenant", "actor", operation.operationId(), "owner");
         store.reserve(intent, "owner", registration(intent));
@@ -413,11 +485,11 @@ class SshWorkspaceStoreTest {
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
     }
 
-    private static Map<String, Object> registration(SshWorkspaceStore.Intent intent) {
+    static Map<String, Object> registration(SshWorkspaceStore.Intent intent) {
         return registration(intent, "/work/project", "2");
     }
 
-    private static Map<String, Object> registration(SshWorkspaceStore.Intent intent, String root, String inode) {
+    static Map<String, Object> registration(SshWorkspaceStore.Intent intent, String root, String inode) {
         Map<String, Object> identity = Map.of("root", root, "hostId", "host", "device", "1",
                 "inode", inode, "birthTime", "3");
         var marker = new LinkedHashMap<String, Object>(identity);
