@@ -525,7 +525,14 @@ shellTest(
       c.stage('COMPOSER_DRAFT');
       await c.key('\x06');
       await c.type('DRAFT_OWNED');
-      expect(compact(await c.frame('draft-held'))).toContain('DRAFT_OWNED');
+      // The frame is a snapshot, not a wait: on a loaded host the draft can
+      // still be one repaint behind when it is captured (nightly run
+      // 42069115052 failed the same way on the footer below).
+      await until(
+        async () =>
+          compact(await c.frame('draft-held')).includes('DRAFT_OWNED'),
+        'Composer draft did not render in the frame',
+      );
       expect(c.bytes()).toBe(firstInput);
       expect(c.server.requests).toHaveLength(1);
       c.stage('PTY_FOCUS_RETURN');
@@ -537,7 +544,13 @@ shellTest(
       );
       expect(c.bytes()).toBe(resumedInput);
       c.stage('FOCUSED_APPROVAL_MODE');
-      expect(compact(await c.frame('mode-before'))).toContain('YOLOmode');
+      // Same hazard as the draft: the approval footer is a later repaint than
+      // the PTY write this test just awaited, so poll for it instead of
+      // asserting on one snapshot (#15712, run 42069115052).
+      await until(
+        async () => compact(await c.frame('mode-before')).includes('YOLOmode'),
+        'Focused approval footer did not show YOLO mode',
+      );
       await c.key('\x1b[Z');
       await until(
         async () =>

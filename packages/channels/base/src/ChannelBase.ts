@@ -208,6 +208,12 @@ interface ChannelMemoryReadToken {
 
 interface PreflightInboundOptions {
   deferPairingRequests?: boolean;
+  /**
+   * Admit a group message that only fails the group's mention requirement.
+   * For private deliveries: the requirement keeps ambient chatter out of
+   * public replies. Every other group, sender and pairing check still runs.
+   */
+  waiveGroupMention?: boolean;
 }
 
 interface ChannelMemoryRecallCacheEntry {
@@ -332,6 +338,13 @@ export interface ChannelLoopController {
     channelName: string,
     target: SessionTarget,
   ): Promise<ChannelLoop[]>;
+  /**
+   * List every loop in a chat regardless of sender, thread or route. Optional:
+   * `listForTarget` needs the creator's exact target, which chat-wide state
+   * changes (the bot was removed from a group, a group's active messages were
+   * disabled) cannot supply.
+   */
+  listForChat?(channelName: string, chatId: string): Promise<ChannelLoop[]>;
   disable(id: string): Promise<boolean>;
   validateCron(cron: string): void;
   nextFireTime?(job: ChannelLoop): Date;
@@ -3153,6 +3166,17 @@ export abstract class ChannelBase {
     return this.activePrompts.get(sessionId)?.sourceLabel;
   }
 
+  /**
+   * True while the session's live turn is an unattended one (loop or webhook
+   * task). Base delivers such a turn once, in full, through pushProactive and
+   * never calls onResponseComplete, so an adapter whose sink flushes streamed
+   * chunks would post the same text twice. Adapters without an inbound anchor
+   * (QQ) gate on this; the base chunk bookkeeping still runs either way.
+   */
+  protected isProactivePromptTurn(sessionId: string): boolean {
+    return this.activePrompts.get(sessionId)?.loopPrompt === true;
+  }
+
   protected getInboundErrorSourceLabel(envelope: Envelope): string | undefined {
     return this.inboundErrorSourceLabels.get(envelope);
   }
@@ -4866,6 +4890,25 @@ export abstract class ChannelBase {
     return `Loop ${job.id}: ${job.cron}`;
   }
 
+  /**
+   * Disable every enabled loop in a chat. Adapters call this when the chat can
+   * no longer receive proactive messages (the bot was removed from a group, or
+   * a group's active messages were disabled), so orphaned loops stop burning
+   * unattended turns. Needs the chat-scoped controller lookup; returns how many
+   * jobs were disabled.
+   */
+  protected async disableLoopJobsForChat(chatId: string): Promise<number> {
+    if (!this.loopController?.listForChat) return 0;
+    const jobs = await this.loopController.listForChat(this.name, chatId);
+    let disabled = 0;
+    for (const job of jobs) {
+      if (job.enabled && (await this.loopController.disable(job.id))) {
+        disabled++;
+      }
+    }
+    return disabled;
+  }
+
   private async listLoopsFromTool(
     sessionId: string,
   ): Promise<string | ChannelLoopToolResult> {
@@ -6329,7 +6372,7 @@ export abstract class ChannelBase {
     );
   }
 
-  private groupSendersFor(target: { chatId: string }): GroupSenderPolicy {
+  protected groupSendersFor(target: { chatId: string }): GroupSenderPolicy {
     return (
       this.groupConfigFor(target.chatId)?.senders ??
       this.groupConfigFor('*')?.senders ??
@@ -6390,7 +6433,10 @@ export abstract class ChannelBase {
       options.deferPairingRequests === true &&
       groupResult.reason === 'pairing_trigger_required' &&
       (envelope.isMentioned || envelope.isReplyToBot);
-    if (!groupResult.allowed && !deferredGroupPairing) {
+    const waivedGroupMention =
+      options.waiveGroupMention === true &&
+      groupResult.reason === 'mention_required';
+    if (!groupResult.allowed && !deferredGroupPairing && !waivedGroupMention) {
       if (groupResult.pairing !== undefined) {
         this.logPreflightRejected('group_pairing_required', envelope);
         return this.onGroupPairingRequired(
@@ -6762,6 +6808,21 @@ export abstract class ChannelBase {
 
   protected markPreflighted(envelope: Envelope): void {
     this.preflightedEnvelopes.add(envelope);
+  }
+
+  /**
+   * Whether a message with this text passes the channel's message routes the
+   * way preflight would route it. Has no side effects.
+   */
+  protected admitsMessageRoute(text: string): boolean {
+    return (
+      this.messageRoutes.size === 0 ||
+      matchMessageRoute(
+        text,
+        this.messageRoutes,
+        this.config.defaultMessageRoute,
+      ) !== undefined
+    );
   }
 
   private applyMessageRoute(envelope: Envelope): boolean {
@@ -7549,15 +7610,21 @@ export abstract class ChannelBase {
         // bridge only after the latest recovery has restored session routing.
         await this.waitForBridgeRecovery();
         const promptBridge = this.bridge;
+        let turnNotice = '';
+        const onTurnNotice = (sid: string, notice: string) => {
+          if (sid === sessionId) turnNotice = notice;
+        };
         promptBridge.on('textChunk', onChunk);
+        promptBridge.on('turnNotice', onTurnNotice);
         promptBridge.on('responseBoundary', onResponseBoundary);
 
         let taskResultPartial = false;
+        let answerDelivered = false;
         try {
           if (!this.canStartInboundTurn()) {
             throw new ChannelPromptCancelledError();
           }
-          const response = await promptBridge.prompt(sessionId, promptToSend, {
+          let response = await promptBridge.prompt(sessionId, promptToSend, {
             ...(this.config.outputMode === 'per_task'
               ? {
                   outputMode: 'per_task' as const,
@@ -7582,6 +7649,11 @@ export abstract class ChannelBase {
           // If cancelled, skip sending the response
           if (!promptState.cancelled && response) {
             promptState.deliveryStarted = true;
+            if (turnNotice) {
+              response = response.slice(turnNotice.length + 2);
+            }
+          }
+          if (!promptState.cancelled && response) {
             const segment = this.ensureOutputSegment(sessionId, promptState);
             if (segment && taskResultPartial) segment.partial = true;
             await this.onResponseComplete(
@@ -7590,8 +7662,34 @@ export abstract class ChannelBase {
               sessionId,
               segment,
             );
+            answerDelivered = true;
             if (segment && promptState.activeSegmentId === segment.segmentId) {
               promptState.activeSegmentId = undefined;
+            }
+          }
+          if (!promptState.cancelled && turnNotice) {
+            // Keep notices out of stream buffers and let the answer consume
+            // adapter-specific reply metadata (such as DingTalk mentions) first.
+            try {
+              await this.sendResponseMessage(
+                envelope.chatId,
+                turnNotice,
+                sessionId,
+                sourceLabel,
+              );
+            } catch (err) {
+              // The prompt result is `turnNotice || body`, so on an empty body
+              // the notice is the turn's only delivery: rethrow instead of
+              // reporting a completed turn the user never received.
+              if (!answerDelivered) throw err;
+              // The answer is already delivered, so the turn's outcome is fixed
+              // (see the deliveryStarted invariant below): log the failed
+              // notice instead of letting it rewrite completed into failed.
+              // The notice was sliced out of the answer above, so this line is
+              // the only remaining record of what the user never received.
+              process.stderr.write(
+                `[${this.name}] turn notice delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)} (dropped notice: ${sanitizeLogText(turnNotice, 200)})\n`,
+              );
             }
           }
           // Once delivery started the turn's outcome is fixed — don't let a
@@ -7669,6 +7767,7 @@ export abstract class ChannelBase {
           throw err;
         } finally {
           promptBridge.off('textChunk', onChunk);
+          promptBridge.off('turnNotice', onTurnNotice);
           promptBridge.off('responseBoundary', onResponseBoundary);
           // Identity guard: a turn that wedged past /clear's bounded wait gets
           // EVICTED — /clear gives up on active.done, deletes activePrompts, and a

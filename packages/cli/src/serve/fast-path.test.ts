@@ -755,6 +755,7 @@ describe('serve fast path argument parsing', () => {
       ],
       ['max-connections', ['--max-connections', '256']],
       ['event-ring-size', ['--event-ring-size', '8000']],
+      ['event-ring-max-bytes', ['--event-ring-max-bytes', '1048576']],
       [
         'compacted-replay-max-bytes',
         ['--compacted-replay-max-bytes', '4194304'],
@@ -921,6 +922,7 @@ describe('serve fast path argument parsing', () => {
     expect(fastPathParsed).not.toHaveProperty('options.maxTotalSessions');
     expect(fastPathParsed).not.toHaveProperty('options.maxConnections');
     expect(fastPathParsed).not.toHaveProperty('options.eventRingSize');
+    expect(fastPathParsed).not.toHaveProperty('options.eventRingMaxBytes');
     expect(fastPathParsed).not.toHaveProperty(
       'options.compactedReplayMaxBytes',
     );
@@ -987,6 +989,48 @@ describe('serve fast path argument parsing', () => {
         options: { memoryBudgetMb: 8192 },
       });
     }
+  });
+
+  it('parses --event-ring-max-bytes on both fast-path flag forms', () => {
+    for (const args of [
+      ['--event-ring-max-bytes', '1048576'],
+      ['--event-ring-max-bytes=1048576'],
+    ]) {
+      expect(parseServeFastPathArgs(['serve', ...args])).toMatchObject({
+        kind: 'serve',
+        options: { eventRingMaxBytes: 1024 * 1024 },
+      });
+    }
+    expect(parseServeFastPathArgs(['serve', '--event-ring-max-bytes'])).toEqual(
+      {
+        kind: 'fallback',
+      },
+    );
+  });
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    Infinity,
+    -Infinity,
+    Number.MAX_SAFE_INTEGER + 1,
+    256 * 1024 * 1024 + 1,
+  ])('rejects fast-path eventRingMaxBytes=%s before startup', async (value) => {
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('process.exit(1)');
+    }) as typeof process.exit);
+    const boot = vi.spyOn(runQwenServeModule, 'runQwenServe');
+    await expect(
+      tryRunServeFastPath(['serve', `--event-ring-max-bytes=${value}`]),
+    ).rejects.toThrow('process.exit(1)');
+    expect(stderrWrites.join('')).toContain('eventRingMaxBytes');
+    expect(boot).not.toHaveBeenCalled();
   });
 
   it('parses --compacted-replay-max-bytes on the fast path', () => {
