@@ -53,7 +53,7 @@ beforeEach(() => {
   mocks.createAdapter.mockReset().mockReturnValue(mocks.adapter);
 });
 afterEach(() => vi.unstubAllEnvs());
-it('installs the subscription in the project without writing user settings', async () => {
+it('installs the subscription in the current project settings', async () => {
   const runtime = config();
   const signal = new AbortController().signal;
   await activateSubscription(settings, runtime, signal);
@@ -176,17 +176,15 @@ it('rejects an untrusted workspace without falling back to user settings', async
   expect(mocks.apply).not.toHaveBeenCalled();
 });
 
-it('requires a project when workspace settings are inactive', async () => {
-  const inactive = {
+it('saves to user settings when the CLI starts in the home directory', async () => {
+  const userOnly = {
     ...settings,
     workspaceSettingsActive: false,
   } as LoadedSettings;
-  await expect(
-    activateSubscription(inactive, config(), new AbortController().signal),
-  ).rejects.toThrow('Open a project folder');
-  expect(mocks.userInfo).not.toHaveBeenCalled();
-  expect(mocks.createAdapter).not.toHaveBeenCalled();
-  expect(inactive.setValues).not.toHaveBeenCalled();
+  const runtime = config();
+  await activateSubscription(userOnly, runtime, new AbortController().signal);
+  expect(mocks.createAdapter).toHaveBeenCalledWith(userOnly, SettingScope.User);
+  expect(runtime.setSubscriptionPlan).toHaveBeenCalledWith('pro');
 });
 
 it('keeps committed disk settings and runtime consistent when the dialog closes during refresh', async () => {

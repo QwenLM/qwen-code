@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.host.HostCommandRunner;
 import com.alibaba.qwen.code.runtimebroker.host.HostCommandRunner.Result;
 import com.alibaba.qwen.code.runtimebroker.host.WorkspaceFileProcess;
+import com.alibaba.qwen.code.runtimebroker.spi.SshConnections;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeNode;
 
 import java.io.IOException;
@@ -31,6 +32,7 @@ import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -40,7 +42,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /** Owns SSH control sockets and ephemeral forwarding addresses, never remote workers. */
-public final class SshConnectionManager implements com.alibaba.qwen.code.runtimebroker.spi.SshConnections {
+public final class SshConnectionManager implements SshConnections {
     private static final System.Logger LOG = System.getLogger(SshConnectionManager.class.getName());
     private static final int RECORD_LIMIT = 64 * 1024;
     private static final Duration COMMAND_TIMEOUT = Duration.ofSeconds(60);
@@ -353,7 +355,7 @@ public final class SshConnectionManager implements com.alibaba.qwen.code.runtime
                 throw conflict();
             }
             Map<URI, Forward> forwards = new ConcurrentHashMap<>();
-            Set<URI> local = new java.util.HashSet<>();
+            Set<URI> local = new HashSet<>();
             for (Object entry : entries) {
                 if (!(entry instanceof Map<?, ?> fields) || fields.size() != 3
                         || !(fields.get("remote") instanceof String remote) || !(fields.get("local") instanceof String address)

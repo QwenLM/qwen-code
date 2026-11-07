@@ -158,6 +158,7 @@ import {
   InvalidCursorError,
   getWorkspaceSessionInfoForResponse,
   invalidateWorkspaceSessionListCache,
+  isPersistedSessionCursor,
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
@@ -1636,17 +1637,6 @@ export function registerSessionRoutes(
       signal.throwIfAborted();
       return false;
     }
-  };
-
-  const isNumericSessionCursor = (cursor: string): boolean => {
-    const trimmed = cursor.trim();
-    if (trimmed === '') return false;
-    const parsed = Number(trimmed);
-    return (
-      Number.isFinite(parsed) &&
-      parsed >= 0 &&
-      parsed <= Number.MAX_SAFE_INTEGER
-    );
   };
 
   const requireTrustedRuntimeForWorkspaceRoute = (
@@ -10121,6 +10111,31 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const rawLiveOnly = req.query['liveOnly'];
+        let liveOnly = false;
+        if (rawLiveOnly !== undefined) {
+          if (rawLiveOnly !== '1') {
+            res.status(400).json({
+              error: '`liveOnly` must be "1"',
+              code: 'invalid_session_live_only',
+            });
+            return;
+          }
+          if (
+            view !== undefined ||
+            archiveState === 'archived' ||
+            parentSessionId !== undefined ||
+            parsedSource.sourceType !== undefined
+          ) {
+            res.status(400).json({
+              error:
+                '`liveOnly` cannot be combined with organized view, archived state, parent, or source filters',
+              code: 'invalid_session_live_only_filter',
+            });
+            return;
+          }
+          liveOnly = true;
+        }
         const options = {
           ...(cursor !== undefined ? { cursor } : {}),
           ...(size !== undefined ? { size } : {}),
@@ -10143,22 +10158,35 @@ export function registerSessionRoutes(
         res.once('close', onResponseClosed);
         if (req.aborted || res.destroyed) onRequestAborted();
         try {
+          if (liveOnly && !runtime.trusted) {
+            res.status(403).json({
+              error: '`liveOnly` requires a trusted workspace',
+              code: 'untrusted_workspace',
+            });
+            return;
+          }
           // Organized/archived views always need the persisted store: organized
           // cursors are opaque (non-numeric) and archived-only workspaces have no
           // active persisted sessions, so the live-only fallback would drop them.
           // Metadata filters gather the whole workspace
           // (persisted + live) to filter completely and paginates with an opaque
           // activity cursor, so the numeric-cursor live fallback can't serve it.
+          // `liveOnly` bypasses the persisted store on purpose: its callers need
+          // the sessions holding slots, not a page of closed history.
           const usePersisted =
             readOnlySecondary ||
-            runtime.primary ||
-            view === 'organized' ||
-            archiveState === 'archived' ||
-            parentSessionId !== undefined ||
-            parsedSource.sourceType !== undefined ||
-            (cursor !== undefined && cursor !== ''
-              ? isNumericSessionCursor(cursor)
-              : await hasActivePersistedSessions(runtime, controller.signal));
+            (!liveOnly &&
+              (runtime.primary ||
+                view === 'organized' ||
+                archiveState === 'archived' ||
+                parentSessionId !== undefined ||
+                parsedSource.sourceType !== undefined ||
+                (cursor !== undefined && cursor !== ''
+                  ? isPersistedSessionCursor(cursor)
+                  : await hasActivePersistedSessions(
+                      runtime,
+                      controller.signal,
+                    ))));
           // The live path only reads cursor/size; persisted-only options
           // (organized view or archived state) would be silently dropped there.
           // usePersisted already routes those to the persisted path — assert it so
