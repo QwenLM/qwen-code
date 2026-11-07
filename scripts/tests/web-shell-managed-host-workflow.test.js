@@ -58,8 +58,11 @@ describe('managed host build lane', () => {
     // cannot be dropped from the workflow with this suite still green.
     const expectedPaths = [
       '.github/workflows/web-shell-managed-host.yml',
+      'packages/acp-bridge/package.json',
       'packages/acp-bridge/src/**',
+      'packages/core/package.json',
       'packages/core/src/**',
+      'packages/sdk-typescript/package.json',
       'packages/sdk-typescript/src/**',
       'packages/web-shell/client/**',
       'packages/web-shell/package.json',
