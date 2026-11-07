@@ -1125,6 +1125,69 @@ describe('daemon embedded text resources', () => {
     });
   });
 
+  it('cuts a mixed astral/CJK text to the byte ceiling instead of over-cutting it', () => {
+    // R25-31: the cut is sized from an exact JSON-byte measure, so billing
+    // each code unit its worst-case escaped width kept the ceiling but
+    // destroyed far more text than the budget required — a valid astral pair
+    // billed 12 against its real 4 bytes — and replay presented that over-cut
+    // text as correctly budgeted. 18,900 pairs plus 62,199 three-byte units
+    // stay under the 100k code-unit gate (which passes them unchanged) and
+    // land just over the ceiling. Both orderings are walked: astral-first
+    // cuts in the CJK tail, cjk-first cuts inside the astral run at an offset
+    // no whole pair reaches, where a pair must be kept or dropped whole.
+    const maxRetainedBytes = 1024 * 1024;
+    const uri = 'context://example/wide';
+    const mimeType = 'text/plain';
+    const astral = '\u{20000}'.repeat(18_900);
+    const cjk = '\u754c'.repeat(62_199);
+    const suffix = '\n[truncated]\n';
+    const jsonBytes = (value: unknown) =>
+      new TextEncoder().encode(JSON.stringify(value)).length;
+    for (const text of [astral + cjk, cjk + astral]) {
+      const onTruncation = vi.fn();
+      const store = createDaemonTranscriptStore({
+        now: 1,
+        maxRetainedBytes,
+        onTruncation,
+      });
+      const content = { type: 'resource', resource: { uri, mimeType, text } };
+      // Precondition: the payload passes the code-unit gate and owns a small
+      // real-byte overflow, so the text arm is the cut that fires. The
+      // skeleton keeps exactly these keys, so this is its pre-cut measure.
+      expect(text.length).toBeLessThanOrEqual(100_000);
+      expect(jsonBytes(content)).toBeGreaterThan(256 * 1024);
+      expect(jsonBytes(content)).toBeLessThan(256 * 1024 + 1024);
+      store.dispatch(normalizeDaemonEvent(frame(content))[0]!);
+
+      const snapshot = store.getSnapshot();
+      expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+      const block = snapshot.blocks.find((b) => b.kind === 'user');
+      if (!block || block.kind !== 'user') {
+        throw new Error('expected one retained user block');
+      }
+      expect(block.embeddedResources).toHaveLength(1);
+      const retained = block.embeddedResources![0]!;
+      expect(retained.resource.uri).toBe(uri);
+      expect(retained.resource.mimeType).toBe(mimeType);
+      expect(retained.resource.text).toContain('[truncated]');
+      const retainedJsonBytes = jsonBytes(retained);
+      expect(retainedJsonBytes).toBeLessThanOrEqual(256 * 1024);
+      // Only a few hundred bytes had to go, so the retained resource must
+      // stay within a few KiB of the ceiling rather than ~111 KB below it.
+      expect(retainedJsonBytes).toBeGreaterThan(256 * 1024 - 4096);
+      const kept = retained.resource.text.slice(0, -suffix.length);
+      expect(text.startsWith(kept)).toBe(true);
+      // The cut stops on a pair boundary: a trailing high surrogate would
+      // mean a pair was split into a lone half.
+      expect(/[\uD800-\uDBFF]$/.test(kept)).toBe(false);
+      expect(onTruncation).toHaveBeenCalledWith({
+        kind: 'text',
+        blockId: block.id,
+        sourceRecordIds: ['r1'],
+      });
+    }
+  });
+
   it('converges a skeleton whose uri and text both own the overflow', () => {
     // R14-4: a uri and text that each pass the code-unit gate can together
     // overflow the real-byte ceiling. Both single-field cuts refuse while

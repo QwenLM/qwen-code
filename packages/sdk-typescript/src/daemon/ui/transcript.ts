@@ -2739,10 +2739,12 @@ const TRUNCATED_SUFFIX_ESCAPED_BYTES =
 /**
  * Cut `text` so the retained string — kept prefix plus the truncation
  * suffix — serializes within `byteBudget` real JSON bytes, the ceiling's
- * own unit. The walk bills each code unit its worst-case escaped UTF-8
- * width (a control character or unpaired surrogate costs a full \uXXXX
- * escape, and each half of a surrogate pair is billed 6 against the pair's
- * real 4 bytes), so the measured result never exceeds the budget. Ends in
+ * own unit. The walk bills each code unit its exact escaped UTF-8 width,
+ * matching the exact-byte budget the caller measures: a worst-case width
+ * would keep the bound but over-cut astral text ~3x (a pair billed 12
+ * against its real 4 bytes) and present that loss as correctly budgeted.
+ * A valid pair is billed and consumed as one 4-byte unit and never split —
+ * a lone half serializes as a 6-byte \uXXXX escape instead. Ends in
  * TEXT_TRUNCATED_SUFFIX like truncateTextAtLimit.
  */
 function truncateTextToJsonByteBudget(
@@ -2754,27 +2756,38 @@ function truncateTextToJsonByteBudget(
   let end = 0;
   while (end < text.length) {
     const code = text.charCodeAt(end);
-    const width =
-      code === 0x22 || code === 0x5c
+    const next = end + 1 < text.length ? text.charCodeAt(end + 1) : -1;
+    const paired =
+      code >= 0xd800 && code <= 0xdbff && next >= 0xdc00 && next <= 0xdfff;
+    // JSON.stringify's short escapes: \b \t \n \f \r cost 2, not 6.
+    const shortEscape =
+      code === 0x08 ||
+      code === 0x09 ||
+      code === 0x0a ||
+      code === 0x0c ||
+      code === 0x0d;
+    const width = paired
+      ? 4
+      : code === 0x22 || code === 0x5c || shortEscape
         ? 2
-        : code < 0x20
+        : code < 0x20 || (code >= 0xd800 && code <= 0xdfff)
           ? 6
           : code < 0x80
             ? 1
             : code < 0x800
               ? 2
-              : code >= 0xd800 && code <= 0xdfff
-                ? 6
-                : 3;
+              : 3;
     if (counted + width > budget) break;
     counted += width;
-    end += 1;
+    end += paired ? 2 : 1;
   }
   return `${detachString(text.slice(0, end))}${TEXT_TRUNCATED_SUFFIX}`;
 }
 
-// Never collapse a field to the bare suffix: keep at least one code unit,
-// whose worst-case escaped width is 6 bytes.
+// Never collapse a field to the bare suffix: keep at least one code unit.
+// 6 bytes is the largest term the exact-width walk bills for one retained
+// unit (an unpaired surrogate or a \uXXXX control escape); a valid pair
+// bills 4 and is never split, so the one-unit form stays inside this floor.
 const MINIMUM_TRIMMED_JSON_BYTES = 2 + TRUNCATED_SUFFIX_ESCAPED_BYTES + 6;
 
 /** JSON bytes a string field can give back when cut to its minimum form. */
