@@ -94,6 +94,9 @@ describe('PermissionsDialog', () => {
     await vi.waitFor(() =>
       expect(lastFrame() ?? '').toContain('Bash(docker *)'),
     );
+    await vi.waitFor(() =>
+      expect(lastFrame() ?? '').toContain('› 1. Add a new rule'),
+    );
     stdin.write('\u001B[B'); // Down to the first rule
     await vi.waitFor(() =>
       expect(lastFrame() ?? '').toContain('› 2. Bash(docker *)'),
@@ -119,6 +122,9 @@ describe('PermissionsDialog', () => {
 
     await vi.waitFor(() =>
       expect(lastFrame() ?? '').toContain('Bash(docker *)'),
+    );
+    await vi.waitFor(() =>
+      expect(lastFrame() ?? '').toContain('› 1. Add a new rule'),
     );
     stdin.write('\u001B[B');
     await vi.waitFor(() =>
@@ -149,6 +155,9 @@ describe('PermissionsDialog', () => {
     await vi.waitFor(() =>
       expect(lastFrame() ?? '').toContain('Bash(docker *)'),
     );
+    await vi.waitFor(() =>
+      expect(lastFrame() ?? '').toContain('› 1. Add a new rule'),
+    );
     stdin.write('\u001B[B');
     await vi.waitFor(() =>
       expect(lastFrame() ?? '').toContain('› 2. Bash(docker *)'),
@@ -175,6 +184,9 @@ describe('PermissionsDialog', () => {
 
     await vi.waitFor(() =>
       expect(lastFrame() ?? '').toContain('Bash(docker *)'),
+    );
+    await vi.waitFor(() =>
+      expect(lastFrame() ?? '').toContain('› 1. Add a new rule'),
     );
     stdin.write('\u001B[B');
     await vi.waitFor(() =>
