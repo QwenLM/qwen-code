@@ -18,6 +18,13 @@ export const SKILL_PROVIDER_CONFIG_DIRS = ['.qwen', '.agents'];
 const TMP_DIR_NAME = 'tmp';
 const BIN_DIR_NAME = 'bin';
 const PROJECT_DIR_NAME = 'projects';
+// The project identifier is one directory component, so it must fit the
+// filesystem's NAME_MAX (255 bytes on ext4/APFS/NTFS). Identifiers that fit
+// keep their existing spelling so current sessions stay where they are.
+export const PROJECT_DIR_NAME_MAX = 255;
+const PROJECT_DIR_HASH_SUFFIX_BYTES = 17;
+const PROJECT_DIR_READABLE_BUDGET =
+  PROJECT_DIR_NAME_MAX - PROJECT_DIR_HASH_SUFFIX_BYTES;
 const IDE_DIR_NAME = 'ide';
 const PLANS_DIR_NAME = 'plans';
 const DEBUG_DIR_NAME = 'debug';
@@ -617,9 +624,31 @@ export class Storage {
   }
 
   getProjectDir(): string {
-    const projectId = sanitizeCwd(this.getProjectRoot());
+    let projectId = sanitizeCwd(this.getProjectRoot());
+    // sanitizeCwd only maps non-alphanumerics to '-', so an identifier can be
+    // longer than the filesystem accepts and every path below it then fails
+    // with ENAMETOOLONG. Only an identifier the filesystem would refuse is
+    // renamed: one that already fits stays where its sessions are. Past the
+    // limit, keep a readable prefix and append part of the project hash, which
+    // also keeps two long roots from colliding on that prefix.
+    if (Buffer.byteLength(projectId, 'utf8') > PROJECT_DIR_NAME_MAX) {
+      const hash = getProjectHash(this.getProjectRoot());
+      const bounded = this.projectIdWithinBudget(
+        projectId,
+        PROJECT_DIR_READABLE_BUDGET,
+      );
+      projectId = `${bounded}-${hash.slice(0, 16)}`;
+    }
     const projectsDir = path.join(this.runtimeBaseDir, PROJECT_DIR_NAME);
     return path.join(projectsDir, projectId);
+  }
+
+  private projectIdWithinBudget(id: string, budget: number): string {
+    let end = id.length;
+    while (end > 0 && Buffer.byteLength(id.slice(0, end), 'utf8') > budget) {
+      end--;
+    }
+    return id.slice(0, end);
   }
 
   getProjectTempDir(): string {
