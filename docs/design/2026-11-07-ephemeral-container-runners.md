@@ -161,3 +161,23 @@ The facts this design relies on were checked against the official documentation
 during this discussion; the actual runner version, GitHub account capabilities,
 API permissions and ECS network configuration must be confirmed again at
 deployment time.
+
+## Controlled CI trial
+
+Before routing external PRs, maintainers can dispatch the existing CI workflow
+with `linux_runner=ephemeral-trial` and `branch_ref` set to the reviewed commit
+SHA. Only the build, eight Linux unit shards, lint, three no-AK integration
+shards and their result gates run. Execution jobs select only
+`ecs-qwen-ephemeral-smoke`; result gates stay hosted. Other manual, PR, push and
+scheduled routes remain unchanged, and the global runner kill-switch still
+forces hosted execution. The trial skips the shared build cache to exercise a clean build without
+publishing experimental cache entries.
+The built tree is uploaded once and reused by both test groups.
+
+Keep the five-slot host pool on its trial-only label. Upgrade the manager and
+image from a pinned trusted commit, use a three-hour container lifetime and
+start with 4 CPUs / 8 GiB per slot. Verify the image tools, actual CI results,
+container/network replacement, credential separation and cleanup on failure.
+This path validates reviewed code, not arbitrary contributor code. External-PR
+routing stays disabled until the dispatch boundary and dedicated host/network
+requirements in #16514 are satisfied. Model access remains separate.

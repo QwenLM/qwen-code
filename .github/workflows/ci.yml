@@ -46,7 +46,7 @@ on:
   workflow_dispatch:
     inputs:
       branch_ref:
-        description: 'Branch to run on'
+        description: 'Branch or commit (ephemeral-trial requires a reviewed commit SHA)'
         required: true
         default: 'main'
         type: 'string'
@@ -58,6 +58,7 @@ on:
         options:
           - 'self-hosted'
           - 'self-hosted-arm64'
+          - 'ephemeral-trial'
           - 'hosted'
 
 concurrency:
@@ -245,6 +246,10 @@ jobs:
             if [[ "${EPHEMERAL_ARCH}" == "arm64" ]]; then
               pr_test_runner='["self-hosted", "linux", "arm64", "ecs-qwen-ephemeral"]'
             fi
+            lint_runner="${pr_test_runner}"
+          fi
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" && "${DISPATCH_LINUX_RUNNER}" == "ephemeral-trial" && "${ECS_DISABLED}" != "true" ]]; then
+            pr_test_runner='["ecs-qwen-ephemeral-smoke"]'
             lint_runner="${pr_test_runner}"
           fi
           echo "pr_test_runner=${pr_test_runner}" >> "${GITHUB_OUTPUT}"
@@ -743,7 +748,7 @@ jobs:
       # by arch, each half of the pool restored the other half's misses.
       - name: 'Restore the build cache'
         id: 'build_cache'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name != 'push' }}"
+        if: "${{ github.event.inputs.linux_runner != 'ephemeral-trial' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name != 'push' }}"
         timeout-minutes: 5
         continue-on-error: true
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
@@ -804,7 +809,7 @@ jobs:
 
       - name: 'Pack the build cache'
         id: 'pack_build_cache'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'push' || steps.build_cache.outputs.cache-matched-key == '') }}"
+        if: "${{ github.event.inputs.linux_runner != 'ephemeral-trial' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'push' || steps.build_cache.outputs.cache-matched-key == '') }}"
         timeout-minutes: 8
         run: |-
           rm -rf .qwen-build-cache
@@ -2198,6 +2203,7 @@ jobs:
       - 'test_build'
     if: |-
       ${{
+        github.event.inputs.linux_runner != 'ephemeral-trial' &&
         !cancelled() &&
         (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
         needs.classify_pr.outputs.skip_ci != 'true' &&
@@ -2579,6 +2585,7 @@ jobs:
       - 'web_shell_e2e_smoke'
     if: |-
       ${{
+        github.event.inputs.linux_runner != 'ephemeral-trial' &&
         !cancelled() &&
         (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
         needs.classify_pr.outputs.skip_ci != 'true' &&
@@ -2603,6 +2610,7 @@ jobs:
     needs: 'test_macos_shards'
     if: |-
       ${{
+        github.event.inputs.linux_runner != 'ephemeral-trial' &&
         always() && (
           github.event_name == 'merge_group' ||
           github.event_name == 'schedule' ||
@@ -2624,6 +2632,7 @@ jobs:
     needs: 'classify_pr'
     if: |-
       ${{
+        github.event.inputs.linux_runner != 'ephemeral-trial' &&
         !cancelled() && (
           github.event_name == 'merge_group' ||
           github.event_name == 'schedule' ||
@@ -2751,6 +2760,7 @@ jobs:
     needs: 'classify_pr'
     if: |-
       ${{
+        github.event.inputs.linux_runner != 'ephemeral-trial' &&
         !cancelled() && (
           github.event_name == 'merge_group' ||
           github.event_name == 'schedule' ||
@@ -2976,7 +2986,7 @@ jobs:
     #
     # A draft pull request skips it (and the browser smoke): it cannot merge,
     # and `ready_for_review` starts the full run that gates the merge.
-    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && !github.event.pull_request.draft }}"
+    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.linux_runner == 'ephemeral-trial')) && !github.event.pull_request.draft }}"
     # Shares lint's hosted/disposable routing for untrusted forks. Model keys
     # are empty; the job receives only the read-only checkout token.
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'') }}'
@@ -3123,13 +3133,13 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: "${{ (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
           fetch-depth: 1
 
       - name: 'Verify checkout includes expected head commit'
         uses: './.github/actions/verify-checkout-head'
         with:
-          expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
+          expected_sha: "${{ github.event.inputs.branch_ref || (github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha) }}"
 
       # KEEP IN SYNC with the `test` job's profile step so a docs-only,
       # java_only or github-ci-only PR skips this gate exactly when it skips
@@ -3283,7 +3293,7 @@ jobs:
       - 'classify_pr'
       - 'test_build'
       - 'integration_no_ak'
-    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && !github.event.pull_request.draft }}"
+    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.linux_runner == 'ephemeral-trial')) && !github.event.pull_request.draft }}"
     # ubuntu_runner, not the shards' lint_runner: the routing battery keeps
     # the fork-admitting route to the lanes that isolate HOME, and this job
     # checks out nothing.
