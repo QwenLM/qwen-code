@@ -1,0 +1,93 @@
+# Ephemeral GitHub Actions runners
+
+Each slot registers one just-in-time runner and runs it in a new container.
+After at most one job, the manager removes the container and runner registration
+before creating the next one. An external watchdog also removes a container
+whose runner does not exit.
+
+Each job has a separate Docker bridge with inter-container communication
+disabled. Deleting the network is part of cleanup and a failure blocks slot
+replacement. This does not itself prevent access to the host or private
+networks: configure and verify the host's external egress controls separately.
+
+Use a dedicated host for untrusted pull requests. Docker shares the host kernel;
+jobs must not receive the host Docker socket, host directories, cloud instance
+credentials, internal network access, or long-lived secrets. A runner label is a
+scheduling selector, not an access-control boundary. Before enabling external
+pull requests, verify they cannot select other sensitive runner pools.
+
+## Build the image
+
+The image supports Linux x64 and ARM64. Its Node base is pinned to an OCI index
+digest and the runner downloads are checked against pinned SHA-256 digests.
+BuildKit supplies `TARGETARCH`; with Docker's legacy builder pass it explicitly:
+
+```sh
+docker build --build-arg TARGETARCH=arm64 -t qwen-ephemeral-runner:trial scripts/ci/ephemeral-runner
+```
+
+The runner image supports ARM64, but full PR CI on this image has not yet been
+verified. The repository also selects ARM64 linters; verify the complete CI
+toolchain before routing production work to either architecture.
+
+Hosts with restricted upstream connectivity can set `DEBIAN_MIRROR`,
+`PIP_INDEX_URL` or `RUNNER_RELEASE_URL` at build time. The runner archive is
+still verified against its pinned digest when served from a mirror.
+
+For a real deployment, publish the image to a registry and configure its
+immutable `repository@sha256:...` digest. A local `sha256:...` image ID may be
+used for a trial. Runner and base versions need routine security updates.
+
+## Configure the manager
+
+Install Docker, Node 22, `gh`, and `flock` on the host. Create a GitHub App
+installed only on the intended repository with repository Administration:
+write, and store its private key in a root-readable file. The manager uses it to
+request JIT configurations and delete stale runner registrations; it does not
+pass the key or installation token to job containers.
+
+Copy `config.example.json` to `/etc/qwen-ephemeral-runner/config.json` and
+replace the placeholders: repository, App and installation IDs, private key
+path, actual runner group ID, unique host/pool ID, immutable image reference,
+and matching architecture and labels. Use a unique test label and a controlled
+test repository for a trial. The example runs one slot; increase only after
+measuring the host. Restrict the configuration and key directories to the
+manager account and do not put secrets in the repository.
+
+The `ttlSeconds` limit starts when the container starts, including idle time.
+A job assigned near the deadline can be interrupted. The manager removes and
+replaces the container; GitHub remains authoritative for job status. The
+manager logs cleanup but does not distinguish expiry from normal completion.
+`minDiskBytes` applies to the Docker data filesystem. Configure and verify
+disk quotas or a dedicated data volume as appropriate for the host.
+
+## Install and operate
+
+Install `manager.mjs` in `/opt/qwen-ephemeral-runner/`, install the supplied
+unit in `/etc/systemd/system/`, and create the configured state/log directories
+with permissions restricted to the manager account. A Docker-authorized user
+has host-level power; the unit is intended for a trusted dedicated host.
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now qwen-ephemeral-runner.service
+sudo systemctl status qwen-ephemeral-runner.service
+sudo journalctl -u qwen-ephemeral-runner.service -f
+```
+
+Stopping the service stops replenishment, waits up to the configured grace
+period, and cleans up its containers. The next start reconciles abandoned
+resources first. A cleanup or ambiguous registration error blocks that slot;
+inspect its state and GitHub runner list before manual reconciliation. Never
+remove unrelated runners or run a global Docker prune.
+
+```sh
+sudo systemctl stop qwen-ephemeral-runner.service
+```
+
+After validating a single runner and its recovery paths, the repository variable
+`EXTERNAL_PR_EPHEMERAL_RUNNER_ENABLED=true` opts the selected PR build, test,
+lint and no-AK integration jobs into the new pool. Leave it unset until the host and GitHub access policies have been
+verified. Setting it back to `false` affects newly evaluated runs; cancel and
+rerun already queued work when rolling back.
+Set `EXTERNAL_PR_EPHEMERAL_ARCH=arm64` for an ARM64 pool; the default is x64.

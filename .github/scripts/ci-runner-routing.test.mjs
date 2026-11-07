@@ -123,6 +123,8 @@ function runPickRunnerOutputs({
   eventName,
   dispatch,
   fleet,
+  ephemeralEnabled,
+  ephemeralArch,
 }) {
   const tmp = mkdtempSync(join(tmpdir(), 'pick-runner-'));
   const outputFile = join(tmp, 'github_output');
@@ -133,6 +135,8 @@ function runPickRunnerOutputs({
       ECS_DISABLED: ecsDisabled ? 'true' : '',
       EVENT_NAME: eventName,
       LINUX_RUNNER_FLEET: fleet ?? '',
+      EPHEMERAL_ENABLED: ephemeralEnabled ?? '',
+      EPHEMERAL_ARCH: ephemeralArch ?? '',
       DISPATCH_LINUX_RUNNER: dispatch ?? '',
       GITHUB_OUTPUT: outputFile,
     },
@@ -161,7 +165,15 @@ function runPickRunnerOutputs({
     outputs.split('\n').includes(`lint_runner=${lintRunner}`),
     `lint_runner not published: ${outputs}`,
   );
-  return { ubuntuRunner, lintRunner };
+  const prTest = outputs
+    .split('\n')
+    .find((line) => line.startsWith('pr_test_runner='));
+  assert.ok(prTest, 'pr_test_runner not published');
+  return {
+    ubuntuRunner,
+    lintRunner,
+    prTestRunner: prTest.slice('pr_test_runner='.length),
+  };
 }
 
 function runPickRunner(inputs) {
@@ -438,6 +450,87 @@ describe('ci.yml lint_runner routing', () => {
         fleet,
       });
       assert.equal(out.lintRunner, out.ubuntuRunner, `fleet='${fleet}'`);
+    }
+  });
+});
+
+describe('ci.yml disposable runner routing', () => {
+  it('selects ARM64 only when explicitly configured', () => {
+    const inputs = {
+      eventName: 'pull_request',
+      sameRepo: false,
+      assoc: 'NONE',
+      ephemeralEnabled: 'true',
+    };
+    const arm = '["self-hosted", "linux", "arm64", "ecs-qwen-ephemeral"]';
+    assert.equal(
+      runPickRunnerOutputs({ ...inputs, ephemeralArch: 'arm64' }).prTestRunner,
+      arm,
+    );
+    assert.equal(
+      runPickRunnerOutputs({ ...inputs, ephemeralArch: 'arm64' }).lintRunner,
+      arm,
+    );
+    assert.equal(
+      runPickRunnerOutputs({ ...inputs, ephemeralArch: 'invalid' })
+        .prTestRunner,
+      '["self-hosted", "linux", "x64", "ecs-qwen-ephemeral"]',
+    );
+  });
+  it('routes only untrusted fork jobs to the disposable pool when enabled', () => {
+    const ephemeral = '["self-hosted", "linux", "x64", "ecs-qwen-ephemeral"]';
+    for (const eventName of [
+      'pull_request',
+      'push',
+      'merge_group',
+      'workflow_dispatch',
+    ]) {
+      for (const sameRepo of [true, false]) {
+        for (const assoc of ASSOCIATIONS) {
+          for (const ecsDisabled of [true, false]) {
+            for (const fleet of ['', 'hosted', 'arm64']) {
+              const inputs = { eventName, sameRepo, assoc, ecsDisabled, fleet };
+              const baseline = runPickRunnerOutputs(inputs);
+              const enabled = runPickRunnerOutputs({
+                ...inputs,
+                ephemeralEnabled: 'true',
+              });
+              const selected =
+                eventName === 'pull_request' &&
+                !sameRepo &&
+                !TRUSTED.includes(assoc) &&
+                !ecsDisabled &&
+                fleet !== 'hosted';
+              assert.equal(
+                enabled.prTestRunner,
+                selected ? ephemeral : baseline.ubuntuRunner,
+                JSON.stringify(inputs),
+              );
+              assert.equal(
+                enabled.lintRunner,
+                selected ? ephemeral : baseline.lintRunner,
+                JSON.stringify(inputs),
+              );
+              assert.equal(enabled.ubuntuRunner, baseline.ubuntuRunner);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('routes only the intended jobs through the new output', () => {
+    assert.equal(
+      ciDoc.jobs.classify_pr.outputs.pr_test_runner,
+      '${{ steps.pick_runner.outputs.pr_test_runner }}',
+    );
+    for (const name of ['test_build', 'test'])
+      assert.match(ciDoc.jobs[name]['runs-on'], /pr_test_runner/);
+    for (const name of ['lint_and_static', 'integration_no_ak'])
+      assert.match(ciDoc.jobs[name]['runs-on'], /lint_runner/);
+    for (const [name, job] of Object.entries(ciDoc.jobs)) {
+      if (!['classify_pr', 'test_build', 'test'].includes(name))
+        assert.doesNotMatch(String(job['runs-on']), /pr_test_runner/, name);
     }
   });
 });

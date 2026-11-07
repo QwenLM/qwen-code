@@ -1,0 +1,17 @@
+[Unit]
+Description=Qwen Code ephemeral GitHub Actions runners
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/qwen-ephemeral-runner
+ExecStart=/usr/bin/env node /opt/qwen-ephemeral-runner/manager.mjs /etc/qwen-ephemeral-runner/config.json
+Restart=on-failure
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=300
+
+[Install]
+WantedBy=multi-user.target
