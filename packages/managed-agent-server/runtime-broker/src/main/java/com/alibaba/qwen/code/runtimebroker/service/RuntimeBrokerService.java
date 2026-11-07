@@ -792,7 +792,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 }).thenCompose(stage -> stage);
     }
 
-    private CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
+    CompletionStage<Void> releaseSavedSession(RuntimeBindingRecord binding, RuntimeSessionRecord record,
             BindingRenewal renewal) {
         return releaseSavedSession(binding, record, renewal, true);
     }
