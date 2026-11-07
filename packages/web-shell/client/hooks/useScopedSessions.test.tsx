@@ -42,8 +42,17 @@ let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let scopedResult: ReturnType<typeof useScopedSessions> | undefined;
 
-function Probe({ cwd }: { cwd?: string }) {
-  const result = useScopedSessions(cwd, { autoLoad: true });
+function Probe({
+  cwd,
+  sourceType,
+}: {
+  cwd?: string;
+  sourceType?: string | null;
+}) {
+  const result = useScopedSessions(cwd, {
+    autoLoad: true,
+    ...(sourceType !== undefined ? { sourceType } : {}),
+  });
   scopedResult = result;
   const { sessions, deleteSessions, releaseSession } = result;
   return (
@@ -67,8 +76,8 @@ function Probe({ cwd }: { cwd?: string }) {
   );
 }
 
-function render(cwd?: string) {
-  act(() => root!.render(<Probe cwd={cwd} />));
+function render(cwd?: string, sourceType?: string | null) {
+  act(() => root!.render(<Probe cwd={cwd} sourceType={sourceType} />));
 }
 
 beforeEach(() => {
@@ -173,6 +182,28 @@ describe('useScopedSessions', () => {
     });
     expect(deleteSessionsData).toHaveBeenCalledWith(['secondary']);
     expect(primaryDeleteSessions).not.toHaveBeenCalled();
+  });
+
+  it('omits the source filter when the release dialog asks for all sources', async () => {
+    listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'channel',
+          workspaceCwd: '/all-sources',
+          sourceType: 'channel',
+        },
+      ] satisfies DaemonSessionSummary[],
+    });
+
+    render('/all-sources', null);
+    await act(async () => {
+      await listWorkspaceSessionsPage.mock.results[0]?.value;
+    });
+
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledWith({});
+    expect(
+      container!.querySelector('[data-testid="sessions"]')?.textContent,
+    ).toBe('channel');
   });
 
   it('releases a scoped session without invalidating the primary catalog', async () => {
