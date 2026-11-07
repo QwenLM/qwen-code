@@ -17613,6 +17613,162 @@ describe('DaemonSessionProvider', () => {
     },
   );
 
+  describe('autoContinueInterruptedTurn', () => {
+    const recovered = (
+      recovery:
+        | {
+            kind: 'interrupted_prompt' | 'interrupted_turn';
+            canContinue: boolean;
+            cancellationConfirmationId?: string;
+          }
+        | { kind: 'clean'; canContinue: false },
+    ) => ({
+      v: 1 as const,
+      sessionId: 'session-1',
+      workspaceCwd: '/mock-workspace',
+      state: {},
+      recovery,
+    });
+    // A resumed session arms `catchingUp` until the replay sentinel arrives,
+    // and `continueSession` refuses while it is set. Wait for the sentinel the
+    // way a real load does instead of leaving the stream silent.
+    const replayedThenIdle = (): MockSession['events'] =>
+      async function* replayedThenIdle(opts: { signal?: AbortSignal } = {}) {
+        yield {
+          v: 1,
+          type: 'replay_complete',
+          data: { replayedCount: 0 },
+        };
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      };
+
+    it('continues an interrupted turn once, without a user click', async () => {
+      const continued = vi.fn(async () => ({
+        accepted: true as const,
+        interruption: 'interrupted_prompt' as const,
+        promptId: 'continued-1',
+        lastEventId: 10,
+      }));
+      const session = Object.assign(
+        createMockSession({
+          lastEventId: 10,
+          events: replayedThenIdle(),
+          context: vi.fn(async () =>
+            recovered({ kind: 'interrupted_prompt', canContinue: true }),
+          ),
+        }),
+        { continueSession: continued },
+      );
+      sdkMocks.sessions.push(session);
+
+      await renderWithProvider(<div />, {
+        autoConnect: true,
+        sessionId: 'session-1',
+        autoContinueInterruptedTurn: true,
+      });
+
+      expect(continued).toHaveBeenCalledTimes(1);
+      expect(session.submitPrompt).not.toHaveBeenCalled();
+      // A rerender of the same load must not enqueue a second turn.
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(continued).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves the turn to the Continue button when the user cancelled it', async () => {
+      const continued = vi.fn(async () => ({
+        accepted: false as const,
+        interruption: 'none' as const,
+      }));
+      sdkMocks.sessions.push(
+        Object.assign(
+          createMockSession({
+            lastEventId: 10,
+            context: vi.fn(async () =>
+              recovered({
+                kind: 'interrupted_prompt',
+                canContinue: true,
+                cancellationConfirmationId: 'confirm-1',
+              }),
+            ),
+          }),
+          { continueSession: continued },
+        ),
+      );
+
+      await renderWithProvider(<div />, {
+        autoConnect: true,
+        sessionId: 'session-1',
+        autoContinueInterruptedTurn: true,
+      });
+
+      expect(continued).not.toHaveBeenCalled();
+    });
+
+    it('does nothing when the turn finished cleanly', async () => {
+      const continued = vi.fn(async () => ({
+        accepted: false as const,
+        interruption: 'none' as const,
+      }));
+      sdkMocks.sessions.push(
+        Object.assign(
+          createMockSession({
+            lastEventId: 10,
+            context: vi.fn(async () =>
+              recovered({ kind: 'clean', canContinue: false }),
+            ),
+          }),
+          { continueSession: continued },
+        ),
+      );
+
+      await renderWithProvider(<div />, {
+        autoConnect: true,
+        sessionId: 'session-1',
+        autoContinueInterruptedTurn: true,
+      });
+
+      expect(continued).not.toHaveBeenCalled();
+    });
+
+    it('stays opt-in', async () => {
+      const continued = vi.fn(async () => ({
+        accepted: true as const,
+        interruption: 'interrupted_prompt' as const,
+        promptId: 'continued-1',
+        lastEventId: 10,
+      }));
+      sdkMocks.sessions.push(
+        Object.assign(
+          createMockSession({
+            lastEventId: 10,
+            events: replayedThenIdle(),
+            context: vi.fn(async () =>
+              recovered({ kind: 'interrupted_prompt', canContinue: true }),
+            ),
+          }),
+          { continueSession: continued },
+        ),
+      );
+
+      await renderWithProvider(<div />, {
+        autoConnect: true,
+        sessionId: 'session-1',
+      });
+
+      expect(continued).not.toHaveBeenCalled();
+    });
+  });
+
   it('refreshes recovery after a rewind drops the interrupted turn', async () => {
     const rewind = createDeferred<void>();
     const initial = {

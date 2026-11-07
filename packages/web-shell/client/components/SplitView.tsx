@@ -1009,6 +1009,7 @@ export function SplitView({
                     maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
                     suppressOwnUserEcho
                     restartEventStreamOnPrompt={restartSseOnPrompt}
+                    autoContinueInterruptedTurn
                   >
                     <TerminalArchivedReporter
                       sessionId={sessionId}
