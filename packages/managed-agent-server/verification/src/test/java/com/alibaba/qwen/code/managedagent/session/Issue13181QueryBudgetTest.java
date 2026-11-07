@@ -969,7 +969,7 @@ class Issue13181QueryBudgetTest {
     void asynchronousVerificationHeartbeatsAndStatusAvoidJournalBodyReads() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        byte[] bytes = new byte[] {1, 2, 3, 4};
+        byte[] bytes = new byte[16];
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
             public void putIfAbsent(String key, byte[] input) {}
@@ -1000,7 +1000,7 @@ class Issue13181QueryBudgetTest {
             public void validateConfiguration() {}
         };
         ToolPublicationDataStore data = new ToolPublicationDataStore(fixture.jdbc, fixture.manager,
-                publication.store(), publication.sessions(), bucket, Duration.ofSeconds(10), Duration.ofMillis(300),
+                publication.store(), publication.sessions(), bucket, Duration.ofSeconds(10), Duration.ofSeconds(2),
                 new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
         data.publishSegment(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat",
                 "stdout", 0, bytes, null, true);
@@ -1563,8 +1563,8 @@ class Issue13181QueryBudgetTest {
                 properties.setModelCatalog(List.of(option));
                 when(harness.supportsModelSelection()).thenReturn(true);
             }
-            store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, clock, hub::publish,
-                    registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, clock, hub::publish,
+                    registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             service = new ManagedAgentService(store, new RequestDigests(),
                     mock(HarnessCoordinator.class),
                     harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());

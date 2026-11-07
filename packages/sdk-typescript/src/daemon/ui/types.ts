@@ -306,6 +306,12 @@ export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
   title?: string;
   status?: string;
   toolName?: string;
+  /**
+   * Set when the event only carries a late-arriving tool name (a metadata
+   * lifecycle frame). Reducers may name an existing block by `toolCallId`
+   * but must not create a block from it.
+   */
+  nameOnly?: boolean;
   /** Server-measured call timing; absent in older recordings. */
   startedAt?: number;
   durationMs?: number;
@@ -515,6 +521,7 @@ export interface DaemonLoopStop {
 
 export interface DaemonUiErrorEvent extends DaemonUiEventBase {
   type: 'error';
+  data?: unknown;
   text: string;
   recoverable?: boolean;
   code?: string;
@@ -1344,6 +1351,12 @@ export interface DaemonTranscriptState
   activeThoughtBlockByParent: Record<string, string>;
   blockIndexById: Readonly<Record<string, number>>;
   toolBlockByCallId: Record<string, string>;
+  /**
+   * Late tool name keyed by call id, for lifecycle frames that arrive before
+   * the block they name (mid-run attach). The create path consumes its entry;
+   * the oldest entry is evicted past `MAX_PENDING_TOOL_NAMES`. #16301
+   */
+  pendingToolNameByCallId: Record<string, string>;
   trimmedToolNotificationByCallId: Record<string, true>;
   permissionBlockByRequestId: Record<string, string>;
   nextOrdinal: number;

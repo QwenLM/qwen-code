@@ -20,6 +20,7 @@ import {
   resolveReasoningCapabilities,
   resolveReasoningForModel,
 } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -726,15 +727,18 @@ describe('model configuration manifest', () => {
     expect(getConfiguredModelReasoning(config)).toBeUndefined();
   });
 
-  it('registers the exact stable qwen3.8-max reasoning controls', () => {
-    expect(getModelConfiguration('qwen3.8-max')).toEqual({
-      reasoning: {
-        thinking: true,
-        efforts: ['low', 'medium', 'xhigh'],
-        defaultEffort: 'xhigh',
-      },
-    });
-  });
+  it.each(['qwen3.8-max', 'qwen3.8-flash'])(
+    'registers the exact stable %s reasoning controls',
+    (modelId) => {
+      expect(getModelConfiguration(modelId)).toEqual({
+        reasoning: {
+          thinking: true,
+          efforts: ['low', 'medium', 'xhigh'],
+          defaultEffort: 'xhigh',
+        },
+      });
+    },
+  );
 
   it.each([
     'qwen-latest-series-invite-202610-m6',
@@ -850,21 +854,24 @@ describe('model configuration manifest', () => {
     });
   });
 
-  it('builds the stable qwen3.8-max default reasoning option', () => {
-    expect(buildModelReasoningConfigOption('qwen3.8-max')).toMatchObject({
-      id: 'reasoning_effort',
-      currentValue: 'xhigh',
-      options: [
-        { value: 'none' },
-        { value: 'low' },
-        { value: 'medium' },
-        { value: 'xhigh' },
-      ],
-      _meta: {
-        'qwenCode/reasoning': { defaultEffort: 'xhigh' },
-      },
-    });
-  });
+  it.each(['qwen3.8-max', 'qwen3.8-flash'])(
+    'builds the stable %s default reasoning option',
+    (modelId) => {
+      expect(buildModelReasoningConfigOption(modelId)).toMatchObject({
+        id: 'reasoning_effort',
+        currentValue: 'xhigh',
+        options: [
+          { value: 'none' },
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'xhigh' },
+        ],
+        _meta: {
+          'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+        },
+      });
+    },
+  );
 
   it('omits Thinking off when qwen3.8-max requires thinking', () => {
     expect(
@@ -914,6 +921,13 @@ describe('model configuration manifest', () => {
     ['qwen3.8-max', 'max', false, false],
     ['qwen3.8-max', 'none', false, true],
     ['qwen3.8-max', 'none', true, false],
+    ['qwen3.8-flash', 'low', false, true],
+    ['qwen3.8-flash', 'medium', false, true],
+    ['qwen3.8-flash', 'xhigh', false, true],
+    ['qwen3.8-flash', 'high', false, false],
+    ['qwen3.8-flash', 'max', false, false],
+    ['qwen3.8-flash', 'none', false, true],
+    ['qwen3.8-flash', 'none', true, false],
     ['qwen-latest-series-invite-202610-m6', 'low', false, true],
     ['qwen-latest-series-invite-202610-m6', 'max', false, false],
     ['qwen4-plus', 'none', false, true],
@@ -932,11 +946,27 @@ describe('model configuration manifest', () => {
     },
   );
 
-  it('wraps the stable default option for workspace preview', () => {
-    expect(buildModelReasoningConfigPreview('qwen3.8-max')).toEqual([
-      buildModelReasoningConfigOption('qwen3.8-max'),
-    ]);
-  });
+  it.each([
+    'qwen3.8-max',
+    'qwen3.8-flash',
+    'qwen3.7-plus',
+    'future-served-model',
+  ])(
+    'shows the subscription default for %s in the workspace preview',
+    (modelId) => {
+      const generation = {
+        model: modelId,
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      };
+      const reasoning = resolveReasoningForModel(undefined, generation);
+      expect(
+        buildModelReasoningRoutePreview(generation, reasoning, undefined, true),
+      ).toMatchObject([{ currentValue: 'medium' }]);
+      expect(
+        buildModelReasoningRoutePreview(generation, reasoning, 'xhigh', true),
+      ).toMatchObject([{ currentValue: 'xhigh' }]);
+    },
+  );
 
   it('preserves mandatory thinking in the workspace preview', () => {
     expect(
@@ -955,6 +985,10 @@ describe('model configuration manifest', () => {
     ['qwen3.8-max', 'none', false, { enabled: false }],
     ['qwen3.8-max', 'max', false, {}],
     ['qwen3.8-max', 'none', true, {}],
+    ['qwen3.8-flash', 'medium', false, { enabled: true, effort: 'medium' }],
+    ['qwen3.8-flash', 'none', false, { enabled: false }],
+    ['qwen3.8-flash', 'max', false, {}],
+    ['qwen3.8-flash', 'none', true, {}],
   ] as const)(
     'projects persisted %s selection %s with mandatory=%s',
     (modelId, selection, mandatory, expected) => {

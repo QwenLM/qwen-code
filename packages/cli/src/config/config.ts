@@ -5,6 +5,7 @@
  */
 
 import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
+import type { ContentGeneratorConfig } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { isInteractiveInvocation } from '../utils/interactive-mode.js';
 import { SshExecutionEnvironment } from '@qwen-code/qwen-code-core/services/ssh-execution-environment.js';
 import {
@@ -112,7 +113,7 @@ import {
   validateExecutionSandboxSelection,
 } from './execution-sandbox-settings.js';
 import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
-import { appEvents } from '../utils/events.js';
+import { appEvents, AppEvent } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { memoryCommand } from '../commands/memory.js';
 import { channelCommand } from '../commands/channel.js';
@@ -133,6 +134,12 @@ export { isValidSessionId } from './session-id.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
 import { getPendingGatedMcpServers } from './mcpApprovals.js';
+import {
+  applyProjectHooksApproval,
+  getProjectHooksApprovalState,
+  summarizeProjectHooks,
+  type ProjectHooksApproval,
+} from './hook-approvals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
@@ -146,6 +153,7 @@ import { detectSystemLanguage } from '../i18n/index.js';
 import { normalizeSkillNames, resolveSkillSettings } from './skill-settings.js';
 import { checkAdvisorModelAvailability } from './advisor-model.js';
 import { parseApprovalModeValue } from './approval-mode-value.js';
+import { formatAuxModelSelectorForDisplay } from '../utils/aux-model-selector.js';
 
 export { parseApprovalModeValue };
 
@@ -1313,7 +1321,7 @@ function formatUnavailableAdvisorModelMessage(
       ? 'No models are configured.'
       : `Configured models: ${availableModelIds.join(', ')}.`;
   return (
-    `Advisor model '${modelName}' is not configured.\n` +
+    `Advisor model '${formatAuxModelSelectorForDisplay(modelName)}' is not configured.\n` +
     `${availableModelsLine}\n` +
     'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /advisor without arguments to choose from configured models.'
   );
@@ -1718,6 +1726,10 @@ export async function loadCliConfig(
     systemHooks?: Record<string, unknown>;
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
+    /** Display-only raw workspace block; never feeds execution. */
+    projectHooksDisplayOnly?: Record<string, unknown>;
+    /** What the project hooks approval covers, when there is anything to gate. */
+    projectHooksApproval?: ProjectHooksApproval;
   },
   /**
    * Live-read provider for the set of disabled skill names. Forwarded to
@@ -1763,6 +1775,7 @@ export async function loadCliConfig(
    * construction may install the executor-boundary callback.
    */
   hostPolicy?: {
+    modelConfiguration?: ContentGeneratorConfig & { authType: AuthType };
     toolInvocationGuard?: ToolInvocationGuard;
     workflowAncestorTrustProvider?: ConfigParameters['workflowAncestorTrustProvider'];
     shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
@@ -1783,7 +1796,31 @@ export async function loadCliConfig(
     onManagedEngineQuarantine?: ConfigParameters['onManagedEngineQuarantine'];
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
+  /**
+   * Live-read provider for the project hooks block the approval gate covers.
+   * The YOLO-exit transition re-gates against what the settings hold NOW, not
+   * the startup snapshot: a `/hooks` reload while YOLO-exempt can replace the
+   * block without re-gating. Like `disabledSkillNamesProvider`, callers MUST
+   * close over the live `LoadedSettings` instance, not the merged snapshot.
+   * Callers without one never reload settings mid-session, so the startup
+   * approval stays accurate for them.
+   */
+  projectHooksApprovalProvider?: () => ProjectHooksApproval | undefined,
 ): Promise<Config> {
+  const modelConfiguration = hostPolicy?.modelConfiguration;
+  if (modelConfiguration) {
+    settings = {
+      ...settings,
+      modelProviders: {},
+      providerProtocol: {},
+      fastModel: undefined,
+      compactionModel: undefined,
+      advisorModel: undefined,
+      visionModel: undefined,
+      imageModel: undefined,
+      modelFallbacks: undefined,
+    };
+  }
   assertKnownOmniSettingKeys(settings);
   const agentHostReadOnly = hostPolicy?.agentHostReadOnly === true;
   const sshWorkspace = agentHostReadOnly ? undefined : readSshWorkspace(cwd);
@@ -2275,18 +2312,49 @@ export async function loadCliConfig(
   // up-front provider validation above is what classifies invalid configuration;
   // this call's own settings reads must not re-wrap a resolver
   // defect as a user config error, so it stays unwrapped.
-  const resolvedCliConfig = resolveCliGenerationConfig({
-    argv: {
-      model: argv.model,
-      openaiApiKey: argv.openaiApiKey,
-      openaiBaseUrl: argv.openaiBaseUrl,
-      openaiLogging: argv.openaiLogging,
-      openaiLoggingDir: argv.openaiLoggingDir,
-    },
-    settings,
-    selectedAuthType,
-    env: process.env as Record<string, string | undefined>,
-  });
+  const resolvedCliConfig: ReturnType<typeof resolveCliGenerationConfig> =
+    modelConfiguration
+      ? {
+          authType: modelConfiguration.authType,
+          model: modelConfiguration.model,
+          apiKey: modelConfiguration.apiKey ?? '',
+          baseUrl: modelConfiguration.baseUrl ?? '',
+          generationConfig: {
+            ...resolveCliGenerationConfig({
+              argv: {
+                model: modelConfiguration.model,
+                openaiApiKey: modelConfiguration.apiKey ?? '',
+                openaiBaseUrl: modelConfiguration.baseUrl ?? '',
+                openaiLogging: argv.openaiLogging,
+                openaiLoggingDir: argv.openaiLoggingDir,
+              },
+              settings: {
+                model: {
+                  enableOpenAILogging: settings.model?.enableOpenAILogging,
+                  openAILoggingDir: settings.model?.openAILoggingDir,
+                  reasoningEffort: settings.model?.reasoningEffort,
+                },
+              },
+              selectedAuthType: modelConfiguration.authType,
+              env: {},
+            }).generationConfig,
+            ...modelConfiguration,
+          },
+          sources: {},
+          warnings: [],
+        }
+      : resolveCliGenerationConfig({
+          argv: {
+            model: argv.model,
+            openaiApiKey: argv.openaiApiKey,
+            openaiBaseUrl: argv.openaiBaseUrl,
+            openaiLogging: argv.openaiLogging,
+            openaiLoggingDir: argv.openaiLoggingDir,
+          },
+          settings,
+          selectedAuthType,
+          env: process.env as Record<string, string | undefined>,
+        });
 
   const { model: resolvedModel } = resolvedCliConfig;
 
@@ -2536,6 +2604,54 @@ export async function loadCliConfig(
     bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
+  // Project hooks are gated like project MCP servers (#4615): a cloned
+  // repository's `.qwen/settings.json` must not run commands unreviewed. Only
+  // a YOLO asked for on the command line skips it — a workspace can set
+  // `tools.approvalMode` itself — and only while the session stays in YOLO.
+  const commandLineYolo =
+    approvalMode === ApprovalMode.YOLO &&
+    (argv.approvalMode !== undefined || argv.yolo === true);
+  // Core loads no hooks at all under a shell execution sandbox.
+  const gateHooks = !(
+    bareMode ||
+    safeMode ||
+    settings.disableAllHooks ||
+    shellExecutionSandbox
+  );
+  // The merged block cannot tell workspace hooks apart, so it can never be
+  // approved: callers that load workspace hooks pass separated scopes.
+  const projectHooksState =
+    gateHooks && !commandLineYolo
+      ? hooksConfig
+        ? getProjectHooksApprovalState(hooksConfig.projectHooksApproval)
+        : summarizeProjectHooks(settings.hooks ?? {}).length > 0
+          ? 'pending'
+          : undefined
+      : undefined;
+  // Explicit folder trust is the co-equal authority: a trusted folder runs
+  // its project hooks without a stored approval, so the gate must not also
+  // demand one. Only an explicit rejection still withholds there — the user
+  // said no to this exact block, and trust does not override that decision.
+  // Mirror Config.isExplicitlyTrustedFolder(): IDE-reported workspace trust
+  // counts even with the feature off, as the docs promise.
+  const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+  const explicitlyTrusted =
+    (folderTrust || ideTrust !== undefined) && trustedFolder;
+  const projectHooksPendingApproval = gateHooks
+    ? projectHooksState !== undefined &&
+      projectHooksState !== 'approved' &&
+      !(explicitlyTrusted && projectHooksState !== 'rejected')
+    : undefined;
+  // Read the stored decision even under command-line YOLO: an approved block
+  // keeps its authority while the gate is exempt, without changing the
+  // exemption's pending-flag semantics.
+  const projectHooksApproved =
+    gateHooks &&
+    (projectHooksState === 'approved' ||
+      (commandLineYolo &&
+        hooksConfig?.projectHooksApproval !== undefined &&
+        getProjectHooksApprovalState(hooksConfig.projectHooksApproval) ===
+          'approved'));
   const advisorModel =
     bareMode || safeMode ? undefined : resolveAdvisorModel(argv, settings);
 
@@ -2683,6 +2799,21 @@ export async function loadCliConfig(
         hostPolicy?.executionEngine !== 'managed',
     ),
     pendingMcpServers,
+    projectHooksPendingApproval,
+    projectHooksRejected: projectHooksState === 'rejected',
+    // The stored approval is authority even while command-line YOLO exempts
+    // the gate; only a genuine approved decision sets this.
+    projectHooksApproved,
+    // The exact block the gate covers: mid-session decisions hash this
+    // startup subject, so a decision persisted for a block that changed
+    // since does not apply here.
+    projectHooksApprovalSubject: hooksConfig?.projectHooksApproval
+      ? {
+          hooks: hooksConfig.projectHooksApproval.hooks,
+          env: hooksConfig.projectHooksApproval.env,
+        }
+      : undefined,
+    projectHooksYoloExempt: commandLineYolo,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
       : undefined,
@@ -2711,6 +2842,10 @@ export async function loadCliConfig(
     usageStatisticsEnabled: resolveUsageStatisticsEnabled(
       settings.privacy?.usageStatisticsEnabled,
     ),
+    modelCatalogRefreshEnabled:
+      typeof settings.model?.catalogRefresh === 'boolean'
+        ? settings.model.catalogRefresh
+        : undefined,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
     plansDirectory: settings.plansDirectory,
@@ -2911,10 +3046,9 @@ export async function loadCliConfig(
     compactionModel: settings.compactionModel || undefined,
     imageModel: settings.imageModel || undefined,
     visionBridgeTimeoutMs: settings.visionBridgeTimeoutMs,
-    modelFallbacks: resolveModelFallbacks(
-      argv.fallbackModel,
-      settings.modelFallbacks,
-    ),
+    modelFallbacks: modelConfiguration
+      ? []
+      : resolveModelFallbacks(argv.fallbackModel, settings.modelFallbacks),
     // Use separated hooks if provided, otherwise fall back to merged hooks
     ...resolveHookSettingsForConfig(
       settings.hooks,
@@ -3022,6 +3156,26 @@ export async function loadCliConfig(
   }
 
   const config = new Config(configParams);
+  if (gateHooks && commandLineYolo) {
+    // Leaving YOLO ends the exemption: gate the hooks now, not on the next
+    // `/hooks` reload. Re-gate against the live block: a `/hooks` reload while
+    // YOLO-exempt skips the gate, so the startup snapshot may be stale. Keep
+    // listening — re-entering and leaving YOLO again must re-gate too.
+    const approval = hooksConfig?.projectHooksApproval;
+    config.onApprovalModeChange((mode) => {
+      if (mode === ApprovalMode.YOLO) return;
+      const state = applyProjectHooksApproval(
+        config,
+        projectHooksApprovalProvider
+          ? projectHooksApprovalProvider()
+          : approval,
+      );
+      void config.getHookSystem()?.reload();
+      if (state === 'pending') {
+        appEvents.emit(AppEvent.ProjectHooksPendingApprovalChanged);
+      }
+    });
+  }
   if (advisorModel) {
     validateCliAdvisorModel(config, advisorModel, {
       fastModel: settings.fastModel,

@@ -5,19 +5,24 @@ import org.apache.commons.lang3.StringUtils;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryNotEmptyException;
+import java.nio.file.FileVisitOption;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -26,6 +31,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
@@ -303,7 +309,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
                 }
                 requireSafeMetadata(commonDir);
                 return;
-            } catch (IOException | java.nio.file.InvalidPathException error) {
+            } catch (IOException | InvalidPathException error) {
                 throw ChildWorkspaceException.layout("The repository's Git metadata is unreadable");
             }
         }
@@ -346,7 +352,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
                     || !directory.toRealPath().equals(directory)) {
                 throw ChildWorkspaceException.layout("The repository's " + name + " directory is not a real directory");
             }
-            Files.walkFileTree(directory, java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class), depth,
+            Files.walkFileTree(directory, EnumSet.noneOf(FileVisitOption.class), depth,
                     new SimpleFileVisitor<>() {
                         @Override
                         public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) {
@@ -466,7 +472,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
         try {
             Files.deleteIfExists(partial);
             // CREATE_NEW never follows a link planted at the name.
-            Files.write(partial, refs, java.nio.file.StandardOpenOption.CREATE_NEW);
+            Files.write(partial, refs, StandardOpenOption.CREATE_NEW);
             Files.move(partial, record, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException error) {
             throw new ChildWorkspaceException(ChildWorkspaceException.GIT, true,
@@ -617,7 +623,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
     private static boolean occupied(Path top, String path, Map<String, Change> changes) {
         try {
             return occupiedOnDisk(top, path, changes);
-        } catch (java.nio.file.InvalidPathException error) {
+        } catch (InvalidPathException error) {
             // A name this JVM cannot spell: report it rather than guess.
             return true;
         }
@@ -966,7 +972,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
     private static boolean fileAt(Path top, String path) {
         try {
             return fileOnDisk(top, path);
-        } catch (java.nio.file.InvalidPathException error) {
+        } catch (InvalidPathException error) {
             return false;
         }
     }
@@ -1124,7 +1130,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
                     if (entry.resolve(Files.readString(gitdir).strip()).normalize().equals(gitFile)) {
                         deleteTree(entry);
                     }
-                } catch (java.nio.file.InvalidPathException | java.nio.charset.CharacterCodingException error) {
+                } catch (InvalidPathException | CharacterCodingException error) {
                     // Not a name this child's directory could have.
                 }
             }
@@ -1328,6 +1334,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
         Path err = tempFile("err");
         Path in = input;
         Process process = null;
+        boolean stopAttempted = false;
         try {
             if (in == null) {
                 in = tempFile("in");
@@ -1345,21 +1352,29 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
                 while (!process.waitFor(Math.min(LIVENESS_POLL_MS,
                         Math.max(1, (deadline - System.nanoTime()) / 1_000_000)), TimeUnit.MILLISECONDS)) {
                     if (!live.getAsBoolean()) {
+                        stopAttempted = true;
                         kill(process);
                         throw claimLost(args);
                     }
                     if (System.nanoTime() >= deadline) {
+                        stopAttempted = true;
                         kill(process);
                         throw new ChildWorkspaceException(ChildWorkspaceException.GIT, true,
                                 "git " + args.getFirst() + " timed out");
                     }
                     if (oversized(out, err)) {
+                        stopAttempted = true;
                         kill(process);
                         throw oversized(args);
                     }
                 }
             } catch (InterruptedException error) {
-                kill(process);
+                stopAttempted = true;
+                try {
+                    kill(process);
+                } finally {
+                    Thread.currentThread().interrupt();
+                }
                 throw error;
             }
             if (oversized(out, err)) {
@@ -1375,7 +1390,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
             throw new ChildWorkspaceException(ChildWorkspaceException.GIT, true,
                     "git " + args.getFirst() + " could not run", error);
         } finally {
-            if (process != null && process.isAlive()) {
+            if (process != null && process.isAlive() && !stopAttempted) {
                 kill(process);
             }
             deleteQuietly(out);
@@ -1389,25 +1404,81 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
     /**
      * Stops a command and every process it started: {@code worktree add}
      * runs a checkout in a child Git, which must not keep writing after the
-     * step gave up. The children are listed before the parent dies, when
-     * they would be reparented out of reach.
+     * step gave up. Stop leaves while their parents can still reap them;
+     * killing a parent first can strand a zombie under a non-reaping init.
+     * Every observed descendant remains part of the final stop proof.
      */
     private static void kill(Process process) {
+        boolean interrupted = Thread.interrupted();
         try {
-            List<ProcessHandle> descendants = process.descendants().toList();
-            process.destroyForcibly();
-            descendants.forEach(ProcessHandle::destroyForcibly);
+            Set<ProcessHandle> descendants = new LinkedHashSet<>();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            long reapDeadline = deadline - TimeUnit.MILLISECONDS.toNanos(500);
+            try {
+                while (System.nanoTime() < reapDeadline) {
+                    interrupted |= Thread.interrupted();
+                    observeDescendants(process, descendants);
+                    List<ProcessHandle> alive = descendants.stream().filter(ProcessHandle::isAlive).toList();
+                    if (alive.isEmpty()) {
+                        break;
+                    }
+                    Set<Long> parents = new HashSet<>();
+                    alive.forEach(child -> child.parent().ifPresent(parent -> parents.add(parent.pid())));
+                    alive.stream().filter(child -> !parents.contains(child.pid())).forEach(ProcessHandle::destroyForcibly);
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+                }
+            } finally {
+                try {
+                    observeDescendants(process, descendants);
+                } finally {
+                    forceKnownTree(process, descendants);
+                }
+            }
             while (process.isAlive() || descendants.stream().anyMatch(ProcessHandle::isAlive)) {
-                if (Thread.currentThread().isInterrupted() || System.nanoTime() >= deadline) {
+                interrupted |= Thread.interrupted();
+                if (System.nanoTime() >= deadline) {
                     throw new ChildWorkspaceException(ChildWorkspaceException.STOP_UNVERIFIED, false,
                             "The original Git process tree has no confirmed stop proof");
                 }
-                java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
             }
         } catch (RuntimeException unverified) {
             throw new ChildWorkspaceException(ChildWorkspaceException.STOP_UNVERIFIED, false,
                     "The original Git process tree has no confirmed stop proof", unverified);
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private static void observeDescendants(Process process, Set<ProcessHandle> descendants) {
+        process.descendants().forEach(descendants::add);
+        for (ProcessHandle parent : List.copyOf(descendants)) {
+            if (parent.isAlive()) {
+                parent.descendants().forEach(descendants::add);
+            }
+        }
+    }
+
+    private static void forceKnownTree(Process process, Set<ProcessHandle> descendants) {
+        List<RuntimeException> failures = new ArrayList<>();
+        for (ProcessHandle child : descendants) {
+            try {
+                child.destroyForcibly();
+            } catch (RuntimeException failure) {
+                failures.add(failure);
+            }
+        }
+        try {
+            process.destroyForcibly();
+        } catch (RuntimeException failure) {
+            failures.add(failure);
+        }
+        if (!failures.isEmpty()) {
+            var unverified = new IllegalStateException("The original Git process tree could not be signaled");
+            failures.forEach(unverified::addSuppressed);
+            throw unverified;
         }
     }
 

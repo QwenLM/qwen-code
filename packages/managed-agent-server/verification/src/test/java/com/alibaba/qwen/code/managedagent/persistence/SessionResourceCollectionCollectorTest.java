@@ -84,7 +84,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(collector.runOnce()).isTrue();
         assertThat(rows()).singleElement().satisfies(row -> assertThat(row.get("inline_bytes")).isNull());
         assertThat(((Number) ledger().get("collected_bytes")).longValue()).isEqualTo(bytes.length);
-        assertThat(jdbc.queryForObject("SELECT resource_gc_completed FROM ma_session WHERE"
+        assertThat(jdbc.queryForObject("SELECT is_resource_gc_completed FROM ma_session WHERE"
                 + " tenant_id = ? AND session_id = ?", Boolean.class, tenant, session)).isTrue();
     }
 
@@ -101,7 +101,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThatThrownBy(collector::runOnce).isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("journal collection is incomplete");
         assertThat(jdbc.queryForObject(
-                                "SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ?"
+                                "SELECT is_resource_gc_completed FROM ma_session WHERE tenant_id = ?"
                                         + " AND session_id = ?",
                 Boolean.class, tenant, session)).isFalse();
         assertThat(jdbc.queryForObject(
@@ -118,7 +118,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
                 tenant, session);
         assertThat(collector.runOnce()).isTrue();
         assertThat(jdbc.queryForObject(
-                                "SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ?"
+                                "SELECT is_resource_gc_completed FROM ma_session WHERE tenant_id = ?"
                                         + " AND session_id = ?",
                 Boolean.class, tenant, session)).isTrue();
         assertThat(jdbc.queryForObject(
@@ -287,7 +287,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         head(session);
         publish("segment", CONTENT, new byte[64]);
         retire();
-        jdbc.update("UPDATE ma_session SET recovery_protected = TRUE"
+        jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
         var collector = collector(true, Duration.ZERO);
         assertThat(collector.runOnce()).isFalse();
@@ -845,7 +845,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     void readAfterCollectionAnswersTheSessionRetiredOutcome() {
         initSession();
         head(session);
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         tx.executeWithoutResult(status -> sessions.acquireWriter(tenant, session, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer", 60000L)));
         publish("collected", CONTENT, new byte[64]);
@@ -1021,7 +1021,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     @Test
     void tamperedLiveRowStillFailsClosed() {
         initSession();
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         tx.executeWithoutResult(status -> sessions.acquireWriter(tenant, session, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer", 60000L)));
         publish("tampered", CONTENT, new byte[64]);
@@ -1124,7 +1124,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     void collectsRowsPublishedThroughTheRealProducerByteExact() {
         initSession();
         head(session);
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         var grant = tx.execute(status -> sessions.acquireWriter(tenant, session, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer", 60000L)));
         publishThroughStore(sessions, grant.writerGeneration(), "produced-content", CONTENT, new byte[1024]);
@@ -1375,7 +1375,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
                         com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, "media-other"), "media-outcome"));
         assertThat(MEDIA_JSON.readTree(bytes).path("functionResponse").path("parts").get(0)
                 .path("inlineData").path("data").asText()).isEqualTo("AQID");
-        byte[] history = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).readResource(tenant, "workspace-1", session,
+        byte[] history = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).readResource(tenant, "workspace-1", session,
                 original.path("historyRef").path("resourceId").asText(), MEDIA_TOKEN).bytes();
         assertThat(history).isEqualTo(Base64.getDecoder().decode(
                 original.required("historyBytesBase64").textValue()));
@@ -1412,12 +1412,12 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(ledger().get("collected_bytes")).isEqualTo(expected);
         assertThat(collector(true, Duration.ZERO).runOnce()).isFalse();
         assertThat(ledger().get("collected_bytes")).isEqualTo(expected);
-        assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).readResource(tenant, "workspace-1",
+        assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).readResource(tenant, "workspace-1",
                 session, "media-outcome", MEDIA_TOKEN))
                 .hasFieldOrPropertyWithValue("code", "tool_output_session_retired");
         assertThatThrownBy(() -> readRecoveryMedia(original)).hasMessageContaining("resource_collected");
         assertMediaReadable("media-other", bytes);
-        assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).transactions(tenant, "workspace-1", "media-other",
+        assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).transactions(tenant, "workspace-1", "media-other",
                 MEDIA_TOKEN, 0, 100).transactions()).hasSize(other.required("transactions").size());
     }
 
@@ -1432,7 +1432,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
                 + " session_scope_key = ?", Long.class, resScope);
         boolean reader = "reader".equals(protection);
         if (!reader) {
-            tx.executeWithoutResult(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).blockRecovery(tenant,
+            tx.executeWithoutResult(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).blockRecovery(tenant,
                     session, MEDIA_TOKEN, new ManagedSessionStoreModels.BlockRecoveryRequest(
                             "workspace-1", "media-writer", 1, "BLOCKED_RESOURCE", "media_evidence")));
         }
@@ -1502,7 +1502,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
             }
         }
         JsonNode fixture = MEDIA_JSON.readTree(output.toFile());
-        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         tx.executeWithoutResult(status -> store.acquireWriter(tenant, sessionId, MEDIA_TOKEN,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "media-writer", 60000L)));
         for (JsonNode transaction : fixture.required("transactions")) {
@@ -1517,7 +1517,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     }
 
     private void assertMediaReadable(String sessionId, byte[] expected) {
-        assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).readResource(tenant, "workspace-1", sessionId,
+        assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).readResource(tenant, "workspace-1", sessionId,
                 "media-outcome", MEDIA_TOKEN).bytes()).isEqualTo(expected);
     }
 
@@ -1533,7 +1533,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     }
 
     private void sealMedia(String sessionId) {
-        tx.executeWithoutResult(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).sealWriter(tenant,
+        tx.executeWithoutResult(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).sealWriter(tenant,
                 sessionId, MEDIA_TOKEN, new ManagedSessionStoreModels.SealWriterRequest(
                         "workspace-1", "media-writer", 1)));
     }
@@ -1562,7 +1562,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     void mcpEvidenceSurvivesReopenAndConnectionReleaseUntilRetirement(String operationKind)
             throws Exception {
         initSession();
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         var journal = tx.execute(status -> new ExtensionRecordJournal(sessions, tenant,
                 "workspace-1", session).open());
         JsonNode templates = new ObjectMapper().readTree(Files.readString(VerificationFixtures.moduleRoot().resolve("../core/src/managed-runtime/contracts/managed-mcp-record-v1.fixtures.json")))

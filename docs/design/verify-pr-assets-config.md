@@ -43,7 +43,8 @@ that never changes between rounds should be configured once.
   unset, so the skill keeps reading the variables it already documents and a
   one-off export still wins.
 - The skill states the three-tier order — flag, variable (export, `.env`, or
-  settings), default — and keeps publishing consent per invocation.
+  settings), default — and leaves publishing consent to the skill's
+  session-consent rule, never to a coordinate.
 
 ## Design decisions
 
@@ -72,7 +73,9 @@ that never changes between rounds should be configured once.
 - The bridge runs from `loadSettings` where the environment is applied. Callers
   that skip environment loading are per-request config reads and do not need
   it.
-- Coordinates are not consent: `--publish` still gates every comment, and the
+- Coordinates are not consent: every comment still requires an explicit
+  publish request — given in the round's invocation or inherited within the
+  same session as the skill's **Manual re-verification** defines — and the
   pre-post guard and read-back are unchanged.
 
 ## Validation plan
