@@ -547,9 +547,8 @@ ready servers.
 It depends on the sandbox mode.
 
 The tool execution sandbox (`tools.executionSandbox`) cannot be combined with
-LSP. Starting Qwen Code with `--experimental-lsp` while it is configured fails
-with `tools.executionSandbox does not yet support ACP, worktree management, LSP,
-MCP, extensions or provisional workspaces.` See [Sandbox](./sandbox.md).
+LSP. The CLI refuses `--experimental-lsp` together with `tools.executionSandbox`
+at startup. See [Sandbox](./sandbox.md).
 
 A whole-CLI sandbox (a container or similar environment that runs the entire
 CLI) works, subject to that environment. Qwen Code starts `stdio` language
