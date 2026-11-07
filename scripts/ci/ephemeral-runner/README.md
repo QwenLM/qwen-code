@@ -138,3 +138,22 @@ been verified. Changing it affects newly evaluated jobs; cancel queued work and
 start a new workflow run when rolling back. It does not detect idle runners or
 migrate a queued job automatically.
 Set `EXTERNAL_PR_EPHEMERAL_ARCH=arm64` for an ARM64 pool; the default is x64.
+
+## Validate the CI lanes
+
+Keep trial runners on only `ecs-qwen-ephemeral-smoke`. Dispatch the existing CI
+workflow from a reviewed branch, pinning its checkout to that branch's exact
+head SHA:
+
+```sh
+gh workflow run ci.yml --repo QwenLM/qwen-code --ref <reviewed-branch> -f branch_ref=<reviewed-head-sha> -f linux_runner=ephemeral-trial
+```
+
+This runs the build, eight Linux unit shards, lint and three no-AK integration
+shards on the disposable pool. macOS, Windows and browser lanes are excluded;
+result gates use hosted runners. The trial does not use the shared build cache.
+The global kill-switch still wins. Normal dispatch and PR routes are unchanged.
+Run only reviewed code on the shared trial host; this option does not enable
+external PRs or solve the rollout gates above. Use the example resource limits
+and at least a three-hour TTL for the five-slot trial, then inspect actual run
+results and cleanup before enabling any broader route.

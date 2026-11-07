@@ -451,6 +451,34 @@ describe('ci.yml lint_runner routing', () => {
 });
 
 describe('ci.yml disposable runner routing', () => {
+  it('uses only the trial label for an explicit manual trial and honors the kill-switch', () => {
+    assert.ok(
+      ciDoc.on.workflow_dispatch.inputs.linux_runner.options.includes(
+        'ephemeral-trial',
+      ),
+    );
+    for (const ecsDisabled of [false, true]) {
+      const out = runPickRunnerOutputs({
+        eventName: 'workflow_dispatch',
+        dispatch: 'ephemeral-trial',
+        ecsDisabled,
+      });
+      assert.equal(out.ubuntuRunner, HOSTED);
+      assert.equal(
+        out.prTestRunner,
+        ecsDisabled ? HOSTED : '["ecs-qwen-ephemeral-smoke"]',
+      );
+      assert.equal(out.lintRunner, out.prTestRunner);
+    }
+    const pr = runPickRunnerOutputs({
+      eventName: 'pull_request',
+      sameRepo: false,
+      assoc: 'NONE',
+      dispatch: 'ephemeral-trial',
+    });
+    assert.equal(pr.prTestRunner, HOSTED);
+  });
+
   it('keeps all selected fork jobs hosted unless the switch is exactly true', () => {
     for (const ephemeralEnabled of [undefined, '', 'false', 'invalid']) {
       const out = runPickRunnerOutputs({

@@ -620,7 +620,7 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
 // Any context term the substitutions do not model throws rather than reading
 // as false, so a gate that grows a new input is re-read here instead of
 // silently degrading this guard.
-const gateRunsOn = (cond, event) => {
+const gateRunsOn = (cond, event, linuxRunner = 'self-hosted') => {
   if (String(cond ?? '').trim() === '') return true;
   let e = String(cond)
     .replace(/\$\{\{/g, ' ')
@@ -632,6 +632,7 @@ const gateRunsOn = (cond, event) => {
     [/cancelled\(\)/g, 'false'],
     [/always\(\)/g, 'true'],
     [/github\.event_name/g, `"${event}"`],
+    [/github\.event\.inputs\.linux_runner/g, JSON.stringify(linuxRunner)],
     // These pins model a normal run: a gate keyed on any other value of a
     // modeled output (e.g. `ci_profile != 'full'`, `skip_ci == 'true'`)
     // evaluates here at the pin and may mis-report its reachability —
@@ -1663,7 +1664,7 @@ describe('post-merge push lane', () => {
     }
   });
 
-  it('pins the two PR-only lanes to their whole checkout ref', () => {
+  it('pins the two non-push lanes to their whole checkout ref', () => {
     // Same order contract as above, for the two lanes that carry no push arm
     // and so cannot join that loop. Whole literal, not a substring: moving
     // `|| github.ref` ahead of the pull-request arm keeps every token in
@@ -1675,7 +1676,7 @@ describe('post-merge push lane', () => {
       web_shell_e2e_smoke:
         "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.ref }}",
       integration_no_ak:
-        "${{ (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}",
+        "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}",
     };
     for (const [job, ref] of Object.entries(expectedRefs)) {
       const checkout = (ci.jobs[job].steps ?? []).find((s) =>
@@ -2149,4 +2150,24 @@ process.exit(result.status ?? 1);
       }
     });
   }
+});
+
+it('manual ephemeral trials reach only the disposable Linux lanes and result gates', () => {
+  const selected = Object.entries(ci.jobs)
+    .filter(([, job]) =>
+      gateRunsOn(job.if, 'workflow_dispatch', 'ephemeral-trial'),
+    )
+    .map(([name]) => name)
+    .sort();
+  expect(selected).toEqual(
+    [
+      'classify_pr',
+      'test_build',
+      'test',
+      'test_ubuntu',
+      'lint_and_static',
+      'integration_no_ak',
+      'integration_no_ak_result',
+    ].sort(),
+  );
 });

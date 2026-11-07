@@ -479,7 +479,7 @@ describe('no-AK integration CI wiring', () => {
       .find((line) => line.startsWith('    if:'));
     expect(jobIf).toContain("needs.classify_pr.outputs.skip_ci != 'true'");
     expect(jobIf).toContain(
-      "(github.event_name == 'pull_request' || github.event_name == 'merge_group')",
+      "(github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.event.inputs.linux_runner == 'ephemeral-trial'))",
     );
     // Event PR head SHA on pull_request, queue head on merge_group — the same
     // shape the Ubuntu gate uses, so this check tests the pushed tree, not
@@ -776,7 +776,7 @@ describe('no-AK integration CI wiring', () => {
       "expected_sha: '${{ github.event.merge_group.head_sha }}'",
     );
     expect(guardCalls.integration_no_ak).toContain(
-      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
+      'expected_sha: "${{ github.event.inputs.branch_ref || (github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha) }}"',
     );
 
     // The run conditions are part of the guard's contract: scoping a guard to
