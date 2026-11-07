@@ -243,8 +243,8 @@ class SessionLifecycleCoordinatorTest {
         var jdbc = new ManagedSchemaJdbcTemplate(source);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES ('tenant', 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
                 WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
@@ -267,7 +267,7 @@ class SessionLifecycleCoordinatorTest {
             public CompletionStage<Void> drain(String id) { throw new AssertionError("Accepted bound close must keep its original scope"); }
         };
         try (var executor = Executors.newSingleThreadExecutor()) {
-            var coordinator = new SessionLifecycleCoordinator(store, com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)),
+            var coordinator = new SessionLifecycleCoordinator(store, com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc),
                     new UnavailableHarnessConnector(), unsupported, new ChildResultRelayStore(jdbc),
                     new ObjectMapper(), admissions(store, unsupported), noTurnCancels(), brokerProvider(null), executor,
                     Clock.systemUTC(), properties);
@@ -375,8 +375,8 @@ class SessionLifecycleCoordinatorTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getDispatch().setLeaseDuration(Duration.ofMillis(200));
         properties.getDispatch().setRetryInitialDelay(Duration.ofMillis(50));
-        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(),
-                Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(),
+                Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state)"
@@ -674,7 +674,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(true, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(false, false), world.relayStore,
                     new ObjectMapper(), admissions(world.store,
                             warmer(false, false)),
@@ -712,7 +712,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(true, true);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     noTurnCancels(),
@@ -772,7 +772,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(true, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     noTurnCancels(),
@@ -843,7 +843,7 @@ class SessionLifecycleCoordinatorTest {
             };
             try (var executor = Executors.newSingleThreadExecutor()) {
                 var coordinator = new SessionLifecycleCoordinator(world.store,
-                        com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                        com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                         warmer(true, false), world.relayStore, new ObjectMapper(),
                         admissions(world.store, warmer(true, false)),
                         noTurnCancels(),
@@ -908,7 +908,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(false, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, true), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, true)),
                     noTurnCancels(),
@@ -957,7 +957,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(true, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     noTurnCancels(),
@@ -996,7 +996,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(true, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     noTurnCancels(),
@@ -1064,7 +1064,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(true, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     noTurnCancels(),
@@ -1099,7 +1099,7 @@ class SessionLifecycleCoordinatorTest {
         liveScope(world, "{\"inputRef\":{\"resourceId\":\"res-input\"}}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, completed_at, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'FAILED', FALSE, 1, 2, 2, 1)",
@@ -1107,7 +1107,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(true, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     noTurnCancels(),
@@ -1143,7 +1143,7 @@ class SessionLifecycleCoordinatorTest {
         liveScope(world, "{\"inputRef\":{\"resourceId\":\"res-input\"}}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, completed_at, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'COMPLETED', TRUE, 1, 2, 2, 1)",
@@ -1151,7 +1151,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(true, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     noTurnCancels(),
@@ -1193,7 +1193,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(true, true);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     noTurnCancels(),
@@ -1246,7 +1246,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(true, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     noTurnCancels(),
@@ -1291,7 +1291,7 @@ class SessionLifecycleCoordinatorTest {
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(
                     lifecycleWorld.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(lifecycleWorld.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(lifecycleWorld.jdbc), harness,
                     warmer(true, false), lifecycleWorld.relayStore,
                     new ObjectMapper(), admissions(lifecycleWorld.store,
                             warmer(true, false)),
@@ -1340,7 +1340,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(true, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     noTurnCancels(),
@@ -1385,7 +1385,7 @@ class SessionLifecycleCoordinatorTest {
         // nothing but a keyed cancel can move it.
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', '" + initialTurnStatus + "', TRUE, 1, 2, 1)",
@@ -1406,7 +1406,7 @@ class SessionLifecycleCoordinatorTest {
                 world.child, "run-1", "turn-1");
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     sessions,
@@ -1471,7 +1471,7 @@ class SessionLifecycleCoordinatorTest {
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
@@ -1494,7 +1494,7 @@ class SessionLifecycleCoordinatorTest {
                 world.child, "run-1", "turn-1");
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     sessions,
@@ -1544,7 +1544,7 @@ class SessionLifecycleCoordinatorTest {
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
@@ -1566,7 +1566,7 @@ class SessionLifecycleCoordinatorTest {
                 world.child, "run-1", "turn-1");
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     sessions,
@@ -1606,7 +1606,7 @@ class SessionLifecycleCoordinatorTest {
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
@@ -1619,7 +1619,7 @@ class SessionLifecycleCoordinatorTest {
         ManagedAgentService sessions = Mockito.mock(ManagedAgentService.class);
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     sessions,
@@ -1653,7 +1653,7 @@ class SessionLifecycleCoordinatorTest {
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
@@ -1680,7 +1680,7 @@ class SessionLifecycleCoordinatorTest {
                 world.child, "run-1", "turn-1");
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     sessions,
@@ -1721,7 +1721,7 @@ class SessionLifecycleCoordinatorTest {
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
                         + " session_id, turn_id, prompt_id, input_json,"
-                        + " payload_digest, status, submission_attempted,"
+                        + " payload_digest, status, is_submission_attempted,"
                         + " gmt_create, gmt_modified, version)"
                         + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
                         + " 'd', 'RUNNING', TRUE, 1, 2, 1)",
@@ -1746,7 +1746,7 @@ class SessionLifecycleCoordinatorTest {
                 world.child, "run-1", "turn-1");
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(world.store,
-                    com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(world.jdbc)), harness,
+                    com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
                     admissions(world.store, warmer(true, false)),
                     sessions,

@@ -95,6 +95,20 @@ export interface DaemonStandaloneConnectionState {
   errorCode?: string;
 }
 
+export interface DaemonWorkflowMode {
+  requested: boolean;
+  available: boolean;
+  effective: boolean;
+  reason?: string;
+}
+
+export type DaemonWorkflowModeStatus =
+  | 'unbound'
+  | 'unknown'
+  | 'syncing'
+  | 'ready'
+  | 'unsupported';
+
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
   runtimeStopped?: boolean;
@@ -132,6 +146,9 @@ export interface DaemonConnectionState {
   models?: DaemonModelInfo[];
   currentModel?: string;
   reasoning?: DaemonReasoningControls;
+  workflowMode?: DaemonWorkflowMode;
+  workflowModeStatus?: DaemonWorkflowModeStatus;
+  workflowModePending?: boolean;
   currentMode?: string;
   planExecutionMode?: string;
   displayName?: string;
@@ -141,6 +158,8 @@ export interface DaemonConnectionState {
   /** Authoritative Goal v2 state for the current session. */
   goalState?: GoalSnapshotV2;
   backgroundTurn?: DaemonBackgroundTurn;
+  /** Browser-owned send, including the gap before an authoritative user echo. */
+  localPrompt?: { sessionId: string; startedAt: number };
   /** Stops a lagging live-state snapshot from reviving the finished execution. */
   finishedBackgroundTurnId?: string;
   /** Local monotonic time; orders background events against live-state requests. */
@@ -321,6 +340,7 @@ export type DaemonNoticeOperation =
   | 'send_shell_command'
   | 'switch_model'
   | 'set_reasoning_effort'
+  | 'set_workflow_mode'
   | 'set_approval_mode'
   | 'submit_permission'
   | 'cancel_prompt'
@@ -548,8 +568,10 @@ export interface DaemonSessionActions {
       workspaceCwd: string;
       sessionId?: string;
     }) => void | Promise<void>,
+    options?: { reloadProviders?: boolean },
   ): Promise<void>;
 
+  setWorkflowMode(requested: boolean): Promise<void>;
   setReasoningEffort(
     value: ReasoningSelection,
     opts?: { persist?: boolean },
@@ -627,7 +649,10 @@ export interface DaemonSessionActions {
   releaseSession(sessionId: string): Promise<void>;
   closeSession(): Promise<void>;
   refreshCommands(): Promise<void>;
-  getContext(): Promise<DaemonSessionContextStatus>;
+  getContext(opts?: {
+    /** Rethrow transient failures without recording a notice. */
+    silent?: boolean;
+  }): Promise<DaemonSessionContextStatus>;
   getContextUsage(opts?: {
     detail?: boolean;
     /** Reconcile composer counters after compression, without changing billing usage. */

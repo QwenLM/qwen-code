@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceProvider;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
@@ -26,20 +26,20 @@ import java.util.concurrent.CompletionStage;
 
 public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
     private final RuntimeBrokerOperations service;
-    private final AgentStateStore store;
+    private final SessionQueryStore store;
     private final WorkspaceRuntimeResolver workspaces;
     private final ChildWorkspaceProvider childWorkspaces;
     private final ResidentWorkspaceCatalog residents;
     private final boolean resident;
     private final SshWorkspaceService ssh;
-    private final RuntimeProvisioner localProvisioner;
+    private final RuntimeProvisioner primaryProvisioner;
     private final RuntimeBindingRepository extensionBindings;
     private final WorkspacePhysicalTransport extensionTransport;
     private final java.util.Set<String> retired = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private static final java.util.Set<String> LIFECYCLE_FENCED = java.util.Set.of("CLOSING", "CLOSED", "ARCHIVING", "ARCHIVED", "DELETING", "DELETED");
-    public ManagedRuntimeCoordinator(RuntimeBrokerOperations service, AgentStateStore store, WorkspaceRuntimeResolver workspaces,
+    public ManagedRuntimeCoordinator(RuntimeBrokerOperations service, SessionQueryStore store, WorkspaceRuntimeResolver workspaces,
             ChildWorkspaceProvider childWorkspaces, ResidentWorkspaceCatalog residents, boolean resident,
-            SshWorkspaceService ssh, RuntimeProvisioner localProvisioner, RuntimeBindingRepository extensionBindings,
+            SshWorkspaceService ssh, RuntimeProvisioner primaryProvisioner, RuntimeBindingRepository extensionBindings,
             WorkspacePhysicalTransport extensionTransport) {
         this.service = service;
         this.store = store;
@@ -48,11 +48,11 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
         this.residents = residents;
         this.resident = resident;
         this.ssh = ssh;
-        this.localProvisioner = localProvisioner;
+        this.primaryProvisioner = primaryProvisioner;
         this.extensionBindings = extensionBindings;
         this.extensionTransport = extensionTransport;
     }
-    public static HarnessSessionResolver resolver(AgentStateStore store, WorkspaceRuntimeResolver workspaces,
+    public static HarnessSessionResolver resolver(SessionQueryStore store, WorkspaceRuntimeResolver workspaces,
             ManagedAgentSettings properties, String workspaceId, String workspaceCwd) {
         var broker = properties.getRuntimeBroker();
         return new HarnessSessionResolver() {
@@ -111,6 +111,11 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
                                     "workspace_unavailable",
                                     "Hosted Workspace execution is not available.",
                                     false));
+                }
+                if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS
+                        .equals(broker.getProvisioner())) {
+                    return CompletableFuture.failedFuture(
+                            com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable());
                 }
                 // The durable row is the admission fence for closing/closed,
                 // archived and deleted Sessions: unlike the in-process
@@ -251,6 +256,9 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
 
     @Override
     public boolean supportsWorkspaceContextChange(ContextBinding binding) {
+        if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(primaryProvisioner.kind())) {
+            return supportsWorkspaceClose(binding);
+        }
         return residents.find(binding) == null;
     }
 
@@ -263,7 +271,8 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
             ssh.node(ssh.runtimeStorage(binding).nodeId());
             return true;
         }
-        return localProvisioner.supportsDrainedStop();
+        return !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS
+                .equals(primaryProvisioner.kind()) && primaryProvisioner.supportsDrainedStop();
     }
 
     @Override

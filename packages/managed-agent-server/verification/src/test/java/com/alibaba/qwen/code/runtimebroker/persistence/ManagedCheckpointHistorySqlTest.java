@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.runtimebroker.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
@@ -50,7 +49,7 @@ public class ManagedCheckpointHistorySqlTest {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
-        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String session = UUID.randomUUID().toString();
         original = new JdbcCsiFilesRetirementGuard.Original(CsiFilesRetirementProfile.request(new ContextBinding(
                 "tenant", "workspace", 1, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
@@ -175,7 +174,7 @@ public class ManagedCheckpointHistorySqlTest {
                 .put("recordBytesBase64", Base64.getEncoder().encodeToString(records.getBytes(StandardCharsets.UTF_8)));
         commit.putArray("resources").add(active).add(resource("root", "managed-checkpoint", root.toString())).add(pageRef);
         var request = JSON.treeToValue(commit, ManagedSessionStoreModels.CommitTransactionRequest.class);
-        transaction.execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).commit("tenant", original.request().getIsolationKey(),
+        transaction.execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).commit("tenant", original.request().getIsolationKey(),
                 "a".repeat(32), request));
         return root;
     }

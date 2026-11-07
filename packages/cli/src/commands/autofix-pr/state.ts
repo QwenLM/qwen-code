@@ -34,6 +34,7 @@ import {
 } from '../review/lib/gh.js';
 import { git, gitOpt, repoRoot } from '../review/lib/git.js';
 import { normalizeSegment } from '../review/lib/remote-match.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 export const REPLY_MARKER = '<!-- qwen-autofix-pr:v1 -->';
 
@@ -100,12 +101,47 @@ export interface AutofixPrState {
   watch?: AutofixPrWatchOptions;
   /** What rounds left for a person, newest last, for `status`. */
   needsHuman?: NeedsHumanItem[];
+  /** The `needsHuman` lines a summary that reached the PR has reported, and
+   * the head it reported them on. Kept apart from `needsHuman`, which is
+   * recorded before any POST so `status` survives a later failure: this one
+   * advances only on a delivered (or adopted) summary, so a report that never
+   * arrived stays due on the next run. */
+  reportedNeedsHuman?: { sha: string; texts: string[] };
   /** When `prepare` made this state (ISO 8601): a gate cursor older than
    * it is a former watch's, which `status` does not report. */
   preparedAt?: string;
   /** Set by a `cleanup` that kept the worktree: the watch is over, and the
    * helpers of its rounds refuse until a start (`prepare`) resumes it. */
   ended?: { at: string; reason: string };
+  /** Checks a round saw failing and has not seen pass since, written by
+   * `snapshot`: the budget of fix pushes per failing check (Section 10). */
+  failingChecks?: FailingCheck[];
+}
+
+export interface FailingCheck {
+  /** The check across its attempts: app, workflow, trigger and name. */
+  identity: string;
+  /** Its name, as the round reports it. */
+  check: string;
+  /** The head a round last saw it fail on. */
+  head: string;
+  /** Heads of this watch's own pushes it failed on again since a round
+   * first saw it fail. */
+  pushes: number;
+  /** The latest push of the watch the record counts from: only a push the
+   * watch made after this one spends another, so a return to an earlier
+   * push does not count twice. */
+  lastPush?: string;
+  /** Heads the count has no result for yet — still running, or not
+   * answered — oldest first, each with the record's `pushes` once that
+   * read counted: a pass found there later leaves only the pushes counted
+   * since. */
+  unanswered?: UnansweredHead[];
+}
+
+export interface UnansweredHead {
+  sha: string;
+  pushes: number;
 }
 
 export interface AutofixPrWatchOptions {
@@ -147,6 +183,9 @@ export interface PendingPost {
   bodyHash: string;
   /** The head the reply was posted on: a summary reports that head's push. */
   sha: string;
+  /** For a summary: the `needsHuman` lines its body reports, so adopting it
+   * marks exactly those as reported, never a later plan's. */
+  needsHuman?: string[];
 }
 
 /**
@@ -186,6 +225,40 @@ export function rerunFloors(state: {
 
 /** Pushes one watch may make before it stops (Section 10 of the design). */
 export const MAX_PUSHES = 10;
+
+/** Pushes of a watch a check may go on failing across before a round
+ * leaves it for a person instead of fixing it again (Section 10). */
+export const MAX_CHECK_FIX_PUSHES = 3;
+
+/** Checks `failingChecks` keeps, the most recently added last. */
+export const MAX_FAILING_CHECKS = 100;
+
+/**
+ * The state with `head` as the head the watch knows. A head the watch did
+ * not push is someone else's: it gives every check its fix pushes back,
+ * counted again from the watch's latest push (Section 10) — whether or not
+ * a round ever reads it, as one a fix merged in before pushing.
+ */
+export function withKnownHead(
+  state: AutofixPrState,
+  head: string,
+): AutofixPrState {
+  if (state.pushedShas.includes(head) || !state.failingChecks?.length) {
+    return { ...state, lastKnownHeadSha: head };
+  }
+  const lastPush = state.pushedShas.at(-1);
+  return {
+    ...state,
+    lastKnownHeadSha: head,
+    failingChecks: state.failingChecks.map((record) => ({
+      identity: record.identity,
+      check: record.check,
+      head: record.head,
+      pushes: 0,
+      ...(lastPush === undefined ? {} : { lastPush }),
+    })),
+  };
+}
 
 /** Key of one failed attempt of a check on a head, as the gate cursor keys it. */
 export function checkAttemptKey(
@@ -776,7 +849,8 @@ function isPendingPost(value: unknown): value is PendingPost {
     (post.where === 'summary' || Number.isInteger(post.where)) &&
     isStringList(post.handled) &&
     typeof post.bodyHash === 'string' &&
-    typeof post.sha === 'string'
+    typeof post.sha === 'string' &&
+    (post.needsHuman === undefined || isStringList(post.needsHuman))
   );
 }
 
@@ -873,6 +947,18 @@ export function stateDefect(state: AutofixPrState): string | null {
   ) {
     return 'needsHuman';
   }
+  if (
+    state.reportedNeedsHuman !== undefined &&
+    !(
+      typeof state.reportedNeedsHuman === 'object' &&
+      state.reportedNeedsHuman !== null &&
+      typeof state.reportedNeedsHuman.sha === 'string' &&
+      SHA_RE.test(state.reportedNeedsHuman.sha) &&
+      isStringList(state.reportedNeedsHuman.texts)
+    )
+  ) {
+    return 'reportedNeedsHuman';
+  }
   if (state.preparedAt !== undefined && typeof state.preparedAt !== 'string') {
     return 'preparedAt';
   }
@@ -887,7 +973,42 @@ export function stateDefect(state: AutofixPrState): string | null {
   ) {
     return 'ended';
   }
+  if (
+    state.failingChecks !== undefined &&
+    !(
+      Array.isArray(state.failingChecks) &&
+      state.failingChecks.every(isFailingCheck)
+    )
+  ) {
+    return 'failingChecks';
+  }
   return null;
+}
+
+function isFailingCheck(value: unknown): value is FailingCheck {
+  const check = value as FailingCheck | null;
+  return (
+    typeof check === 'object' &&
+    check !== null &&
+    typeof check.identity === 'string' &&
+    typeof check.check === 'string' &&
+    typeof check.head === 'string' &&
+    Number.isInteger(check.pushes) &&
+    check.pushes >= 0 &&
+    SHA_RE.test(check.head) &&
+    (check.lastPush === undefined || SHA_RE.test(check.lastPush)) &&
+    (check.unanswered === undefined ||
+      (Array.isArray(check.unanswered) &&
+        check.unanswered.every(
+          (entry: UnansweredHead | null) =>
+            typeof entry === 'object' &&
+            entry !== null &&
+            typeof entry.sha === 'string' &&
+            SHA_RE.test(entry.sha) &&
+            Number.isInteger(entry.pushes) &&
+            entry.pushes >= 0,
+        )))
+  );
 }
 
 function isWatchOptions(value: unknown): value is AutofixPrWatchOptions {
@@ -951,7 +1072,8 @@ export function readState(statePath: string): AutofixPrState | null {
   }
   // The fields these hold, and nothing else: what reaches `status`, a
   // rebuilt state and the next write is what the helpers wrote.
-  const { watch, ended, needsHuman } = parsed;
+  const { watch, ended, needsHuman, reportedNeedsHuman, failingChecks } =
+    parsed;
   return {
     ...parsed,
     ...(watch
@@ -972,6 +1094,35 @@ export function readState(statePath: string): AutofixPrState | null {
             at,
             text,
           })),
+        }
+      : {}),
+    ...(reportedNeedsHuman
+      ? {
+          reportedNeedsHuman: {
+            sha: reportedNeedsHuman.sha,
+            texts: [...reportedNeedsHuman.texts],
+          },
+        }
+      : {}),
+    ...(failingChecks
+      ? {
+          failingChecks: failingChecks.map(
+            ({ identity, check, head, pushes, lastPush, unanswered }) => ({
+              identity,
+              check,
+              head,
+              pushes,
+              ...(lastPush === undefined ? {} : { lastPush }),
+              ...(unanswered === undefined
+                ? {}
+                : {
+                    unanswered: unanswered.map(({ sha, pushes }) => ({
+                      sha,
+                      pushes,
+                    })),
+                  }),
+            }),
+          ),
         }
       : {}),
   };
@@ -1163,7 +1314,19 @@ export function withWatchLock<T>(
     id: randomUUID(),
   } satisfies LockToken);
   const pending = `${lockPath}.${randomUUID()}`;
-  writeFileSync(pending, token, { flag: 'wx' });
+  try {
+    writeFileSync(pending, token, { flag: 'wx' });
+  } catch (err) {
+    // No directory to hold the lock: no watch was ever prepared here, or
+    // its files were removed since. `prepare` makes the directory first.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new AutofixPrRefusal(
+        'not_prepared',
+        `PR #${prNumber} is not prepared here; run \`qwen autofix-pr prepare ${prNumber} --repo <owner>/<repo>\` first.`,
+      );
+    }
+    throw err;
+  }
   try {
     for (let attempt = 0; ; attempt += 1) {
       if (takeLock(pending, lockPath, token)) break;
@@ -1195,7 +1358,8 @@ export function withWatchLock<T>(
         if (breakStaleLock(lockPath, held, pending)) break;
         continue;
       }
-      throw new Error(
+      throw new AutofixPrRefusal(
+        'busy',
         `another autofix-pr helper is working on PR #${prNumber}; run one at a time (a lock left by a helper that was killed expires after ${LOCK_STALE_MS / 60_000} minutes, or \`qwen autofix-pr cleanup ${prNumber} --force\` removes it).`,
       );
     }
@@ -1305,7 +1469,8 @@ export function requireState(
 ): AutofixPrState {
   const state = readState(statePath);
   if (!state) {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'not_prepared',
       `PR #${prNumber} is not prepared here; run \`qwen autofix-pr prepare ${prNumber} --repo <owner>/<repo>\` first.`,
     );
   }
@@ -1334,14 +1499,16 @@ export function taskArg(argv: Record<string, unknown>): string | undefined {
 export function assertWatching(state: AutofixPrState, task?: string): void {
   // First: a stopped watch says so to whichever session asks.
   if (state.ended) {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'watch_stopped',
       `PR #${state.prNumber}'s watch was stopped (${state.ended.reason}); ` +
         `its worktree was kept. Start it again with /autofix-pr ${state.prNumber}.`,
     );
   }
   assertOwnedBySession(state);
   if (task !== undefined && state.watch?.task !== task) {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'task_replaced',
       `task ${task} no longer drives PR #${state.prNumber}'s watch; ` +
         `delete the task whose gate has --task ${task}` +
         (state.watch?.task
@@ -1361,7 +1528,8 @@ export function ghNotFound(err: unknown): boolean {
 export function assertOwnedBySession(state: AutofixPrState): void {
   const sessionId = currentSessionId();
   if (state.sessionId !== sessionId) {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'watched_elsewhere',
       `PR #${state.prNumber} is watched by another session ` +
         `(${state.sessionId || 'no session'}). Take it over with ` +
         (state.watch

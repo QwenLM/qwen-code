@@ -187,7 +187,10 @@ gen2（gen3 不传）。在 `commitDurableWait` 之后打日志
 - **profile 假设。** 多调用 native 捕获依赖于夹具是非 shell file profile（由
   现有单调用捕获推导）；.75 head 运行必须确认两调用 plan 确实捕获。
 - **钩子惰性。** 钩子绝不能影响生产：env 在 runner 之外绝不设置、fire-once、
-  感知 abort 的 hold。单测把不匹配 session 的用例排在匹配用例之前。
+  感知 abort 的 hold。惰性由源码文本契约钉（default-off 标志、env 只传给崩溃代、
+  已 allowlist 的 `process.env` 读取）与真机 M1 红钉住；非可选的 `sessionId` 类型
+  意味着未设置的 env 永远无法匹配真实 session。专用行为单测（匹配/不匹配/abort）
+  延后——见开放问题。
 - **CI 预算。** 多一条臂抬 `hosted-failover-e2e` 的上限与 timeout；契约钉住两者。
 
 ## 验证计划
@@ -197,10 +200,15 @@ gen2（gen3 不传）。在 `commitDurableWait` 之后打日志
   terminal、恢复 plan 深相等、Action ID 与 deadline 保留、Allow[1] 之前 sibling[0]
   仍 decided 且未被重问、scrash 后仅凭 MySQL 恢复。
 - **实测变异红**（绿色证据需要红）。真机：M1 禁用钩子 → barrier 超时；M2 跳过
-  pending 兄弟决策 → terminal 超时；M3 反转恢复 plan → 恢复阻塞；R1-4 恢复重问
-  已决兄弟 → 答复前的已决兄弟检查变红；R1-5 逆序派发 → `settled_at` plan 顺序
-  检查变红。Fast-tier：R1-6 first-match 计划链接选择 → 行为化升序链接用例变红；
-  R1-7 收窄执行计数分支 → 锚定契约钉变红。
+  pending 兄弟决策 → terminal 超时；M3 反转恢复 plan → 恢复阻塞。Fast-tier
+  契约钉：R1-4 已决兄弟状态检查（`decided` → `requested`）让答复前的钉变红；
+  R1-5 执行顺序列（`settled_at`）变异让 plan 顺序钉变红；R1-6 first-match 计划
+  链接选择 → 行为化升序链接用例变红；R1-7 收窄执行计数分支 → 锚定契约钉变红。
+  R1-4/R1-5 检查是纵深防御，并非真机变异首先撞上的守卫：重新施加裁决仍让
+  Action[0] 保持 `decided`，重新打开／取消 Action[0] 会先被 load 路由的
+  cancelled/expired 守卫拦截，而逆序派发在恢复采纳阶段（`Saved native request
+digest conflicts`）就变红、尚未到达 `settled_at` 检查。因此它们的承重性由上述
+  fast-tier 钉证明，而非真机在新断言处变红。
 - 契约套件 + 行为化测试绿；serve `process-env-guard` 绿；`npm run build &&
 npm run typecheck && npm run bundle`。专用钩子单测（匹配/不匹配/abort）延后
   ——见开放问题。
@@ -220,7 +228,9 @@ npm run typecheck && npm run bundle`。专用钩子单测（匹配/不匹配/abo
 - after-results 模型计数为 **1**（一个初始两调用轮 + 一个 after-results 轮；审批恢复
   不重发推理），由 .75 head 运行确认（`initialRequests=1`、`modelAfterResults=1`）。
 - 非 shell file-profile 假设成立：.75 head 运行捕获了两调用 plan（`approvalOrdinal=1`，
-  两个调用按模型顺序）。
+  两个调用按 plan 顺序）。plan 顺序即 request 顺序——`captureNativeBatch` 由
+  `batch.requests.entries()` 构建 `plan.calls`——未必是模型的 part 顺序，因此本臂
+  的顺序断言是 plan 顺序断言。
 
 ## 开放问题
 
