@@ -42,7 +42,7 @@ PR 拥有可评审的契约。
 注定"的两个条件域：
 
 - **条件域 A —— 缓存已过期**：空闲 ≥ `context.idleCompactionMinutes`
-  （默认 `60`，即达到/超过典型提供商缓存 TTL；缺省或 `0` 禁用功能）
+  （默认 `60`，取自典型的提供商缓存 TTL——该 TTL 是假设值，校准见待定问题 1；缺省或 `0` 禁用功能）
   **且** 有效提示估算 ≥ 软水位（`context.idleCompactionWatermark`，默认
   `0.7`）× 生效的自动压缩阈值。缓存已死，压缩不损失任何本未损失的东西。
 - **条件域 B —— 压缩本已迫近**：空闲 ≥ 小地板
@@ -108,7 +108,7 @@ Headless/SDK 运行（`runNonInteractive`）与 hosted/managed 会话整体禁�
 
 - 代码 PR 之前需 `.qwen/e2e-tests/` 计划覆盖两个条件域、中止竞争与
   提交门。
-- 适用两-tier 置信度门禁（`packages/core/src/**`）。
+- 适用两档置信度门禁（`packages/core/src/**`）。
 
 ## 验收标准
 

@@ -51,8 +51,8 @@ pay. The trigger is therefore restricted to the two regimes where the
 rewrite is free or already doomed:
 
 - **Regime A — cache expired**: idle ≥ `context.idleCompactionMinutes`
-  (default `60`, i.e. at/above the typical provider cache TTL;
-  `undefined`/`0` disables the feature) **and** effective prompt estimate ≥
+  (default `60`, from the typical provider cache TTL — an assumption,
+  calibration in Open questions 1; `undefined`/`0` disables the feature) **and** effective prompt estimate ≥
   soft watermark (`context.idleCompactionWatermark`, default `0.7`) × the
   effective auto-compact threshold. With the cache dead, compacting costs
   nothing that is not already lost.
