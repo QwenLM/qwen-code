@@ -4726,6 +4726,39 @@ describe('GithubChannel', () => {
       }
     });
 
+    it('keeps retrying the records after one already recorded as consumed', async () => {
+      // The consumed branch removes the record and moves on. Ending the loop
+      // there instead drops every sibling that still needs its delivery, and
+      // no other case in this file covers a record that follows a consumed one.
+      await connectForPublication();
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: { id: 1, html_url: 'https://github.com/o/r/issues/42#c1' },
+      });
+      mkdirSync(join(pendingPath(), '..'), { recursive: true });
+      writeFileSync(
+        auditPath(),
+        JSON.stringify({
+          outcome: 'posted',
+          pendingId: 'pending',
+          chatId: 'owner/repo',
+          threadId: 'issue:42',
+        }) + '\n',
+      );
+      writePending([
+        pendingRecord(),
+        pendingRecord({ id: 'fresh', fullText: 'Second reply' }),
+      ]);
+
+      await retryPendingForTest();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: expect.stringContaining('Second reply'),
+        }),
+      );
+    });
+
     it('does not collapse same-body pending finals without a source message id', async () => {
       await connectForPublication();
       const error = Object.assign(new Error('rate limited'), {
