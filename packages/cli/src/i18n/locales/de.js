@@ -1079,6 +1079,8 @@ export default {
     'Chatverlauf konnte nicht komprimiert werden, da die Komprimierungszusammenfassung abgeschnitten wurde.',
   'Could not compress chat history due to an API error.':
     'Chatverlauf konnte aufgrund eines API-Fehlers nicht komprimiert werden.',
+  'Could not compress chat history because it is too large for the context window.':
+    'Chatverlauf konnte nicht komprimiert werden, da er für das Kontextfenster zu groß ist.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================

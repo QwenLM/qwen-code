@@ -16906,6 +16906,23 @@ describe('LlmChat', async () => {
         expectStreamCalls(1);
       });
 
+      it('surfaces an actionable error when the history is too large to compress', async () => {
+        // No compression request fits the window. A later send only adds to
+        // the history, so unlike a transient side-query failure this earns
+        // the new-session advice rather than the original 413 (#9455).
+        const compressSpy = noopThen(
+          failed(CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE, 90_000),
+        );
+        failThen([sdkStyle413()]);
+
+        const caught = await sendCaught('prompt-id-413-input-too-large');
+
+        expect(caught?.message).toMatch(/start a new session/i);
+        expect(caught?.status).toBe(413);
+        expect(compressSpy).toHaveBeenCalledTimes(2);
+        expectStreamCalls(1);
+      });
+
       it('keeps token-wording overflow on the original reactive path', async () => {
         // Regression guard: the 413 classification must not change how
         // provider-reported context-length wording is recovered.
