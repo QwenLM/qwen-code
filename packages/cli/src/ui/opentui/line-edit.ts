@@ -20,12 +20,9 @@
  * is just another code point: ink's "join with the previous line" and its
  * "insert a new line" both reduce to adding or removing that character.
  *
- * Not ported, and recorded as follow-ups: word jumps (ctrl/alt+←/→, alt+b/f),
- * delete-word-right (alt+d, ctrl/alt+Delete), kill-line (ctrl+k/ctrl+u) and
- * undo/redo (ctrl+z) — all of which ink's TextInput does bind, as it does
- * clear-input (ctrl+C) and open-external-editor (ctrl+X). Neither is ported:
- * the app's exit handler acts on ctrl+C wherever a dialog owns the screen, and
- * ctrl+X is unbound in this renderer. ctrl+D is deliberately absent: the app's
+ * Auth and Permissions explicitly route clear-input (ctrl+C); the app's
+ * exit handler still receives the same key. Open-external-editor (ctrl+X) remains
+ * unbound in dialog fields. ctrl+D is deliberately absent: the app's
  * global EXIT binding acts on it, and this reducer hands it back unhandled, so
  * no field ever edits on that key. Legacy dialog rows still render spans without column
  * windowing; catalog source and setting fields use `windowLineAtCaret`.
@@ -39,6 +36,9 @@
 
 import { useRef, useState } from 'react';
 import {
+  applyWordDeletion,
+  getWordMovePosition,
+  offsetToLogicalPos,
   findPrevWordStart,
   findPrevWordStartInLine,
   getWordBoundaries,
@@ -298,6 +298,34 @@ export function applyLineKey(
   const modified = ctrl || meta;
   const next = clampCaret(state);
 
+  const wordMove =
+    (modified && name === 'left') || (meta && !ctrl && name === 'b')
+      ? 'wordLeft'
+      : (modified && name === 'right') || (meta && !ctrl && name === 'f')
+        ? 'wordRight'
+        : null;
+  const deleteWordRight =
+    (meta && !ctrl && name === 'd') || (modified && name === 'delete');
+  if (wordMove || deleteWordRight) {
+    const lines = next.text.split('\n');
+    const [cursorRow, cursorCol] = offsetToLogicalPos(next.text, next.cursor);
+    const geometry = { lines, cursorRow, cursorCol, preferredCol: null };
+    const target = wordMove
+      ? getWordMovePosition(lines, cursorRow, cursorCol, wordMove)
+      : null;
+    const edited = target
+      ? { ...geometry, cursorRow: target.row, cursorCol: target.col }
+      : applyWordDeletion(geometry, 'delete_word_right', (current) => current);
+    return {
+      text: edited.lines.join('\n'),
+      cursor:
+        edited.lines
+          .slice(0, edited.cursorRow)
+          .reduce((offset, line) => offset + cpLen(line) + 1, 0) +
+        edited.cursorCol,
+    };
+  }
+
   if (name === 'left' && !modified) return moveCaretLeft(next);
   if (ctrl && name === 'b') return moveCaretLeft(next);
   if (name === 'right' && !modified) return moveCaretRight(next);
@@ -305,6 +333,24 @@ export function applyLineKey(
   if (name === 'home' || (ctrl && name === 'a')) return moveCaretHome(next);
   if (name === 'end') return moveCaretLineEnd(next);
   if (ctrl && name === 'e') return moveCaretEnd(next);
+  if (ctrl && name === 'k') {
+    const { end } = lineBounds(next.text, next.cursor);
+    return next.cursor === end
+      ? deleteAtCaret(next)
+      : {
+          text: cpSlice(next.text, 0, next.cursor) + cpSlice(next.text, end),
+          cursor: next.cursor,
+        };
+  }
+  if (ctrl && name === 'u') {
+    const { start } = lineBounds(next.text, next.cursor);
+    return next.cursor === start
+      ? backspaceAtCaret(next)
+      : {
+          text: cpSlice(next.text, 0, start) + cpSlice(next.text, next.cursor),
+          cursor: start,
+        };
+  }
   if (ctrl && name === 'w') return deleteWordLeftAtCaret(next);
   if (
     isDeleteWordBackwardSequence(sequence) ||
@@ -349,7 +395,11 @@ export function useLineEdit(
    * ink's TextInput key handling. `false` means the field leaves the key to the
    * dialog — Enter, list navigation, and every combo this port doesn't bind.
    */
-  handleKey: (key: Pick<Key, 'name' | 'ctrl' | 'meta' | 'sequence'>) => boolean;
+  handleKey: (
+    key: Pick<Key, 'name' | 'ctrl' | 'meta' | 'shift' | 'sequence'>,
+  ) => boolean;
+  /** Clears a TextInput-owned field as one edit. */
+  clear: () => void;
   /** Inserts at the caret: a paste, or a printable key. */
   insert: (text: string) => void;
   /**
@@ -375,20 +425,49 @@ export function useLineEdit(
   // because only `settle` arms this and every consumer calls it after success.
   const settledRef = useRef(false);
   const mirror = useRef<LineState>(endOfLine(value));
+  const undo = useRef<LineState[]>([]);
+  const redo = useRef<LineState[]>([]);
+  const accepted = useRef({
+    state: mirror.current,
+    undo: undo.current,
+    redo: redo.current,
+  });
   const mounted = useRef<unknown>(mountKey);
   if (mounted.current !== mountKey) {
     mounted.current = mountKey;
     mirror.current = endOfLine(value);
     settledRef.current = false;
+    undo.current = [];
+    redo.current = [];
   } else {
+    if (value !== mirror.current.text) {
+      undo.current = accepted.current.undo;
+      redo.current = accepted.current.redo;
+      if (value !== accepted.current.state.text) {
+        undo.current = [...undo.current, accepted.current.state].slice(-100);
+        redo.current = [];
+      }
+    }
     mirror.current = caretForAcceptedValue(mirror.current, value);
   }
-  const commit = (next: LineState) => {
+  accepted.current = {
+    state: mirror.current,
+    undo: undo.current,
+    redo: redo.current,
+  };
+  const publish = (next: LineState) => {
     const changed = next.text !== mirror.current.text;
     mirror.current = next;
     // A caret-only move changes no text, so it needs its own repaint.
     repaint((frame) => frame + 1);
     if (changed) onChange(next.text);
+  };
+  const commit = (next: LineState) => {
+    if (next.text !== mirror.current.text) {
+      undo.current = [...undo.current, mirror.current].slice(-100);
+      redo.current = [];
+    }
+    publish(next);
   };
   return {
     get text() {
@@ -398,10 +477,26 @@ export function useLineEdit(
       return mirror.current.cursor;
     },
     handleKey: (key) => {
+      if (settledRef.current) return false;
+      if (key.ctrl && key.name === 'z') {
+        const from = key.shift ? redo : undo;
+        const to = key.shift ? undo : redo;
+        const previous = from.current.at(-1);
+        if (previous) {
+          from.current = from.current.slice(0, -1);
+          to.current = [...to.current, mirror.current].slice(-100);
+          publish(previous);
+        }
+        return true;
+      }
       const edited = applyLineKey(mirror.current, key);
       if (!edited) return false;
       commit(edited);
       return true;
+    },
+    clear: () => {
+      if (settledRef.current || !mirror.current.text) return;
+      commit(endOfLine(''));
     },
     insert: (text) => {
       // Enforced here rather than at each call site: a bracketed paste arrives as

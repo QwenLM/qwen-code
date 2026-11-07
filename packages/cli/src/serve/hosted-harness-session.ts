@@ -767,6 +767,7 @@ interface HostedSession {
   lifecycleKind?: 'close' | 'delete';
   cleanupBlocked?: boolean;
   cleanupHolds?: Map<string, HostedCleanupHold>;
+  cleanupRetry?: Promise<void>;
   recoveryCleanupOnly?: boolean;
   lifecycleProtocolVersion?: 1 | 2;
   /** Fetched Workspace instructions; undefined until the first fetch. */
@@ -2586,30 +2587,45 @@ async function retryHostedCleanup(
   drain = false,
 ): Promise<void> {
   if (!drain && unsettledPromptId(session)) return;
+  // A load can overlap the wake pump's retry. Re-read the debt with each
+  // caller's authority after the previous attempt settles.
+  const retry = (session.cleanupRetry ?? Promise.resolve())
+    .catch(() => undefined)
+    .then(async () => {
+      if (!drain && unsettledPromptId(session)) return;
+      try {
+        session.cleanupHolds?.clear();
+        if (hasHostedCleanupDebt(session.managed)) {
+          // Unsettled wake turns need their recovery pump to commit the terminal
+          // record before reconciliation can release their Runtime.
+          retainHostedCleanupHolds(
+            session,
+            await reconcileHostedTurnCleanup(
+              session.managed,
+              options,
+              undefined,
+              drain,
+            ),
+          );
+        }
+        if (session.cleanupBlocked) liftRecoveryBlock(session);
+        session.cleanupBlocked = false;
+      } catch (cause) {
+        if (!session.blocked) {
+          session.cleanupBlocked = true;
+          session.blocked = true;
+          session.monitorWake?.kick();
+        }
+        throw cause;
+      }
+    });
+  session.cleanupRetry = retry;
   try {
-    session.cleanupHolds?.clear();
-    if (hasHostedCleanupDebt(session.managed)) {
-      // Unsettled wake turns need their recovery pump to commit the terminal
-      // record before reconciliation can release their Runtime.
-      retainHostedCleanupHolds(
-        session,
-        await reconcileHostedTurnCleanup(
-          session.managed,
-          options,
-          undefined,
-          drain,
-        ),
-      );
+    await retry;
+  } finally {
+    if (session.cleanupRetry === retry) {
+      session.cleanupRetry = undefined;
     }
-    if (session.cleanupBlocked) liftRecoveryBlock(session);
-    session.cleanupBlocked = false;
-  } catch (cause) {
-    if (!session.blocked) {
-      session.cleanupBlocked = true;
-      session.blocked = true;
-      session.monitorWake?.kick();
-    }
-    throw cause;
   }
 }
 
