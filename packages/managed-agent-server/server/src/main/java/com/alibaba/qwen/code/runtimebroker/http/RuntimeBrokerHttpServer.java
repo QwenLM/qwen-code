@@ -277,11 +277,13 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 complete(exchange, service.capabilitiesContext(sessionId, lifecycleAuthority(exchange)), value -> {
                     var scope = value.scope();
                     Map<String, Object> result = new java.util.LinkedHashMap<>(Map.of(
-                        "protocolVersion", 1, "harnessSessionId", sessionId,
-                        "scope", Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
-                                "workspaceGeneration", scope.getWorkspaceGeneration(),
-                                "isolationClass", scope.getIsolationClass(), "capabilityDigest", scope.getCapabilityDigest())));
-                    if (value.workspaceContext() != null) result.put("workspaceContext", Map.of("cwdRelative", value.workspaceContext().cwdRelative(), "contextRevision", value.workspaceContext().contextRevision()));
+                            "protocolVersion", 1, "harnessSessionId", sessionId,
+                            "scope", Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
+                                    "workspaceGeneration", scope.getWorkspaceGeneration(),
+                                    "isolationClass", scope.getIsolationClass(), "capabilityDigest", scope.getCapabilityDigest())));
+                    if (value.workspaceContext() != null) {
+                        result.put("workspaceContext", Map.of("cwdRelative", value.workspaceContext().cwdRelative(), "contextRevision", value.workspaceContext().contextRevision()));
+                    }
                     return result;
                 });
                 return;
