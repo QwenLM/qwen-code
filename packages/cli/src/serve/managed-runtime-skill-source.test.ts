@@ -86,6 +86,37 @@ async function snapshot(
 }
 
 describe('Runtime project Skill snapshots', () => {
+  it('prepares nine consecutive snapshots and preserves downloaded chunk retries', async () => {
+    for (let i = 0; i < 9; i++) await skill('.qwen', 'skill' + i);
+    const listed = await candidates();
+    expect(listed).toHaveLength(9);
+    let first: Awaited<ReturnType<typeof snapshot>> | undefined;
+    for (const candidate of listed) {
+      const prepared = await snapshot(candidate);
+      if (!first) first = prepared;
+      const bytes = await sources.control('session', {
+        kind: 'extension-skill-archive',
+        operationId: prepared.operationId,
+        preparationId: String(prepared.result['preparationId']),
+        offset: 0,
+      });
+      expect(Buffer.from(String(bytes['base64']), 'base64').length).toBe(
+        bytes['totalBytes'],
+      );
+      expect(
+        await sources.control('session', {
+          kind: 'extension-skill-archive',
+          operationId: prepared.operationId,
+          preparationId: String(prepared.result['preparationId']),
+          offset: 0,
+        }),
+      ).toEqual(bytes);
+    }
+    expect((await snapshot(listed[0], first!.operationId)).result).toEqual(
+      first!.result,
+    );
+  });
+
   it('does not publish a snapshot that finishes its ownership check after retirement', async () => {
     await skill('.qwen', 'review');
     const candidate = (await candidates())[0];

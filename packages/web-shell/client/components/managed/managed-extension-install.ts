@@ -457,17 +457,24 @@ export async function continueManagedExtensionInstall(
   );
   if (pins.length >= 32)
     throw new Error('The Session package limit has been reached.');
-  save({ applySubmitted: true });
-  return management.apply(
-    command.sessionId,
-    managedExtensionSelection(
-      {
-        revision: command.expectedConfigRevision,
-        selectionVersion: command.selectionVersion,
-        mcpAuthBindings: command.mcpAuthBindings,
-      },
-      [...pins, command.pin!],
-    ),
-    { ...options, idempotencyKey: command.applyKey },
+  const extensions = [...pins, command.pin!];
+  const selection = managedExtensionSelection(
+    {
+      revision: command.expectedConfigRevision,
+      selectionVersion: command.selectionVersion,
+      mcpAuthBindings: command.mcpAuthBindings,
+      extensions: authorize ? extensions : command.extensions,
+    },
+    extensions,
   );
+  save({
+    applySubmitted: true,
+    ...(selection.selectionVersion === 2
+      ? { mcpAuthBindings: selection.mcpAuthBindings }
+      : {}),
+  });
+  return management.apply(command.sessionId, selection, {
+    ...options,
+    idempotencyKey: command.applyKey,
+  });
 }

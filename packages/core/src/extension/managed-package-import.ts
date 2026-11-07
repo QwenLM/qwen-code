@@ -243,6 +243,27 @@ export async function prepareManagedPackageImport(
       const recipe = parseManagedMcpRecipe(input['recipe'], {
         allowPlaceholders: true,
       });
+      const settings = input['settings'];
+      if (settings !== undefined && !Array.isArray(settings))
+        invalid('invalid MCP settings');
+      const declared = new Set(
+        ((settings ?? []) as unknown[]).map(
+          (setting) => object(setting)['envVar'],
+        ),
+      );
+      for (const field of ['env', 'headers'] as const) {
+        for (const value of Object.values(recipe[field] ?? {})) {
+          const reference = (
+            field === 'headers'
+              ? /^(?:Bearer )?\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/iu
+              : /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/u
+          ).exec(value);
+          if (!reference || !declared.has(reference[1]))
+            invalid(
+              'MCP environment and headers require declared settings placeholders',
+            );
+        }
+      }
       await fs.writeFile(
         path.join(root, 'qwen-extension.json'),
         JSON.stringify({

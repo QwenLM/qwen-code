@@ -352,6 +352,7 @@ export function ManagedExtensionsManagerPage({
               editing={editing}
               skillsOnly={view === 'skills'}
               onChanged={() => void run(async () => {})}
+              onInstalled={() => setEditing(undefined)}
             />
           )}
           {catalog && snapshot && (

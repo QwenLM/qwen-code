@@ -55,7 +55,7 @@ export function isManagedMcpAuthBindings(
 export function managedExtensionSelection(
   snapshot: Pick<
     ManagedExtensionSnapshot,
-    'revision' | 'selectionVersion' | 'mcpAuthBindings'
+    'revision' | 'selectionVersion' | 'mcpAuthBindings' | 'extensions'
   >,
   extensions: ManagedExtensionPin[],
 ): ManagedExtensionSelection {
@@ -65,9 +65,17 @@ export function managedExtensionSelection(
         expectedConfigRevision: snapshot.revision,
         extensions,
         mcpAuthBindings: (snapshot.mcpAuthBindings ?? []).filter((binding) =>
-          extensions.some((pin) =>
-            binding.serverId.startsWith(`${pin.extensionId}:`),
-          ),
+          extensions.some((pin) => {
+            const previous = snapshot.extensions.find(
+              (entry) => entry.extensionId === pin.extensionId,
+            );
+            return (
+              binding.serverId.startsWith(`${pin.extensionId}:`) &&
+              previous?.packageRevision === pin.packageRevision &&
+              previous.packageDigest === pin.packageDigest &&
+              previous.settingsRevision === pin.settingsRevision
+            );
+          }),
         ),
       }
     : { expectedConfigRevision: snapshot.revision, extensions };

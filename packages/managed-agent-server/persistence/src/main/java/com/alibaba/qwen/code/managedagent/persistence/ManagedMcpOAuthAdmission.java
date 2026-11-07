@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
@@ -70,6 +71,10 @@ public final class ManagedMcpOAuthAdmission {
         long revision = body.path("configRevision").asLong();
         // Revoking a grant must not prevent the exact committed configuration from settling.
         boolean phaseOnly = followsCommittedConfiguration(jdbc, tenant, session, body);
+        boolean restoring = "recoverPrevious".equals(body.path("mode").asText());
+        if (restoring) {
+            requireRestoredIdentity(jdbc, tenant, session, body, bundle);
+        }
         String actorKey = null;
         if (bundle.path("formatVersion").asInt() == 2) {
             JsonNode bindings = bundle.path("mcpAuthBindings");
@@ -77,7 +82,7 @@ public final class ManagedMcpOAuthAdmission {
             if (!bindings.isEmpty()) {
                 actorKey = bundle.path("executionActorKey").asText();
                 if (!actorKey.matches("[a-f0-9]{64}")
-                        || !actorKey.equals(body.path("command").path("actorKey").asText())) {
+                        || !restoring && !actorKey.equals(body.path("command").path("actorKey").asText())) {
                     throw invalid();
                 }
                 if (!phaseOnly) {
@@ -144,6 +149,48 @@ public final class ManagedMcpOAuthAdmission {
                         session,
                         revision);
         if (changed != 1) {
+            throw invalid();
+        }
+    }
+
+    private static void requireRestoredIdentity(JdbcTemplate jdbc, String tenant, String session,
+            JsonNode body, JsonNode bundle) {
+        JsonNode restored = readBundle(jdbc, tenant, session, body.path("restoresBundleRef"));
+        JsonNode current = ManagedMcpSettings.find(jdbc, tenant, session);
+        var records = new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(jdbc);
+        boolean foundActive = false;
+        for (int step = 0; ManagedConfigInstall.isPackageConfig(current); step++) {
+            if (step >= 4096) {
+                throw invalid();
+            }
+            ManagedConfigInstall.require(current);
+            if ("active".equals(current.path("phase").asText())) {
+                if (!ManagedExtensionRecords.same(
+                        current.path("bundleRef"), body.path("restoresBundleRef"))) {
+                    throw invalid();
+                }
+                foundActive = true;
+                break;
+            }
+            if (current.path("previousRecordRef").isNull()) {
+                break;
+            }
+            current = records.readRecordResource(tenant, session, current.get("previousRecordRef"));
+        }
+        if (!foundActive && (restored.path("configRevision").asLong(-1) != 0
+                || restored.has("mcpAuthBindings") && !restored.path("mcpAuthBindings").isEmpty()
+                || restored.has("executionActorKey") && !restored.path("executionActorKey").isNull())) {
+            throw invalid();
+        }
+        if (restored.path("formatVersion").asInt() == 2) {
+            if (bundle.path("formatVersion").asInt() != 2
+                    || !ManagedExtensionRecords.same(
+                            restored.path("mcpAuthBindings"), bundle.path("mcpAuthBindings"))
+                    || !restored.path("executionActorKey").equals(bundle.path("executionActorKey"))) {
+                throw invalid();
+            }
+        } else if (bundle.path("formatVersion").asInt() == 2
+                && (!bundle.path("mcpAuthBindings").isEmpty() || !bundle.path("executionActorKey").isNull())) {
             throw invalid();
         }
     }

@@ -50,6 +50,7 @@ export interface ManagedExtensionInstallerProps {
   skillsOnly?: boolean;
   editing?: { extensionId: string; inspection: ManagedExtensionInspection };
   onChanged: () => void;
+  onInstalled?: () => void;
 }
 
 function stringRecord(text: string): Record<string, string> {
@@ -98,20 +99,18 @@ export function buildManagedMcpInput(input: {
     ].some((value) => String(value).includes('[redacted]'))
   )
     throw new Error('Redacted values must be entered again.');
-  for (const [key, value] of Object.entries(headers)) {
+  for (const value of Object.values(headers)) {
     const reference = /^(?:Bearer )?\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/i.exec(
       value,
     );
-    if (
-      /^(authorization|proxy-authorization|x-api-key)$/i.test(key) &&
-      (!reference || !input.secretKeys.includes(reference[1]!))
-    )
+    if (!reference || !input.secretKeys.includes(reference[1]!))
       throw new Error(
         'Credential headers must use a declared secret placeholder.',
       );
   }
-  for (const key of input.secretKeys) {
-    if (environment[key] !== undefined && environment[key] !== `\${${key}}`)
+  for (const value of Object.values(environment)) {
+    const reference = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/u.exec(value);
+    if (!reference || !input.secretKeys.includes(reference[1]!))
       throw new Error('Declared credentials must use settings placeholders.');
   }
   if (
@@ -519,7 +518,9 @@ export function ManagedExtensionInstaller(
           ];
           const auth = await provider.mcpOAuth.query(sessionId, pins, options);
           controller.signal.throwIfAborted();
-          const bindings = value.mcpAuthBindings ?? [];
+          const bindings = (value.mcpAuthBindings ?? []).filter((binding) =>
+            auth.servers.some((server) => server.serverId === binding.serverId),
+          );
           if (
             !auth.supported ||
             auth.servers.some(
@@ -537,7 +538,9 @@ export function ManagedExtensionInstaller(
             setAuthorizationPins(pins);
             throw new ManagedExtensionInstallAuthorizationRequired();
           }
-          return value;
+          return value.selectionVersion === 2
+            ? { ...value, mcpAuthBindings: bindings }
+            : value;
         },
       );
       if (controller.signal.aborted || !mounted.current) return;
@@ -548,6 +551,7 @@ export function ManagedExtensionInstaller(
         setAuthorizationPins(undefined);
         setSecrets({});
         setStatus('managed.install.complete');
+        props.onInstalled?.();
       } else setStatus('managed.install.savedNotApplied');
       onChanged();
     } catch (cause) {
@@ -586,7 +590,10 @@ export function ManagedExtensionInstaller(
         {!props.skillsOnly && (
           <Select
             value={kind}
-            onValueChange={(value) => setKind(value as typeof kind)}
+            onValueChange={(value) => {
+              setUpdateId('new');
+              setKind(value as typeof kind);
+            }}
             disabled={busy || !!pending || !!editing}
           >
             <SelectTrigger aria-label={t('managed.install.kind')}>
@@ -923,6 +930,7 @@ export function ManagedExtensionInstaller(
                       save(undefined);
                       setStatus('managed.install.complete');
                       onChanged();
+                      props.onInstalled?.();
                       return undefined;
                     }
                     if (

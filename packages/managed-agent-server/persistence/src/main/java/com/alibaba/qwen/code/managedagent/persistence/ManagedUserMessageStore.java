@@ -141,21 +141,8 @@ public class ManagedUserMessageStore
     @Transactional
     public List<Message> claim(String tenant, String session, String promptId, boolean initialOnly) {
         lock(tenant, session);
-        String principal = ManagedMcpOAuthAdmission.actor(jdbc, tenant, session);
-        if (principal != null) {
-            boolean foreign = false;
-            for (String actor : jdbc.queryForList("SELECT DISTINCT actor_id FROM ma_user_message WHERE tenant_id=? AND session_id=?"
-                    + " AND state IN ('queued','claimed')", String.class, tenant, session)) {
-                if (actor == null || !principal.equals(DigestUtils.sha256Hex(actor))) {
-                    jdbc.update("UPDATE ma_user_message SET state='recovery_blocked' WHERE tenant_id=? AND session_id=?"
-                            + " AND actor_id=? AND state IN ('queued','claimed')", tenant, session, actor);
-                    foreign = true;
-                }
-            }
-            if (foreign) {
-                jdbc.update("UPDATE ma_user_message_queue SET is_paused=TRUE WHERE tenant_id=? AND session_id=?", tenant, session);
-                return List.of();
-            }
+        if (blockForeignActors(tenant, session)) {
+            return List.of();
         }
         reconcile(tenant, session);
         if (initialOnly) {
@@ -214,6 +201,9 @@ public class ManagedUserMessageStore
         // it orders this dispatch against lifecycle and other admissions of
         // the Session, and the storage fence is checked by Turn admission.
         lock(tenant, session);
+        if (blockForeignActors(tenant, session)) {
+            return;
+        }
         reconcile(tenant, session);
         Snapshot snapshot = snapshot(tenant, session);
         if (snapshot.paused() || snapshot.messages().isEmpty() || snapshot.messages().stream()
@@ -256,6 +246,26 @@ public class ManagedUserMessageStore
         jdbc.update("UPDATE ma_user_message SET state = 'withdrawn' WHERE state = 'queued' AND EXISTS"
                 + " (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_user_message.tenant_id"
                 + " AND s.session_id = ma_user_message.session_id AND s.status <> 'ACTIVE')");
+    }
+
+    private boolean blockForeignActors(String tenant, String session) {
+        String principal = ManagedMcpOAuthAdmission.actor(jdbc, tenant, session);
+        if (principal != null) {
+            boolean foreign = false;
+            for (String actor : jdbc.queryForList("SELECT DISTINCT actor_id FROM ma_user_message WHERE tenant_id=? AND session_id=?"
+                    + " AND state IN ('queued','claimed')", String.class, tenant, session)) {
+                if (actor == null || !principal.equals(DigestUtils.sha256Hex(actor))) {
+                    jdbc.update("UPDATE ma_user_message SET state='recovery_blocked' WHERE tenant_id=? AND session_id=?"
+                            + " AND actor_id=? AND state IN ('queued','claimed')", tenant, session, actor);
+                    foreign = true;
+                }
+            }
+            if (foreign) {
+                jdbc.update("UPDATE ma_user_message_queue SET is_paused=TRUE WHERE tenant_id=? AND session_id=?", tenant, session);
+                return true;
+            }
+        }
+        return false;
     }
 
     private String lockSession(String tenant, String session) {

@@ -216,6 +216,69 @@ class ManagedExtensionConfigurationAdmissionTest {
         assertThat(ManagedMcpOAuthAdmission.actor(jdbc, "tenant", id)).isNull();
     }
 
+    @Test
+    void restoresThePersonalOwnerAfterAnotherOperatorFailsToRemoveTheBinding() throws Exception {
+        String workspace = registerWorkspace();
+        String id = UUID.randomUUID().toString();
+        var journal = publicJournal(id, workspace);
+        var beans = new DefaultListableBeanFactory();
+        beans.registerSingleton("secrets", new AesGcmSecretProtector("test", new byte[32]));
+        var grants = new JdbcMcpOAuthRepository(jdbc, transactionManager, json, beans.getBeanProvider(SecretProtector.class));
+        var scope = new McpOAuthRepository.Scope("tenant", workspace, "actor");
+        String attemptId = "mauth_" + UUID.randomUUID();
+        String state = DigestUtils.sha256Hex(attemptId);
+        String nonce = DigestUtils.sha256Hex("nonce");
+        grants.createAttempt(new McpOAuthRepository.Attempt(attemptId, scope, state, nonce, DigestUtils.sha256Hex("request"), "pending",
+                System.currentTimeMillis() + 120_000, json.createObjectNode().put("serverId", "ext_fixture:server")
+                        .put("providerId", "test").put("resourceUri", "https://mcp.example/mcp").put("credentialEpoch", 0),
+                json.createObjectNode().put("verifier", "private"), null));
+        grants.receiveCode(state, null, "code", System.currentTimeMillis());
+        grants.claimAttempt(scope, attemptId, nonce, System.currentTimeMillis());
+        var grant = grants.completeAttempt(scope, attemptId, json.createObjectNode().put("access_token", "private"),
+                System.currentTimeMillis() + 3600_000, System.currentTimeMillis());
+        var auth = json.createArrayNode();
+        auth.addObject().put("serverId", "ext_fixture:server").put("credentialId", grant.id())
+                .put("credentialGeneration", grant.generation());
+        var empty = json.createArrayNode();
+        CommitResource personal = bundle("owner-active", 1, auth);
+        CommitResource removal = bundle("owner-removed", 2, empty);
+        CommitResource restored = bundle("owner-restored", 3, auth);
+        CommitResource borrowed = bundle("owner-borrow-attempt", 2, auth);
+        CommitResource forged = bundle("owner-forged-restore", 4, auth);
+        List<CommitResource> closure = new ArrayList<>(resources());
+        closure.addAll(List.of(personal, removal, restored, borrowed, forged));
+        ObjectNode current = null;
+        ObjectNode initial = command(0, auth);
+        for (String phase : List.of("preparing", "prepared", "committed", "active")) {
+            current = configurationPhase(phase, current, initial, 1, null, null, personal);
+            commit(journal, id, workspace, current, "committed".equals(phase), false, closure);
+        }
+        ObjectNode remove = command(1, empty).put("actorKey", DigestUtils.sha256Hex("other-operator"));
+        ObjectNode borrowing = configurationPhase("committed", current, remove, 2, personal, null, borrowed);
+        assertThatThrownBy(() -> transaction(() -> {
+            ManagedMcpOAuthAdmission.commit(jdbc, "tenant", id, borrowing);
+            return null;
+        })).isInstanceOf(ManagedAgentException.class);
+        for (String phase : List.of("preparing", "prepared", "committed", "recovery_required")) {
+            current = configurationPhase(phase, current, remove, 2, personal, null, removal);
+            commit(journal, id, workspace, current, "committed".equals(phase), false, closure);
+        }
+        for (String phase : List.of("preparing", "prepared", "committed", "active")) {
+            current = configurationPhase(phase, current, remove, 3, removal, personal, restored);
+            commit(journal, id, workspace, current, "committed".equals(phase), false, closure);
+        }
+        JsonNode active = ManagedMcpSettings.find(jdbc, "tenant", id);
+        assertThat(active.path("phase").asText()).isEqualTo("active");
+        assertThat(active.path("command").path("actorKey").asText()).isEqualTo(DigestUtils.sha256Hex("other-operator"));
+        assertThat(ManagedMcpOAuthAdmission.actor(jdbc, "tenant", id)).isEqualTo(DigestUtils.sha256Hex("actor"));
+        ObjectNode wrongBaseline = configurationPhase("committed", current, remove, 4, restored, personal, forged);
+        assertThatThrownBy(() -> transaction(() -> {
+            ManagedMcpOAuthAdmission.commit(jdbc, "tenant", id, wrongBaseline);
+            return null;
+        })).isInstanceOf(ManagedAgentException.class);
+        assertThat(ManagedMcpOAuthAdmission.actor(jdbc, "tenant", id)).isEqualTo(DigestUtils.sha256Hex("actor"));
+    }
+
     private ObjectNode command(long revision, JsonNode bindings) {
         ObjectNode command = json.createObjectNode().put("operationId", UUID.randomUUID().toString())
                 .put("actorKey", DigestUtils.sha256Hex("actor")).put("expectedRevision", revision).put("selectionVersion", 2);

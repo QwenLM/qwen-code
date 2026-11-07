@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore.Mes
 import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore.Snapshot;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -301,6 +302,35 @@ class ManagedUserMessageStoreTest {
 
     private Command submit(String text) {
         return new Command("submit", null, null, text(text));
+    }
+
+    @Test
+    void pausesForeignActorMessagesBeforeClaiming() {
+        pausesForeignActorMessages(false);
+    }
+
+    @Test
+    void pausesForeignActorMessagesBeforeDispatcherSubmission() {
+        pausesForeignActorMessages(true);
+    }
+
+    private void pausesForeignActorMessages(boolean dispatch) {
+        Message foreign = command("foreign", submit("foreign")).messages().getFirst();
+        Message own = command("own", submit("own")).messages().getLast();
+        jdbc.update("UPDATE ma_user_message SET actor_id=? WHERE tenant_id=? AND session_id=? AND message_id=?",
+                ACTOR + "-other", TENANT, session, foreign.id());
+        jdbc.update("UPDATE ma_session SET personal_execution_actor_key=?,personal_auth_config_revision=1"
+                + " WHERE tenant_id=? AND session_id=?", DigestUtils.sha256Hex(ACTOR), TENANT, session);
+        if (dispatch) {
+            messages.startNext(TENANT, session, (tenant, actor, key, target, input) -> {
+                throw new AssertionError("Foreign queue head must not be submitted");
+            });
+        } else {
+            assertThat(messages.claim(TENANT, session, "prompt", false)).isEmpty();
+        }
+        assertThat(query().paused()).isTrue();
+        assertThat(state(foreign)).isEqualTo("recovery_blocked");
+        assertThat(state(own)).isEqualTo("queued");
     }
 
     private List<InputBlock> text(String text) {
