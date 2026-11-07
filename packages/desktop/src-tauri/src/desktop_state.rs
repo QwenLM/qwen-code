@@ -132,7 +132,7 @@ impl SettingsStore {
     }
 }
 
-fn settings_persistence_disabled() -> bool {
+pub(crate) fn settings_persistence_disabled() -> bool {
     settings_persistence_disabled_value(
         std::env::var_os(DISABLE_SETTINGS_PERSISTENCE_ENV).as_deref(),
     )
