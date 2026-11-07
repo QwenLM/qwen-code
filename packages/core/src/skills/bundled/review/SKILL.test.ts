@@ -413,10 +413,46 @@ describe('bundled review skill', () => {
       '**Whether a PLAN exists is a separate field: `diffPath`.**',
     );
     // …and the re-run instruction, including the flag-replacement rule that
-    // keeps a second `--since` from reading as two anchors.
+    // keeps a second `--since`/`--since-model` from reading as two anchors.
     expect(body).toContain(
-      'REPLACING any `--since` it already carries, never appending a second one',
+      'REPLACING any `--since` and any `--since-model` it already carries, ' +
+        'never appending a second one',
     );
+    // The marker recovery re-run must carry BOTH fields, taken from the side
+    // file's `sha`/`model` pair. The command "above" it carries neither on this
+    // path (no cache), or another model's when the cache anchor was withheld —
+    // so a reader who copies the model half from there is refused as
+    // `cross-model-anchor` and reviews the full diff. Sliced to THIS sentence
+    // — the same `--since <sha>` words occur in the cache path, where they are
+    // already correct — so the assertion cannot be satisfied by that other
+    // occurrence.
+    const reRunAt = body.indexOf(
+      're-run the `fetch-pr` command from above with',
+    );
+    expect(reRunAt).toBeGreaterThan(-1);
+    const reRunSentence = body.slice(
+      reRunAt,
+      body.indexOf('never appending a second one', reRunAt),
+    );
+    expect(reRunSentence).toContain('--since-model');
+  });
+
+  it('describes the effective incremental scope without the retired range model', () => {
+    // The `effective: true` bullet used to call the report's diff `since..head`
+    // — the full-range model the narrowing replaced. Naming that range invites
+    // a reader to hand the anchor to git, which this same section forbids; the
+    // published scope is `incremental.scope`'s file classes.
+    const body = skillBody();
+    const at = body.indexOf('`effective: true` (no `upToDate`)');
+    expect(at).toBeGreaterThan(-1);
+    const rest = body.slice(at + 1);
+    const nextBullet = rest.indexOf('\n    - `');
+    expect(nextBullet).toBeGreaterThan(-1);
+    const bullet = rest.slice(0, nextBullet);
+    expect(bullet).not.toMatch(/since\.\.head/);
+    expect(bullet).toContain('`deltaFiles`');
+    expect(bullet).toContain('`interaction[]`');
+    expect(bullet).toContain('`contextFileCount`');
   });
 
   it('pins which refusal reasons the recovery flow may retry', () => {

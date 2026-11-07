@@ -770,8 +770,8 @@ export class LiveSessionCoordinator {
     runtime: WorkspaceRuntime,
   ): Promise<SessionListItem | undefined> {
     const service = new SessionService(runtime.workspaceCwd);
-    let cursor: number | undefined;
-    const seenCursors = new Set<number>();
+    let cursor: number | string | undefined;
+    const seenCursors = new Set<number | string>();
     while (true) {
       const page = await service.listSessions({
         size: SESSION_SCAN_SIZE,

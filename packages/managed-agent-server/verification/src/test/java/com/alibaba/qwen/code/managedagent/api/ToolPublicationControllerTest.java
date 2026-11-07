@@ -183,8 +183,7 @@ class ToolPublicationControllerTest {
         properties.getSessionStore().setBindingKey("0123456789abcdef0123456789abcdef");
         properties.getToolPublication().setEntryConcurrency(1);
         WriterCredentialPolicy credentials = new WriterCredentialPolicy(properties);
-        ManagedSessionStore sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
-        sessions.setCredentials(credentials);
+        ManagedSessionStore sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc, credentials);
         writerToken = credentials.issue(TENANT, WORKSPACE, SESSION);
         var grant = new TransactionTemplate(manager).execute(transaction -> sessions.acquireWriter(
                 TENANT, SESSION, writerToken, new AcquireWriterRequest(WORKSPACE, "writer", 60_000L)));

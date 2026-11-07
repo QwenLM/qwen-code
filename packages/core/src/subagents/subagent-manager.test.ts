@@ -2960,7 +2960,9 @@ describe('SubagentManager', () => {
 
       it('does not register hooks for a project-level subagent in an untrusted folder', async () => {
         const addAgentHooksSpy = stubHookRegistry();
-        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(false);
+        vi.spyOn(mockConfig, 'isExplicitlyTrustedFolder').mockReturnValue(
+          false,
+        );
 
         const result = await createHooked('Bash', { level: 'project' });
 
@@ -2972,14 +2974,14 @@ describe('SubagentManager', () => {
 
       it('registers hooks for a project-level subagent in a trusted folder', async () => {
         const addAgentHooksSpy = stubHookRegistry();
-        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(true);
+        vi.spyOn(mockConfig, 'isExplicitlyTrustedFolder').mockReturnValue(true);
 
         const result = await createHooked('Bash', { level: 'project' });
 
         expect(addAgentHooksSpy).toHaveBeenCalledTimes(1);
         const registration = addAgentHooksSpy.mock.calls[0][2];
         expect(registration.isSourceTrusted()).toBe(true);
-        vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(false);
+        vi.mocked(mockConfig.isExplicitlyTrustedFolder).mockReturnValue(false);
         expect(registration.isSourceTrusted()).toBe(false);
         await result.dispose();
       });
@@ -2991,9 +2993,9 @@ describe('SubagentManager', () => {
           ({ getRegistry: () => ({ addAgentHooks }) }) as unknown as ReturnType<
             Config['getHookSystem']
           >;
-        runtime.isTrustedFolder = () => true;
+        runtime.isExplicitlyTrustedFolder = () => true;
         const sourceTrust = vi
-          .spyOn(mockConfig, 'isTrustedFolder')
+          .spyOn(mockConfig, 'isExplicitlyTrustedFolder')
           .mockReturnValue(false);
         const config: SubagentConfig = {
           ...baseConfig,
@@ -3006,7 +3008,7 @@ describe('SubagentManager', () => {
         expect(addAgentHooks).not.toHaveBeenCalled();
         await untrusted.dispose();
         sourceTrust.mockReturnValue(true);
-        runtime.isTrustedFolder = () => false;
+        runtime.isExplicitlyTrustedFolder = () => false;
         const trusted = await manager.createAgentHeadless(config, runtime);
         expect(addAgentHooks).toHaveBeenCalledOnce();
         const registration = addAgentHooks.mock.calls[0][2];

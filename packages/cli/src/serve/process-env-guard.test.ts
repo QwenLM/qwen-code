@@ -505,6 +505,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:PATH': 2,
         'key:PYTHONPATH': 2,
         'key:QWEN_CODE_INTEGRATION_TEST': 1,
+        'key:QWEN_CODE_HOOK_APPROVALS_PATH': 2,
+        'key:QWEN_CODE_TRUSTED_FOLDERS_PATH': 2,
         'key:QWEN_CODE_MCP_APPROVALS_PATH': 2,
         'key:QWEN_CODE_WARNINGS_FILE': 2,
         'key:QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE': 1,

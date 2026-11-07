@@ -51,6 +51,7 @@ import {
   extractHttpStatus,
   isInvalidClientIdError,
   isAcpChildCapacityError,
+  isSessionLimitExceededError,
 } from './httpErrors.js';
 import {
   applyConfigOptions,
@@ -68,6 +69,7 @@ import {
   beginSessionConfigMutation,
   beginSessionConfigRead,
   getSessionConfigSync,
+  observeSessionConfig,
   queueSessionConfigRefresh,
   type SessionConfigSyncMap,
   type SessionConfigSync,
@@ -1320,6 +1322,8 @@ export function createDaemonSessionActions({
         );
       }
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+      const localPrompt = { sessionId, startedAt: Date.now() };
+      setConnection((current) => ({ ...current, localPrompt }));
       setPromptStatus('waiting');
       const ctrl = new AbortController();
       activePromptsRef.current.set(sessionId, {
@@ -1527,6 +1531,12 @@ export function createDaemonSessionActions({
           'send_prompt',
         );
       } finally {
+        setConnection((current) => {
+          if (current.localPrompt !== localPrompt) return current;
+          const next = { ...current };
+          delete next.localPrompt;
+          return next;
+        });
         const active = activePromptsRef.current.get(sessionId);
         if (active?.controller === ctrl) {
           activePromptsRef.current.delete(sessionId);
@@ -1905,9 +1915,11 @@ export function createDaemonSessionActions({
       }
     },
 
-    async refreshModels(beforeRefresh) {
+    async refreshModels(beforeRefresh, options) {
       const session = sessionRef.current;
       const before = getConnection();
+      const readOnly = options?.reloadProviders === false;
+      const priorModelMutation = modelMutationGeneration;
       const context = before.sessionContext;
       const client = session?.client ?? getClient?.();
       const workspaceCwd =
@@ -1928,33 +1940,131 @@ export function createDaemonSessionActions({
           sessionContextKey(context) &&
         current.workspaceCwd === before.workspaceCwd &&
         current.status === 'connected' &&
-        (session ? session.client === client : getClient?.() === client);
+        (session ? session.client === client : getClient?.() === client) &&
+        (!readOnly ||
+          (priorModelMutation === modelMutationGeneration &&
+            current.currentModel === before.currentModel));
+      const checkSubscriptionSelection = (models: typeof before.models) => {
+        const selected = before.models?.find(
+          (model) => model.id === before.currentModel,
+        );
+        if (
+          selected?.authType === 'qwen-subscription' &&
+          !models?.some((model) => model.id === before.currentModel)
+        ) {
+          throw new Error(
+            `The selected model, ${selected.baseModelId ?? selected.label}, is no longer available. Run /model to choose another model.`,
+          );
+        }
+      };
       await beforeRefresh?.({ workspaceCwd, sessionId: session?.sessionId });
       if (!isCurrent()) return;
+      if (readOnly && session) {
+        // Invalidate older reconnect snapshots without starting a config write.
+        observeSessionConfig(sessionConfigGeneration, session);
+      }
       const workspace = client.workspaceByCwd(workspaceCwd);
-      const reload = workspace.reloadModelProviders({
-        clientId: session?.clientId,
-      });
-      const result = await (session
-        ? trackSessionConfigMutation(session, reload, 'Reload models timed out')
-        : reload);
-      if (!isCurrent()) return;
-      if (
-        result.status !== 'applied' &&
-        !(result.status === 'deferred' && !session)
-      ) {
-        throw new Error('Unable to reload model providers.');
+      if (!readOnly) {
+        const reload = workspace.reloadModelProviders({
+          clientId: session?.clientId,
+        });
+        const result = await (session
+          ? trackSessionConfigMutation(
+              session,
+              reload,
+              'Reload models timed out',
+            )
+          : reload);
+        if (!isCurrent()) return;
+        if (
+          result.status !== 'applied' &&
+          !(result.status === 'deferred' && !session)
+        ) {
+          throw new Error('Unable to reload model providers.');
+        }
       }
       if (session) {
         const status = await session.context();
         if (!isCurrent()) return;
-        const models = mapSessionContextModels(status);
-        if (status.sessionId !== session.sessionId || !models) {
-          throw new Error('Unable to read the refreshed session model list.');
-        }
         const providers = await workspace.workspaceProviders();
         if (!isCurrent()) return;
         if (!providers.initialized) {
+          throw new Error(
+            providers.errors?.[0]?.error ??
+              'Unable to read the refreshed model list.',
+          );
+        }
+        const refreshed = mapSessionContextModels(status);
+        if (
+          status.sessionId !== session.sessionId ||
+          (!refreshed && providers.current?.authType)
+        ) {
+          throw new Error('Unable to read the refreshed session model list.');
+        }
+        const models = refreshed ?? { models: [] };
+        const currentModel =
+          readOnly ||
+          models.models.some((model) => model.id === refreshed?.currentModel)
+            ? refreshed?.currentModel
+            : undefined;
+        setConnection((current) =>
+          isCurrent(current)
+            ? {
+                ...current,
+                providers,
+                models: models.models,
+                ...(readOnly && current.context
+                  ? {
+                      context: {
+                        ...current.context,
+                        state: {
+                          ...current.context.state,
+                          _meta: {
+                            ...current.context.state._meta,
+                            authType: status.state._meta?.['authType'],
+                          },
+                          models: status.state.models,
+                        },
+                      },
+                    }
+                  : {}),
+                contextWindow:
+                  models.models.find(
+                    (model) => model.id === current.currentModel,
+                  )?.contextWindow ?? current.contextWindow,
+                ...((readOnly ||
+                  (models.models.length === 0 &&
+                    !providers.current?.authType)) &&
+                priorModelMutation === modelMutationGeneration
+                  ? {
+                      currentModel,
+                      contextWindow:
+                        models.models.find((model) => model.id === currentModel)
+                          ?.contextWindow ??
+                        (current.currentModel === currentModel
+                          ? current.contextWindow
+                          : undefined),
+                      reasoning:
+                        current.currentModel === currentModel
+                          ? current.reasoning
+                          : undefined,
+                    }
+                  : {}),
+              }
+            : current,
+        );
+        if (!readOnly) checkSubscriptionSelection(models.models);
+      } else {
+        const providers = await workspace.workspaceProviders();
+        if (!isCurrent()) return;
+        const { models, currentModel, contextWindow } =
+          mapProviderStatus(providers);
+        if (
+          !providers.initialized ||
+          (models.length === 0 &&
+            providers.current?.authType &&
+            !(readOnly && providers.current.authType === 'qwen-subscription'))
+        ) {
           throw new Error(
             providers.errors?.[0]?.error ??
               'Unable to read the refreshed model list.',
@@ -1965,27 +2075,24 @@ export function createDaemonSessionActions({
             ? {
                 ...current,
                 providers,
-                models: models.models,
-                contextWindow:
-                  models.models.find(
-                    (model) => model.id === current.currentModel,
-                  )?.contextWindow ?? current.contextWindow,
+                models,
+                ...(readOnly
+                  ? {
+                      currentModel: providers.current?.authType
+                        ? currentModel
+                        : undefined,
+                      contextWindow: providers.current?.authType
+                        ? (contextWindow ??
+                          (current.currentModel === currentModel
+                            ? current.contextWindow
+                            : undefined))
+                        : undefined,
+                    }
+                  : {}),
               }
             : current,
         );
-      } else {
-        const providers = await workspace.workspaceProviders();
-        if (!isCurrent()) return;
-        const { models } = mapProviderStatus(providers);
-        if (!providers.initialized || models.length === 0) {
-          throw new Error(
-            providers.errors?.[0]?.error ??
-              'Unable to read the refreshed model list.',
-          );
-        }
-        setConnection((current) =>
-          isCurrent(current) ? { ...current, providers, models } : current,
-        );
+        if (!readOnly) checkSubscriptionSelection(models);
       }
     },
 
@@ -2694,6 +2801,9 @@ export function createDaemonSessionActions({
           }`,
           error,
           'create_session',
+          isSessionLimitExceededError(error)
+            ? { code: 'session_limit_exceeded' }
+            : undefined,
         );
       }
     },
@@ -2775,17 +2885,19 @@ export function createDaemonSessionActions({
 
     async releaseSession(sessionId) {
       try {
-        const session = requireSessionForAction(
-          addNotice,
-          sessionRef.current,
-          'Release session failed',
-          'release_session',
-        );
+        const session = sessionRef.current;
+        // The release dialog is reachable from the empty new-session screen,
+        // where no session client exists yet. Fall back to the workspace
+        // daemon client so the recovery action still frees the slot.
+        const client = session?.client ?? getClient?.();
+        if (!client) {
+          throw new Error('Daemon session is not connected');
+        }
         await withActionTimeout(
-          session.client.closeSession(sessionId),
+          client.closeSession(sessionId),
           'Release session timed out',
         );
-        onGeneratedUiInvalidated?.(session, 'deleted', sessionId);
+        if (session) onGeneratedUiInvalidated?.(session, 'deleted', sessionId);
       } catch (error) {
         throw dispatchActionError(
           addNotice,
@@ -2846,10 +2958,14 @@ export function createDaemonSessionActions({
       }
     },
 
-    async getContext() {
+    async getContext(opts) {
+      const currentSession = sessionRef.current;
+      if (!currentSession && opts?.silent) {
+        throw new Error('Daemon session is not connected');
+      }
       const session = requireSessionForAction(
         addNotice,
-        sessionRef.current,
+        currentSession,
         'Load context failed',
         'load_context',
       );
@@ -2895,6 +3011,9 @@ export function createDaemonSessionActions({
             ? { ...current, workflowModeStatus: 'unknown' }
             : current,
         );
+        if (opts?.silent && isTransientSessionReadError(error)) {
+          throw error;
+        }
         throw dispatchActionError(
           addNotice,
           'Load context failed',

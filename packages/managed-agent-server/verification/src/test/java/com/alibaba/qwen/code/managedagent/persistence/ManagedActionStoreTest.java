@@ -47,6 +47,7 @@ class ManagedActionStoreTest {
     private static final String ACTION = "tool_approval_" + "a".repeat(32);
     private ConsolidatedStoreFixture fixture;
     private JdbcTemplate jdbc;
+    private StoreLockTrace trace;
     private ManagedActionStore actions;
     private AgentStateStore agents;
     private TransactionTemplate transactions;
@@ -55,7 +56,8 @@ class ManagedActionStoreTest {
     @BeforeEach
     void initialize() throws Exception {
         fixture = ConsolidatedStoreFixture.open("action_store");
-        var source = fixture.source();
+        var source = new StoreLockTrace(fixture.source());
+        trace = source;
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transactions = new TransactionTemplate(
@@ -431,15 +433,21 @@ class ManagedActionStoreTest {
     void planExitUsesItsActiveTurnAfterLivePolicyChanges(String turnStatus, String option,
             boolean expectedPlan, long expectedRevision) {
         jdbc.update("UPDATE ma_session SET approval_mode='default', selected_approval_mode='yolo',"
-                + " approval_revision=2, plan_enabled=TRUE WHERE tenant_id=? AND session_id=?", TENANT, SESSION);
+                + " approval_revision=2, is_plan_enabled=TRUE WHERE tenant_id=? AND session_id=?", TENANT, SESSION);
         jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
-                        + "status,approval_mode,approval_revision,plan_enabled,gmt_create,gmt_modified)"
+                        + "status,approval_mode,approval_revision,is_plan_enabled,gmt_create,gmt_modified)"
                         + " VALUES (?,?,'turn','turn','[]','digest',?,'default',1,TRUE,0,0)",
                 TENANT, SESSION, turnStatus);
         ObjectNode options = planExitOptions();
+        trace.clear();
         project("requested", null, 1, options);
         project("decided", response(option), 2, options);
-        assertThat(jdbc.queryForObject("SELECT plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
+        if (option.equals("allow")) {
+            trace.assertSessionBeforeTurn(TENANT, SESSION);
+        } else {
+            assertThat(trace.successful(TENANT, SESSION)).noneMatch(StoreLockTrace.Event::turn);
+        }
+        assertThat(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
                 Boolean.class, TENANT, SESSION)).isEqualTo(expectedPlan);
         assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id=? AND session_id=?",
                 Long.class, TENANT, SESSION)).isEqualTo(expectedRevision);

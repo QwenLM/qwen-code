@@ -55,7 +55,7 @@ class WorkspaceCsiRetainedArtifactsTest {
         expected = fixture.historicalKeys();
         tx = new TransactionTemplate(new DataSourceTransactionManager(source));
         clock.advance(Duration.between(clock.instant(), Instant.now()));
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, clock, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, clock, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         accepted();
         jdbc.update("INSERT INTO ma_workspace (tenant_id,workspace_id,workspace_generation,storage_id,display_name,config_ref,policy_ref,state)"
                 + " VALUES ('foreign','workspace',1,'ordinary-storage','Fixture',?,?,'ACTIVE')", WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
@@ -83,7 +83,7 @@ class WorkspaceCsiRetainedArtifactsTest {
     void acceptsEmptyMessagesAndActualAgentResourcesIncludingEmptyAndLiteralText() throws Exception {
         materialize();
         assertThat(tx.execute(status -> store.findMessagePage("foreign", session, null, 100, true)).items()).isEmpty();
-        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String literal = "Unicode 指令 {\"sessionId\":\"" + expected.table("ma_session").rows().getFirst().text("session_id") + "\"}";
         for (String text : List.of("", literal)) {
             tx.execute(status -> resources.publishAgentInstructions("foreign", "workspace", session, text));
@@ -233,7 +233,7 @@ class WorkspaceCsiRetainedArtifactsTest {
     @ParameterizedTest
     @ValueSource(strings = {"instructions-utf8", "skills-shape", "skills-path", "skills-field", "publish-command", "agent-scope"})
     void refusesMalformedAgentArtifactsWithOtherwiseCorrectDigests(String fault) throws Exception {
-        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         tx.execute(status -> resources.publishAgentInstructions("foreign", "workspace", session, "valid"));
         tx.execute(status -> resources.publishAgentSkills("foreign", "workspace", session, List.of(Map.of("name", "review", "description", "description", "body", "body"))));
         accepted();
