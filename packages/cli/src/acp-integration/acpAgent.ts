@@ -240,6 +240,11 @@ import { AcpFileSystemService } from './service/filesystem.js';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import { createAcpOutput } from './acp-output.js';
 import {
+  carryGatedMcpApprovals,
+  formatMcpApprovalCarryLog,
+  type McpApprovalCarryResult,
+} from './mcp-approval-carry.js';
+import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
@@ -673,6 +678,55 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
+// Bound on the post-cd approval carry (queue wait + one connect per carried
+// server). Same magnitude as the drain above: the carry never fails the cd,
+// so a stuck discovery queue degrades to a warning instead of holding it.
+const MCP_APPROVAL_CARRY_TIMEOUT_MS = 30_000;
+const MCP_APPROVAL_CARRY_TIMEOUT_ENV =
+  'QWEN_SERVE_MCP_APPROVAL_CARRY_TIMEOUT_MS';
+// The carry waits between `beginSessionCloseAfterCurrentGate` and
+// `releaseGate`, so an unbounded value would hold a session's close gate for
+// as long as the environment asks. Cap at five drains.
+const MCP_APPROVAL_CARRY_TIMEOUT_MAX_MS = 5 * SESSION_DRAIN_TIMEOUT_MS;
+
+/**
+ * Parse the post-cd approval-carry timeout.
+ *
+ * Operator/test-only knob: it is on the project-`.env` exclusion list and
+ * capped, because the wait happens while the session's close gate is held.
+ * Mirrors the workspace MCP budget parsing — only plain decimal digits are
+ * accepted, and invalid values fall back to the default loudly instead of
+ * silently.
+ */
+export function parseMcpApprovalCarryTimeoutMs(
+  raw: string | undefined,
+): number {
+  if (raw === undefined || raw === '') return MCP_APPROVAL_CARRY_TIMEOUT_MS;
+  const trimmed = raw.trim();
+  const parsed = Number(trimmed);
+  if (!/^\d+$/.test(trimmed) || !Number.isSafeInteger(parsed) || parsed <= 0) {
+    process.stderr.write(
+      `qwen serve: ignoring invalid ${MCP_APPROVAL_CARRY_TIMEOUT_ENV}=` +
+        `'${raw}' (expected positive integer); ` +
+        `MCP approval carry timeout stays ${MCP_APPROVAL_CARRY_TIMEOUT_MS}ms.\n`,
+    );
+    return MCP_APPROVAL_CARRY_TIMEOUT_MS;
+  }
+  if (parsed > MCP_APPROVAL_CARRY_TIMEOUT_MAX_MS) {
+    process.stderr.write(
+      `qwen serve: clamping ${MCP_APPROVAL_CARRY_TIMEOUT_ENV}='${raw}' to ` +
+        `${MCP_APPROVAL_CARRY_TIMEOUT_MAX_MS}ms (maximum for a cd).\n`,
+    );
+    return MCP_APPROVAL_CARRY_TIMEOUT_MAX_MS;
+  }
+  return parsed;
+}
+
+function resolveMcpApprovalCarryTimeoutMs(): number {
+  return parseMcpApprovalCarryTimeoutMs(
+    process.env[MCP_APPROVAL_CARRY_TIMEOUT_ENV],
+  );
+}
 const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
@@ -4416,9 +4470,10 @@ class QwenAgent implements Agent {
   private async reconcileMcpServerAcrossLiveConfigs(
     serverName: string,
     operation: 'discover' | 'disable' | 'disconnect',
+    configs: Config[] = this.getLiveMcpConfigs(serverName),
   ): Promise<void> {
     const errors: unknown[] = [];
-    for (const config of this.getLiveMcpConfigs(serverName)) {
+    for (const config of configs) {
       try {
         const registry = config.getToolRegistry();
         if (operation === 'discover') {
@@ -4449,6 +4504,110 @@ class QwenAgent implements Agent {
     }
   }
 
+  /**
+   * Carries gated MCP approval decisions to a session's new working directory
+   * and makes the live configs reflect them.
+   *
+   * Serialized through the workspace MCP discovery queue: the carry writes
+   * approval records for the new directory key and then reconnects, and a
+   * concurrent workspace reload landing between those two steps would
+   * recompute the gate before the store holds the decision, leaving a server
+   * that the user already approved pending until the next reload.
+   */
+  private async carrySessionMcpApprovals(
+    config: Config,
+    previousCwd: string,
+    nextCwd: string,
+    sessionId: string,
+  ): Promise<{
+    result?: McpApprovalCarryResult;
+    error?: unknown;
+    syncFailures: Array<{ server: string; message: string }>;
+    timedOut?: boolean;
+    timeoutMs: number;
+  }> {
+    // Parse once: an invalid or clamped value must warn once per cd, and the
+    // handler's warning has to quote the value the timer actually used.
+    const timeoutMs = resolveMcpApprovalCarryTimeoutMs();
+    const outcome: {
+      result?: McpApprovalCarryResult;
+      error?: unknown;
+      syncFailures: Array<{ server: string; message: string }>;
+      timedOut?: boolean;
+      timeoutMs: number;
+    } = { syncFailures: [], timeoutMs };
+
+    const queued = this.trackWorkspaceMcpDiscovery(
+      'session-cd-approvals',
+      async () => {
+        try {
+          const result = await carryGatedMcpApprovals(
+            previousCwd,
+            nextCwd,
+            config.getMcpServers(),
+            loadMcpApprovals(),
+          );
+          outcome.result = result;
+          // Emitted here, not from the cd handler: a slow carry settles after
+          // the response already returned (see the bounded race below), and
+          // the write is security-relevant enough that it must still leave a
+          // trail when it lands.
+          const summary = formatMcpApprovalCarryLog(
+            sessionId,
+            previousCwd,
+            nextCwd,
+            result,
+          );
+          if (summary) {
+            process.stderr.write(`${summary}\n`);
+          }
+          // The decision belongs to this session's new directory only.
+          // Clearing the gate for every live config would silently approve
+          // the server for other sessions sitting in unrelated directories
+          // whose own gate is still pending - the workspace approval endpoint
+          // may fan out because the user approved at workspace scope, but a cd
+          // carries one directory's record.
+          for (const entry of result.carried) {
+            if (entry.status !== 'approved') continue;
+            if (!config.getMcpServers()?.[entry.server]) continue;
+            config.approveMcpServerForSession(entry.server);
+          }
+          for (const entry of result.carried) {
+            if (entry.status !== 'approved') continue;
+            if (!config.getMcpServers()?.[entry.server]) continue;
+            try {
+              await this.reconcileMcpServerAcrossLiveConfigs(
+                entry.server,
+                'discover',
+                [config],
+              );
+            } catch (error) {
+              outcome.syncFailures.push({
+                server: entry.server,
+                message: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
+        } catch (error) {
+          outcome.error = error;
+        }
+      },
+    );
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), timeoutMs);
+      if (typeof timer.unref === 'function') timer.unref();
+    });
+    const settled = await Promise.race([
+      queued.then(() => 'done' as const),
+      timedOut,
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
+    if (settled === 'timeout') outcome.timedOut = true;
+    return outcome;
+  }
+
   private getMcpServerStatus(config: Config, serverName: string) {
     const manager = config.getToolRegistry()?.getMcpClientManager() as
       | { getServerStatus?: (name: string) => MCPServerStatus }
@@ -4462,6 +4621,19 @@ class QwenAgent implements Agent {
     label: string,
     run: () => Promise<void>,
   ): { accepted: boolean } {
+    this.trackWorkspaceMcpDiscovery(label, run);
+    return { accepted: true };
+  }
+
+  /**
+   * Same queue as {@link enqueueWorkspaceMcpDiscovery}, but hands the caller
+   * the settled promise so it can wait for its turn without changing the
+   * control-endpoint responses (those serialize to `{ accepted: true }`).
+   */
+  private trackWorkspaceMcpDiscovery(
+    label: string,
+    run: () => Promise<void>,
+  ): Promise<void> {
     const previous = this.workspaceMcpDiscoveryPromise ?? Promise.resolve();
     const tracked = previous
       .then(async () => {
@@ -4483,7 +4655,7 @@ class QwenAgent implements Agent {
         }
       });
     this.workspaceMcpDiscoveryPromise = tracked;
-    return { accepted: true };
+    return tracked;
   }
 
   private async createWorkspaceMcpDiscoveryConfig(
@@ -13184,6 +13356,50 @@ class QwenAgent implements Agent {
                   : String(relocation.mcpRefreshError)
               }`,
             );
+          }
+
+          // Gated servers only exist for non-bare/non-safe configs, and safe
+          // mode must not touch the local approvals store at all (see the
+          // pendingMcpServers gate in config/cli). Skip the carry — including
+          // the `loadMcpApprovals()` read — in those modes.
+          //
+          // `settledPreviousCwd` is `getTargetDir()`; the approval store keys
+          // on `getWorkingDir()`. Both return the same `cwd` field today (set
+          // together at boot and by relocateWorkingDirectory), so the carry
+          // reads the records the approval paths wrote.
+          if (!config.getBareMode() && !config.isSafeMode()) {
+            const carry = await this.carrySessionMcpApprovals(
+              config,
+              settledPreviousCwd,
+              canonicalPath,
+              session.getId(),
+            );
+            if (carry.error) {
+              warnings.push(
+                `MCP approval carry failed: ${
+                  carry.error instanceof Error
+                    ? carry.error.message
+                    : String(carry.error)
+                }`,
+              );
+            }
+            if (carry.timedOut) {
+              warnings.push(
+                `MCP approval carry still in progress after ${carry.timeoutMs}ms; it will finish in the background and be logged when it settles`,
+              );
+            }
+            if (carry.result) {
+              for (const failure of carry.result.failed) {
+                warnings.push(
+                  `MCP approval carry could not persist ${failure.server}: ${failure.message} (applied in memory only; will not survive a restart)`,
+                );
+              }
+            }
+            for (const failure of carry.syncFailures) {
+              warnings.push(
+                `MCP approval carry could not reconnect ${failure.server}: ${failure.message}`,
+              );
+            }
           }
 
           try {

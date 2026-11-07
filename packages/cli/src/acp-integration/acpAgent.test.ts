@@ -40,6 +40,7 @@ import { QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER } from '@qwen-code/qwen-code-core/q
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { BTW_STREAM_TIMEOUT_MS } from './btw-generation.js';
 import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
+import * as mcpApprovalCarry from './mcp-approval-carry.js';
 
 const mockPrepareFileWatchersForProcessExit = vi.hoisted(() => vi.fn());
 vi.mock(
@@ -202,7 +203,7 @@ const mockMcpServerRequiresOAuth = vi.hoisted(() => new Map<string, boolean>());
 const { mockMcpApprovals, mockGetPendingGatedMcpServers } = vi.hoisted(() => ({
   mockMcpApprovals: {
     getState: vi.fn().mockReturnValue('approved'),
-    setState: vi.fn().mockResolvedValue(undefined),
+    setState: vi.fn().mockResolvedValue(true),
   },
   mockGetPendingGatedMcpServers: vi.fn().mockReturnValue([]),
 }));
@@ -212,6 +213,16 @@ vi.mock('../config/mcpApprovals.js', () => ({
   getPendingGatedMcpServers: mockGetPendingGatedMcpServers,
   getPromptableMcpServers: vi.fn().mockReturnValue([]),
 }));
+
+// Spy-mode: the real carry runs, and the cd route's call into it is asserted.
+vi.mock('./mcp-approval-carry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./mcp-approval-carry.js')>();
+  return {
+    ...actual,
+    carryGatedMcpApprovals: vi.fn(actual.carryGatedMcpApprovals),
+  };
+});
 
 vi.mock('@agentclientprotocol/sdk', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@agentclientprotocol/sdk')>()),
@@ -1199,6 +1210,7 @@ import {
   deliverClientMcpMessage,
   selectVisibleHistoryRecords,
   createManagedExternalToolGuard,
+  parseMcpApprovalCarryTimeoutMs,
 } from './acpAgent.js';
 import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
@@ -1456,7 +1468,7 @@ describe('runAcpAgent shutdown cleanup', () => {
     delete process.env['QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD'];
     delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
     mockMcpApprovals.getState.mockReturnValue('approved');
-    mockMcpApprovals.setState.mockResolvedValue(undefined);
+    mockMcpApprovals.setState.mockResolvedValue(true);
     // Reset mockConfig after clearAllMocks
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
@@ -2548,7 +2560,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     delete process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
     mockExtractDaemonTraceContext.mockReturnValue(undefined);
     mockMcpApprovals.getState.mockReturnValue('approved');
-    mockMcpApprovals.setState.mockResolvedValue(undefined);
+    mockMcpApprovals.setState.mockResolvedValue(true);
     mockConnectionState.reset();
     mockRunExitCleanup.mockResolvedValue(undefined);
     mockMcpPoolDrainAll
@@ -8548,6 +8560,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const innerConfig = await setupSessionMocks(sessionId);
     Object.assign(innerConfig, {
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      getMcpServers: vi.fn().mockReturnValue({}),
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
       relocateWorkingDirectory: vi.fn().mockResolvedValue({
         mcpRefreshError: new Error('MCP failed'),
@@ -8570,7 +8583,328 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         newCwd: canonicalTargetDir,
         warnings: ['MCP refresh failed: MCP failed'],
       });
+      // The cd route carries approvals from the settled previous directory to
+      // the canonical target, before reporting its warnings.
+      expect(
+        vi.mocked(mcpApprovalCarry.carryGatedMcpApprovals),
+      ).toHaveBeenCalledWith('/tmp', canonicalTargetDir, {}, expect.anything());
     } finally {
+      await fs.rm(targetDir, { recursive: true, force: true });
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not clear another live session MCP gate when carrying approvals', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const workspaceA = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-carry-scope-a-')),
+    );
+    const workspaceB = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-carry-scope-b-')),
+    );
+    const childDir = path.join(workspaceA, 'sessions', 'A');
+    await fs.mkdir(path.join(workspaceA, '.qwen'), { recursive: true });
+    await fs.writeFile(path.join(workspaceA, '.qwen', 'settings.json'), '{}');
+    await fs.mkdir(childDir, { recursive: true });
+    // Same configuration source as the workspace, reached through a symlink.
+    // Windows needs a junction (absolute target) — directory symlinks require
+    // elevation there, and the carry compares real paths either way.
+    if (process.platform === 'win32') {
+      await fs.symlink(
+        path.resolve(childDir, '..', '..', '.qwen'),
+        path.join(childDir, '.qwen'),
+        'junction',
+      );
+    } else {
+      await fs.symlink(
+        path.join('..', '..', '.qwen'),
+        path.join(childDir, '.qwen'),
+        'dir',
+      );
+    }
+    const canonicalChild = await fs.realpath(childDir);
+    const server = {
+      command: 'node',
+      args: ['fixture.mjs'],
+      scope: 'workspace',
+    };
+
+    let currentDirA = workspaceA;
+    const discoverA = vi.fn().mockResolvedValue(undefined);
+    const approveA = vi.fn();
+    const innerConfigA = await setupSessionMocks(sessionId);
+    Object.assign(innerConfigA, {
+      getTargetDir: vi.fn(() => currentDirA),
+      getMcpServers: vi.fn().mockReturnValue({ fixture: server }),
+      approveMcpServerForSession: approveA,
+      getToolRegistry: vi.fn().mockReturnValue({
+        discoverToolsForServer: discoverA,
+      }),
+      isRestrictiveSandbox: vi.fn().mockReturnValue(false),
+      relocateWorkingDirectory: vi.fn(async (target: string) => {
+        currentDirA = target;
+        return {};
+      }),
+    });
+    Object.assign(innerConfigA.getLlmClient(), {
+      addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
+    });
+
+    // A second live session in an unrelated directory with the same gated
+    // server name: its own gate is still pending and must stay that way.
+    const innerConfigB = makeInnerConfig();
+    const discoverB = vi.fn().mockResolvedValue(undefined);
+    const approveB = vi.fn();
+    let pendingB = ['fixture'];
+    Object.assign(innerConfigB, {
+      getSessionId: vi
+        .fn()
+        .mockReturnValue('22222222-2222-2222-2222-222222222222'),
+      getTargetDir: vi.fn().mockReturnValue(workspaceB),
+      getMcpServers: vi.fn().mockReturnValue({ fixture: server }),
+      approveMcpServerForSession: approveB,
+      setPendingMcpServers: vi.fn((pending: string[] | undefined) => {
+        pendingB = pending ?? [];
+      }),
+      getPendingMcpServers: vi.fn(() => pendingB),
+      getToolRegistry: vi.fn().mockReturnValue({
+        discoverToolsForServer: discoverB,
+      }),
+    });
+
+    vi.mocked(loadCliConfig)
+      .mockResolvedValueOnce(innerConfigA as unknown as Config)
+      .mockResolvedValueOnce(innerConfigB as unknown as Config);
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: workspaceA, mcpServers: [] });
+    await agent.newSession({ cwd: workspaceB, mcpServers: [] });
+
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+          sessionId,
+          path: childDir,
+        }),
+      ).resolves.toMatchObject({ newCwd: canonicalChild });
+
+      // The cd'ing session's own gate is cleared and its server reconnected.
+      expect(approveA).toHaveBeenCalledWith('fixture');
+      expect(discoverA).toHaveBeenCalledWith('fixture');
+      // The other session's pending gate and registry are left untouched.
+      expect(approveB).not.toHaveBeenCalled();
+      expect(pendingB).toEqual(['fixture']);
+      expect(discoverB).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(workspaceA, { recursive: true, force: true });
+      await fs.rm(workspaceB, { recursive: true, force: true });
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('returns from cd while a stuck approval carry finishes in the background', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const workspace = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-carry-timeout-')),
+    );
+    const childDir = path.join(workspace, 'sessions', 'A');
+    await fs.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fs.writeFile(path.join(workspace, '.qwen', 'settings.json'), '{}');
+    await fs.mkdir(childDir, { recursive: true });
+    if (process.platform === 'win32') {
+      await fs.symlink(
+        path.resolve(childDir, '..', '..', '.qwen'),
+        path.join(childDir, '.qwen'),
+        'junction',
+      );
+    } else {
+      await fs.symlink(
+        path.join('..', '..', '.qwen'),
+        path.join(childDir, '.qwen'),
+        'dir',
+      );
+    }
+    const canonicalChild = await fs.realpath(childDir);
+    const server = {
+      command: 'node',
+      args: ['fixture.mjs'],
+      scope: 'workspace',
+    };
+
+    let currentDir = workspace;
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getTargetDir: vi.fn(() => currentDir),
+      getMcpServers: vi.fn().mockReturnValue({ fixture: server }),
+      approveMcpServerForSession: vi.fn(),
+      getToolRegistry: vi.fn().mockReturnValue({
+        discoverToolsForServer: vi.fn().mockResolvedValue(undefined),
+      }),
+      isRestrictiveSandbox: vi.fn().mockReturnValue(false),
+      relocateWorkingDirectory: vi.fn(async (target: string) => {
+        currentDir = target;
+        return {};
+      }),
+    });
+    Object.assign(innerConfig.getLlmClient(), {
+      addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
+    });
+
+    let releaseCarry!: (value: mcpApprovalCarry.McpApprovalCarryResult) => void;
+    const carryGate = new Promise<mcpApprovalCarry.McpApprovalCarryResult>(
+      (resolve) => {
+        releaseCarry = resolve;
+      },
+    );
+    // The carry parses its timeout before the queue wait; rewriting the env
+    // from inside the (queued) carry must therefore not change what the
+    // warning reports. The old double-parse rendered the second value here.
+    const carryMock = vi.mocked(mcpApprovalCarry.carryGatedMcpApprovals);
+    carryMock.mockImplementationOnce(() => {
+      process.env['QWEN_SERVE_MCP_APPROVAL_CARRY_TIMEOUT_MS'] = '400';
+      return carryGate;
+    });
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const previousTimeout =
+      process.env['QWEN_SERVE_MCP_APPROVAL_CARRY_TIMEOUT_MS'];
+    process.env['QWEN_SERVE_MCP_APPROVAL_CARRY_TIMEOUT_MS'] = '200';
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: workspace, mcpServers: [] });
+
+    try {
+      const response = (await agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.sessionCd,
+        { sessionId, path: childDir },
+      )) as { newCwd: string; warnings: string[] };
+      expect(response.newCwd).toBe(canonicalChild);
+      const warnings = response.warnings.join('\n');
+      expect(warnings).toContain('still in progress');
+      expect(warnings).toContain('will finish in the background');
+      // One parse: the value the timer used, not the rewritten env.
+      expect(warnings).toContain('after 200ms');
+      expect(warnings).not.toContain('after 400ms');
+      expect(carryMock).toHaveBeenCalled();
+
+      // The carry settles after the response and must still leave a trail.
+      releaseCarry({
+        carried: [{ server: 'fixture', status: 'approved' }],
+        failed: [],
+        skipped: [],
+      });
+      await vi.waitFor(() => {
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining(`session=${sessionId}`),
+        );
+      });
+      await vi.waitFor(() => {
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('carried=[fixture:approved]'),
+        );
+      });
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env['QWEN_SERVE_MCP_APPROVAL_CARRY_TIMEOUT_MS'];
+      } else {
+        process.env['QWEN_SERVE_MCP_APPROVAL_CARRY_TIMEOUT_MS'] =
+          previousTimeout;
+      }
+      stderrSpy.mockRestore();
+      await fs.rm(workspace, { recursive: true, force: true });
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('parses the carry timeout strictly and caps it', () => {
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      expect(parseMcpApprovalCarryTimeoutMs(undefined)).toBe(30_000);
+      expect(parseMcpApprovalCarryTimeoutMs('')).toBe(30_000);
+      expect(parseMcpApprovalCarryTimeoutMs('250')).toBe(250);
+      expect(parseMcpApprovalCarryTimeoutMs(' 250 ')).toBe(250);
+
+      // Loose numeric spellings are invalid rather than coerced: a `0.5` or
+      // `1e9` value must not silently become a fraction or a near-infinite
+      // gate hold.
+      expect(parseMcpApprovalCarryTimeoutMs('0.5')).toBe(30_000);
+      expect(parseMcpApprovalCarryTimeoutMs('1e9')).toBe(30_000);
+      expect(parseMcpApprovalCarryTimeoutMs('30s')).toBe(30_000);
+      expect(parseMcpApprovalCarryTimeoutMs('0')).toBe(30_000);
+
+      // Five drains is the ceiling, and clamping is announced.
+      expect(parseMcpApprovalCarryTimeoutMs('1000000')).toBe(150_000);
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('ignoring invalid'),
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('clamping'),
+      );
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  // An invalid value falls back to the default, so the carry finishes before
+  // the timeout: this pins that the cd still succeeds and reports the bad
+  // value once. The parse-once property (warning quotes the timer's value) is
+  // pinned by the stuck-carry case above, which is the only one that reaches
+  // the timeout branch.
+  it('still returns from cd when the carry timeout env is invalid', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const targetDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-carry-env-once-'),
+    );
+    const innerConfig = await setupSessionMocks(sessionId);
+    Object.assign(innerConfig, {
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      getMcpServers: vi.fn().mockReturnValue({}),
+      isRestrictiveSandbox: vi.fn().mockReturnValue(false),
+      relocateWorkingDirectory: vi.fn().mockResolvedValue({}),
+    });
+    Object.assign(innerConfig.getLlmClient(), {
+      addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const previousTimeout =
+      process.env['QWEN_SERVE_MCP_APPROVAL_CARRY_TIMEOUT_MS'];
+    process.env['QWEN_SERVE_MCP_APPROVAL_CARRY_TIMEOUT_MS'] = '30s';
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+          sessionId,
+          path: targetDir,
+        }),
+      ).resolves.toMatchObject({ newCwd: await fs.realpath(targetDir) });
+
+      // The bad value is reported once and does not block the cd.
+      const invalid = stderrSpy.mock.calls.filter(([chunk]) =>
+        String(chunk).includes('ignoring invalid'),
+      );
+      expect(invalid).toHaveLength(1);
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env['QWEN_SERVE_MCP_APPROVAL_CARRY_TIMEOUT_MS'];
+      } else {
+        process.env['QWEN_SERVE_MCP_APPROVAL_CARRY_TIMEOUT_MS'] =
+          previousTimeout;
+      }
+      stderrSpy.mockRestore();
       await fs.rm(targetDir, { recursive: true, force: true });
     }
 
@@ -34528,7 +34862,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       (v: string | null | undefined) => v ?? 'auto',
     );
     mockMcpApprovals.getState.mockReturnValue('approved');
-    mockMcpApprovals.setState.mockResolvedValue(undefined);
+    mockMcpApprovals.setState.mockResolvedValue(true);
     mockGetPendingGatedMcpServers.mockReset();
     mockGetPendingGatedMcpServers.mockReturnValue([]);
     mockConnectionState.reset();
