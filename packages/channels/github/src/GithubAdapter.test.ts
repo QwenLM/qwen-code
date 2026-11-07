@@ -361,6 +361,9 @@ class LiveGithubChannel extends GithubChannel {
 
   async pollForTest(): Promise<void> {
     await this.pollOnce();
+    // Public tasks execute in the background runner; drain it so assertions
+    // see the same settled state the inline execution used to produce.
+    await this.whenPublicTasksIdle();
   }
 
   startPromptForTest(
@@ -428,6 +431,9 @@ describe('GithubChannel', () => {
 
   async function pollOnce() {
     await (channel as unknown as { pollOnce: () => Promise<void> }).pollOnce();
+    // Public tasks execute in the background runner; drain it so assertions
+    // see the same settled state the inline execution used to produce.
+    await channel.whenPublicTasksIdle();
   }
 
   describe('connect', () => {
@@ -1499,6 +1505,10 @@ describe('GithubChannel', () => {
       ).not.toHaveBeenCalled();
       releaseInbound();
       await poll;
+      // The background task settled after the poll returned; the cursor
+      // commits on the first poll that sees no blocking task.
+      mockOctokit.paginate.mockResolvedValue([]);
+      await pollOnce();
 
       expect(
         mockOctokit.rest.activity.markNotificationsAsRead,
@@ -2760,6 +2770,12 @@ describe('GithubChannel', () => {
           try {
             await pollOnce();
             await pollOnce();
+            // The claimed tasks cannot settle (corrupt pending-deliveries
+            // file): the background runner leaves them running, and they
+            // keep holding the window.
+            const held = readInboundTasks();
+            expect(held.length).toBeGreaterThan(0);
+            expect(held.every((task) => task.state === 'running')).toBe(true);
             rmSync(pending, { force: true });
             await pollOnce();
             await pollOnce();
@@ -2770,10 +2786,6 @@ describe('GithubChannel', () => {
           expect(channel.inboundEnvelopes.map((e) => e.messageId)).toContain(
             '1002',
           );
-          // The claimed task held the window, so the thread was read again.
-          expect(journalRows()).toEqual([
-            expect.objectContaining({ outcome: 'failed', thread: 'issue:42' }),
-          ]);
         });
 
         it('still reads the comment lane after a failed direct dispatch', async () => {
@@ -2816,6 +2828,12 @@ describe('GithubChannel', () => {
           try {
             await pollOnce();
             await pollOnce();
+            // The claimed task cannot settle (corrupt pending-deliveries
+            // file): the background runner leaves it running, and it keeps
+            // holding the window while the comment lane is read again.
+            const held = readInboundTasks();
+            expect(held.length).toBeGreaterThan(0);
+            expect(held.every((task) => task.state === 'running')).toBe(true);
             rmSync(pending, { force: true });
             await pollOnce();
             await pollOnce();
@@ -2826,9 +2844,6 @@ describe('GithubChannel', () => {
           expect(channel.inboundEnvelopes.map((e) => e.messageId)).toContain(
             '1001',
           );
-          expect(journalRows()).toEqual([
-            expect.objectContaining({ outcome: 'failed', thread: 'pr:42' }),
-          ]);
         });
 
         it('reports the skip once the thread no longer holds the window', async () => {
@@ -2851,23 +2866,37 @@ describe('GithubChannel', () => {
             expect(
               mockOctokit.rest.activity.markNotificationsAsRead,
             ).not.toHaveBeenCalled();
-            // The claimed task settles at the start of the next poll; the
-            // thread then fails on its own and the window is marked read.
+            // The claimed task runs in the background and cannot settle
+            // (corrupt pending-deliveries file); it keeps holding the window.
+            expect(
+              readInboundTasks().some((task) => task.state === 'running'),
+            ).toBe(true);
             rmSync(pending, { force: true });
+            // The recovered task settles in the background; the skip and
+            // mark-read land on the first poll that sees no blocking task.
+            await pollOnce();
+            await channel.whenPublicTasksIdle();
             await pollOnce();
           } finally {
             stderr.mockRestore();
           }
 
-          expect(
-            journalRows().map((row) => [row['outcome'], row['thread']]),
-          ).toEqual([
-            ['failed', 'issue:42'],
-            ['skipped', 'issue:42'],
+          // Every window reports the skip once; the mock keeps re-listing
+          // the thread after mark-read, so later windows may repeat it.
+          const rows = journalRows().map((row) => [
+            row['outcome'],
+            row['thread'],
           ]);
+          expect(rows.length).toBeGreaterThan(0);
+          expect(
+            rows.every(
+              ([outcome, thread]) =>
+                outcome === 'skipped' && thread === 'issue:42',
+            ),
+          ).toBe(true);
           expect(
             mockOctokit.rest.activity.markNotificationsAsRead,
-          ).toHaveBeenCalledTimes(1);
+          ).toHaveBeenCalled();
         });
 
         it("reports another thread skipped while one thread's task holds the window", async () => {
@@ -2898,15 +2927,20 @@ describe('GithubChannel', () => {
             stderr.mockRestore();
           }
 
-          // Thread 1's task holds the window; thread 2 is given up on.
+          // Thread 1's background task holds the window; thread 2 is given
+          // up on. The hold is now visible in the durable task state rather
+          // than an inline inbound-failed journal row.
+          expect(
+            readInboundTasks().some(
+              (task) =>
+                task.source.threadId === 'issue:1' && task.state === 'running',
+            ),
+          ).toBe(true);
           expect(
             journalRows()
               .map((row) => [row['thread'], row['outcome']])
               .sort(),
-          ).toEqual([
-            ['issue:1', 'failed'],
-            ['issue:2', 'skipped'],
-          ]);
+          ).toEqual([['issue:2', 'skipped']]);
           expect(
             mockOctokit.rest.activity.markNotificationsAsRead,
           ).not.toHaveBeenCalled();
@@ -6049,7 +6083,10 @@ describe('GithubChannel', () => {
         42,
       );
 
-      expect(handled).toBe(false);
+      // The claim is durable and synchronous; the publication failure now
+      // surfaces from the background runner, not the dispatch return value.
+      expect(handled).toBe(true);
+      await channel.whenPublicTasksIdle();
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
       let validationError: unknown;
       try {
@@ -6354,6 +6391,14 @@ describe('GithubChannel', () => {
       });
 
       await pollOnce();
+      // The comment turn settles in the background; the body feed waits for
+      // the thread's durable work and lands on the next poll.
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ last_read_at: null, reason: 'subscribed' }),
+        ])
+        .mockResolvedValueOnce([]);
+      await pollOnce();
 
       const bodyEnvelope = channel.inboundEnvelopes.find((e) =>
         e.messageId.startsWith('issue-body-'),
@@ -6377,6 +6422,14 @@ describe('GithubChannel', () => {
         },
       });
 
+      await pollOnce();
+      // The comment turn settles in the background; the body feed waits for
+      // the thread's durable work and lands on the next poll.
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ last_read_at: null, reason: 'subscribed' }),
+        ])
+        .mockResolvedValueOnce([]);
       await pollOnce();
 
       expect(channel.inboundEnvelopes.map((env) => env.messageId)).toEqual([
@@ -6608,6 +6661,7 @@ describe('GithubChannel', () => {
         42,
         { dispatchedComments: ['C_1001'] },
       );
+      await channel.whenPublicTasksIdle();
 
       const tasks = readInboundTasks();
       expect(tasks).toHaveLength(1);
@@ -8665,6 +8719,9 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
   async function pollOnce(): Promise<void> {
     await (channel as unknown as { pollOnce: () => Promise<void> }).pollOnce();
+    // Public tasks execute in the background runner; drain it so assertions
+    // see the same settled state the inline execution used to produce.
+    await channel.whenPublicTasksIdle();
   }
 
   function prNotification(
@@ -8681,6 +8738,179 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       ...overrides,
     });
   }
+
+  describe('public task runner', () => {
+    function rawPollOnce(): Promise<void> {
+      return (
+        channel as unknown as { pollOnce: () => Promise<void> }
+      ).pollOnce();
+    }
+
+    it('returns from the poll before the public turn completes and finishes it in the background', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      let releaseTurn!: () => void;
+      const turnGate = new Promise<void>((resolve) => {
+        releaseTurn = resolve;
+      });
+      channel.handleInboundHook = () => turnGate;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await rawPollOnce();
+
+      // The poll returned while the public turn is still running, and the
+      // claim is already durable.
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(existsSync(inboundTaskPath())).toBe(true);
+
+      releaseTurn();
+      await channel.whenPublicTasksIdle();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
+    it('keeps watch detection and bound delivery flowing during a long public turn', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true, prWatchEvents: ['head_change'] },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            prs: [
+              {
+                number: 43,
+                url: 'https://github.com/owner/repo/pull/43',
+                state: 'open',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      let releaseTurn!: () => void;
+      const turnGate = new Promise<void>((resolve) => {
+        releaseTurn = resolve;
+      });
+      channel.handleInboundHook = () => turnGate;
+      let pr43Sha = 'sha-1';
+      mockOctokit.rest.pulls.get.mockImplementation(
+        async (params: { pull_number: number }) => ({
+          data: makePrMeta({
+            head: { sha: params.pull_number === 43 ? pr43Sha : 'sha-other' },
+          }),
+        }),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      // Poll 1 baselines bound PR 43 and claims the public mention on
+      // unbound PR 42; the public turn hangs on the gate.
+      await rawPollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+
+      // Poll 2 runs while the public turn is still in flight: the watch
+      // pass must still detect the head change and deliver it bound.
+      pr43Sha = 'sha-2';
+      await rawPollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![0]).toBe(
+        'bound-session',
+      );
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+
+      releaseTurn();
+      await channel.whenPublicTasksIdle();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+
+    it('executes queued public tasks in claim order and does not re-run re-listed events', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      const order: string[] = [];
+      const gates: Array<() => void> = [];
+      channel.handleInboundHook = (envelope) => {
+        order.push(envelope.threadId ?? '');
+        return new Promise<void>((resolve) => {
+          gates.push(resolve);
+        });
+      };
+      const notification43 = prNotification('mention', {
+        subject: {
+          title: 'Test PR 43',
+          url: 'https://api.github.com/repos/owner/repo/pulls/43',
+          type: 'PullRequest',
+        },
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification(), notification43])
+        .mockResolvedValueOnce([makeComment()])
+        .mockResolvedValueOnce([makeComment({ id: 1002 })]);
+
+      await rawPollOnce();
+      // Concurrency 1: only the first claim is executing.
+      expect(order).toEqual(['pr:42']);
+      gates[0]!();
+      await vi.waitFor(() => expect(order).toHaveLength(2));
+      expect(order).toEqual(['pr:42', 'pr:43']);
+      gates[1]!();
+      await channel.whenPublicTasksIdle();
+      expect(channel.inboundEnvelopes).toHaveLength(2);
+
+      // The frozen cursor re-lists the same window; dedupe must not
+      // re-execute either event.
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification(), notification43])
+        .mockResolvedValueOnce([makeComment()])
+        .mockResolvedValueOnce([makeComment({ id: 1002 })]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(2);
+      expect(order).toEqual(['pr:42', 'pr:43']);
+    });
+
+    it('recovers a persisted public task through the background runner exactly once', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      // The first worker claims the task and hangs mid-turn; it never
+      // finishes (simulates a crash before publication).
+      const never = new Promise<void>(() => {});
+      channel.handleInboundHook = () => never;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      await rawPollOnce();
+      expect(existsSync(inboundTaskPath())).toBe(true);
+      const firstWorker = channel;
+      firstWorker.disconnect();
+
+      // A fresh worker on the same state recovers the durable task.
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(firstWorker.inboundEnvelopes).toHaveLength(0);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+  });
 
   describe('bound-session delivery', () => {
     it('delivers a comment event into the bound session, not the channel path', async () => {
@@ -17527,6 +17757,318 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       } finally {
         stderr.mockRestore();
       }
+    });
+
+    it('watches open PRs before terminal-pending ones when the cap is exceeded', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true, prWatchEvents: ['head_change'] },
+        { boundSessions },
+      );
+      const bindings = [];
+      for (let i = 1; i <= 30; i++) {
+        bindings.push(
+          makeBinding({
+            sessionId: `s-${i}`,
+            updatedAt: `2026-07-02T00:00:${String(i).padStart(2, '0')}.000Z`,
+            prs: [
+              {
+                number: i,
+                url: `https://github.com/owner/repo/pull/${i}`,
+                state: 'open',
+              },
+            ],
+          }),
+        );
+      }
+      // The NEWEST binding is already merged: under recency-only selection
+      // it would take a slot from a live open PR.
+      bindings.push(
+        makeBinding({
+          sessionId: 's-newest',
+          updatedAt: '2026-07-03T00:00:00.000Z',
+          prs: [
+            {
+              number: 999,
+              url: 'https://github.com/owner/repo/pull/999',
+              state: 'merged',
+            },
+          ],
+        }),
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings,
+        partial: false,
+      });
+      const fetched: number[] = [];
+      mockOctokit.rest.pulls.get.mockImplementation(
+        async (params: { pull_number: number }) => {
+          fetched.push(params.pull_number);
+          return {
+            data: makePrMeta(
+              params.pull_number === 999
+                ? { state: 'closed', merged: true }
+                : {},
+            ),
+          };
+        },
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      let errText = '';
+      try {
+        mockNotificationsOnce([]);
+        await pollOnce();
+        errText = stderr.mock.calls.map((call) => String(call[0])).join('');
+      } finally {
+        stderr.mockRestore();
+      }
+      expect([...fetched].sort((a, b) => a - b)).toEqual(
+        Array.from({ length: 30 }, (_, i) => i + 1),
+      );
+      expect(fetched).not.toContain(999);
+      expect(errText).toContain('PR watch cap exceeded');
+      expect(errText).toContain('owner/repo#999');
+    });
+
+    it('drains terminal-pending PRs with the leftover budget and then stops polling them', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          prWatchEvents: ['head_change', 'state_change'],
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 's-open',
+            updatedAt: '2026-07-02T00:00:00.000Z',
+            prs: [
+              {
+                number: 1,
+                url: 'https://github.com/owner/repo/pull/1',
+                state: 'open',
+              },
+              {
+                number: 2,
+                url: 'https://github.com/owner/repo/pull/2',
+                state: 'open',
+              },
+            ],
+          }),
+          makeBinding({
+            sessionId: 's-merged',
+            updatedAt: '2026-07-01T00:00:00.000Z',
+            prs: [
+              {
+                number: 3,
+                url: 'https://github.com/owner/repo/pull/3',
+                state: 'merged',
+              },
+              {
+                number: 4,
+                url: 'https://github.com/owner/repo/pull/4',
+                state: 'merged',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      const fetched: number[] = [];
+      mockOctokit.rest.pulls.get.mockImplementation(
+        async (params: { pull_number: number }) => {
+          fetched.push(params.pull_number);
+          return {
+            data: makePrMeta(
+              params.pull_number >= 3 ? { state: 'closed', merged: true } : {},
+            ),
+          };
+        },
+      );
+      mockNotificationsOnce([]);
+      await pollOnce();
+      // Leftover budget observes every terminal-pending PR once...
+      expect([...fetched].sort((a, b) => a - b)).toEqual([1, 2, 3, 4]);
+      // ...without firing state_change on a first observation.
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      const entries = readWatchState().entries;
+      expect(entries['owner/repo#3']?.['prState']).toBe('closed');
+      expect(entries['owner/repo#4']?.['prState']).toBe('closed');
+
+      // Next poll: the drained PRs left the active set for good.
+      fetched.length = 0;
+      mockNotificationsOnce([]);
+      await pollOnce();
+      expect([...fetched].sort((a, b) => a - b)).toEqual([1, 2]);
+    });
+
+    it('still fires state_change for a terminal-pending PR squeezed in by the leftover budget', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true, prWatchEvents: ['state_change'] },
+        { boundSessions },
+      );
+      const bindings = [];
+      for (let i = 1; i <= 29; i++) {
+        bindings.push(
+          makeBinding({
+            sessionId: `s-${i}`,
+            updatedAt: `2026-07-02T00:00:${String(i).padStart(2, '0')}.000Z`,
+            prs: [
+              {
+                number: i,
+                url: `https://github.com/owner/repo/pull/${i}`,
+                state: 'open',
+              },
+            ],
+          }),
+        );
+      }
+      // Oldest binding, observed open before, now merged in the registry:
+      // recency-only selection would exclude it forever; the leftover
+      // terminal budget must still deliver its transition.
+      bindings.push(
+        makeBinding({
+          sessionId: 's-oldest',
+          updatedAt: '2026-07-01T00:00:00.000Z',
+          prs: [
+            {
+              number: 999,
+              url: 'https://github.com/owner/repo/pull/999',
+              state: 'merged',
+            },
+          ],
+        }),
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings,
+        partial: false,
+      });
+      seedWatchState({
+        'owner/repo#999': {
+          headSha: 'sha-1',
+          prState: 'open',
+          headObservedAt: Date.now(),
+        },
+      });
+      mockOctokit.rest.pulls.get.mockImplementation(
+        async (params: { pull_number: number }) => ({
+          data: makePrMeta(
+            params.pull_number === 999 ? { state: 'closed', merged: true } : {},
+          ),
+        }),
+      );
+      mockNotificationsOnce([]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain('merged');
+    });
+
+    it('honors a configured prWatchLimit and clamps fractional values up', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          prWatchEvents: ['head_change'],
+          prWatchLimit: 35,
+        },
+        { boundSessions },
+      );
+      const bindings = [];
+      for (let i = 1; i <= 35; i++) {
+        bindings.push(
+          makeBinding({
+            sessionId: `s-${i}`,
+            updatedAt: `2026-07-02T00:00:${String(i).padStart(2, '0')}.000Z`,
+            prs: [
+              {
+                number: i,
+                url: `https://github.com/owner/repo/pull/${i}`,
+                state: 'open',
+              },
+            ],
+          }),
+        );
+      }
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings,
+        partial: false,
+      });
+      const fetched: number[] = [];
+      mockOctokit.rest.pulls.get.mockImplementation(
+        async (params: { pull_number: number }) => {
+          fetched.push(params.pull_number);
+          return { data: makePrMeta({}) };
+        },
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        mockNotificationsOnce([]);
+        await pollOnce();
+      } finally {
+        stderr.mockRestore();
+      }
+      expect(fetched).toHaveLength(35);
+      const errText = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(errText).not.toContain('PR watch cap exceeded');
+    });
+
+    it('rounds a fractional prWatchLimit up to whole PRs', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          prWatchEvents: ['head_change'],
+          prWatchLimit: 1.5,
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 's-1',
+            updatedAt: '2026-07-02T00:00:01.000Z',
+            prs: [
+              {
+                number: 1,
+                url: 'https://github.com/owner/repo/pull/1',
+                state: 'open',
+              },
+            ],
+          }),
+          makeBinding({
+            sessionId: 's-2',
+            updatedAt: '2026-07-02T00:00:02.000Z',
+            prs: [
+              {
+                number: 2,
+                url: 'https://github.com/owner/repo/pull/2',
+                state: 'open',
+              },
+            ],
+          }),
+          makeBinding({
+            sessionId: 's-3',
+            updatedAt: '2026-07-02T00:00:03.000Z',
+            prs: [
+              {
+                number: 3,
+                url: 'https://github.com/owner/repo/pull/3',
+                state: 'open',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      const fetched: number[] = [];
+      mockOctokit.rest.pulls.get.mockImplementation(
+        async (params: { pull_number: number }) => {
+          fetched.push(params.pull_number);
+          return { data: makePrMeta({}) };
+        },
+      );
+      mockNotificationsOnce([]);
+      await pollOnce();
+      expect([...fetched].sort((a, b) => a - b)).toEqual([2, 3]);
     });
 
     it('logs the excluded PRs when the watch cap is exceeded (H17)', async () => {

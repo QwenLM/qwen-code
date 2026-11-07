@@ -158,6 +158,16 @@ export const plugin: ChannelPlugin = {
         options: PR_WATCH_EVENTS.map((value) => ({ value, label: value })),
       },
       {
+        key: 'prWatchLimit',
+        label: 'PR Watch Limit',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: 500,
+        default: '30',
+        description:
+          'Maximum bound PRs watched per poll (requires Deliver To PR-Bound Sessions). Open PRs are watched first; merged/closed bindings drain with the leftover budget. Each watched PR costs about one pulls.get per poll, so raise Poll Interval when raising this. Kept between 1 and 500. Leave empty for 30.',
+      },
+      {
         key: 'boundSessionActions',
         label: 'Bound Session Actions',
         kind: 'record',

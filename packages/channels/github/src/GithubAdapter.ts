@@ -46,6 +46,7 @@ interface GithubConfig extends ChannelConfig {
   useLocalGh?: boolean;
   deliverToBoundSessions?: boolean;
   prWatchEvents?: unknown;
+  prWatchLimit?: unknown;
   boundSessionActions?: unknown;
 }
 
@@ -387,8 +388,17 @@ function isBoundActionKey(key: string): boolean {
   return (PR_NOTIFICATION_REASONS as readonly string[]).includes(event);
 }
 
-/** Bounds one poll's watch fan-out (2-3 GitHub calls per watched PR). */
-const MAX_WATCHED_PRS = 30;
+/**
+ * Default watch fan-out per poll (~1 pulls.get per watched PR plus
+ * conditional Checks fetches). Operators with more open bindings raise
+ * `prWatchLimit` (and `pollInterval`) deliberately; the watch pass already
+ * fails fast on rate limits, so an over-budget configuration degrades
+ * instead of hammering the API.
+ */
+const DEFAULT_PR_WATCH_LIMIT = 30;
+
+/** Hard ceiling for the configurable watch fan-out. */
+const MAX_PR_WATCH_LIMIT = 500;
 
 /**
  * After a head change, checks register asynchronously (queued or self-hosted
@@ -1339,6 +1349,22 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private inboundTaskSnapshot: InboundTaskRecord[] = [];
   private activeInboundTaskIdsByMessage = new Map<string, string>();
   private cancelledInboundTaskIds = new Set<string>();
+  /**
+   * Public-path tasks execute in a background FIFO runner (concurrency 1)
+   * instead of inline in the poll loop: a public turn awaits the full agent
+   * reply, and running it inside pollOnce froze watch detection, bound
+   * delivery, and every other notification for the turn's duration. Claims
+   * stay durable and synchronous, so recovery owns execution exactly as it
+   * does for a task interrupted by a crash. Bound and watch deliveries stay
+   * inline: they are fast prompt POSTs whose verdict the dispatch return
+   * value and the cursor gate depend on.
+   */
+  private publicTaskQueue: string[] = [];
+  private publicTasksInFlight = new Set<string>();
+  private publicTaskRunner: Promise<void> | undefined;
+  private publicTaskRunnerGeneration = 0;
+  private publicTaskWake: (() => void) | undefined;
+  private publicTaskIdleWaiters: Array<() => void> = [];
   private pendingCursorUpdatedAt: string | undefined;
   private inboundPersistenceBlocked = false;
   /**
@@ -1538,6 +1564,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.migrateLegacyPublicationState();
     this.inboundPersistenceBlocked = false;
     this.inboundRecoveryPending = true;
+    // A reconnect starts a fresh runner generation; any runner left over
+    // from the previous connection exits after its current task.
+    this.publicTaskRunnerGeneration += 1;
+    this.publicTaskRunner = undefined;
+    this.publicTaskQueue = [];
+    this.publicTasksInFlight.clear();
+    this.publicTaskWake = undefined;
+    const idleWaiters = this.publicTaskIdleWaiters;
+    this.publicTaskIdleWaiters = [];
+    for (const resolve of idleWaiters) resolve();
     try {
       this.recoverableInboundTasks = this.readInboundTasks().filter((record) =>
         this.isRecoverableInboundTask(record),
@@ -1574,6 +1610,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   disconnect(): void {
     this.stopPollLoop();
+    // Retire the runner generation: an idle runner wakes and exits, and a
+    // runner mid-turn exits after that turn. The durable task stays
+    // recoverable for the next connection.
+    this.publicTaskRunnerGeneration += 1;
+    this.publicTaskWake?.();
     this.pendingFinalDeliveryRetryStopRequested = true;
     if (this.pendingFinalDeliveryRequestsActive === 0) {
       this.pendingFinalDeliveryRetryAbort?.abort();
@@ -3081,6 +3122,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const { chatId, threadId, issueNumber } = ctx;
     const bodyKey = `${chatId}|${threadId}`;
     if (this.cursor.dispatchedBodies?.includes(bodyKey)) return;
+    // A public turn for this thread may still be queued or running in the
+    // background runner (a fresh claim or a retry). Feeding the body now
+    // would let its turn overtake — and steer-cancel — the comment turn,
+    // so defer until the thread's durable work settles. The body key is
+    // not recorded, so a later poll feeds it.
+    const threadHasPendingWork = this.readInboundTasks().some(
+      (task) =>
+        task.source.chatId === chatId &&
+        task.source.threadId === threadId &&
+        this.isRecoverableInboundTask(task),
+    );
+    if (threadHasPendingWork) return;
     // Fetch and dispatch failures reach pollOnce, which keeps the
     // notification unread when GitHub may answer differently next poll.
     const issue = await this.fetchIssueMeta(ctx);
@@ -3342,7 +3395,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       undefined,
       privateOnly,
     );
-    return this.runInboundTask(task);
+    // The claim is durable; execution belongs to the background runner.
+    // Awaiting the agent turn here would freeze the whole poll loop
+    // (watch, bound delivery, other notifications) for the turn's duration.
+    // A private-only task is retired inside runInboundTask, never published.
+    this.enqueuePublicTask(task);
+    return true;
   }
 
   private claimInboundTask(
@@ -3420,6 +3478,82 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ...this.boundJournalIdentity(task.delivery),
     });
     return task;
+  }
+
+  /**
+   * Hand a claimed public task to the background runner. Idempotent: a
+   * re-listed event re-claiming a queued/running task, or a recovery pass
+   * re-scanning it, must not execute it twice.
+   */
+  private enqueuePublicTask(task: InboundTaskRecord): void {
+    if (this.publicTasksInFlight.has(task.id)) return;
+    if (!this.isRecoverableInboundTask(task)) return;
+    this.publicTasksInFlight.add(task.id);
+    this.publicTaskQueue.push(task.id);
+    this.startPublicTaskRunner();
+    this.publicTaskWake?.();
+  }
+
+  private startPublicTaskRunner(): void {
+    if (this.publicTaskRunner) return;
+    const generation = this.publicTaskRunnerGeneration;
+    const runner = (async () => {
+      while (generation === this.publicTaskRunnerGeneration) {
+        const id = this.publicTaskQueue.shift();
+        if (id === undefined) {
+          await new Promise<void>((resolve) => {
+            this.publicTaskWake = resolve;
+          });
+          this.publicTaskWake = undefined;
+          continue;
+        }
+        try {
+          const task = this.readInboundTasks().find((t) => t.id === id);
+          if (task) await this.runInboundTask(task);
+        } catch (err) {
+          // runInboundTask owns failure transitions; an unexpected throw
+          // here must not kill the runner or strand the remaining queue.
+          process.stderr.write(
+            `[Channel:${this.name}] public task runner error for ${sanitizeLogText(id, 128)}: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+          );
+        } finally {
+          this.publicTasksInFlight.delete(id);
+          if (
+            this.publicTaskQueue.length === 0 &&
+            this.publicTasksInFlight.size === 0
+          ) {
+            const waiters = this.publicTaskIdleWaiters;
+            this.publicTaskIdleWaiters = [];
+            for (const resolve of waiters) resolve();
+          }
+        }
+      }
+    })().finally(() => {
+      if (this.publicTaskRunner === runner) {
+        this.publicTaskRunner = undefined;
+        // Work enqueued while this runner was winding down (or a retired
+        // generation's leftover queue) must not strand: start a runner for
+        // the current generation.
+        if (this.publicTaskQueue.length > 0) this.startPublicTaskRunner();
+      }
+    });
+    this.publicTaskRunner = runner;
+  }
+
+  /**
+   * Resolves once no public task is queued or running (tests/diagnostics).
+   * Signal-based, not timer-based: callers may run under fake timers.
+   */
+  async whenPublicTasksIdle(): Promise<void> {
+    if (
+      this.publicTaskQueue.length === 0 &&
+      this.publicTasksInFlight.size === 0
+    ) {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      this.publicTaskIdleWaiters.push(resolve);
+    });
   }
 
   private async runInboundTask(task: InboundTaskRecord): Promise<boolean> {
@@ -3898,7 +4032,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           continue;
         }
       }
-      await this.runInboundTask(task);
+      if (
+        task.delivery?.kind === 'bound-session' ||
+        task.envelope.messageId?.startsWith('watch:') === true
+      ) {
+        // Bound and watch deliveries are fast prompt POSTs whose verdict
+        // recovery applies inline; public turns go to the background runner
+        // so a long reply cannot stall the poll loop.
+        await this.runInboundTask(task);
+      } else {
+        this.enqueuePublicTask(task);
+      }
     }
   }
 
@@ -5995,6 +6139,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
+   * Watch fan-out per poll. Clamped like pollInterval: unset or invalid
+   * keeps the default; a fractional count rounds up so the configured
+   * budget is never silently smaller than requested.
+   */
+  private get prWatchLimit(): number {
+    const configured: unknown = (this.config as GithubConfig).prWatchLimit;
+    if (
+      typeof configured === 'number' &&
+      Number.isFinite(configured) &&
+      configured > 0
+    ) {
+      return Math.min(Math.max(Math.ceil(configured), 1), MAX_PR_WATCH_LIMIT);
+    }
+    return DEFAULT_PR_WATCH_LIMIT;
+  }
+
+  /**
    * Edge-triggered state watch over the PRs bound to live sessions. Runs
    * inside the existing poll loop; detection is API-level and costs no model
    * tokens until a real transition fires.
@@ -6008,7 +6169,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     >();
     const active = new Map<
       string,
-      { chatId: string; number: number; updatedAt: string }
+      { chatId: string; number: number; updatedAt: string; terminal: boolean }
     >();
     for (const summary of this.lastBindings) {
       if (summary.sourceType === 'channel') continue;
@@ -6046,6 +6207,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             chatId: identity.chatId,
             number: identity.number,
             updatedAt,
+            terminal: pr.state === 'merged' || pr.state === 'closed',
           });
         }
       }
@@ -6110,19 +6272,37 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }
       }
     }
-    const watched = [...active.entries()]
-      .sort((a, b) => b[1].updatedAt.localeCompare(a[1].updatedAt))
-      .slice(0, MAX_WATCHED_PRS);
-    if (active.size > MAX_WATCHED_PRS) {
+    // Open bindings take priority over terminal-pending ones: a merged or
+    // closed PR that the watch has not observed yet must never crowd a live
+    // PR out of the budget. Terminal-pending PRs drain with the leftover
+    // budget — each needs exactly one more observation before it leaves the
+    // active set for good, so the backlog shrinks instead of accumulating.
+    const limit = this.prWatchLimit;
+    const byRecency = (
+      a: [string, { updatedAt: string }],
+      b: [string, { updatedAt: string }],
+    ) => b[1].updatedAt.localeCompare(a[1].updatedAt);
+    const openEntries = [...active.entries()]
+      .filter(([, candidate]) => !candidate.terminal)
+      .sort(byRecency);
+    const terminalEntries = [...active.entries()]
+      .filter(([, candidate]) => candidate.terminal)
+      .sort(byRecency);
+    const watched = openEntries.slice(0, limit);
+    watched.push(
+      ...terminalEntries.slice(0, Math.max(0, limit - watched.length)),
+    );
+    if (watched.length < active.size) {
       // The cap deterministically excludes the oldest bindings every poll.
       // Surface it (dead-letter principle: surfaced, never silently
-      // consumed) so an operator knows some bound PRs are never watched.
+      // consumed) so an operator knows some bound PRs are not watched this
+      // pass.
       const watchedKeys = new Set(watched.map(([key]) => key));
       const excluded = [...active.keys()].filter(
         (key) => !watchedKeys.has(key),
       );
       process.stderr.write(
-        `[Channel:${this.name}] PR watch cap exceeded: watching ${MAX_WATCHED_PRS}/${active.size} bound PRs (most recent); not watched: ${excluded.join(', ')}\n`,
+        `[Channel:${this.name}] PR watch cap exceeded: watching ${watched.length}/${active.size} bound PRs (open first, most recent; limit ${limit}); not watched: ${excluded.join(', ')}\n`,
       );
     }
     for (const [key, candidate] of watched) {
