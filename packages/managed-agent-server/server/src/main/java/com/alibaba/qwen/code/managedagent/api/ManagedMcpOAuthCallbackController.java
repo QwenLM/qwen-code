@@ -27,7 +27,9 @@ public class ManagedMcpOAuthCallbackController {
         try {
             if (error == null) {
                 service.callback(state, iss, code);
-            } else service.callbackFailure(state);
+            } else {
+                service.callbackFailure(state);
+            }
             accepted = true;
         } catch (ManagedAgentException invalid) {
             accepted = false;

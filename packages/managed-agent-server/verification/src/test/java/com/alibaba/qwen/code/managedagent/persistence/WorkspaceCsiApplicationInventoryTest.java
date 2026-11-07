@@ -788,7 +788,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.TABLES.size());
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(810);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(843);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -837,6 +837,52 @@ class WorkspaceCsiApplicationInventoryTest {
                 jdbc.queryForList("SELECT * FROM ma_user_message_queue"),
                 jdbc.queryForList("SELECT * FROM ma_user_message"),
                 jdbc.queryForList("SELECT * FROM ma_user_message_command"))).usingRecursiveComparison().isEqualTo(before);
+    }
+
+    @Test
+    void personalExecutionBindingsBlockTheFilesOnlyCsiLane() throws Exception {
+        var before = inspect();
+        var owner = before.table("ma_session").rows().getFirst();
+        assertThat(owner.cell("personal_execution_actor_key").isNull()).isTrue();
+        assertThat(owner.number("personal_auth_config_revision")).isZero();
+        assertThat(before.blockers()).noneMatch(blocker -> blocker.table().equals("ma_session"));
+        jdbc.update("UPDATE ma_session SET personal_auth_config_revision = 1 WHERE tenant_id = 'tenant' AND session_id = ?", session);
+        assertThat(inspect().blockers()).anyMatch(blocker -> blocker.table().equals("ma_session")
+                && blocker.code().equals("invalid_original_association"));
+        jdbc.update("UPDATE ma_session SET personal_execution_actor_key = ?, personal_auth_config_revision = 1"
+                + " WHERE tenant_id = 'tenant' AND session_id = ?", "a".repeat(64), session);
+        var snapshot = inspect();
+        assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift"));
+        assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session")
+                && blocker.code().equals("invalid_original_association"));
+        assertThat(snapshot.table("ma_session").rows().getFirst().text("personal_execution_actor_key")).isEqualTo("a".repeat(64));
+        assertThat(snapshot.table("ma_session").rows().getFirst().number("personal_auth_config_revision")).isEqualTo(1);
+        jdbc.update("UPDATE ma_session SET personal_execution_actor_key = NULL, personal_auth_config_revision = 0"
+                + " WHERE tenant_id = 'tenant' AND session_id = ?", session);
+        var restored = inspect();
+        assertThat(restored.blockers()).noneMatch(blocker -> blocker.table().equals("ma_session"));
+        assertThat(restored.table("ma_session").rows().getFirst().bytes()).isEqualTo(owner.bytes());
+    }
+
+    @Test
+    void workspaceOAuthRowsRemainOpaqueContextWithoutMutation() throws Exception {
+        jdbc.update("INSERT INTO ma_mcp_credential (credential_key,scope_key,tenant_id,workspace_id,actor_id,credential_id,"
+                        + "binding_json,generation,state,expires_at_ms,encryption_key_id,encrypted_values,gmt_create)"
+                        + " VALUES (?,?,'tenant','workspace',?,?,'{}',1,'active',1000,?,'opaque-grant',1)",
+                "a".repeat(64), "b".repeat(64), "actor", "mcred_" + UUID.randomUUID(), "test");
+        jdbc.update("INSERT INTO ma_mcp_oauth_attempt (attempt_key,scope_key,tenant_id,workspace_id,actor_id,attempt_id,"
+                        + "state_hash,nonce_hash,request_digest,state,expires_at_ms,binding_json,encryption_key_id,encrypted_values,gmt_create)"
+                        + " VALUES (?,?,'tenant','workspace',?,?,?,?,?,'pending',1000,'{}',?,'opaque-attempt',1)",
+                "c".repeat(64), "b".repeat(64), "actor", "mauth_" + UUID.randomUUID(),
+                "d".repeat(64), "e".repeat(64), "f".repeat(64), "test");
+        var before = inspect();
+        var after = inspect();
+        for (String table : List.of("ma_mcp_credential", "ma_mcp_oauth_attempt")) {
+            assertThat(before.blockers()).noneMatch(blocker -> blocker.table().equals(table));
+            var rows = before.table(table).rows();
+            assertThat(rows).hasSize(1).allMatch(row -> row.membership() == WorkspaceCsiApplicationInventory.Membership.CONTEXT);
+            assertThat(after.table(table).rows().getFirst().bytes()).isEqualTo(rows.getFirst().bytes());
+        }
     }
 
     @Test
