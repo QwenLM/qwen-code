@@ -43,8 +43,9 @@ export function ReleaseSessionDialog({
   } = useScopedSessions(workspaceCwd, {
     autoLoad: true,
     maxAgeMs: 1_000,
-    // The daemon caps the live page at 100 rows; request the shared max so a
-    // full workspace fits in one page.
+    // The daemon caps the live page at 100 rows. Request the shared max so a
+    // full workspace usually fits; above 100 live rows this dialog does not
+    // follow nextCursor.
     pageSize: SESSION_LIST_PAGE_SIZE,
     sourceType: null,
     liveOnly: true,
