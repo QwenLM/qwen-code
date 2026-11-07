@@ -286,6 +286,7 @@ describe('claimInterruptedWorkflowRuns', () => {
     expect(snapshot).toEqual(claimed[0]!.snapshot);
     expect(snapshot).toMatchObject({
       runId: RUN_ID,
+      parentSessionId: 'session-1',
       status: 'failed',
       error: INTERRUPTED_WORKFLOW_ERROR,
       meta: { name: 'audit', description: 'Audit the repo' },

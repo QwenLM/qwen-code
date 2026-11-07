@@ -18,4 +18,12 @@ Cancellation admission and final Continue execution both consult this boundary. 
 
 With a built daemon and an isolated provider, Cancel after read_file, restart, reattach and Continue must refuse with zero further requests. SIGKILL without Cancel must still continue and complete. A timestamp-only cancellation must refuse repeated Continue without changing the transcript. Verify newer input, local commands, rollback, compression, stale results and active Close using focused checks.
 
-Legacy confirmation remains in draft #14087. Remote Host/channel attribution extensions are removed from this PR; their existing policy is unchanged. Untagged automatic input and idle Close after an earlier interruption remain separate work in #13502. No migration or release is included.
+Remote Host/channel attribution extensions, untagged automatic input and idle Close after an earlier interruption remain separate work in #13502. No migration or release is included.
+
+## Legacy confirmation
+
+This follow-up only adds explicit confirmation to the existing daemon/WebShell Continue path. Reuse the validated, uniquely owned timestamp-only terminal UUID as the confirmation ID. Context exposes that ID; admission and final execution require the same current ID. Explicit user cancellation, ambiguous/malformed evidence and missing/stale confirmation remain blocked. Unavailable recording disables Continue without losing the rest of read-only context. No cache, planner field, index or migration is added.
+
+WebShell uses its existing recovery banner and owner guard, asks with the native confirmation dialog, and forwards the ID through the existing SDK/REST/ACP route. Status is the only source of IDs; a refusal refreshes it through the existing action. Stream-json continuation retains main's cancellation refusal. Cancellation notices, transcript projections, Goal and queue policies retain main behavior.
+
+Acceptance: dismissing confirmation makes no request; the current ID resumes once; missing/stale IDs, explicit user Cancel and ambiguous records send no model request. Recheck the boundary before recording an attempt and before model execution so later cancellation cannot be bypassed. A new task still works. Context remains readable with recording disabled or unreadable.

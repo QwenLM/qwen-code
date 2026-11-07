@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -113,7 +114,10 @@ async function withAuthority<T>(
             createdBy: 'daemon',
           };
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',
@@ -1377,7 +1381,10 @@ describe('managed session metadata', () => {
       transcriptPath: harness.transcriptPath,
     });
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',
@@ -1449,7 +1456,10 @@ describe('legacy maintenance on a managed session', () => {
       transcriptPath: harness.transcriptPath,
     });
     await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: harness.projectRoot,
       version: 'test',
@@ -1508,7 +1518,10 @@ describe('legacy maintenance on a managed session', () => {
       transcriptPath: harness.transcriptPath,
     });
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: harness.projectRoot,
       version: 'test',
@@ -1606,7 +1619,10 @@ describe('maintenance on a sealed managed session', () => {
       transcriptPath,
     });
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: projectRoot,
       version: 'test',
@@ -1754,7 +1770,10 @@ describe('maintenance on a sealed managed session', () => {
       transcriptPath: harness.transcriptPath,
     });
     const authority = await LocalManagedSessionAuthority.open({
-      lease: writer,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        writer,
+        sessionKey,
+      ),
       sessionKey,
       cwd: harness.projectRoot,
       version: 'test',

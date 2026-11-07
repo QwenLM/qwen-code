@@ -83,7 +83,7 @@ function isHostedLane(env: NodeJS.ProcessEnv): boolean {
 // is contention, not a scan regression. CI set with both markers absent is
 // exactly that child, so it takes the hosted lane's shared multiplier; a
 // lane whose markers survived takes its own arm: `ecs-qwen-*` the pool's
-// 10x, a github-hosted fallback the 2.2x multiplier, and a marked non-pool
+// 10x, a github-hosted fallback the 3.4x multiplier, and a marked non-pool
 // self-hosted lane (`ecs-agent-*`, `ecs-update-hk-*`, `ecs-win`) the
 // strict bound.
 function isMarkerlessCiLane(env: NodeJS.ProcessEnv): boolean {
@@ -114,21 +114,23 @@ const FAST_RESULT_CEILING_MS = POOL_CI
 // runners, and the smaller corpi breached the strict 100ms bound at 110-177ms
 // on eight jobs — five of those on all three vitest attempts, which `--retry`
 // cannot rescue. So every cold row moves off the strict bound here, sized by
-// this file's own ~20% slack convention rather than the pool's multiple:
-// against the same developer-machine baseline the `~5x` pool figure in
-// `test-utils/latency-budget.ts` uses, this lane measures ~1.2-2.2x, and 2.2x
-// leaves ~1.2x headroom over the worst sample seen on each row (220ms vs
-// 177ms, 275ms vs 227ms). The pool's 10x would have swallowed the reparse
-// regression at 1250ms.
+// this file's own ~20% slack convention rather than the pool's multiple: the
+// multiplier leaves ~1.2x headroom over the worst sample seen on the slowest
+// row. The first sizing, 2.2x (275ms vs a 227ms sample), stopped holding:
+// 12 of 96 hosted jobs from 15-17 October 2026 failed the 1000-topic row on
+// all three vitest attempts, with best-of-5 samples of 276-346ms, while no
+// job failed on the 200/500-topic rows at 220ms. 3.4x puts that row at 425ms,
+// ~1.2x over the 346ms worst, and the smaller rows at 340ms. The pool's 10x
+// would still swallow the reparse regression at 1250ms.
 // What a wall-clock ceiling cannot do is promise that regression reddens
-// fleet-wide: 275ms only catches the +48% reparse where the 1000-topic
-// baseline exceeds 275/1.48 ≈ 186ms, so the faster hosted runners pass it. It
-// stays reliably asserted on the strict lanes — developer machines and
+// fleet-wide: 425ms only catches the +48% reparse where the 1000-topic
+// baseline exceeds 425/1.48 ≈ 287ms, so only the slowest hosted runners see
+// it. It stays reliably asserted on the strict lanes — developer machines and
 // marked self-hosted runners — which is where this file's header says the
 // number means something. The warm-cache gate is
 // untouched — hosted jobs measured green under it (run 36640349705:
 // `recall-scan-latency.test.ts (2 tests | 1 failed)`).
-const HOSTED_COLD_SCAN_MULTIPLIER = 2.2;
+const HOSTED_COLD_SCAN_MULTIPLIER = 3.4;
 
 /** Ceiling for one cold-scan row on the lane `env` describes. */
 function coldScanCeilingMs(
@@ -291,20 +293,20 @@ describe('coldScanCeilingMs lane arms', () => {
     {
       lane: 'GitHub-hosted (RUNNER_ENVIRONMENT)',
       env: { RUNNER_ENVIRONMENT: 'github-hosted' },
-      small: 220,
-      large: 275,
+      small: 340,
+      large: 425,
     },
     {
       lane: 'GitHub-hosted (RUNNER_NAME prefix)',
       env: { RUNNER_NAME: 'GitHub Actions 1000544680' },
-      small: 220,
-      large: 275,
+      small: 340,
+      large: 425,
     },
     {
       lane: 'markerless CI (autofix gate env -i child)',
       env: { CI: 'true' },
-      small: 220,
-      large: 275,
+      small: 340,
+      large: 425,
     },
     {
       // Exactly one marker present: not the env -i child either. With the
@@ -360,8 +362,9 @@ describe('coldScanCeilingMs lane arms', () => {
   ];
 
   it.each(arms)('pins the $lane ceilings', ({ env, small, large }) => {
-    // toBeCloseTo rather than toBe: 100 * 2.2 is 220.00000000000003 in binary
-    // floating point, and what this case pins is the multiplier, not rounding.
+    // toBeCloseTo rather than toBe: with a multiplier such as 2.2, 100 * 2.2 is
+    // 220.00000000000003 in binary floating point, and what this case pins is
+    // the multiplier, not rounding.
     expect(coldScanCeilingMs(200, env)).toBeCloseTo(small, 6);
     expect(coldScanCeilingMs(500, env)).toBeCloseTo(small, 6);
     expect(coldScanCeilingMs(1000, env)).toBeCloseTo(large, 6);

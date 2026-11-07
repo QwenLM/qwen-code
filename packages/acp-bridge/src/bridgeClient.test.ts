@@ -73,6 +73,7 @@ import {
 import type {
   ClientMcpMessageSender,
   CurrentSessionScheduledTaskCreateInfo,
+  CurrentSessionScheduledTaskCreateResult,
 } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import {
@@ -1957,7 +1958,9 @@ describe('BridgeClient — current-session scheduled-task dispatch', () => {
       ...overrides,
     };
     const handler = vi.fn(
-      async (_info: CurrentSessionScheduledTaskCreateInfo) => ({
+      async (
+        _info: CurrentSessionScheduledTaskCreateInfo,
+      ): Promise<CurrentSessionScheduledTaskCreateResult> => ({
         id: 'cron-1',
         cron: request.cron,
       }),
@@ -1984,6 +1987,43 @@ describe('BridgeClient — current-session scheduled-task dispatch', () => {
       ...request,
       assertCallerPromptActive: expect.any(Function),
     });
+  });
+
+  it('forwards a gate command to the handler and rejects a malformed one', async () => {
+    const { client, handler } = makeCurrentSessionClient();
+
+    // The stored gate is echoed so the child can tell a daemon that dropped
+    // a requested gate.
+    handler.mockResolvedValueOnce({
+      id: 'cron-1',
+      cron: request.cron,
+      gate: './probe.sh --gate',
+    });
+    await expect(
+      client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        { ...request, gate: './probe.sh --gate' },
+      ),
+    ).resolves.toEqual({
+      id: 'cron-1',
+      cron: request.cron,
+      gate: './probe.sh --gate',
+    });
+    expect(handler).toHaveBeenCalledWith({
+      ...request,
+      gate: './probe.sh --gate',
+      assertCallerPromptActive: expect.any(Function),
+    });
+
+    for (const gate of ['', '   ', 7, 'x'.repeat(2049)]) {
+      await expect(
+        client.extMethod(
+          SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+          { ...request, gate },
+        ),
+      ).rejects.toMatchObject({ code: -32602 });
+    }
+    expect(handler).toHaveBeenCalledTimes(1);
   });
 
   it.each(['prompt-1', 'background-1'])(
@@ -2645,6 +2685,67 @@ describe('BridgeClient — artifact ingress', () => {
     expect(
       (sessionUpdate?.data.update as { _meta?: Record<string, unknown> })._meta,
     ).toEqual({ toolName: 'record_artifact' });
+  });
+
+  it('forwards the update-only flag of file-write tool artifacts', async () => {
+    const sessionId = 'sess:update-only-artifacts';
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish: vi.fn().mockReturnValue(true) },
+      artifactWorkspaceReady: true,
+      deferredArtifactBatches: [] as BridgeClientDeferredArtifactBatch[],
+      deferredArtifactInputCount: 0,
+      artifacts: {
+        inputBatchLimit: () => 400,
+        upsertMany,
+      },
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
+      promptActive: true,
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-edit',
+        status: 'completed',
+        content: [],
+        _meta: {
+          toolName: 'edit',
+          artifacts: [
+            {
+              title: 'index.ts',
+              storage: 'workspace',
+              workspacePath: 'src/index.ts',
+              updateOnly: true,
+            },
+          ],
+        },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(upsertMany).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          workspacePath: 'src/index.ts',
+          toolCallId: 'call-edit',
+          toolName: 'edit',
+          updateOnly: true,
+        }),
+      ],
+      { trustedPublisher: false },
+    );
   });
 
   it('does not store artifact metadata from non-tool session updates', async () => {
@@ -5526,5 +5627,43 @@ describe('background execution ownership', () => {
       outcome: { outcome: 'cancelled' },
     });
     expect(entry.pendingPermissionIds.size).toBe(0);
+  });
+});
+
+describe('MCP reload capability invalidation', () => {
+  it('publishes only a current owning-session invalidation', async () => {
+    const publish = vi.fn();
+    const entry = { events: { publish } };
+    const client = makeClient(undefined, {
+      resolveEntry: () => entry,
+      ownsSession: (id) => id === 'owner',
+      handler: vi.fn(),
+    });
+    const method = 'qwen/notify/session/mcp-changed';
+    for (const params of [{}, { sessionId: 42 }, { sessionId: 'foreign' }]) {
+      await client.extNotification(method, params);
+    }
+    expect(publish).not.toHaveBeenCalled();
+    await client.extNotification(method, {
+      sessionId: 'owner',
+      generatedUi: { version: 1, enabled: true },
+    });
+    expect(publish).toHaveBeenCalledExactlyOnceWith({
+      type: 'settings_changed',
+      data: { key: 'mcp' },
+    });
+    const retired = makeClient(undefined, {
+      resolveEntry: () => entry,
+      ownsSession: () => false,
+      handler: vi.fn(),
+    });
+    await retired.extNotification(method, { sessionId: 'owner' });
+    const missing = makeClient(undefined, {
+      resolveEntry: () => undefined,
+      ownsSession: () => true,
+      handler: vi.fn(),
+    });
+    await missing.extNotification(method, { sessionId: 'owner' });
+    expect(publish).toHaveBeenCalledTimes(1);
   });
 });

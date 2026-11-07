@@ -26,6 +26,7 @@ import { Config } from '../config/config.js';
 import { findProjectRoot } from '../utils/projectRoot.js';
 import { ContainerExecutionEnvironment } from './container-execution-environment.js';
 import type { ExecutionWorkerRequest } from './execution-environment.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const runtime = vi.hoisted(() => ({ spawn: vi.fn(), execFile: vi.fn() }));
 vi.mock('node:child_process', async (original) => ({
@@ -374,7 +375,7 @@ describe.skipIf(process.platform === 'win32')(
       },
     );
 
-    it.skipIf(process.getuid?.() === 0).each(['mount point', 'output'])(
+    it.skipIf(!arePermissionBitsEnforced()).each(['mount point', 'output'])(
       'retries failed %s deletion without releasing another sibling lease',
       async (target) => {
         const temporary = dirname(environment.outputDirectory);

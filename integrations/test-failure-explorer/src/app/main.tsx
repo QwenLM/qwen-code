@@ -39,7 +39,7 @@ function render() {
   root.render(
     report ? (
       <ReportApp
-        key={report.reportId}
+        key={`${report.reportId}:${report.viewResolution.mode === 'generated' ? report.viewResolution.digest : 'fixed'}`}
         report={report}
         query={
           connected && app.getHostCapabilities()?.serverTools

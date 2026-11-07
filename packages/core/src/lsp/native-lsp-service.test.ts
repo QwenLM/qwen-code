@@ -16,6 +16,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 // 模拟依赖项
 class MockConfig {
@@ -23,6 +24,10 @@ class MockConfig {
 
   isTrustedFolder(): boolean {
     return true;
+  }
+
+  isExplicitlyTrustedFolder(): boolean {
+    return this.isTrustedFolder();
   }
 
   get(_key: string) {
@@ -668,6 +673,34 @@ describe('NativeLspService', () => {
     expect(internals.lastConnections.has('tsserver')).toBe(false);
   });
 
+  test('blocks workspace LSP discovery and reload when legacy trust is only implicit', () =>
+    inTempDir('lsp-implicit-trust-', async (dir) => {
+      fs.writeFileSync(
+        path.join(dir, '.lsp.json'),
+        JSON.stringify({ ts: { command: 'typescript-language-server' } }),
+      );
+      const config = configAt(dir);
+      vi.spyOn(config, 'isExplicitlyTrustedFolder').mockReturnValue(false);
+      const service = new NativeLspService(
+        config as unknown as CoreConfig,
+        new MockWorkspaceContext() as unknown as WorkspaceContext,
+        new EventEmitter(),
+        new MockFileDiscoveryService() as unknown as FileDiscoveryService,
+        new MockIdeContextStore() as unknown as IdeContextStore,
+        { workspaceRoot: dir, requireTrustedWorkspace: false },
+      );
+      await service.discoverAndPrepare();
+      expect(service.getStatus().size).toBe(0);
+
+      const reconcileServerConfigs = vi.fn(async () => reconcile());
+      internalsOf(service).serverManager = { reconcileServerConfigs };
+      const result = await service.reinitialize();
+      expect(reconcileServerConfigs).toHaveBeenCalledWith([]);
+      expect(result.skipped).toEqual([
+        { name: 'typescript-language-server', reason: 'server_trust_required' },
+      ]);
+    }));
+
   test('reinitialize skips all user-configured servers in untrusted workspaces', () =>
     inTempDir('lsp-untrusted-', async (dir) => {
       const service = untrustedService(dir);
@@ -1125,7 +1158,7 @@ describe('NativeLspService', () => {
   // typed cast so the private method need not be public just for tests.
   describe('applyTextEdits — error branches', () => {
     let tmpDir: string;
-    const noChmod = process.platform === 'win32' || process.getuid?.() === 0;
+    const noChmod = !arePermissionBitsEnforced();
 
     const applyEdit = (filePath: string, newText: string) =>
       (

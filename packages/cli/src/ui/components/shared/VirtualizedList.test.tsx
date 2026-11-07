@@ -145,6 +145,31 @@ describe('<VirtualizedList />', () => {
     expect(frame.endsWith('item-19')).toBe(true);
   });
 
+  it('stays anchored to the first row when stickToBottom is false', async () => {
+    const list = (
+      <VirtualizedList<Item>
+        data={makeItems(20)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+        stickToBottom={false}
+      />
+    );
+
+    const { lastFrame, rerender } = render(list);
+    rerender(list);
+    await act(async () => {});
+
+    // The transcript default would follow the tail after measurement; a
+    // top-anchored viewport (the /btw side answer) must not.
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('item-0');
+    expect(frame).not.toContain('item-19');
+  });
+
   it('collapses a short bottom-stuck list below the container height', async () => {
     const { lastFrame, rerender } = render(
       <VirtualizedList<Item>

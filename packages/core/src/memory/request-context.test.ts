@@ -6,7 +6,12 @@
 
 import type { Content } from '@google/genai';
 import { describe, expect, it } from 'vitest';
-import { appendAutoMemoryContext } from './request-context.js';
+import {
+  appendAutoMemoryContext,
+  appendAutoMemorySnapshot,
+  getAutoMemorySnapshot,
+  withoutAutoMemorySnapshots,
+} from './request-context.js';
 import { REATTACH_BOUNDARY_METADATA } from '../services/image-payload-references.js';
 
 const catalog = 'current memory catalog';
@@ -15,6 +20,40 @@ const catalog = 'current memory catalog';
 const catalogPart = (text: string) => ({
   text,
   partMetadata: { [REATTACH_BOUNDARY_METADATA]: true },
+});
+
+describe('retained memory snapshots', () => {
+  it('deduplicates retries against the latest surviving snapshot and preserves shared user parts', () => {
+    const image = { inlineData: { mimeType: 'image/png', data: 'pixels' } };
+    const user = { role: 'user', parts: [{ text: 'question' }, image] };
+    const history: Content[] = [user];
+    const first = getAutoMemorySnapshot(history, 'A')!;
+    appendAutoMemorySnapshot(history, first);
+    expect(history).toHaveLength(1);
+    expect(user.parts).toHaveLength(2);
+    expect(history[0].parts?.[1]).toBe(image);
+    expect(getAutoMemorySnapshot(history, 'A')).toBeUndefined();
+    const second = getAutoMemorySnapshot(history, 'B')!;
+    appendAutoMemorySnapshot(history, second);
+    expect(getAutoMemorySnapshot(history, 'A')).toEqual(first);
+    expect(history[0].parts?.slice(-2)).toEqual([first, second]);
+    expect(getAutoMemorySnapshot([user], 'A')).toEqual(first);
+  });
+
+  it('filters only marked parts and removes snapshot-only entries without mutating history', () => {
+    const snapshot = getAutoMemorySnapshot([], 'catalog')!;
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: snapshot.text }, snapshot] },
+      { role: 'model', parts: [{ text: 'reply' }] },
+      { role: 'user', parts: [snapshot] },
+    ];
+    const original = structuredClone(history);
+    expect(withoutAutoMemorySnapshots(history)).toEqual([
+      { role: 'user', parts: [{ text: snapshot.text }] },
+      history[1],
+    ]);
+    expect(history).toEqual(original);
+  });
 });
 
 describe('appendAutoMemoryContext', () => {

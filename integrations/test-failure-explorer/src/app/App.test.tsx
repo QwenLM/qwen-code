@@ -16,6 +16,8 @@ import type {
   ReportQuery,
   ShowData,
 } from '../app-contract.js';
+import { showSchema } from '../app-contract.js';
+import type { ViewSection } from '../view-spec.js';
 import { ReportApp } from './App.js';
 import type { SendAnalysis } from './analysis-request.js';
 
@@ -138,6 +140,38 @@ function detail(overrides: Partial<DetailData> = {}): DetailData {
     ...overrides,
   };
 }
+
+function generatedReport(
+  sections: ViewSection[],
+  overrides: Partial<ShowData> = {},
+): ShowData {
+  return report({
+    viewResolution: { mode: 'generated', digest: 'c'.repeat(64) },
+    view: { schemaVersion: 1, reportId, sections },
+    ...overrides,
+  });
+}
+
+const generatedList: ViewSection = {
+  kind: 'failure-list',
+  groupBy: 'none',
+  columns: ['title', 'path', 'status'],
+};
+const generatedGroups: ViewSection = {
+  kind: 'hypothesis-groups',
+  groups: [
+    {
+      label: 'Shared setup',
+      hypothesis: 'The setup may affect both failures.',
+      failureIds: ['f0:a0', 'f1:error'],
+    },
+    {
+      label: 'File setup',
+      hypothesis: 'Inspect the file error independently.',
+      failureIds: ['f1:error'],
+    },
+  ],
+};
 
 function render(query?: Query, data = report(), sendAnalysis?: SendAnalysis) {
   const container = globalThis.document.createElement('div');
@@ -786,5 +820,426 @@ describe('ReportApp', () => {
     await act(async () => pending.reject(new Error('View removed')));
     expect(container.textContent).toBe('');
     expect(sendAnalysis).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('generated report views', () => {
+  it('renders sections and columns in spec order with canonical counts and deduplicated hypothesis coverage', () => {
+    const query = vi.fn<Query>();
+    const data = generatedReport(
+      [
+        { kind: 'evidence', initialFailureId: 'f0:a1' },
+        { kind: 'status-counts' },
+        {
+          kind: 'failure-list',
+          groupBy: 'none',
+          columns: ['duration', 'status', 'title'],
+          initialTextFilter: 'Failure',
+        },
+        { kind: 'summary' },
+        generatedGroups,
+      ],
+      {
+        initialDetail: detail({
+          item: entry(1),
+          text: 'Canonical diagnostics',
+        }),
+      },
+    );
+    data.summary.computed.failures = 3;
+    data.summary.computed.fileErrors = 1;
+    const { container } = render(query, data);
+    expect(
+      Array.from(container.querySelectorAll('[data-view-section]')).map(
+        (section) => section.getAttribute('data-view-section'),
+      ),
+    ).toEqual([
+      'evidence',
+      'status-counts',
+      'failure-list',
+      'summary',
+      'hypothesis-groups',
+    ]);
+    const columns = container
+      .querySelectorAll('.entry-button')[0]
+      .querySelectorAll('[data-column]');
+    expect(
+      Array.from(columns).map((column) => column.getAttribute('data-column')),
+    ).toEqual(['duration', 'status', 'title']);
+    expect(Array.from(columns).map((column) => column.textContent)).toEqual([
+      '12 ms',
+      'failed',
+      'Failure 0',
+    ]);
+    expect(container.querySelector('.entry-button .entry-path')).toBeNull();
+    expect(container.querySelector('.detail-scroll pre')?.textContent).toBe(
+      'Canonical diagnostics',
+    );
+    expect(container.textContent).toContain('4 assertions');
+    expect(container.textContent).toContain('1 file errors');
+    expect(container.textContent).toContain(
+      'Covers 2 / 3 failed entries (unique)',
+    );
+    expect(container.textContent).toContain('not confirmed causes');
+    expect(
+      container.querySelector<HTMLInputElement>('input[type="search"]')?.value,
+    ).toBe('Failure');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('groups only the current page by file identity even when path previews are identical', () => {
+    const samePreview = { text: 'test/' + 'x'.repeat(315), truncated: true };
+    const data = generatedReport(
+      [{ kind: 'failure-list', groupBy: 'file', columns: ['path', 'title'] }],
+      {
+        firstPage: list({
+          matchedCount: 40,
+          returnedCount: 3,
+          nextOffset: 3,
+          items: [
+            entry(0, { path: samePreview }),
+            entry(0, { itemId: 'f1:a0', path: samePreview }),
+            entry(1, {
+              itemId: 'f0:error',
+              kind: 'file-error',
+              path: samePreview,
+            }),
+          ],
+        }),
+      },
+    );
+    data.summary.computed.failures = 40;
+    const { container } = render(undefined, data);
+    const groups = container.querySelectorAll('.file-group');
+    expect(groups).toHaveLength(2);
+    expect(groups[0].getAttribute('aria-label')).toBe('File f0');
+    expect(groups[0].querySelectorAll('.entry-button')).toHaveLength(2);
+    expect(groups[0].textContent).toContain('2 on this page');
+    expect(groups[1].getAttribute('aria-label')).toBe('File f1');
+    expect(groups[1].textContent).toContain('1 on this page');
+    expect(container.textContent).toContain('40 in report · 3 on this page');
+    expect(container.textContent).toContain('1–3 of 40 matched');
+  });
+
+  it('keeps provenance, integrity warnings and all-failures access when summary sections are omitted', () => {
+    const data = generatedReport([generatedList]);
+    data.summary.consistencyWarningCount = 1;
+    data.summary.consistencyWarnings = [
+      { text: 'Reported and computed counts differ.', truncated: false },
+    ];
+    const { container } = render(undefined, data);
+    expect(container.textContent).toContain('reports/vitest.json');
+    expect(container.textContent).toContain('Run completeness unknown');
+    expect(container.textContent).toContain('1 consistency warnings');
+    expect(container.textContent).toContain(
+      'Reported and computed counts differ.',
+    );
+    expect(button(container, 'All failures (2)').disabled).toBe(true);
+    expect(container.textContent).toContain('Read-only saved result');
+    expect(container.querySelector('.status-counts')).toBeNull();
+  });
+
+  it('intersects hypothesis IDs with filters through pagination and clears every filter for all failures', async () => {
+    const query = vi.fn<Query>().mockImplementation(async (request) =>
+      list({
+        collection: request.kind === 'list' ? request.collection : 'failures',
+        offset: request.kind === 'list' ? (request.offset ?? 0) : 0,
+        returnedCount: 1,
+        items: [entry(0)],
+        nextOffset: request.kind === 'list' && request.offset === 0 ? 1 : null,
+      }),
+    );
+    const { container } = render(
+      query,
+      generatedReport([
+        generatedGroups,
+        { ...generatedList, initialTextFilter: 'needle' },
+      ]),
+    );
+    await click(container, 'Assertions');
+    const select = container.querySelector('select')!;
+    act(() => {
+      select.value = 'failed';
+      select.dispatchEvent(new globalThis.Event('change', { bubbles: true }));
+    });
+    await click(container, 'Search');
+    await click(container, 'View group Shared setup');
+    expect(query.mock.calls.at(-1)?.[0]).toEqual({
+      kind: 'list',
+      collection: 'assertions',
+      text: 'needle',
+      status: 'failed',
+      failureIds: ['f0:a0', 'f1:error'],
+      offset: 0,
+      limit: 25,
+    });
+    await click(container, 'Next entries');
+    expect(query.mock.calls.at(-1)?.[0]).toMatchObject({
+      failureIds: ['f0:a0', 'f1:error'],
+      offset: 1,
+    });
+    inputText(container, 'changed');
+    await click(container, 'Search');
+    expect(query.mock.calls.at(-1)?.[0]).toMatchObject({
+      failureIds: ['f0:a0', 'f1:error'],
+      text: 'changed',
+      offset: 0,
+    });
+    await click(container, 'All failures (2)');
+    expect(query.mock.calls.at(-1)?.[0]).toEqual({
+      kind: 'list',
+      collection: 'failures',
+      text: '',
+      offset: 0,
+      limit: 25,
+    });
+    expect(
+      container.querySelector<HTMLInputElement>('input[type="search"]')?.value,
+    ).toBe('');
+    expect(select.value).toBe('all');
+    expect(button(container, 'Previous entries').disabled).toBe(true);
+    expect(container.querySelector('.group-filter')).toBeNull();
+  });
+
+  it('cancels a superseded group request and ignores its late reply', async () => {
+    const older = deferred();
+    const newer = deferred();
+    const query = vi
+      .fn<Query>()
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+    const { container } = render(
+      query,
+      generatedReport([generatedGroups, generatedList]),
+    );
+    await click(container, 'View group Shared setup');
+    await click(container, 'View group File setup');
+    expect(query.mock.calls[0][1].aborted).toBe(true);
+    await act(async () => newer.resolve(list({ items: [entry(3)] })));
+    await act(async () => older.resolve(list({ items: [entry(8)] })));
+    expect(container.textContent).toContain('Failure 3');
+    expect(container.textContent).not.toContain('Failure 8');
+  });
+
+  it('restores the saved filtered page and evidence on capability loss and keeps query controls disabled', async () => {
+    const pending = deferred();
+    const query = vi.fn<Query>().mockReturnValue(pending.promise);
+    const data = generatedReport(
+      [
+        { ...generatedList, initialTextFilter: 'original' },
+        { kind: 'evidence', initialFailureId: 'f0:a0' },
+        generatedGroups,
+      ],
+      { initialDetail: detail({ text: 'Saved initial diagnostics' }) },
+    );
+    const { container, rerender } = render(query, data);
+    await click(container, 'View group Shared setup');
+    rerender(undefined);
+    expect(query.mock.calls[0][1].aborted).toBe(true);
+    expect(
+      container.querySelector<HTMLInputElement>('input[type="search"]')?.value,
+    ).toBe('original');
+    expect(container.textContent).toContain('Failure 0');
+    expect(container.querySelector('.detail-scroll pre')?.textContent).toBe(
+      'Saved initial diagnostics',
+    );
+    expect(button(container, 'View group Shared setup').disabled).toBe(true);
+    expect(button(container, 'All failures (2)').disabled).toBe(true);
+    expect(button(container, 'Search').disabled).toBe(true);
+    await act(async () => pending.resolve(list({ items: [entry(9)] })));
+    expect(container.textContent).not.toContain('Failure 9');
+  });
+
+  it('fetches omitted initial evidence once and lets a later user choice cancel it', async () => {
+    const initial = deferred();
+    const clicked = deferred();
+    const query = vi
+      .fn<Query>()
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(clicked.promise);
+    const { container } = render(
+      query,
+      generatedReport([
+        { kind: 'evidence', initialFailureId: 'f1:error' },
+        generatedList,
+      ]),
+    );
+    expect(query.mock.calls[0][0]).toEqual({
+      kind: 'detail',
+      itemId: 'f1:error',
+      field: 'diagnostics',
+      offset: 0,
+    });
+    expect(container.querySelector('.detail-title')).toBeNull();
+    expect(container.textContent).toContain('Loading initial evidence');
+    await openEntry(container, 0);
+    expect(query.mock.calls[0][1].aborted).toBe(true);
+    await act(async () =>
+      clicked.resolve(detail({ text: 'Current clicked evidence' })),
+    );
+    await act(async () =>
+      initial.resolve(
+        detail({
+          item: entry(1, { itemId: 'f1:error', kind: 'file-error' }),
+          text: 'Stale initial evidence',
+        }),
+      ),
+    );
+    expect(container.querySelector('.detail-scroll pre')?.textContent).toBe(
+      'Current clicked evidence',
+    );
+    expect(container.textContent).not.toContain('Stale initial evidence');
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows initial-evidence errors without invented item facts and supports an explicit retry', async () => {
+    const query = vi
+      .fn<Query>()
+      .mockRejectedValueOnce(new Error('Snapshot unavailable'))
+      .mockResolvedValueOnce(detail({ text: 'Recovered canonical evidence' }));
+    const { container } = render(
+      query,
+      generatedReport([
+        { kind: 'evidence', initialFailureId: 'f0:a0' },
+        generatedList,
+      ]),
+    );
+    await act(async () => {});
+    expect(container.textContent).toContain(
+      'Detail unavailable: Snapshot unavailable',
+    );
+    expect(container.querySelector('.detail-title')).toBeNull();
+    await click(container, 'Retry initial evidence');
+    expect(container.querySelector('.detail-scroll pre')?.textContent).toBe(
+      'Recovered canonical evidence',
+    );
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps entry details and their paging reachable without a model-chosen evidence section', async () => {
+    const query = vi
+      .fn<Query>()
+      .mockResolvedValueOnce(
+        detail({ text: 'first', nextOffset: 5, totalLength: 10 }),
+      )
+      .mockResolvedValueOnce(
+        detail({ text: 'later', offset: 5, totalLength: 10 }),
+      );
+    const { container } = render(query, generatedReport([generatedList]));
+    expect(container.querySelector('.detail-pane')).toBeNull();
+    await openEntry(container, 0);
+    expect(container.querySelector('.detail-scroll pre')?.textContent).toBe(
+      'first',
+    );
+    await click(container, 'Next detail fragment');
+    expect(query.mock.calls[1][0]).toEqual({
+      kind: 'detail',
+      itemId: 'f0:a0',
+      field: 'diagnostics',
+      offset: 5,
+    });
+    expect(container.querySelector('.detail-scroll pre')?.textContent).toBe(
+      'later',
+    );
+    await click(container, 'Back to entries');
+    expect(container.querySelector('.detail-pane')).toBeNull();
+    await openEntry(container, 0);
+    expect(container.querySelector('.detail-scroll pre')?.textContent).toBe(
+      'later',
+    );
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps model text inert and the 20-selection limit and explicit host review intact', async () => {
+    const hostile = '<img src="https://example.test/x"><script>send()</script>';
+    const sendAnalysis = vi.fn<SendAnalysis>().mockResolvedValue({});
+    const data = generatedReport(
+      [
+        generatedList,
+        {
+          kind: 'hypothesis-groups',
+          groups: [
+            { label: hostile, hypothesis: hostile, failureIds: ['f0:a0'] },
+          ],
+        },
+      ],
+      {
+        firstPage: list({
+          returnedCount: 21,
+          matchedCount: 21,
+          items: Array.from({ length: 21 }, (_, index) => entry(index)),
+        }),
+      },
+    );
+    const { container } = render(undefined, data, sendAnalysis);
+    expect(container.querySelectorAll('img, script, a, iframe')).toHaveLength(
+      0,
+    );
+    const checkboxes = container.querySelectorAll<HTMLInputElement>(
+      'input[type="checkbox"]',
+    );
+    await act(async () => {
+      for (const checkbox of checkboxes) checkbox.click();
+    });
+    expect(container.textContent).toContain('20 / 20 failures selected');
+    expect(checkboxes[20].disabled).toBe(true);
+    expect(sendAnalysis).not.toHaveBeenCalled();
+    expect(container.querySelector('textarea')?.value).not.toContain(hostile);
+    await click(container, 'Select request text');
+    expect(sendAnalysis).not.toHaveBeenCalled();
+    await click(container, 'Review selected failures');
+    expect(sendAnalysis.mock.calls[0][0]).toEqual(
+      Array.from({ length: 20 }, (_, index) => `f0:a${index}`),
+    );
+    expect(container.textContent).toContain('does not confirm completion');
+  });
+
+  it('renders unknown saved layouts as a usable fixed view without mislabelling a filtered first page', async () => {
+    const data = showSchema.parse({
+      ...generatedReport([
+        { ...generatedList, initialTextFilter: 'hidden filter' },
+      ]),
+      view: { schemaVersion: 2, reportId, sections: [generatedList] },
+    });
+    const query = vi.fn<Query>().mockResolvedValue(list());
+    const { container } = render(query, data);
+    expect(container.querySelector('[data-view-section]')).toBeNull();
+    expect(container.textContent).toContain(
+      'Fixed report view: unsupported-view',
+    );
+    expect(container.textContent).toContain('reports/vitest.json');
+    expect(container.textContent).not.toContain('Failure 0');
+    await click(container, 'Load entries');
+    expect(query.mock.calls[0][0]).toEqual({
+      kind: 'list',
+      collection: 'failures',
+      text: '',
+      offset: 0,
+      limit: 25,
+    });
+    expect(container.textContent).toContain('Failure 0');
+  });
+
+  it('keeps independently rendered cards isolated even for the same report', async () => {
+    const firstQuery = vi
+      .fn<Query>()
+      .mockResolvedValue(list({ items: [entry(9)] }));
+    const secondQuery = vi.fn<Query>();
+    const first = render(
+      firstQuery,
+      generatedReport([generatedList, generatedGroups]),
+    );
+    const second = render(
+      secondQuery,
+      generatedReport([{ ...generatedList, initialTextFilter: 'second' }]),
+    );
+    await click(first.container, 'View group Shared setup');
+    expect(first.container.textContent).toContain('Failure 9');
+    expect(second.container.textContent).toContain('Failure 0');
+    expect(
+      second.container.querySelector<HTMLInputElement>('input[type="search"]')
+        ?.value,
+    ).toBe('second');
+    expect(secondQuery).not.toHaveBeenCalled();
   });
 });

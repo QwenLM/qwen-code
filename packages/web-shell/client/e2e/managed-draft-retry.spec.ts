@@ -25,8 +25,14 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
     await page.route('**/api/agent/web-shell/v1/**', async (route) => {
+      if (
+        new URL(route.request().url()).pathname.endsWith('/runtime-nodes/query')
+      )
+        return route.fulfill({ json: { supported: false, data: [] } });
       const path = new URL(route.request().url()).pathname;
       const body = route.request().postDataJSON();
+      if (path.endsWith('/user-messages/query'))
+        return route.fulfill({ json: { paused: false, messages: [] } });
       if (path.endsWith('/sessions/query'))
         return route.fulfill({ json: { data: sessions, hasMore: false } });
       if (path.endsWith('/sessions/get'))
@@ -45,7 +51,7 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
         });
       if (path.endsWith('/transcript/query'))
         return route.fulfill({
-          json: { events: [], lastSequence: 0, hasMore: false },
+          json: { items: [], events: [], lastSequence: 0, hasMore: false },
         });
       if (path.endsWith('/events/stream'))
         return route.fulfill({ contentType: 'text/event-stream', body: '' });
@@ -66,6 +72,9 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
               json: {
                 sessionId: body.sessionId,
                 turnId: 'accepted-turn',
+                operationId: 'submit-accepted-turn',
+                admissionStage: 'java_durable',
+                deliveryState: 'pending',
                 status: 'accepted',
                 replayed: true,
               },
@@ -85,7 +94,7 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
     });
     const choose = async (name: string) => {
       await page
-        .getByRole('button', { name: new RegExp(`Conversation ${name}`) })
+        .getByRole('button', { name: new RegExp(`^Conversation ${name}\\b`) })
         .click();
       await expect(editor).toBeVisible();
     };
@@ -96,7 +105,9 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
     await editor.fill('  Accepted A input  ');
     await editor.press('Enter');
     await expect(
-      page.getByText('The request outcome is unconfirmed', { exact: false }),
+      page.getByText('The previous message was not confirmed as submitted', {
+        exact: false,
+      }),
     ).toBeVisible();
     await choose('B');
     await expect(editor).toContainText('Unrelated B draft');
@@ -108,12 +119,18 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
     if (retryFrom === 'owner') {
       await choose('A');
       await expect(editor).toContainText('Accepted A input');
+    } else {
+      // A foreign session owns no retry affordance: it redirects to the
+      // conversation holding the pending prompt instead.
+      await page
+        .getByRole('button', { name: 'Open the original conversation' })
+        .click();
     }
 
     await page.getByRole('button', { name: 'Retry the same request' }).click();
 
     await expect(
-      page.getByRole('button', { name: /Conversation A/ }),
+      page.getByRole('button', { name: /^Conversation A\b/ }),
     ).toHaveAttribute('aria-current', 'page');
     await expect(editor).toHaveAttribute('contenteditable', 'true');
     await expect(editor).not.toContainText('Accepted A input');
