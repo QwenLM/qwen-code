@@ -170,5 +170,4 @@ public class ManagedMcpOAuthProperties implements ManagedMcpOAuthConfiguration {
             return "McpOAuthProvider[secrets=redacted]";
         }
     }
-
 }
