@@ -179,6 +179,59 @@ describe('classifyPromptRequest', () => {
     }
   });
 
+  it('gives a bound relay without a registered token no classification', () => {
+    // 'forged' is registered for no workspace, so a primary and trusted
+    // target cannot stand in for the process-level token check.
+    expect(
+      classifyPromptRequest(
+        {
+          _meta: {
+            [CHANNEL_PROMPT_META_KEY]: true,
+            [CHANNEL_BOUND_RELAY_META_KEY]: true,
+            [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'forged',
+            [DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]: 'shown',
+          },
+        },
+        runtime,
+      ).classification,
+    ).toStrictEqual({ channelPrompt: false, requestedChannelPrompt: true });
+  });
+
+  it.each([
+    { relay: true, classified: true },
+    { relay: 'true', classified: false },
+    { relay: 1, classified: false },
+    { relay: false, classified: false },
+  ])(
+    'takes the bound-relay marker only when it is exactly true (relay: $relay)',
+    ({ relay, classified }) => {
+      // Registered for another workspace and sent to a primary, trusted
+      // target, so the marker's own value decides.
+      registerChannelWorkerPromptAuthorization('worker-token', '/elsewhere');
+      expect(
+        classifyPromptRequest(
+          {
+            _meta: {
+              [CHANNEL_PROMPT_META_KEY]: true,
+              [CHANNEL_BOUND_RELAY_META_KEY]: relay,
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'worker-token',
+              [DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]: 'shown',
+            },
+          },
+          runtime,
+        ).classification,
+      ).toStrictEqual(
+        classified
+          ? {
+              channelPrompt: true,
+              promptDisplayText: 'shown',
+              requestedChannelPrompt: true,
+            }
+          : { channelPrompt: false, requestedChannelPrompt: true },
+      );
+    },
+  );
+
   it('classifies a channel prompt carrying a registered worker token', () => {
     registerChannelWorkerPromptAuthorization('worker-token', '/ws');
     const { classification } = classifyPromptRequest(
@@ -195,6 +248,107 @@ describe('classifyPromptRequest', () => {
       requestedChannelPrompt: true,
     });
   });
+
+  it.each([
+    { marker: undefined, channelPrompt: false, requested: false },
+    { marker: false, channelPrompt: false, requested: true },
+    { marker: null, channelPrompt: false, requested: true },
+    { marker: 'true', channelPrompt: false, requested: true },
+    { marker: true, channelPrompt: true, requested: true },
+  ])(
+    'classifies a worker prompt as a channel turn only for a marker of exactly true (marker: $marker)',
+    ({ marker, channelPrompt, requested }) => {
+      registerChannelWorkerPromptAuthorization('worker-token', '/ws');
+      const { classification } = classifyPromptRequest(
+        {
+          _meta: {
+            ...(marker !== undefined
+              ? { [CHANNEL_PROMPT_META_KEY]: marker }
+              : {}),
+            [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'worker-token',
+            [DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]: 'shown',
+          },
+        },
+        runtime,
+      );
+      // The display text, accepted from the worker with or without the
+      // marker, shows the credential was honoured in every row. Any marker
+      // the request carries, true or not, keeps the PR-binding backfill
+      // off (`requestedChannelPrompt`).
+      expect(classification).toStrictEqual({
+        channelPrompt,
+        promptDisplayText: 'shown',
+        requestedChannelPrompt: requested,
+      });
+    },
+  );
+
+  it('drops a display text that is not a string, even from the worker', () => {
+    registerChannelWorkerPromptAuthorization('worker-token', '/ws');
+    const { classification } = classifyPromptRequest(
+      {
+        _meta: {
+          [CHANNEL_PROMPT_META_KEY]: true,
+          [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'worker-token',
+          [DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]: 42,
+        },
+      },
+      runtime,
+    );
+    expect(classification).toStrictEqual({
+      channelPrompt: true,
+      requestedChannelPrompt: true,
+    });
+  });
+
+  it.each([
+    { name: 'only the submitted prompt', meta: {}, submitted: true },
+    {
+      name: 'a false channel marker',
+      meta: { [CHANNEL_PROMPT_META_KEY]: false },
+      submitted: false,
+    },
+    {
+      name: 'a null channel marker',
+      meta: { [CHANNEL_PROMPT_META_KEY]: null },
+      submitted: false,
+    },
+    {
+      name: 'a worker credential',
+      meta: { [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'forged' },
+      submitted: false,
+    },
+    {
+      name: 'a null worker credential',
+      meta: { [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: null },
+      submitted: false,
+    },
+    {
+      name: 'a display text that is not a string',
+      meta: { [DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]: 42 },
+      submitted: false,
+    },
+    {
+      name: 'a null display text',
+      meta: { [DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]: null },
+      submitted: false,
+    },
+  ])(
+    'takes the submitted prompt only from a plain client ($name)',
+    ({ meta, submitted }) => {
+      // The channel marker, a worker credential or a display text, present
+      // with any value, marks a caller other than a plain client.
+      const { classification } = classifyPromptRequest(
+        { _meta: { [SUBMITTED_PROMPT_META_KEY]: 'label', ...meta } },
+        runtime,
+      );
+      if (submitted) {
+        expect(classification).toHaveProperty('submittedPrompt', 'label');
+      } else {
+        expect(classification).not.toHaveProperty('submittedPrompt');
+      }
+    },
+  );
 });
 
 describe('admitSessionPrompt', () => {
