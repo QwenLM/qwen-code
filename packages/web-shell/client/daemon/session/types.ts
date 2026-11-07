@@ -268,6 +268,13 @@ export interface DaemonSessionProviderProps {
    * regardless of this flag.
    */
   restartEventStreamOnPrompt?: boolean;
+  /**
+   * Resume an unexpectedly interrupted turn as soon as a loaded session
+   * reports one, instead of waiting for the Continue button. A turn the user
+   * explicitly cancelled is never resumed: the daemon reports it either as
+   * clean or with a `cancellationConfirmationId`, and both are skipped.
+   */
+  autoContinueInterruptedTurn?: boolean;
   /** Initial reconnect delay in milliseconds. */
   reconnectDelayMs?: number;
   /** Maximum reconnect delay in milliseconds after backoff. */

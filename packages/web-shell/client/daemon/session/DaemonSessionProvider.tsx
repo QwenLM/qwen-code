@@ -42,6 +42,7 @@ import {
   isTrimmedPermissionBlockId,
   isTrimmedToolBlockId,
   isUnrecognizedDiagnosticReason,
+  isDaemonTurnError,
   matchTurnEvent,
   normalizeDaemonEvent,
   type CreateSessionRequest,
@@ -953,6 +954,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     autoConnect = true,
     autoReconnect = true,
     restartEventStreamOnPrompt = false,
+    autoContinueInterruptedTurn = false,
     reconnectDelayMs = 1_000,
     maxReconnectDelayMs = 10_000,
     heartbeatIntervalMs = 30_000,
@@ -1766,6 +1768,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const settleCurrentSessionRestoredPromptRef = useRef<() => boolean>(
     () => false,
   );
+  // One automatic continuation per loaded session id: React re-renders and a
+  // StrictMode double-invoke must not enqueue two turns for the same
+  // interruption.
+  const autoContinuedSessionIdsRef = useRef(new Set<string>());
   // Apply the buffered transcript batch from outside the connect closure. The
   // action layer must settle against a committed store, not one that is still
   // 16ms behind (#9487).
@@ -5679,6 +5685,40 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     if (promptStatus !== 'idle') return;
     queueMicrotask(() => tryLiveJournalRepairRef.current?.());
   }, [promptStatus]);
+  // Resume a turn a daemon or environment restart interrupted, once per load,
+  // without asking the user to press Continue. A turn the user stopped is
+  // never resumed: the daemon reports it as clean, or — when the cancellation
+  // reason was not persisted — attaches a `cancellationConfirmationId`. Both
+  // are left to the banner, which is the only place a deliberate stop can be
+  // told apart from a lost answer. `catchingUp` stays set after a normal load
+  // until the replay drains, so eligibility is keyed on the recovery snapshot
+  // rather than on the load flags.
+  useEffect(() => {
+    if (!autoContinueInterruptedTurn || promptStatus !== 'idle') return;
+    const sessionId = connection.sessionId;
+    if (sessionId === undefined) {
+      autoContinuedSessionIdsRef.current.clear();
+      return;
+    }
+    if (connection.status !== 'connected') return;
+    const recovery = connection.context?.recovery;
+    if (
+      connection.context?.sessionId !== sessionId ||
+      !recovery ||
+      !recovery.canContinue ||
+      recovery.cancellationConfirmationId !== undefined ||
+      connection.loadingTranscript
+    ) {
+      return;
+    }
+    if (autoContinuedSessionIdsRef.current.has(sessionId)) return;
+    autoContinuedSessionIdsRef.current.add(sessionId);
+    void actions.continueSession().catch((error: unknown) => {
+      if (!isDaemonTurnError(error)) {
+        console.warn('Automatic continuation failed', error);
+      }
+    });
+  }, [autoContinueInterruptedTurn, connection, promptStatus, actions]);
   const loadMoreTranscript = useCallback(
     async (options?: { force?: boolean }) => {
       const history = transcriptHistoryRef.current;
