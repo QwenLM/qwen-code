@@ -6,36 +6,17 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 const checkForUpdatesDetailed = vi.fn();
 const relaunchForUpdate = vi.fn();
 const performStandaloneUpdate = vi.fn();
 const getInstallationInfo = vi.fn();
-const resolveUpdateCommand = vi.fn(
-  (updateCommand: string, latestVersion: string) =>
-    updateCommand.replace('@latest', `@${latestVersion}`),
-);
-const formatUpdateInstructions = vi.fn(
-  (
-    installationInfo: {
-      updateMessage?: string;
-      updateCommand?: string;
-      isStandalone?: boolean;
-    },
-    latestVersion: string,
-  ) => {
-    if (installationInfo.updateMessage && !installationInfo.updateCommand) {
-      return [installationInfo.updateMessage];
-    }
-    if (installationInfo.updateCommand) {
-      return [
-        'Run the following to update:',
-        `  ${resolveUpdateCommand(installationInfo.updateCommand, latestVersion)}`,
-      ];
-    }
-    return ['Manual update required. Please reinstall Qwen Code.'];
-  },
-);
+const standaloneGuidanceLine =
+  'Standalone install detected. Please rerun the standalone installer to update:';
+const standaloneUpdateCommand =
+  'curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash';
+const standaloneUpdateMessage = `${standaloneGuidanceLine} ${standaloneUpdateCommand}`;
 vi.mock('../utils/updateCheck.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../utils/updateCheck.js')>()),
   checkForUpdatesDetailed,
@@ -48,10 +29,11 @@ vi.mock('../../utils/processUtils.js', () => ({
 vi.mock('../standalone-update.js', () => ({
   performStandaloneUpdate,
 }));
-vi.mock('../../utils/installationInfo.js', () => ({
-  formatUpdateInstructions,
+// Only the detector is stubbed; the real formatter runs so the composed
+// content matches what /update actually emits.
+vi.mock('../../utils/installationInfo.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../utils/installationInfo.js')>()),
   getInstallationInfo,
-  resolveUpdateCommand,
 }));
 const { updateCommand } = await import('./update-command.js');
 
@@ -137,6 +119,7 @@ describe('updateCommand', () => {
     getInstallationInfo.mockReturnValue({
       isStandalone: true,
       standaloneDir: '/tmp/qwen-code',
+      updateMessage: standaloneUpdateMessage,
     });
 
     const result = await updateCommand.action!(
@@ -147,9 +130,9 @@ describe('updateCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content:
-        'Update available: 1.2.3\nManual update required. Please reinstall Qwen Code.',
+      content: `Update available: 1.2.3\n${standaloneGuidanceLine}\n ${standaloneUpdateCommand}`,
     });
+    expect(getInstallationInfo).toHaveBeenCalledWith('/repo', false);
     expect(relaunchForUpdate).not.toHaveBeenCalled();
     expect(performStandaloneUpdate).not.toHaveBeenCalled();
   });
@@ -302,6 +285,51 @@ describe('updateCommand', () => {
       content:
         'Update available: 1.2.3\nDownloading update...\nUpdate successful! The new version will be used on your next run.',
     });
+  });
+
+  it('does not update standalone installs in non-interactive mode when auto-update is disabled', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+      updateMessage: standaloneUpdateMessage,
+    });
+
+    const result = await updateCommand.action!(
+      context('non_interactive', false),
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: `Update available: 1.2.3\n${standaloneGuidanceLine}\n ${standaloneUpdateCommand}`,
+    });
+    expect(getInstallationInfo).toHaveBeenCalledWith('/repo', false);
+    expect(performStandaloneUpdate).not.toHaveBeenCalled();
+  });
+
+  it('translates the standalone guidance line in the rendered /update output', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+      updateMessage: standaloneUpdateMessage,
+    });
+
+    await setLanguageAsync('zh');
+    try {
+      const result = await updateCommand.action!(
+        context('non_interactive', false),
+        '',
+      );
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: `Update available: 1.2.3\n检测到独立安装。请重新运行独立安装程序以更新：\n ${standaloneUpdateCommand}`,
+      });
+    } finally {
+      await setLanguageAsync('en');
+    }
   });
 
   it('returns deferred message when standalone update is not yet active', async () => {

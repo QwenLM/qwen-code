@@ -1,0 +1,178 @@
+apiVersion: 'apps/v1'
+kind: 'Deployment'
+metadata:
+  name: 'qwen-harness'
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: 'qwen-harness'
+  strategy:
+    type: 'RollingUpdate'
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: 'qwen-harness'
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: 'RuntimeDefault'
+      # A native sidecar remains available until the Harness preStop completes.
+      initContainers:
+        - name: 'mtls'
+          restartPolicy: 'Always'
+          image: 'docker.io/envoyproxy/envoy:v1.39.4'
+          command:
+            - '/usr/local/bin/envoy'
+          args:
+            - '-c'
+            - '/etc/envoy/envoy.yaml'
+            - '--log-level'
+            - 'warning'
+            - '--concurrency'
+            - '1'
+          ports:
+            - name: 'https'
+              containerPort: 8443
+          startupProbe:
+            tcpSocket:
+              port: 'https'
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            tcpSocket:
+              port: 'https'
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: '100m'
+              memory: '128Mi'
+            limits:
+              cpu: '1'
+              memory: '256Mi'
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - 'ALL'
+          volumeMounts:
+            - name: 'envoy'
+              mountPath: '/etc/envoy'
+              readOnly: true
+            - name: 'tls'
+              mountPath: '/etc/qwen/tls'
+              readOnly: true
+      containers:
+        - name: 'harness'
+          # Replace with the immutable image built from this directory's Dockerfile.
+          image: 'qwen-harness:replace-with-built-digest'
+          env:
+            - name: 'QWEN_HOSTED_HARNESS_INSTANCE_ID'
+              valueFrom:
+                fieldRef:
+                  fieldPath: 'metadata.uid'
+            - name: 'QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST'
+              valueFrom:
+                configMapKeyRef:
+                  name: 'qwen-harness-settings'
+                  key: 'capability-digest'
+            - name: 'QWEN_MANAGED_RUNTIME_BROKER_URL'
+              valueFrom:
+                configMapKeyRef:
+                  name: 'qwen-harness-settings'
+                  key: 'broker-url'
+            - name: 'NODE_EXTRA_CA_CERTS'
+              value: '/etc/qwen/secrets/outbound-ca.crt'
+            - name: 'NODE_OPTIONS'
+              value: '--max-old-space-size=1536'
+          startupProbe:
+            exec:
+              command:
+                - 'node'
+                - '/opt/qwen/harness-probe.mjs'
+                - 'startup'
+            timeoutSeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command:
+                - 'node'
+                - '/opt/qwen/harness-probe.mjs'
+                - 'ready'
+            timeoutSeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - 'node'
+                - '/opt/qwen/harness-probe.mjs'
+                - 'live'
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - 'node'
+                  - '/opt/qwen/harness-probe.mjs'
+                  - 'drain'
+          resources:
+            requests:
+              cpu: '1'
+              memory: '1Gi'
+            limits:
+              cpu: '2'
+              memory: '3Gi'
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - 'ALL'
+          volumeMounts:
+            - name: 'runtime'
+              mountPath: '/var/run/qwen'
+            - name: 'tmp'
+              mountPath: '/tmp'
+            - name: 'settings'
+              mountPath: '/etc/qwen/config'
+              readOnly: true
+            - name: 'secrets'
+              mountPath: '/etc/qwen/secrets'
+              readOnly: true
+      volumes:
+        - name: 'runtime'
+          emptyDir:
+            sizeLimit: '1Gi'
+        - name: 'tmp'
+          emptyDir:
+            sizeLimit: '256Mi'
+        - name: 'settings'
+          configMap:
+            name: 'qwen-harness-settings'
+            items:
+              - key: 'settings.json'
+                path: 'settings.json'
+        - name: 'envoy'
+          configMap:
+            name: 'qwen-harness-envoy'
+        - name: 'secrets'
+          secret:
+            secretName: 'qwen-harness-secrets'
+            defaultMode: 288
+        - name: 'tls'
+          secret:
+            secretName: 'qwen-harness-tls'
+            defaultMode: 288

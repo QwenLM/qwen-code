@@ -28,6 +28,11 @@ import {
   createMemoryScopedAgentConfig,
   isAllowedMemoryPath,
 } from './memory-scoped-agent-config.js';
+import {
+  scanAutoMemoryTopicDocuments,
+  scanUserAutoMemoryTopicDocuments,
+} from './structured-scan.js';
+import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_REMEMBER');
 
@@ -85,9 +90,18 @@ async function buildCleanMemorySystemPrompt(
       await readUserAutoMemoryIndex().catch(() => null),
       /* userSection */ undefined,
       /* teamSection */ undefined,
-      // The remember agent needs the full protocol (type definitions, scope
-      // routing, exclusion rules) to write correct memories — do not remove.
-      { forceFullProtocol: true },
+      {
+        keywordVocabularySnapshot: renderWriterKeywordVocabularySnapshot(
+          // The vocabulary is advisory prompt context: an unreadable user
+          // root must not fail the run, but the failure is logged so a
+          // silently empty vocabulary stays diagnosable.
+          await scanUserAutoMemoryTopicDocuments().catch((error) => {
+            debugLogger.error('User memory vocabulary scan failed:', error);
+            return [];
+          }),
+          { scopes: ['user'] },
+        ),
+      },
     );
   }
 
@@ -106,16 +120,33 @@ async function buildCleanMemorySystemPrompt(
       indexContent: await readUserAutoMemoryIndex().catch(() => null),
     };
   }
-  const projectIndex = await readAutoMemoryIndex(projectRoot);
+  const [projectIndex, projectDocs, userDocs] = await Promise.all([
+    readAutoMemoryIndex(projectRoot),
+    // The vocabulary is advisory prompt context on the project side too:
+    // an unreadable project memory root must not fail the run either.
+    scanAutoMemoryTopicDocuments(projectRoot).catch((error) => {
+      debugLogger.error('Project memory vocabulary scan failed:', error);
+      return [];
+    }),
+    scope === 'project'
+      ? Promise.resolve([])
+      : scanUserAutoMemoryTopicDocuments().catch((error) => {
+          debugLogger.error('User memory vocabulary scan failed:', error);
+          return [];
+        }),
+  ]);
 
   return buildManagedAutoMemoryPrompt(
     getAutoMemoryRoot(projectRoot),
     projectIndex,
     userMemory,
     /* teamSection */ undefined,
-    // The remember agent needs the full protocol (type definitions, scope routing,
-    // exclusion rules) to write correct memories — do not remove.
-    { forceFullProtocol: true },
+    {
+      keywordVocabularySnapshot: renderWriterKeywordVocabularySnapshot(
+        [...userDocs, ...projectDocs],
+        { scopes: scope === 'project' ? ['project'] : ['user', 'project'] },
+      ),
+    },
   );
 }
 
@@ -202,8 +233,8 @@ export async function runManagedRememberByAgent(params: {
     params.scope,
   );
   // The remember agent's system prompt already embeds the full managed
-  // auto-memory protocol and MEMORY.md indexes (buildCleanMemorySystemPrompt
-  // with forceFullProtocol). AgentCore.buildChatSystemPrompt would otherwise
+  // auto-memory protocol and MEMORY.md indexes (buildCleanMemorySystemPrompt;
+  // the full protocol is the only path). AgentCore.buildChatSystemPrompt would otherwise
   // append config.getAutoMemoryPrompt() a second time, duplicating the entire
   // section — and in clean mode re-injecting parent-session memory into the
   // intended blank-slate agent. Zero it out for every mode so the section is
@@ -382,6 +413,11 @@ export async function runManagedRememberByAgent(params: {
     );
   }
 
+  if (touchedScopes.includes('user')) {
+    await params.config
+      .getMemoryManager()
+      .recordUserMutation(params.projectRoot, params.config);
+  }
   await rebuildWrittenScopes();
 
   return {

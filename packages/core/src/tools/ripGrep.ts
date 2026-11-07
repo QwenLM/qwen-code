@@ -441,6 +441,14 @@ class GrepToolInvocation extends BaseToolInvocation<
         llmContent: llmContent.trim(),
         returnDisplay: displayMessage,
         resultFilePaths,
+        // This render is already bounded, so the scheduler must not measure
+        // its own body and report it as the raw size. The pre-reduction size
+        // existed only inside the append loop that skipped it, and rebuilding
+        // the full render to count it is the allocation the limit avoids;
+        // declare it unknown instead (#13652 R2-5).
+        ...(truncatedByLineLimit || truncatedByCharLimit
+          ? { rawOutputSize: null, truncatedByProducer: true }
+          : {}),
       };
     } catch (error) {
       debugLogger.error('Error during ripgrep search operation:', error);
@@ -685,7 +693,7 @@ export class RipGrepTool extends BaseDeclarativeTool<
     super(
       RipGrepTool.Name,
       'Grep',
-      'A powerful search tool built on ripgrep\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Use Agent tool for open-ended searches requiring multiple rounds\n  - Pattern syntax: Uses ripgrep (not grep) - special regex characters need escaping (use `interface\\{\\}` to find `interface{}` in Go code)\n',
+      'A powerful search tool built on ripgrep\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Pattern syntax: Uses ripgrep (not grep) - special regex characters need escaping (use `interface\\{\\}` to find `interface{}` in Go code)\n',
       Kind.Search,
       {
         properties: {

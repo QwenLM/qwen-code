@@ -188,15 +188,23 @@ Two constraints:
 
 Ephemeral agent worktrees that survived a crash or `--no-cleanup` shutdown are reaped on every CLI startup, with conservative fail-closed rules:
 
-| Guard                                  | Behavior                                       |
-| -------------------------------------- | ---------------------------------------------- |
-| Slug must match `agent-<7hex>` pattern | Named worktrees you created are never touched. |
-| Directory `mtime` > 30 days            | Newer entries are skipped.                     |
-| Any uncommitted tracked change         | Skip the entry (don't delete).                 |
-| Any commit not reachable from a remote | Skip the entry (don't delete).                 |
-| Any error reading git state            | Skip the entry (don't delete).                 |
+| Guard                                                     | Behavior                                                                                                                                                       |
+| --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Slug must match `agent-<7hex>` pattern                    | Other names are never touched. A worktree you named exactly `agent-<7hex>` is indistinguishable from an ephemeral agent worktree and **is** a sweep candidate. |
+| Directory `mtime` > 30 days                               | Newer entries are skipped.                                                                                                                                     |
+| Any uncommitted work — tracked, untracked, or git-ignored | Skip the entry (don't delete). Only disposable build output, symlinks and the session marker are exempt — see the note below.                                  |
+| Any commit not reachable from a remote                    | Skip the entry (don't delete).                                                                                                                                 |
+| Any error reading git state                               | Skip the entry (don't delete).                                                                                                                                 |
 
-Named user worktrees (`enter_worktree` slugs) are **never** auto-cleaned — you keep them around until you ask to remove them.
+Named user worktrees (`enter_worktree` slugs) are never auto-cleaned, with one exception: the reserved `agent-<7hex>` shape, which the sweep cannot tell apart from an ephemeral agent worktree, is reaped after 30 days once it holds no uncommitted content and no unmerged commits. Pick any other name for work you want kept.
+
+The uncommitted-content guard reads `git status --porcelain --untracked-files=normal --ignored=matching`, so even content your ignore rules hide — a `.env`, `.qwen/pr-drafts/` — preserves an aged `agent-<7hex>` worktree. The only exemptions are:
+
+- **Disposable build output** — an _ignored_ entry whose _first_ path segment is `node_modules`, `dist` or `coverage`, so that output and anything git lists under it, a single ignored file included (`!! dist/archive.zip` under a `*.zip` rule). Also an ignored _directory_ nested inside the checkout whose own name is one of those three (a monorepo's `packages/app/node_modules/`) — but only when git collapses the entry _at_ that directory, which needs an ignore rule matching the directory itself (`node_modules/`, or a bare `node_modules`). A rule matching the directory's _contents_ instead (`**/node_modules/*`, or a package-local `node_modules/**`) makes git list the files individually (`!! packages/app/node_modules/x/`), which is not exempt and preserves the checkout. A nested ignored _file_ with one of those names is not build output and still preserves the worktree, so `go test -coverprofile=coverage` writing `packages/app/coverage` keeps the checkout — but nothing stored under a root `dist/`, `coverage/` or `node_modules/` is kept. The same tree left _untracked_, so git says `?? dist/`, is not exempt and preserves the checkout. Note that `??` describes the _rendered entry_, not the absence of a rule: git collapses an untracked parent (`?? packages/`) whenever it holds any non-ignored untracked file, and lists ignored files inside it separately as `!!` at the same time. The usual reasons an entry renders `??` are that no ignore rule reaches it — including a rule whose spelling does not reach that path, since a root `node_modules/**` covers only the root-level tree — or that the rule was committed after the worktree branch was cut.
+- **Symlinks** — removing the checkout unlinks them and never touches what they point at, which is what keeps `worktree.symlinkDirectories` checkouts reapable. A nested value (`tools/cache`) makes git collapse the subtree to a single `?? tools/` entry, so a collapsed directory qualifies only when it holds at least one entry and everything inside it is itself a symlink; one real file beside the links — or an empty directory, which holds no link to speak of — preserves the worktree.
+- **The daemon's `.qwen-session` marker**, as long as git lists it as untracked or ignored. A marker the repository actually tracks is not exempt: an edit to a tracked path is indistinguishable from user work, and `writeWorktreeSessionMarker` overwrites a tracked marker unconditionally, so the daemon itself can be the author of that edit — the preserve then holds until the marker is committed or reverted.
+
+A path git quotes because it contains special characters is not resolved and counts as work.
 
 ## Safety Guards on `exit_worktree action="remove"`
 
@@ -342,4 +350,4 @@ Check `<chatsDir>/<sessionId>.worktree.json` exists. The CLI deletes the sidecar
 This is the session-ownership guard. Resume the original session and exit from there, or run the suggested `git worktree remove …` command manually.
 
 **Stale `agent-<hex>` worktrees keep piling up.**
-The 30-day cutoff is conservative; sweep manually with `git worktree list && git worktree remove <path>`, or wait — the next CLI startup after the 30-day mark will reap them as long as they are clean and pushed.
+The 30-day cutoff is conservative; sweep manually with `git worktree list && git worktree remove <path>`, or wait — the next CLI startup after the 30-day mark will reap them as long as they hold no uncommitted work (tracked, untracked, or git-ignored beyond disposable build output and symlinks) and no unmerged commits. Run with `--debug` and grep for `cleanupStaleAgentWorktrees: keeping` to see which entry the sweep refused and why, or `worktreeHasWork: waiving` to see which entries authorized a removal and under which exemption.

@@ -5,6 +5,15 @@
  */
 
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { promises as fs } from 'node:fs';
+import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
+import {
+  listSavedWorkflows as listRealSavedWorkflows,
+  resolveSavedWorkflowScript,
+} from '@qwen-code/qwen-code-core/agents/runtime/workflow-saved.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -21,6 +30,10 @@ import {
   type SavedWorkflowEntry,
 } from '@qwen-code/qwen-code-core';
 import { SavedWorkflowLoader } from './saved-workflow-loader.js';
+import {
+  extensionOwnerLabel,
+  getCommandSourceBadge,
+} from './commandMetadata.js';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 
 const listMock = vi.mocked(listSavedWorkflows);
@@ -35,7 +48,7 @@ function makeConfig(overrides: Partial<Record<string, unknown>> = {}): Config {
   } as unknown as Config;
 }
 
-const ctx = {} as CommandContext;
+const ctx = { executionMode: 'interactive' } as CommandContext;
 const signal = new AbortController().signal;
 
 function entry(
@@ -72,9 +85,102 @@ describe('SavedWorkflowLoader', () => {
     expect(c.kind).toBe(CommandKind.FILE);
     expect(c.source).toBe('workflow-command');
     expect(c.sourceDetail).toBe('project');
-    // Interactive only — the tool-dispatch action can't run in headless / ACP,
-    // so advertising those modes would surface a command that then fails.
-    expect(c.supportedModes).toEqual(['interactive']);
+    // Every mode: outside the interactive UI the command expands to a prompt
+    // instead of a tool dispatch, so it no longer restricts itself.
+    expect(c.supportedModes).toBeUndefined();
+  });
+
+  it('builds an extension workflow command tagged with its extension', async () => {
+    listMock.mockResolvedValue([
+      entry({
+        name: 'gcp:audit',
+        scriptPath: '/home/.qwen/extensions/gcp/workflows/audit.js',
+        source: 'extension',
+        extensionName: 'gcp',
+        extensionDisplayName: 'Google Cloud',
+        description: 'Audits the project',
+      }),
+      entry({ name: 'deep-research', source: 'project' }),
+    ]);
+    const [extensionCmd, projectCmd] = await new SavedWorkflowLoader(
+      makeConfig(),
+    ).loadCommands(signal);
+
+    expect(extensionCmd).toMatchObject({
+      name: 'gcp:audit',
+      description: 'Audits the project',
+      kind: CommandKind.FILE,
+      source: 'workflow-command',
+      sourceLabel: extensionOwnerLabel({
+        name: 'gcp',
+        displayName: 'Google Cloud',
+      }),
+      sourceDetail: 'extension',
+    });
+    // Without `whenToUse` the author named no condition, so the model does
+    // not see the command; the user still runs it in every mode.
+    expect(extensionCmd.modelInvocable).toBeUndefined();
+    expect(extensionCmd.modelDescription).toBeUndefined();
+    expect(extensionCmd.supportedModes).toBeUndefined();
+    // An extension command, renamed on a collision, that still answers to its
+    // documented name in the denylist.
+    expect(extensionCmd).toMatchObject({
+      extensionName: 'gcp',
+      workflowName: 'gcp:audit',
+    });
+    expect(getCommandSourceBadge(extensionCmd)).toBe(
+      `[${extensionOwnerLabel({ name: 'gcp', displayName: 'Google Cloud' })}]`,
+    );
+    expect(await extensionCmd.action!(ctx, '')).toEqual({
+      type: 'tool',
+      toolName: 'workflow',
+      toolArgs: { scriptPath: '/home/.qwen/extensions/gcp/workflows/audit.js' },
+    });
+    // Project and user workflows keep their existing shape.
+    expect(projectCmd.description).toBe(
+      'Run the "deep-research" saved workflow (project)',
+    );
+    expect('extensionName' in projectCmd).toBe(false);
+    expect('workflowName' in projectCmd).toBe(false);
+    expect(projectCmd.sourceLabel).toBe('Workflow');
+    expect(getCommandSourceBadge(projectCmd)).toBeNull();
+  });
+
+  it('names the owner once, in the capped badge, even for a long display name', async () => {
+    listMock.mockResolvedValue([
+      entry({
+        name: 'gcp:audit',
+        source: 'extension',
+        extensionName: 'gcp',
+        extensionDisplayName:
+          'Alibaba Cloud Database Suite for Production Workloads',
+        description: 'Audits the project',
+      }),
+    ]);
+    const [cmd] = await new SavedWorkflowLoader(makeConfig()).loadCommands(
+      signal,
+    );
+    expect(cmd.description).toBe('Audits the project');
+    expect(getCommandSourceBadge(cmd)).toBe(
+      '[Extension: Alibaba Cloud Database …]',
+    );
+  });
+
+  it('falls back to the manifest name for the owner badge', async () => {
+    listMock.mockResolvedValue([
+      entry({
+        name: 'gcp:audit',
+        source: 'extension',
+        extensionName: 'gcp',
+        description: 'Audits the project',
+      }),
+    ]);
+    const [cmd] = await new SavedWorkflowLoader(makeConfig()).loadCommands(
+      signal,
+    );
+    expect(getCommandSourceBadge(cmd)).toBe(
+      `[${extensionOwnerLabel({ name: 'gcp' })}]`,
+    );
   });
 
   it('action dispatches the workflow tool with the scriptPath', async () => {
@@ -128,6 +234,150 @@ describe('SavedWorkflowLoader', () => {
     expect('args' in result.toolArgs).toBe(false);
   });
 
+  // The Workflow tool refuses a scriptPath in a name-only session, so the
+  // interactive command has to dispatch by name there — and only there, since a
+  // path keeps grants written as Workflow(scriptPath:...) matching.
+  it('dispatches by name in a name-only session', async () => {
+    listMock.mockResolvedValue([
+      entry({
+        name: 'gcp:audit',
+        source: 'extension',
+        scriptPath: '/home/.qwen/extensions/gcp/workflows/audit.js',
+        extensionName: 'gcp',
+      }),
+    ]);
+    const [locked] = await new SavedWorkflowLoader(
+      makeConfig({ isWorkflowNameOnly: () => true }),
+    ).loadCommands(signal);
+    expect(await locked.action!(ctx, '{"scope":"src"}')).toEqual({
+      type: 'tool',
+      toolName: 'workflow',
+      toolArgs: { name: 'gcp:audit', args: { scope: 'src' } },
+    });
+
+    const [unlocked] = await new SavedWorkflowLoader(
+      makeConfig({ isWorkflowNameOnly: () => false }),
+    ).loadCommands(signal);
+    expect(await unlocked.action!(ctx, '')).toEqual({
+      type: 'tool',
+      toolName: 'workflow',
+      toolArgs: {
+        scriptPath: '/home/.qwen/extensions/gcp/workflows/audit.js',
+      },
+    });
+  });
+
+  it('treats a context without an execution mode as the interactive UI', async () => {
+    listMock.mockResolvedValue([entry()]);
+    const [cmd] = await new SavedWorkflowLoader(makeConfig()).loadCommands(
+      signal,
+    );
+    expect(await cmd.action!({} as CommandContext, '')).toMatchObject({
+      type: 'tool',
+    });
+  });
+
+  describe('outside the interactive UI', () => {
+    const audit = () =>
+      entry({
+        name: 'gcp:audit',
+        scriptPath: '/home/.qwen/extensions/gcp/workflows/audit.js',
+        source: 'extension',
+        extensionName: 'gcp',
+        description: 'Audits the project',
+        whenToUse: 'When the user asks for a dependency audit',
+      });
+
+    async function load(e: SavedWorkflowEntry) {
+      listMock.mockResolvedValue([e]);
+      const [cmd] = await new SavedWorkflowLoader(makeConfig()).loadCommands(
+        signal,
+      );
+      return cmd;
+    }
+
+    it('lists an extension workflow that declares whenToUse for the model', async () => {
+      const cmd = await load(audit());
+      expect(cmd).toMatchObject({
+        description: 'Audits the project',
+        modelInvocable: true,
+        modelDescription:
+          'Audits the project — When the user asks for a dependency audit',
+        whenToUse: 'When the user asks for a dependency audit',
+      });
+    });
+
+    // The condition is the third-party author's; a project or user workflow
+    // is not listed on the strength of the same field.
+    it('does not list a project workflow for the model', async () => {
+      const cmd = await load(entry({ whenToUse: 'Whenever' }));
+      expect(cmd.modelInvocable).toBeUndefined();
+    });
+
+    // The Skill tool and the headless and ACP command paths all build a
+    // non-interactive context, and none of them can run a tool dispatch.
+    it.each(['non_interactive', 'acp'] as const)(
+      'asks the model to run the workflow by name in %s mode',
+      async (executionMode) => {
+        const cmd = await load(audit());
+        expect(
+          await cmd.action!({ executionMode } as CommandContext, ''),
+        ).toEqual({
+          type: 'submit_prompt',
+          content: [
+            'Run the "gcp:audit" workflow.',
+            'Audits the project',
+            'When the user asks for a dependency audit',
+            'Invoke: Workflow({ name: "gcp:audit" })',
+          ].join('\n\n'),
+        });
+      },
+    );
+
+    it('passes JSON args as a value and other text as a string', async () => {
+      const cmd = await load(audit());
+      const run = async (args: string) =>
+        (
+          (await cmd.action!(
+            { executionMode: 'acp' } as CommandContext,
+            args,
+          )) as { content: string }
+        ).content;
+      expect(await run(' {"files":["a.csv"]} ')).toContain(
+        'Invoke: Workflow({ name: "gcp:audit", args: {"files":["a.csv"]} })',
+      );
+      expect(await run('the lockfile')).toContain(
+        'Invoke: Workflow({ name: "gcp:audit", args: "the lockfile" })',
+      );
+    });
+
+    // `CommandService` renames an extension command that collides with its
+    // extension's skill; the Workflow tool only knows the qualified name.
+    it('names the workflow, not a renamed command', async () => {
+      const cmd = await load(audit());
+      cmd.name = 'gcp.gcp:audit';
+      const result = (await cmd.action!(
+        { executionMode: 'non_interactive' } as CommandContext,
+        '',
+      )) as { content: string };
+      expect(result.content).toContain('Workflow({ name: "gcp:audit" })');
+    });
+
+    it('asks for a project workflow by name without a description', async () => {
+      const cmd = await load(entry());
+      expect(
+        await cmd.action!(
+          { executionMode: 'non_interactive' } as CommandContext,
+          '',
+        ),
+      ).toEqual({
+        type: 'submit_prompt',
+        content:
+          'Run the "deep-research" saved workflow (project).\n\nInvoke: Workflow({ name: "deep-research" })',
+      });
+    });
+  });
+
   it('returns [] when workflows are disabled (tool not registered)', async () => {
     listMock.mockResolvedValue([entry()]);
     const cmds = await new SavedWorkflowLoader(
@@ -171,6 +421,83 @@ describe('SavedWorkflowLoader', () => {
     expect(cmds).toEqual([]);
   });
 
+  it.each(['project', 'user'])(
+    'R1-1: an inaccessible %s root preserves extensions without exposing farther executable namesakes',
+    async (brokenScope) => {
+      const directory = await realpath(
+        await mkdtemp(path.join(tmpdir(), 'qwen-workflow-list-')),
+      );
+      const target = path.join(directory, 'project');
+      const project = path.join(target, '.qwen', 'workflows');
+      const user = path.join(directory, 'user');
+      const extensionFile = path.join(directory, 'extension', 'check.js');
+      const userDirectory = vi
+        .spyOn(Storage, 'getUserWorkflowsDir')
+        .mockReturnValue(user);
+      const lstat = fs.lstat.bind(fs);
+      const rootProbe = vi.spyOn(fs, 'lstat');
+      try {
+        for (const dir of [project, user, path.dirname(extensionFile)]) {
+          await mkdir(dir, { recursive: true });
+        }
+        await writeFile(path.join(project, 'local.js'), 'return "LOCAL";');
+        await writeFile(path.join(user, 'mine.js'), 'return "USER";');
+        await writeFile(path.join(project, 'shared.js'), 'return "NEAR";');
+        await writeFile(path.join(user, 'shared.js'), 'return "FAR";');
+        await writeFile(extensionFile, 'return "EXTENSION";');
+        const config = makeConfig({
+          storage: new Storage(target),
+          getTargetDir: () => target,
+          getActiveExtensions: () => [
+            {
+              workflows: [
+                {
+                  name: 'audit:check',
+                  extensionName: 'audit',
+                  description: 'Check',
+                  scriptPath: extensionFile,
+                },
+              ],
+            },
+          ],
+        });
+        const unavailable = brokenScope === 'project' ? project : user;
+        rootProbe.mockImplementation(((file, ...args) =>
+          String(file) === unavailable
+            ? Promise.reject(
+                Object.assign(new Error('root EACCES'), { code: 'EACCES' }),
+              )
+            : lstat(file, ...args)) as typeof fs.lstat);
+        listMock.mockImplementation(listRealSavedWorkflows);
+
+        const commands = await new SavedWorkflowLoader(config).loadCommands(
+          signal,
+        );
+        expect(commands.map((command) => command.name)).toEqual([
+          'audit:check',
+          ...(brokenScope === 'user' ? ['local', 'shared'] : []),
+        ]);
+        const invocation = await commands[0].action!(ctx, '');
+        expect(invocation).toMatchObject({
+          type: 'tool',
+          toolArgs: { scriptPath: extensionFile },
+        });
+        expect(
+          (
+            await resolveSavedWorkflowScript(
+              { scriptPath: extensionFile },
+              config,
+            )
+          ).script,
+        ).toBe('return "EXTENSION";');
+      } finally {
+        rootProbe.mockRestore();
+        userDirectory.mockRestore();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('returns [] when the signal aborts during enumeration', async () => {
     listMock.mockResolvedValue([entry()]);
     const aborted = AbortSignal.abort();
@@ -178,5 +505,68 @@ describe('SavedWorkflowLoader', () => {
       aborted,
     );
     expect(cmds).toEqual([]);
+  });
+
+  it('R01 revalidates a cached ancestor command path and name after trust revocation', async () => {
+    const temporary = await mkdtemp(
+      path.join(tmpdir(), 'qwen-workflow-loader-'),
+    );
+    const directory = await realpath(temporary);
+    const repo = path.join(directory, 'repo');
+    const target = path.join(repo, 'packages', 'app');
+    const user = path.join(directory, 'user');
+    const scriptPath = path.join(repo, '.qwen', 'workflows', 'shared.js');
+    const userDirectory = vi
+      .spyOn(Storage, 'getUserWorkflowsDir')
+      .mockReturnValue(user);
+    try {
+      await mkdir(target, { recursive: true });
+      await mkdir(path.join(repo, '.git'));
+      await mkdir(path.dirname(scriptPath), { recursive: true });
+      await writeFile(scriptPath, "return 'DW01_ANCESTOR';");
+      let allowed = true;
+      const config = makeConfig({
+        getTargetDir: () => target,
+        getWorkflowAncestorTrustProvider:
+          () => async (dirs: readonly string[]) =>
+            dirs.map(() => allowed),
+        storage: {
+          getGeneratedWorkflowsDir: () => path.join(directory, 'generated'),
+        },
+      });
+      listMock.mockImplementation(listRealSavedWorkflows);
+      const loader = new SavedWorkflowLoader(config);
+      const [command] = await loader.loadCommands(signal);
+      expect(command.name).toBe('shared');
+      const invocation = await command.action!(ctx, '');
+      expect(invocation).toMatchObject({
+        type: 'tool',
+        toolArgs: { scriptPath },
+      });
+      if (
+        !invocation ||
+        invocation.type !== 'tool' ||
+        typeof invocation.toolArgs['scriptPath'] !== 'string'
+      ) {
+        throw new Error('Expected a workflow tool with a script path');
+      }
+      const cached = { scriptPath: invocation.toolArgs['scriptPath'] };
+      await expect(
+        resolveSavedWorkflowScript(cached, config),
+      ).resolves.toMatchObject({
+        script: "return 'DW01_ANCESTOR';",
+      });
+      allowed = false;
+      await expect(
+        resolveSavedWorkflowScript(cached, config),
+      ).rejects.toThrow();
+      await expect(
+        resolveSavedWorkflowScript('shared', config),
+      ).rejects.toThrow();
+      await expect(loader.loadCommands(signal)).resolves.toEqual([]);
+    } finally {
+      userDirectory.mockRestore();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

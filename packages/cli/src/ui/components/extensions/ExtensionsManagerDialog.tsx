@@ -12,6 +12,7 @@ import { useUIState } from '../../contexts/UIStateContext.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { t } from '../../../i18n/index.js';
 import { stripUnsafeCharacters } from '../../utils/textUtils.js';
+import type { ExtensionUpdateState } from '../../state/extensions.js';
 import {
   EXTENSIONS_TABS,
   type ExtensionsTab,
@@ -65,6 +66,7 @@ export function ExtensionsManagerDialog({
     confirmUpdateExtensionRequests,
     settingInputRequests,
     pluginChoiceRequests,
+    commandContext,
   } = useUIState();
   const { columns } = useTerminalSize();
   // Cap the width to the app's main content area (AppContainer caps it at 100).
@@ -123,6 +125,19 @@ export function ExtensionsManagerDialog({
   const bumpReload = useCallback(() => {
     setReloadSignal((value) => value + 1);
   }, []);
+
+  // Keeps the app's update-state map honest after an in-dialog update: the
+  // extension is current again, so a stale "update available" entry must not
+  // come back when the detail view is re-entered.
+  const handleUpdateStateChange = useCallback(
+    (name: string, state: ExtensionUpdateState) => {
+      commandContext.ui.dispatchExtensionStateUpdate({
+        type: 'SET_STATE',
+        payload: { name, state },
+      });
+    },
+    [commandContext],
+  );
 
   const handleLockChange = useCallback((locked: boolean) => {
     setTabLocked(locked);
@@ -233,6 +248,7 @@ export function ExtensionsManagerDialog({
               onStatus={setStatus}
               extensionsUpdateState={extensionsUpdateState}
               reloadSignal={reloadSignal}
+              onUpdateStateChange={handleUpdateStateChange}
             />
           )}
           {activeTab === EXTENSIONS_TABS.SOURCES && (

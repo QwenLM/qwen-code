@@ -22,6 +22,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { parse } from 'yaml';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const workflow = readFileSync(
   '.github/workflows/qwen-code-pr-review.yml',
@@ -38,6 +39,18 @@ const botLogin =
   parse(workflow)
     .jobs['review-config'].steps.find((s) => s.name === 'Set review constants')
     ?.run.match(/bot_login=([A-Za-z0-9-]+)/)?.[1] ?? '';
+
+// The supersede kill dir is minted under RUNNER_TEMP with a fixed prefix and
+// never exported (R4-1), so the replay's forge stub can only DISCOVER it by
+// listing that prefix. The two literals live in different files; renaming one
+// side alone leaves the stub globbing nothing, the forged kill record never
+// lands, and the refusal replay goes vacuously green. Derive the production
+// prefix from the workflow text and pin the stub glob to it (the supersede
+// suite asserts the pair).
+const supersedeKillDirPrefix =
+  workflow.match(/SUPERSEDE_KILL_DIR="[^\n]*?\/tmp\}\/([^."]+)\.XXXXXX/)?.[1] ??
+  '';
+const forgedKillDirGlob = `"\${RUNNER_TEMP}"/qwen-review-supersede-kill.*`;
 
 // Capability probe, not a platform check: the FIFO wedge tests need
 // mkfifo(1). vitest.config excludes win32 only, so the merge_group/schedule
@@ -104,13 +117,99 @@ const realPkillPath = realUtilityPath('pkill');
 const realPgrepPath = realUtilityPath('pgrep');
 
 describe('qwen pr review runner routing', () => {
-  it('isolates the long-running review job on the agent pool', () => {
+  it('isolates the long-running review job on the schedule-sized review pool', () => {
+    // Review and autofix use separate runner pools.
     const runsOn = String(parse(workflow).jobs['review-pr']['runs-on']);
 
     expect(runsOn).toBe(
-      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-agent"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
+      '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-review"]\') || fromJSON(\'["ubuntu-latest"]\') }}',
     );
     expect(runsOn).not.toContain('ecs-qwen');
+    expect(runsOn).not.toContain('ecs-agent');
+  });
+
+  it('routes the command gate to ECS for payload-less events, keeps the fork guard', () => {
+    // authorize is the write-permission gate for /review and /resolve. It
+    // loads CI_BOT_PAT but checks out nothing and runs no agent, so the
+    // persistent pool is safe whenever the trigger carries no fork code.
+    // issue_comment and workflow_dispatch have no github.event.pull_request
+    // payload: the old same-repo-only guard fell through to ubuntu-latest for
+    // every command, parking the gate in the hosted queue for hours (#15286).
+    // This removes the GATE wait only: the saving lands where the downstream
+    // job is already pool-routed (/review, /triage, /tmux, /verify); /resolve
+    // end-to-end latency is unchanged because resolve-pr stays on ubuntu-latest.
+    // Pin the exact expression so neither the new ECS disjuncts nor the fork
+    // guard / hosted fallback can be dropped silently.
+    const runsOn = String(parse(workflow).jobs['authorize']['runs-on']);
+
+    expect(runsOn).toBe(
+      "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch')) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}",
+    );
+    // The command events must reach the persistent pool...
+    expect(runsOn).toContain("github.event_name == 'issue_comment'");
+    expect(runsOn).toContain("github.event_name == 'workflow_dispatch'");
+    // ...while PR-payload events keep the same-repo fork guard, and the
+    // hosted fallback + ECS kill switch stay for forks / disabled routing.
+    expect(runsOn).toContain(
+      'github.event.pull_request.head.repo.full_name == github.repository',
+    );
+    expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+    expect(runsOn).toContain('fromJSON(\'["ubuntu-latest"]\')');
+    // The ECS routing above is only safe while authorize stays checkout-free:
+    // a `uses:` step (e.g. actions/checkout to read a label or config) would
+    // execute contributor-authored files on the persistent pool with
+    // CI_BOT_PAT in the step env while the expression pin stayed green. Scope
+    // to authorize — other jobs in this workflow legitimately check out.
+    const authorizeJob = parse(workflow).jobs['authorize'];
+    expect(authorizeJob.steps.every((s) => s.uses === undefined)).toBe(true);
+    // Pin the run: half of the premise too: the step inventory is exactly
+    // the one permission step, and no event value is spliced into the shell
+    // — everything must keep arriving through env:. A run-only debug step
+    // interpolating github.event.comment.body adds no `uses:` key and would
+    // slip past the assertion above.
+    expect(authorizeJob.steps.map((s) => s.name)).toEqual([
+      'Check principal write permission',
+    ]);
+    for (const s of authorizeJob.steps) {
+      expect(String(s.run ?? '')).not.toContain('${{');
+    }
+    // On the persistent pool the step must also pin gh's config resolution:
+    // GH_HOST plus a private, guarded GH_CONFIG_DIR, like qwen-autofix.yml's
+    // route/review-scan. Without them a planted shared ~/.config/gh
+    // (http_unix_socket) receives CI_BOT_PAT and can forge the permission
+    // response that downstream jobs consume as should_review.
+    const authorizeStep = authorizeJob.steps.find(
+      (s) => s.id === 'principal_permission',
+    );
+    // Evaluate the live (comment-stripped) lines, not mere substrings: an
+    // unguarded `export GH_CONFIG_DIR="$(mktemp ...)"` one-liner (a failed
+    // mktemp then leaves it empty and gh falls back to the shared config) or
+    // a preamble relocated below the first gh call must both red this test.
+    const live = String(authorizeStep.run)
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('#'))
+      .join('\n');
+    // Fail-closed guarded mint in the sibling route/review-scan shape.
+    const guard =
+      'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/authorize-gh-config.XXXXXX")"; then';
+    expect(live).toContain('export GH_HOST=github.com');
+    expect(live).toContain(guard);
+    expect(live).toMatch(/exit 1\n\s*fi\n\s*export GH_CONFIG_DIR\n/);
+    // Both pins must be exported BEFORE the first permission API call.
+    const api = live.indexOf(
+      'gh api "repos/${GITHUB_REPOSITORY}/collaborators/',
+    );
+    expect(api).toBeGreaterThan(-1);
+    expect(live.indexOf('export GH_HOST=github.com')).toBeLessThan(api);
+    expect(live.indexOf(guard)).toBeLessThan(api);
+    // The body must execute no repository code: on the pool the cwd is the
+    // reused $GITHUB_WORKSPACE, which other lanes fill with contributor
+    // files, so a relative-path or interpreter invocation here would run a
+    // planted file with CI_BOT_PAT in the environment.
+    expect(live).not.toMatch(/(^|[\s;&|(`'"])(\.{1,2}\/)/m);
+    expect(live).not.toMatch(
+      /(^|[\s;&|(`])(?:[^\s;&|()`'"]*\/)?(source|bash|sh|node|python[0-9.]*|npx|npm|pnpm|yarn)(\s|$)/m,
+    );
   });
 });
 
@@ -485,7 +584,9 @@ function runScenario(
         // the stub DISCOVERS it by listing (no derivation), plants the kill
         // record plus SUPERSEDE_FILE, and dies non-retryably (a fatal
         // skips the retry reset that clears plants).
-        '  supersede_forged_kill_record) for d in "${RUNNER_TEMP}"/qwen-review-supersede-kill.*; do if [ -d "$d" ]; then printf "head-b" > "$d/killed"; fi; done; printf "head-b" > "$SUPERSEDE_FILE"; exit 3 ;;',
+        '  supersede_forged_kill_record) for d in ' +
+          forgedKillDirGlob +
+          '; do if [ -d "$d" ]; then printf "head-b" > "$d/killed"; fi; done; printf "head-b" > "$SUPERSEDE_FILE"; exit 3 ;;',
         '  retry_watcher_relaunch) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else i=0; until [ -f "$SUPERSEDE_FILE" ] || [ "$i" -ge 200 ]; do /bin/sleep 0.05; i=$((i+1)); done; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
         '  retry_clears_stale_signals) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else { [ -f "$SUPERSEDE_FILE" ] && echo present || echo absent; } >> "$OBS"; r success false "ok"; fi ;;',
         '  compose_latch_reset) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; : > "$SALVAGE_DIR/compose-seen"; else { [ -f "$SALVAGE_DIR/compose-seen" ] && echo present || echo absent; } >> "$OBS"; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
@@ -2554,6 +2655,9 @@ describe('docs-only gate and relay, executed', () => {
     expect(review.env.AUTO_REVIEW).toBe(
       '${{ steps.context.outputs.auto_review }}',
     );
+    expect(review.env.QWEN_REVIEW_AUTOMATIC).toBe(
+      '${{ steps.context.outputs.auto_review }}',
+    );
   });
 });
 
@@ -3421,7 +3525,8 @@ describe('checkout self-heal', () => {
   // A workspace whose entries the owning user cannot unlink: find -exec rm
   // exits nonzero, so the user-mode wipe leg fails deterministically. Root
   // bypasses the 0o500 lock via CAP_DAC_OVERRIDE, so the tests built on it
-  // skip there, and win32 has no POSIX permission bits to honor.
+  // skip where it keeps that capability, and win32 has no POSIX permission
+  // bits to honor.
   const lockFixture = () => {
     const parent = realpathSync(
       mkdtempSync(join(tmpdir(), 'checkout-heal-lock-')),
@@ -3437,7 +3542,7 @@ describe('checkout self-heal', () => {
     rmSync(parent, { recursive: true, force: true });
   };
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'exits 0 and keeps survivors when BOTH wipe legs fail',
     () => {
       // The wipe step has no continue-on-error, so its own never-fail exit
@@ -3467,7 +3572,7 @@ describe('checkout self-heal', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'escalates to the sudo leg when the user-mode wipe fails',
     () => {
       // Deleting the `|| sudo -n find …` leg (or flipping it to `&&`) must
@@ -3668,13 +3773,13 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(
       inJobStep.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
     ).toHaveLength(4);
-    // Same invariant for the fallback job's TWO bodies (failure and
-    // cancelled): the cross-job dedup matches `actions/runs/<id>)`, anchored
-    // on the markdown link's closing paren — a body that rendered the URL
-    // differently would escape it.
+    // Same invariant for the fallback job's THREE bodies (queue-expiry,
+    // cancelled and failure): the cross-job dedup matches
+    // `actions/runs/<id>)`, anchored on the markdown link's closing paren — a
+    // body that rendered the URL differently would escape it.
     expect(
       step.run.match(/See \[workflow logs\]\(\$\{RUN_URL\}\)\./g),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     expect(inJobStep.run).toContain(
       `body="$(printf '%s\\n\\n%s' "$FALLBACK_MARKER" "$body")"`,
     );
@@ -3728,8 +3833,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
   it('opens the gate on any upstream failure but never on skip or resolve', () => {
     // Every job whose failure marks review-pr 'skipped' is enumerated: the
     // incident's trigger can kill the chain's self-hosted jobs first
-    // (authorize / review-config), and a transient API failure can kill the
-    // hosted ones (precheck-pr / delay-automatic-review).
+    // (authorize / review-config / delay-automatic-review), and a transient
+    // API failure can kill the hosted one (precheck-pr).
     expect(job.needs).toEqual([
       'precheck-pr',
       'review-config',
@@ -3898,7 +4003,9 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.stdout).not.toContain('repaired');
   });
 
-  it.skipIf(!hasGnuMktemp)(
+  // Both cases make a directory unwritable, which only binds where
+  // permission bits do: not for root with its DAC capabilities.
+  it.skipIf(!hasGnuMktemp || !arePermissionBitsEnforced())(
     'repairs a single unwritable directory instead of failing fast',
     () => {
       // Mutant control: a status=1 right after the first failed touch would
@@ -3909,15 +4016,20 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     },
   );
 
-  it('fails fast when repair is impossible', () => {
-    // Mutant control: dropping the post-repair re-probe would report this
-    // unusable directory as repaired (exit 0) and die at FinalizeJob — the
-    // exact PR #8894 death the probe exists to prevent.
-    const r = runHealthProbe({ breakDir: 'home', sudoMode: 'fail' });
-    expect(r.status).toBe(1);
-    expect(r.stdout).toContain('still unusable after repair');
-    expect(r.stdout).toContain('failing fast instead of dying at job finalize');
-  });
+  it.skipIf(!arePermissionBitsEnforced())(
+    'fails fast when repair is impossible',
+    () => {
+      // Mutant control: dropping the post-repair re-probe would report this
+      // unusable directory as repaired (exit 0) and die at FinalizeJob — the
+      // exact PR #8894 death the probe exists to prevent.
+      const r = runHealthProbe({ breakDir: 'home', sudoMode: 'fail' });
+      expect(r.status).toBe(1);
+      expect(r.stdout).toContain('still unusable after repair');
+      expect(r.stdout).toContain(
+        'failing fast instead of dying at job finalize',
+      );
+    },
+  );
 
   it('does not probe _diag when it does not exist', () => {
     // Polarity: an inverted `[ -d ]` guard probes the missing directory,
@@ -3955,6 +4067,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
       runCreated = '',
       runStartedAttempt = '',
       reviewPrResult = 'failure',
+      jobs = '',
     } = {},
   ) {
     const dir = mkdtempSync(join(tmpdir(), 'fallback-comment-'));
@@ -3989,6 +4102,17 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           '  [ "${SCENARIO:-}" = "lookup_fail" ] && exit 1',
           '  echo "qwen-code-ci-bot"; exit 0',
           'fi',
+          // The never-started guard asks this run's job list whether review-pr
+          // ever got a runner. It runs the step's REAL --jq filter over the
+          // fixture, like the reviews branch below. Leaving JOBS_JSON unset
+          // keeps every pre-existing case on the unreadable-list path
+          // ("unknown"), where posting wins — the same posture they had before
+          // this branch existed.
+          'case "$*" in',
+          '  *"/actions/runs/12345/jobs"*)',
+          '    [ -n "${JOBS_JSON:-}" ] || exit 1',
+          '    printf "%s" "$JOBS_JSON" | jq -r "$filter"; exit 0 ;;',
+          'esac',
           'if [ "$cmd" = "run" ] && [ "$sub" = "view" ]; then',
           '  case "$*" in',
           '    *createdAt*|*startedAt*)',
@@ -4083,6 +4207,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
               RUN_CREATED: runCreated,
               RUN_STARTED_ATTEMPT: runStartedAttempt,
               REVIEW_PR_RESULT: reviewPrResult,
+              JOBS_JSON: jobs,
             },
           },
         );
@@ -4134,6 +4259,145 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     // The failure path keeps the original body.
     const failed = runFallbackStep('default', { reviewPrResult: 'failure' });
     expect(failed.posted).toContain('did not complete successfully');
+  });
+
+  it.skipIf(!hasJq)(
+    'posts a cause-neutral body when no runner ever started review-pr',
+    () => {
+      // The review pool is closed for 12 of every 24 hours, so a review-pr job
+      // queued into the dark window can expire without a runner ever picking it
+      // up: no runner_name and no steps. Nothing ran, so the failure body's
+      // "did not complete successfully / retried automatically" claims would
+      // both be false. Silence is not the alternative to a false claim, though:
+      // ack-review-request has already told a hand-requesting maintainer the
+      // result is posted here and that a command-triggered review is not listed
+      // under this PR's checks, and a head nobody pushes again never queues
+      // another run. So the branch posts a body that is true instead, under the
+      // same marker-plus-run-URL shape the dedupe anchors on.
+      const jobs = JSON.stringify({
+        total_count: 2,
+        jobs: [
+          {
+            name: 'precheck-pr',
+            runner_name: 'ubuntu-latest',
+            steps: [{ name: 'Checkout' }],
+          },
+          { name: 'review-pr', runner_name: '', status: 'queued', steps: [] },
+        ],
+      });
+      for (const reviewPrResult of ['failure', 'cancelled']) {
+        const r = runFallbackStep('never_started', {
+          reviewPrResult,
+          jobs,
+        });
+        expect(r.status).toBe(0);
+        expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+        expect(r.posted).toContain('never started');
+        expect(r.posted).not.toContain('24-hour queue limit');
+        expect(r.posted).toContain('cannot determine the cause');
+        expect(r.summary).not.toContain('queue expired');
+        expect(r.posted).toContain('actions/runs/12345)');
+        expect(r.posted).toContain('@qwen-code /review');
+        expect(r.posted).not.toContain('did not complete successfully');
+        expect(r.posted).not.toContain('retried automatically');
+        expect(r.summary).toContain('never started by a runner');
+      }
+    },
+  );
+
+  it.skipIf(!hasJq)('still posts when review-pr did run on a runner', () => {
+    // The control for the body above: the same job list with a runner recorded
+    // must keep the failure body. Without it the never-started branch could
+    // widen (an `and` relaxed to an `or`, the runner_name clause dropped) and
+    // relabel every genuine failure as a queue expiry, telling the author to
+    // re-request a review that actually ran and failed.
+    const r = runFallbackStep('ran', {
+      reviewPrResult: 'failure',
+      jobs: JSON.stringify({
+        total_count: 1,
+        jobs: [
+          {
+            name: 'review-pr',
+            runner_name: 'ecs-qwen-hk1-3',
+            steps: [{ name: 'Run review' }],
+          },
+        ],
+      }),
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+    expect(r.posted).toContain('did not complete successfully');
+  });
+
+  it.skipIf(!hasJq)(
+    'still posts when a runner was assigned before any step was recorded',
+    () => {
+      // The guard's two clauses only disagree on this mixed state: a runner
+      // accepted review-pr and the job was lost before it recorded a step
+      // (worker killed, host deregistered mid-assignment). Both clauses must
+      // hold for "nothing ran" — widening the `and` to an `or`, or dropping
+      // the runner_name clause, reads this row as never-started and relabels
+      // a genuine failure as a queue expiry — the body assertion below is
+      // what forbids it.
+      const r = runFallbackStep('ran_no_steps', {
+        reviewPrResult: 'failure',
+        jobs: JSON.stringify({
+          total_count: 1,
+          jobs: [
+            { name: 'review-pr', runner_name: 'ecs-qwen-hk1-3', steps: [] },
+          ],
+        }),
+      });
+      expect(r.status).toBe(0);
+      expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+      expect(r.posted).toContain('did not complete successfully');
+      expect(r.posted).not.toContain('never started');
+    },
+  );
+
+  it.skipIf(!hasJq)(
+    'still posts when the listing carries no review-pr job',
+    () => {
+      // The listing is read with `?per_page=100` and no pagination, so a
+      // listing that drops review-pr (or a run large enough to push it off the
+      // first page) leaves the filter with an empty list. An empty list is
+      // "unknown", not "nothing ran": the step cannot prove the job never
+      // started, and the comment has to post.
+      const r = runFallbackStep('no_review_pr_job', {
+        reviewPrResult: 'failure',
+        jobs: JSON.stringify({
+          total_count: 1,
+          jobs: [
+            {
+              name: 'precheck-pr',
+              runner_name: 'ubuntu-latest',
+              steps: [{ name: 'Checkout' }],
+            },
+          ],
+        }),
+      });
+      expect(r.status).toBe(0);
+      expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+      // Dropping the filter's `length == 0` arm makes jq's `all` vacuously
+      // true on an empty list, and this row then claims a review never
+      // started when the step simply could not see it.
+      expect(r.posted).toContain('did not complete successfully');
+      expect(r.posted).not.toContain('never started');
+    },
+  );
+
+  it('posts when the job list cannot be read', () => {
+    // No fixture, so the listing fails and the step cannot prove the job
+    // never started. An unreadable list must not be read as "nothing ran".
+    const r = runFallbackStep('jobs_unreadable', {
+      reviewPrResult: 'failure',
+    });
+    expect(r.status).toBe(0);
+    expect(r.posted.startsWith(`${marker}\n\n`)).toBe(true);
+    // The guard's read site is `= "true"`, not `!= "false"`: the third state
+    // has to fall through to the generic body, not into the queue-expiry one.
+    expect(r.posted).toContain('did not complete successfully');
+    expect(r.posted).not.toContain('never started');
   });
 
   it('dedupes on the marker plus this run URL', () => {
@@ -4584,6 +4848,19 @@ describe('review supersede salvage (#10110)', () => {
     // Defined and armed before the retry loop starts.
     expect(run.indexOf('supersede_watcher()')).toBeLessThan(
       run.indexOf('attempt=1'),
+    );
+  });
+
+  it('discovers the kill dir with the prefix the workflow mints', () => {
+    // The kill dir is never exported, so the replayed agent can only reach
+    // it by DISCOVERING it: the forge stub lists RUNNER_TEMP for the prefix
+    // production mints. Rename either literal alone and the glob matches
+    // nothing — the forged record never lands, and the refusal replay below
+    // still passes without exercising the refusal. Pin the stub glob to the
+    // prefix derived from the workflow text so that one-sided edit is red.
+    expect(supersedeKillDirPrefix).not.toBe('');
+    expect(forgedKillDirGlob).toBe(
+      `"\${RUNNER_TEMP}"/${supersedeKillDirPrefix}.*`,
     );
   });
 
@@ -6234,8 +6511,11 @@ describe('review supersede salvage (#10110)', () => {
       // run start is the triggering push's shape, and no watcher poll
       // could have recorded the kill that early) — so the event postdates
       // START_TS + SALVAGE_POLL_SECONDS with margin for the harness setup
-      // between now and the loop start.
-      const now = new Date(Date.now() + 75000).toISOString();
+      // between now and the loop start. The margin is deliberately
+      // generous: the branch has no upper bound on the timestamp, and a
+      // loaded self-hosted runner once ate a 15s margin and turned this
+      // genuine cede red.
+      const now = new Date(Date.now() + 300000).toISOString();
       const r = runScenario('cede_revert_ff_kill', {
         armWatcher: true,
         extraEnv: {
@@ -6364,7 +6644,7 @@ describe('review supersede salvage (#10110)', () => {
         armWatcher: true,
         extraEnv: {
           ...base,
-          STUB_TIMELINE: `head-x head-a ${new Date(Date.now() + 75000).toISOString()}`,
+          STUB_TIMELINE: `head-x head-a ${new Date(Date.now() + 300000).toISOString()}`,
           STUB_TIMELINE_ACTOR: 'qwen-ci-bot',
         },
       });
@@ -6752,7 +7032,7 @@ describe('review supersede salvage (#10110)', () => {
   });
 
   it('exports the salvage-post contract to the agent only where the watcher arms (shape)', () => {
-    // R32-2: the skill's anchorsAtRisk=true rule restarts unless the
+    // R32-2: the skill's anchorsAtRisk=true rule re-anchors unless the
     // environment carries the CI salvage contract; the export sits inside
     // the AUTO_REVIEW-gated arming block, so an explicit run (no watcher,
     // any marker forged) never carries it. Cross-pinned with
@@ -7253,4 +7533,359 @@ describe('review supersede salvage (#10110)', () => {
       );
     },
   );
+});
+
+describe('review model canary routing', () => {
+  const run = runReviewStep();
+
+  it('wires the three model variables instead of pinning OPENAI_MODEL', () => {
+    const step = parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    );
+    expect(step.env.REVIEW_MODEL_DEFAULT).toBe(
+      '${{ vars.QWEN_PR_REVIEW_MODEL }}',
+    );
+    expect(step.env.REVIEW_MODEL_CANARY).toBe(
+      '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY }}',
+    );
+    expect(step.env.REVIEW_MODEL_CANARY_PERCENT).toBe(
+      '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}',
+    );
+    // The canary cohort's optional endpoint pair: the URL is a variable,
+    // the key is a secret, and neither is pinned into the script.
+    expect(step.env.REVIEW_BASE_URL_CANARY).toBe(
+      '${{ vars.QWEN_PR_REVIEW_BASE_URL_CANARY }}',
+    );
+    expect(step.env.REVIEW_API_KEY_CANARY).toBe(
+      '${{ secrets.REVIEW_OPENAI_API_KEY_CANARY }}',
+    );
+    // The env no longer carries the model itself: a literal there would make
+    // every split a workflow edit, which is the thing a rollout must not need.
+    expect(step.env.OPENAI_MODEL).toBeUndefined();
+
+    // Selection runs before --model is built, and the run announces its
+    // cohort: the model is recorded nowhere else a later comparison could
+    // read it, so without the notice a rollout leaves no trace of which model
+    // served a given review.
+    const select = run.indexOf('REVIEW_COHORT=default');
+    expect(select).toBeGreaterThan(-1);
+    expect(select).toBeLessThan(run.indexOf('MODEL_ARGS=()'));
+    expect(run.indexOf('::notice title=Review model::')).toBeGreaterThan(
+      select,
+    );
+  });
+
+  it('buckets by PR number and stays inside the configured percent', () => {
+    const start = run.indexOf('canary_percent_effective() {');
+    const end = run.indexOf('OPENAI_MODEL="${REVIEW_MODEL_DEFAULT:-}"', start);
+    const block = run.slice(start, end);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const pick = (defaultModel, canaryModel, percent, pr) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\n${block}\nif [ "$REVIEW_COHORT" = canary ]; then printf '%s' "$REVIEW_MODEL_CANARY"; else printf '%s' "$REVIEW_MODEL_DEFAULT"; fi`,
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            REVIEW_MODEL_DEFAULT: defaultModel,
+            REVIEW_MODEL_CANARY: canaryModel,
+            REVIEW_MODEL_CANARY_PERCENT: percent,
+            PR_NUMBER: pr,
+          },
+        },
+      ).trim();
+
+    // Off unless a percent is set: merging this changes nothing, which is
+    // what makes the rollout a variable change and its revert one too.
+    for (const percent of ['', '0', 'abc']) {
+      expect(pick('main', 'canary', percent, '12345')).toBe('main');
+    }
+    // No canary model, no split, however high the percent goes.
+    expect(pick('main', '', '100', '12345')).toBe('main');
+    expect(pick('main', 'canary', '100', '12345')).toBe('canary');
+
+    // Whole buckets only, measured as an effect: at 10%, sweep the full
+    // bucket range and pin exactly which PRs are selected. This dominates a
+    // single boundary pair, and two identical calls are self-equality.
+    const canaried = execFileSync(
+      'bash',
+      [
+        '-c',
+        `set -euo pipefail\nREVIEW_MODEL_CANARY=canary\nREVIEW_MODEL_CANARY_PERCENT=10\nfor PR_NUMBER in {12300..12399}; do\n${block}\nif [ "$REVIEW_COHORT" = canary ]; then echo "$PR_NUMBER"; fi; done`,
+      ],
+      { encoding: 'utf8' },
+    )
+      .trim()
+      .split('\n');
+    expect(canaried).toEqual(
+      Array.from({ length: 10 }, (_, index) => String(12300 + index * 10)),
+    );
+    for (const decade of [12300, 12310]) {
+      for (let bucket = 0; bucket < 10; bucket++) {
+        expect(pick('main', 'canary', '80', String(decade + bucket))).toBe(
+          bucket < 8 ? 'canary' : 'main',
+        );
+      }
+    }
+
+    // Repository-variable typos fail toward off, never toward full rollout.
+    // One row per clamp step; deleting that step alone flips its row. The
+    // 20-digit value is the digit bound's: bash wraps it to 50.
+    expect(pick('main', 'canary', '08', '12307')).toBe('canary');
+    expect(pick('main', 'canary', '08', '12308')).toBe('main');
+    expect(pick('main', 'canary', '0050', '12324')).toBe('canary');
+    expect(pick('main', 'canary', '250', '12399')).toBe('main');
+    expect(pick('main', 'canary', '18446744073709551666', '12300')).toBe(
+      'main',
+    );
+
+    // A PR number that cannot be read keeps the default rather than guessing.
+    expect(pick('main', 'canary', '100', '')).toBe('main');
+    expect(pick('main', 'canary', '100', 'x123')).toBe('main');
+  });
+
+  // The rows above supply their own positional arguments, so they cannot see
+  // the four the workflow actually passes: transposing the default and canary
+  // arguments inverts the rollout, and swapping PR_NUMBER for a per-run value
+  // loses the bucket entirely — both with every row above still green. Slice
+  // the real block (helper, router, trim, call site, endpoint override,
+  // notice, MODEL_ARGS) and execute it with the values the step's `env:`
+  // supplies.
+  it('routes and reports at the real call site, not a paraphrase of it', () => {
+    const start = run.indexOf('canary_percent_effective() {');
+    const notice = run.indexOf('echo "::notice title=Review model::');
+    const args = run.indexOf('MODEL_ARGS=()', notice);
+    const end = run.indexOf('\nfi', args) + '\nfi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(notice).toBeGreaterThan(start);
+    expect(args).toBeGreaterThan(notice);
+    expect(end).toBeGreaterThan(args);
+    // The step logs the pre-override host under its own label; reverting that
+    // rename would report a same-named value the notice no longer means.
+    expect(run).toContain('echo "initial_openai_host=${openai_host}"');
+    expect(run).not.toContain('echo "openai_host=${openai_host}"');
+    // The notice derives its endpoint host from openai_base_host(), which the
+    // workflow defines above configure_qwen_network — outside this slice, and
+    // shared with the proxy bypass. Deleting that helper must fail here.
+    const helperStart = run.indexOf('openai_base_host() {');
+    expect(helperStart).toBeGreaterThan(-1);
+    const helperEnd = run.indexOf('\n}', helperStart) + '\n}'.length;
+    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}`;
+
+    // GITHUB_RUN_ID is pinned so the fourth argument cannot be swapped for a
+    // per-run value unnoticed: 9999999 % 10 = 9 is outside every percent a
+    // case below configures, so such a swap routes to the default model.
+    const serve = (canary, percent, pr) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\n${block}\nprintf '%s' "$OPENAI_MODEL|${'${MODEL_ARGS[*]-}'}"`,
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            REVIEW_MODEL_DEFAULT: 'default-model',
+            REVIEW_MODEL_CANARY: canary,
+            REVIEW_MODEL_CANARY_PERCENT: percent,
+            OPENAI_BASE_URL: 'https://default.example.com/v1',
+            OPENAI_API_KEY: 'default-key',
+            REVIEW_BASE_URL_CANARY: '',
+            REVIEW_API_KEY_CANARY: '',
+            PR_NUMBER: pr,
+            GITHUB_RUN_ID: '9999999',
+          },
+        },
+      );
+
+    // 12300 % 10 = 0 is inside a 10% split; 12301 % 10 = 1 is not. The
+    // notice's model field is anchored — a bare 'canary' check is satisfied
+    // by the percent suffix even when the model field is wrong.
+    expect(serve('canary-model', '10', '12300')).toBe(
+      '::notice title=Review model::canary-model (PR #12300, canary 10%, bucket 0/10, cohort canary, endpoint default.example.com)\n' +
+        'canary-model|--model canary-model',
+    );
+    expect(serve('canary-model', '10', '12301')).toBe(
+      '::notice title=Review model::default-model (PR #12301, canary 10%, bucket 1/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|--model default-model',
+    );
+
+    // A percent that is not a multiple of ten switches the bucket count to
+    // 100, so a notice hard-coding the count prints a bucket the split never
+    // used: 12387 % 100 = 87 is outside 8%, 12307 % 100 = 7 is inside it.
+    expect(serve('canary-model', '8', '12387')).toBe(
+      '::notice title=Review model::default-model (PR #12387, canary 8%, bucket 87/100, cohort default, endpoint default.example.com)\n' +
+        'default-model|--model default-model',
+    );
+    expect(serve('canary-model', '8', '12307')).toBe(
+      '::notice title=Review model::canary-model (PR #12307, canary 8%, bucket 7/100, cohort canary, endpoint default.example.com)\n' +
+        'canary-model|--model canary-model',
+    );
+
+    // The notice reports the percent the router APPLIED, not the configured
+    // one. Both of these clamp to off, so the raw variable would announce a
+    // canary cohort that never ran — '10 ' is the silent spelling, since
+    // nothing about `canary 10 %` looks malformed.
+    for (const percent of ['250', '10 ']) {
+      expect(serve('canary-model', percent, '12309')).toBe(
+        `::notice title=Review model::default-model (PR #12309, canary 0%, bucket 9/10, cohort default, endpoint default.example.com)\n` +
+          'default-model|--model default-model',
+      );
+    }
+
+    // A padded canary name must not reach --model verbatim: the provider
+    // rejects it and that failure is terminal for the whole cohort. Trimming
+    // still leaves whitespace-only meaning "no split", not an invented one.
+    expect(serve(' canary-model ', '100', '12345')).toBe(
+      '::notice title=Review model::canary-model (PR #12345, canary 100%, bucket 5/10, cohort canary, endpoint default.example.com)\n' +
+        'canary-model|--model canary-model',
+    );
+    expect(serve('   ', '100', '12345')).toBe(
+      '::notice title=Review model::default-model (PR #12345, canary 100%, bucket 5/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|--model default-model',
+    );
+  });
+
+  // The endpoint override lives inside the same sliced block, so the real
+  // call site is exercised again — with the base endpoint env present this
+  // time, plus per-row canary URL/key. The override must never leak the
+  // default key to another provider, and must never touch the default
+  // cohort's endpoint.
+  it('moves the endpoint only for the canary cohort, and only with its own key', () => {
+    const start = run.indexOf('canary_percent_effective() {');
+    const notice = run.indexOf('echo "::notice title=Review model::');
+    const args = run.indexOf('MODEL_ARGS=()', notice);
+    const end = run.indexOf('\nfi', args) + '\nfi'.length;
+    const helperStart = run.indexOf('openai_base_host() {');
+    expect(helperStart).toBeGreaterThan(-1);
+    const helperEnd = run.indexOf('\n}', helperStart) + '\n}'.length;
+    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}`;
+
+    const serve = (canary, percent, pr, canaryUrl, canaryKey, dflt) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\n${block}\nprintf '%s' "$OPENAI_MODEL|$REVIEW_COHORT|$OPENAI_BASE_URL|$OPENAI_API_KEY"`,
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            REVIEW_MODEL_DEFAULT: dflt ?? 'default-model',
+            REVIEW_MODEL_CANARY: canary,
+            REVIEW_MODEL_CANARY_PERCENT: percent,
+            PR_NUMBER: pr,
+            OPENAI_BASE_URL: 'https://default.example.com/v1',
+            OPENAI_API_KEY: 'default-key',
+            REVIEW_BASE_URL_CANARY: canaryUrl ?? '',
+            REVIEW_API_KEY_CANARY: canaryKey ?? '',
+          },
+        },
+      );
+
+    // Full pair configured: the canary cohort moves model, URL and key
+    // together. 12300 % 10 = 0 is inside the 10% split.
+    expect(
+      serve(
+        'canary-model',
+        '10',
+        '12300',
+        'https://canary.example.com/v1',
+        'canary-key',
+      ),
+    ).toBe(
+      '::notice title=Review model::canary-model (PR #12300, canary 10%, bucket 0/10, cohort canary, endpoint canary.example.com)\n' +
+        'canary-model|canary|https://canary.example.com/v1|canary-key',
+    );
+
+    // A canary URL without its own key must not receive the default key:
+    // the cohort degrades to the default model and endpoint, with a warning.
+    const noKey = serve(
+      'canary-model',
+      '10',
+      '12300',
+      'https://canary.example.com/v1',
+      undefined,
+    );
+    expect(noKey).toBe(
+      '::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort.\n' +
+        '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // A key without a URL is inert: the model split still applies, the
+    // endpoint stays with the default gateway.
+    expect(serve('canary-model', '10', '12300', undefined, 'canary-key')).toBe(
+      '::notice title=Review model::canary-model (PR #12300, canary 10%, bucket 0/10, cohort canary, endpoint default.example.com)\n' +
+        'canary-model|canary|https://default.example.com/v1|default-key',
+    );
+
+    // The default cohort never touches the canary endpoint, even when the
+    // pair is fully configured. 12301 % 10 = 1 is outside the 10% split.
+    expect(
+      serve(
+        'canary-model',
+        '10',
+        '12301',
+        'https://canary.example.com/v1',
+        'canary-key',
+      ),
+    ).toBe(
+      '::notice title=Review model::default-model (PR #12301, canary 10%, bucket 1/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // Same model on both cohorts (a pure endpoint quota split): the bucket
+    // decides, names no longer matter. 12307 % 10 = 7 is inside 80%.
+    expect(
+      serve(
+        'same-model',
+        '80',
+        '12307',
+        'https://username:password@canary.example.com/v1?token=secret',
+        'canary-key',
+        'same-model',
+      ),
+    ).toBe(
+      '::notice title=Review model::same-model (PR #12307, canary 80%, bucket 7/10, cohort canary, endpoint canary.example.com)\n' +
+        'same-model|canary|https://username:password@canary.example.com/v1?token=secret|canary-key',
+    );
+
+    // ...and the same-model split still respects the bucket boundary:
+    // 12308 % 10 = 8 is outside an 80% split, so no override.
+    expect(
+      serve(
+        'same-model',
+        '80',
+        '12308',
+        'https://canary.example.com/v1',
+        'canary-key',
+        'same-model',
+      ),
+    ).toBe(
+      '::notice title=Review model::same-model (PR #12308, canary 80%, bucket 8/10, cohort default, endpoint default.example.com)\n' +
+        'same-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // An unparseable canary URL degrades like a missing key.
+    const badUrl = serve(
+      'canary-model',
+      '10',
+      '12300',
+      'not a url',
+      'canary-key',
+    );
+    expect(badUrl).toBe(
+      '::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort.\n' +
+        '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
+    );
+  });
 });

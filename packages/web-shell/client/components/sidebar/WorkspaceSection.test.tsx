@@ -9,10 +9,9 @@ import type {
   DaemonSessionSearchResult,
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
-  DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
-import gitStyles from '../ChatEditor.module.css';
 import type { WorkspaceSessionStats } from './workspaceOverviewModel';
+import type { SessionTreeRenderOptions } from './sessionTree';
 
 const {
   workspaceGit,
@@ -127,7 +126,6 @@ let container: HTMLDivElement;
 function renderSection(
   overrides: Partial<{
     workspace: DaemonWorkspaceCapability;
-    onOpenGitDiff: (cwd: string) => void;
     client: DaemonClient;
     reloadToken: number;
     expanded: boolean;
@@ -138,6 +136,7 @@ function renderSection(
     sessionGroupCatalog: DaemonSessionGroupCatalog;
     sessionLiveStateEnabled: boolean;
     overviewEnabled: boolean;
+    overviewMenuOpen: boolean;
     renderHeader: (expanded: boolean) => ReactNode;
     headerActions: (
       visible: boolean,
@@ -146,14 +145,22 @@ function renderSection(
     sessionStats: WorkspaceSessionStats | null;
     renderSessions: boolean;
     excludePinned: boolean;
+    limitSessions: boolean;
+    editingSessionId: string;
     searchQuery: string;
     gitBranchWanted: boolean;
+    untitledSessionLabel: string;
     renderSession: (
       session: DaemonSessionSummary,
-      options?: { searchSnippet?: string | undefined },
+      options?: {
+        searchSnippet?: string | undefined;
+        tree?: SessionTreeRenderOptions;
+      },
     ) => ReactNode;
     onOpenPathLocally: (cwd: string) => Promise<void>;
     onOpenTerminalLocally: (cwd: string) => Promise<void>;
+    onOpenGitDiff: (workspaceCwd: string) => void;
+    onOpenCommit: (workspaceCwd: string) => void;
   }> = {},
 ): void {
   act(() => {
@@ -169,6 +176,7 @@ function renderSection(
           trustToOpenLabel="Trust to open"
           noSessionsLabel="No sessions"
           loadErrorLabel="Load failed"
+          untitledSessionLabel={overrides.untitledSessionLabel}
           organizationEnabled={overrides.organizationEnabled ?? false}
           sessionCatalogRequestsEnabled={
             overrides.sessionCatalogRequestsEnabled
@@ -176,6 +184,8 @@ function renderSection(
           sessionGroupCatalog={overrides.sessionGroupCatalog}
           sessionLiveStateEnabled={overrides.sessionLiveStateEnabled}
           excludePinned={overrides.excludePinned}
+          limitSessions={overrides.limitSessions}
+          editingSessionId={overrides.editingSessionId}
           searchQuery={overrides.searchQuery}
           sourceType={overrides.sourceType}
           channelGroupingEnabled={overrides.channelGroupingEnabled}
@@ -186,8 +196,8 @@ function renderSection(
               <div key={session.sessionId}>{session.displayName}</div>
             ))
           }
-          onOpenGitDiff={overrides.onOpenGitDiff}
           overviewEnabled={overrides.overviewEnabled}
+          overviewMenuOpen={overrides.overviewMenuOpen}
           renderHeader={overrides.renderHeader}
           headerActions={overrides.headerActions}
           sessionStats={overrides.sessionStats}
@@ -195,6 +205,8 @@ function renderSection(
           gitBranchWanted={overrides.gitBranchWanted}
           onOpenPathLocally={overrides.onOpenPathLocally}
           onOpenTerminalLocally={overrides.onOpenTerminalLocally}
+          onOpenGitDiff={overrides.onOpenGitDiff}
+          onOpenCommit={overrides.onOpenCommit}
         />
       </I18nProvider>,
     );
@@ -237,7 +249,7 @@ function gitChip(): HTMLElement | null {
 }
 
 /** Open the workspace hover popover (300 ms delay) and return its dialog. */
-async function openDetailsDialog(): Promise<HTMLElement> {
+async function openDetailsDialog(keepFakeTimers = false): Promise<HTMLElement> {
   vi.useFakeTimers();
   const headerRow = container.querySelector<HTMLElement>(
     '[class*="headerRow"]',
@@ -247,7 +259,7 @@ async function openDetailsDialog(): Promise<HTMLElement> {
     vi.advanceTimersByTime(300);
     await Promise.resolve();
   });
-  vi.useRealTimers();
+  if (!keepFakeTimers) vi.useRealTimers();
   const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
   expect(dialog).not.toBeNull();
   return dialog!;
@@ -306,6 +318,41 @@ describe('WorkspaceSection label', () => {
 
     expect(container.textContent).toContain('Payments API');
     expect(container.textContent).not.toContain('project');
+  });
+
+  it('labels a nameless session instead of showing its id', async () => {
+    const listWorkspaceSessionsPage = vi.fn().mockResolvedValue({
+      sessions: [
+        {
+          sessionId: '550e8400-e29b-41d4-a716-446655440000',
+          displayName: '',
+          createdAt: '2026-01-01T00:00:00.000Z',
+        } as DaemonSessionSummary,
+      ],
+    });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      workspace: untrustedWorkspace,
+      client,
+      expanded: true,
+      untitledSessionLabel: 'Untitled session',
+    });
+    await flush();
+
+    const row = container.querySelector<HTMLElement>('[role="note"]');
+    if (!row) throw new Error('read-only row was not rendered');
+    expect(row.textContent).toBe('Untitled session');
+    expect(row.textContent).not.toContain('550e8400');
+    // The visible text drops the id; the accessible name keeps it so two
+    // untitled read-only rows are not announced identically.
+    expect(row.getAttribute('aria-label')).toContain('550e8400');
   });
 
   it('shows read-only session details from row hover', async () => {
@@ -1062,6 +1109,68 @@ describe('WorkspaceSection session loading', () => {
     expect(container.textContent).not.toContain('Session 6');
   });
 
+  it('keeps the edited row mounted when a refresh reorders it past the preview', async () => {
+    const sessions = Array.from({ length: 6 }, (_, index) => ({
+      sessionId: `session-${index + 1}`,
+      displayName: `Session ${index + 1}`,
+      workspaceCwd: trustedWorkspace.cwd,
+    })) as DaemonSessionSummary[];
+    const makeSessionClient = (ordered: DaemonSessionSummary[]) =>
+      ({
+        workspaceByCwd: vi.fn(() => ({
+          workspaceGit,
+          listWorkspaceSessionsPage: vi
+            .fn()
+            .mockResolvedValue({ sessions: ordered }),
+          listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+        })),
+      }) as unknown as DaemonClient;
+    const renderSession = (session: DaemonSessionSummary) =>
+      session.sessionId === 'session-5' ? (
+        <input
+          key={session.sessionId}
+          data-testid="rename-draft"
+          defaultValue="typed draft"
+        />
+      ) : (
+        <div key={session.sessionId}>{session.displayName}</div>
+      );
+
+    renderSection({
+      client: makeSessionClient(sessions),
+      expanded: true,
+      editingSessionId: 'session-5',
+      renderSession,
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="rename-draft"]'),
+    ).not.toBeNull();
+    expect(container.textContent).not.toContain('Session 6');
+
+    // Another session's activity moves ahead of the edited row, pushing it
+    // past the five-row preview on the next catalog refresh.
+    renderSection({
+      client: makeSessionClient([
+        sessions[5]!,
+        sessions[0]!,
+        sessions[1]!,
+        sessions[2]!,
+        sessions[3]!,
+        sessions[4]!,
+      ]),
+      expanded: true,
+      editingSessionId: 'session-5',
+      renderSession,
+    });
+    await flush();
+
+    expect(container.textContent).toContain('Session 6');
+    expect(
+      container.querySelector('[data-testid="rename-draft"]'),
+    ).not.toBeNull();
+  });
+
   it('refreshes the catalog when an expanded workspace loses trust', async () => {
     const listWorkspaceSessionsPage = vi
       .fn()
@@ -1201,196 +1310,345 @@ describe('WorkspaceSection session loading', () => {
   });
 });
 
-describe('WorkspaceSection git chip', () => {
-  it('renders a clickable git chip for a trusted repo', async () => {
-    const status: DaemonWorkspaceGitStatus = {
-      v: 2,
-      workspaceCwd: '/tmp/project',
-      branch: 'main',
-      unstaged: 1,
-    };
-    workspaceGit.mockResolvedValue(status);
-    const onOpenGitDiff = vi.fn();
-
-    renderSection({ onOpenGitDiff });
-    await flush();
-
-    const chip = gitChip();
-    expect(chip).not.toBeNull();
-    // The chip is a read-only OUTPUT inside a button that opens the changes
-    // view on click.
-    expect(chip?.tagName).toBe('OUTPUT');
-    expect(chip?.getAttribute('data-dirty')).toBe('true');
-    expect(chip?.className).toContain(gitStyles.gitBranchChipCompact);
-    expect(chip?.getAttribute('aria-label')).toContain('main');
-
-    // The chip itself is a read-only OUTPUT; the wrapping button opens the
-    // branch picker popover on click (which contains a "View Changes" action
-    // that calls onOpenGitDiff). Verify the button is wired and clickable.
-    const button = chip?.closest('button');
-    expect(button).not.toBeNull();
-    act(() => {
-      button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    // Clicking the chip opens the branch picker popover, not the diff dialog
-    // directly. The diff dialog is accessible via "View Changes" inside the
-    // popover.
-    expect(button?.getAttribute('aria-expanded')).toBe('true');
-  });
-
-  it('re-fetches git status right after a picker checkout instead of waiting for the poll', async () => {
-    // The sidebar chip only polls every 60s, so without the onBranchChanged
-    // wiring it would keep showing the old branch for up to a minute after a
-    // checkout made through the branch picker.
+describe('WorkspaceSection Git summary', () => {
+  it('reads Git only while hover details are visible and shows plain summary text', async () => {
+    const client = makeOverviewClient();
     workspaceGit.mockResolvedValue({
       v: 2,
       workspaceCwd: '/tmp/project',
-      branch: 'feat/demo',
+      branch: 'main',
+      unstaged: 6,
+      stashCount: 11,
+      computedAt: 1,
     });
-    workspaceGitBranches.mockResolvedValue({
-      v: 1,
-      workspaceCwd: '/tmp/project',
-      available: true,
-      local: [
-        { name: 'feat/demo', isHead: true },
-        { name: 'main', isHead: false },
-      ],
-      remote: [],
-      tags: [],
-      recent: [],
-      head: 'feat/demo',
-      detached: false,
-    });
-    const client = makeClient();
-
-    renderSection({ client, onOpenGitDiff: vi.fn() });
+    renderSection({ client, overviewEnabled: true });
     await flush();
-    expect(workspaceGit).toHaveBeenCalledTimes(1);
-
-    const chipButton = gitChip()?.closest('button');
-    expect(chipButton).not.toBeNull();
-    act(() => {
-      chipButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    vi.useFakeTimers();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(60_000);
     });
-    await flush();
-    // Opening the picker fetches a fresh status for its action hints and
-    // hands it back to the chip.
-    expect(workspaceGit).toHaveBeenCalledTimes(2);
-
-    // The picker content is portaled outside the section container.
-    const mainItem = Array.from(document.body.querySelectorAll('button')).find(
-      (button) => button.textContent === 'main',
+    expect(workspaceGit).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    const dialog = await openDetailsDialog(true);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(workspaceGit).toHaveBeenCalledOnce();
+    expect(dialog.textContent).toContain('6 modified · 11 stashed');
+    expect(
+      dialog.querySelector('[title="6 modified · 11 stashed"]'),
+    ).not.toBeNull();
+    const branchRow = Array.from(dialog.querySelectorAll('div')).find(
+      (row) => row.textContent === 'main6 modified · 11 stashed',
     );
-    expect(mainItem).toBeTruthy();
-    act(() => {
-      mainItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(branchRow).toBeDefined();
+    expect(branchRow?.querySelector('button')).toBeNull();
+    expect(gitChip()).toBeNull();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(60_000);
     });
-    await flush();
-
-    expect(workspaceGitCheckout).toHaveBeenCalledWith('main', undefined);
     expect(workspaceGit).toHaveBeenCalledTimes(3);
-  });
-
-  it('hides the chip for an untrusted workspace and never queries git', async () => {
-    workspaceGit.mockResolvedValue({
-      v: 2,
-      workspaceCwd: '/tmp/danger',
-      branch: 'main',
+    await act(async () => {
+      dialog.dispatchEvent(new Event('pointerout', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(100);
     });
-
-    renderSection({
-      workspace: untrustedWorkspace,
-      onOpenGitDiff: vi.fn(),
+    workspaceGit.mockClear();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(60_000);
     });
-    await flush();
-
-    expect(gitChip()).toBeNull();
     expect(workspaceGit).not.toHaveBeenCalled();
+    vi.useRealTimers();
   });
 
-  it('skips the git poll when the workspace cwd is not a real path', async () => {
-    // A synthetic fallback workspace carries a display name in `cwd`; polling
-    // would qualify the route with it and 400, so no request fires and the chip
-    // stays hidden.
-    workspaceGit.mockResolvedValue({
-      v: 2,
-      workspaceCwd: 'Project',
-      branch: 'main',
+  it('keeps a Git read that settles after the hover details close', async () => {
+    let resolveRead!: (status: { branch: string }) => void;
+    workspaceGit.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+    );
+    renderSection({ client: makeOverviewClient(), overviewEnabled: true });
+    const dialog = await openDetailsDialog(true);
+    // Close before the blocking read settles.
+    await act(async () => {
+      dialog.dispatchEvent(new Event('pointerout', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(100);
     });
-
-    renderSection({
-      workspace: { ...trustedWorkspace, cwd: 'Project' },
-      onOpenGitDiff: vi.fn(),
+    await act(async () => {
+      resolveRead({ branch: 'late-branch' });
     });
-    await flush();
-
-    expect(workspaceGit).not.toHaveBeenCalled();
-    expect(gitChip()).toBeNull();
+    // The next open repaints the retained snapshot while its own read is
+    // still in flight.
+    workspaceGit.mockReturnValueOnce(new Promise(() => {}));
+    const headerRow = container.querySelector<HTMLElement>(
+      '[class*="headerRow"]',
+    );
+    await act(async () => {
+      headerRow?.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      vi.advanceTimersByTime(300);
+      await Promise.resolve();
+    });
+    const reopened = document.querySelector<HTMLElement>('[role="dialog"]');
+    expect(reopened).not.toBeNull();
+    expect(reopened!.textContent).toContain('late-branch');
+    vi.useRealTimers();
   });
 
-  it('re-fetches git status when reloadToken changes', async () => {
-    // reloadToken is in the polling effect's dependency array so agent activity
-    // (which bumps it) refreshes the chip immediately instead of waiting for the
-    // next 60s tick. A stable client isolates the re-fetch to the token change.
-    workspaceGit.mockResolvedValue({
-      v: 2,
-      workspaceCwd: '/tmp/project',
-      branch: 'main',
-    });
-    const client = makeClient();
-    const onOpenGitDiff = vi.fn();
-
-    renderSection({ client, reloadToken: 0, onOpenGitDiff });
-    await flush();
-    expect(workspaceGit).toHaveBeenCalledTimes(1);
-
-    renderSection({ client, reloadToken: 1, onOpenGitDiff });
-    await flush();
+  it('keeps the newer Git snapshot when hover and focus reads overlap', async () => {
+    let resolveOlder!: (status: { branch: string }) => void;
+    workspaceGit
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveOlder = resolve;
+        }),
+      )
+      .mockResolvedValueOnce({ branch: 'newer-branch' });
+    renderSection({ client: makeOverviewClient(), overviewEnabled: true });
+    const dialog = await openDetailsDialog(true);
+    await act(async () => window.dispatchEvent(new Event('focus')));
     expect(workspaceGit).toHaveBeenCalledTimes(2);
+    await act(async () => resolveOlder({ branch: 'older-branch' }));
+    expect(dialog.textContent).toContain('newer-branch');
+    expect(dialog.textContent).not.toContain('older-branch');
   });
 
-  it('does not re-fetch git status when only the diff handler changes', async () => {
+  it.each([untrustedWorkspace, { ...trustedWorkspace, cwd: 'Project' }])(
+    'does not query untrusted or synthetic workspaces: $cwd',
+    async (workspace) => {
+      renderSection({
+        workspace,
+        overviewEnabled: true,
+        overviewMenuOpen: true,
+        gitBranchWanted: true,
+      });
+      await flush();
+      expect(workspaceGit).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe('WorkspaceSection Git picker entry', () => {
+  function gitRow(): HTMLElement | null {
+    return document.querySelector<HTMLElement>(
+      '[data-web-shell-workspace-git]',
+    );
+  }
+
+  async function showBranchRow(): Promise<HTMLElement> {
+    const dialog = await openDetailsDialog(true);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    return dialog;
+  }
+
+  it('turns the branch row into the picker trigger when Git is wired', async () => {
     workspaceGit.mockResolvedValue({
       v: 2,
       workspaceCwd: '/tmp/project',
       branch: 'main',
+      unstaged: 2,
+      computedAt: 1,
     });
-    const client = makeClient();
+    const onOpenGitDiff = vi.fn();
+    const onOpenCommit = vi.fn();
+    renderSection({
+      client: makeOverviewClient(),
+      overviewEnabled: true,
+      onOpenGitDiff,
+      onOpenCommit,
+    });
+    const dialog = await showBranchRow();
 
-    renderSection({ client, onOpenGitDiff: vi.fn() });
-    await flush();
-    expect(workspaceGit).toHaveBeenCalledTimes(1);
-
-    renderSection({ client, onOpenGitDiff: vi.fn() });
-    await flush();
-    expect(workspaceGit).toHaveBeenCalledTimes(1);
+    const row = gitRow();
+    expect(row).not.toBeNull();
+    expect(row?.tagName).toBe('BUTTON');
+    expect(row?.getAttribute('aria-label')).toBe(
+      'Current Git branch: main — 2 modified',
+    );
+    expect(row?.querySelector('svg.lucide-chevron-right')).not.toBeNull();
+    // The severity dot rides the row regardless of the picker.
+    expect(
+      dialog.querySelector('[class*="sessionDetailsGitDot"]'),
+    ).not.toBeNull();
+    // Neither callback fires merely from pressing the row: the picker owns
+    // the actions, so only opening it counts.
+    expect(onOpenGitDiff).not.toHaveBeenCalled();
+    expect(onOpenCommit).not.toHaveBeenCalled();
+    vi.useRealTimers();
   });
 
-  it('hides the chip when the workspace is not a git repo (null branch)', async () => {
-    workspaceGit.mockResolvedValue({
-      v: 2,
-      workspaceCwd: '/tmp/project',
-      branch: null,
-    });
-
-    renderSection({ onOpenGitDiff: vi.fn() });
-    await flush();
-
-    expect(workspaceGit).toHaveBeenCalled();
-    expect(gitChip()).toBeNull();
-  });
-
-  it('omits the chip when no diff handler is provided', async () => {
+  it('collapses the details when the pointer crosses onto the picker layer', async () => {
     workspaceGit.mockResolvedValue({
       v: 2,
       workspaceCwd: '/tmp/project',
       branch: 'main',
+      unstaged: 2,
+      computedAt: 1,
+    });
+    renderSection({
+      client: makeOverviewClient(),
+      overviewEnabled: true,
+      onOpenGitDiff: vi.fn(),
+      onOpenCommit: vi.fn(),
+    });
+    const details = await showBranchRow();
+    const row = gitRow()!;
+    await act(async () => {
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    const contents = document.querySelectorAll('[data-slot="popover-content"]');
+    const picker = contents[contents.length - 1] as HTMLElement;
+    expect(picker).not.toBe(details);
+
+    // The sequence a browser sends. First the pointer arrives on the row from
+    // the details content, so the collapse below can only come from the row's
+    // own leave; then it crosses onto the picker layer, naming the picker node
+    // as the relatedTarget. React computes enter/leave over the React tree, so
+    // that leave must land on the row — the details content never sees it.
+    await act(async () => {
+      details.dispatchEvent(
+        new MouseEvent('pointerout', { bubbles: true, relatedTarget: row }),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      row.dispatchEvent(
+        new MouseEvent('pointerout', { bubbles: true, relatedTarget: picker }),
+      );
+      picker.dispatchEvent(
+        new MouseEvent('pointerover', { bubbles: true, relatedTarget: row }),
+      );
+      await Promise.resolve();
     });
 
-    renderSection({ onOpenGitDiff: undefined });
-    await flush();
+    // Escape dismisses the topmost layer (the picker); the details follow.
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(details.isConnected).toBe(false);
+    vi.useRealTimers();
+  });
 
-    expect(gitChip()).toBeNull();
+  it('hands keyboard focus back to the folder row when the picker collapses the details', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      unstaged: 2,
+      computedAt: 1,
+    });
+    renderSection({
+      client: makeOverviewClient(),
+      overviewEnabled: true,
+      onOpenGitDiff: vi.fn(),
+      onOpenCommit: vi.fn(),
+    });
+    const details = await showBranchRow();
+    const row = gitRow()!;
+    const folderButton = container.querySelector<HTMLElement>(
+      '[class*="headerRow"] button',
+    )!;
+    // Keyboard path: the row is focused, no pointer ever touches it.
+    await act(async () => {
+      row.focus();
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelectorAll('[data-slot="popover-content"]').length,
+    ).toBe(2);
+
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(details.isConnected).toBe(false);
+    // Both the row and the picker's own field unmount with the details, and
+    // Radix cannot restore focus (this popover is anchored, not triggered).
+    expect(document.activeElement).toBe(folderButton);
+    vi.useRealTimers();
+  });
+
+  it('opens the real picker as a nested layer from the branch row', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      unstaged: 2,
+      computedAt: 1,
+    });
+    renderSection({
+      client: makeOverviewClient(),
+      overviewEnabled: true,
+      onOpenGitDiff: vi.fn(),
+      onOpenCommit: vi.fn(),
+    });
+    const details = await showBranchRow();
+    expect(workspaceGitBranches).not.toHaveBeenCalled();
+
+    await act(async () => {
+      gitRow()!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(workspaceGitBranches).toHaveBeenCalled();
+    expect(
+      document.querySelector(
+        'input[placeholder="Search for branches and actions"]',
+      ),
+    ).not.toBeNull();
+    // Opening the picker must not tear the details down with it. Assert on the
+    // node captured before the picker existed: every popover content carries
+    // role="dialog", so a fresh query could match the picker's own layer.
+    expect(details.isConnected).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it.each([untrustedWorkspace, { ...trustedWorkspace, cwd: 'Project' }])(
+    'leaves the branch row a plain summary without a real trusted workspace: $cwd',
+    async (workspace) => {
+      workspaceGit.mockResolvedValue({
+        v: 2,
+        workspaceCwd: '/tmp/project',
+        branch: 'main',
+        unstaged: 2,
+        computedAt: 1,
+      });
+      renderSection({
+        workspace,
+        client: makeOverviewClient(),
+        overviewEnabled: true,
+        onOpenGitDiff: vi.fn(),
+        onOpenCommit: vi.fn(),
+      });
+      await showBranchRow();
+      expect(gitRow()).toBeNull();
+      vi.useRealTimers();
+    },
+  );
+
+  it('leaves the branch row a plain summary when Git is not wired', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      unstaged: 2,
+      computedAt: 1,
+    });
+    renderSection({ client: makeOverviewClient(), overviewEnabled: true });
+    await showBranchRow();
+    expect(gitRow()).toBeNull();
+    vi.useRealTimers();
   });
 });
 
@@ -1423,8 +1681,9 @@ describe('WorkspaceSection overview', () => {
       document.querySelector('[data-web-shell-workspace-overview]'),
     ).toBeNull();
 
-    // Control arm: the default header consumes the snapshot and fetches.
+    // The default header fetches once its details are opened.
     renderSection({ client, expanded: true, overviewEnabled: true });
+    await openDetailsDialog();
     await flush();
     expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
   });
@@ -1630,7 +1889,7 @@ describe('WorkspaceSection overview gates', () => {
     ).toBeNull();
   });
 
-  it('polls git for the header actions even without a diff handler', async () => {
+  it('reads git for header actions only after the menu opens', async () => {
     workspaceGit.mockResolvedValue({
       v: 2,
       workspaceCwd: '/tmp/project',
@@ -1643,12 +1902,20 @@ describe('WorkspaceSection overview gates', () => {
       gitBranchWanted: true,
     });
     await flush();
+    expect(workspaceGit).not.toHaveBeenCalled();
+    renderSection({
+      client: makeOverviewClient(),
+      headerActions,
+      gitBranchWanted: true,
+      overviewMenuOpen: true,
+    });
+    await flush();
     expect(workspaceGit).toHaveBeenCalled();
     const branches = headerActions.mock.calls.map(
       ([, context]) => context.gitBranch,
     );
     expect(branches).toContain('main');
-    // The chip itself still needs the diff handler.
+    // Git metadata is rendered in the hover summary, not in the header.
     expect(gitChip()).toBeNull();
   });
 
@@ -1705,7 +1972,7 @@ describe('WorkspaceSection overview gates', () => {
       overviewEnabled: true,
       headerActions,
     });
-    await flush();
+    await openDetailsDialog();
     await flush();
     expect(
       headerActions.mock.calls.some(([, context]) => Boolean(context.overview)),
@@ -2213,7 +2480,54 @@ describe('WorkspaceSection content search', () => {
 });
 
 describe('WorkspaceSection overview plumbing', () => {
-  it('still fetches for a custom header when header actions consume the snapshot', async () => {
+  it('loads details after hover or focus and stops refreshing when closed', async () => {
+    vi.useFakeTimers();
+    const client = makeOverviewClient();
+    renderSection({ client, expanded: true, overviewEnabled: true });
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(client.workspaceMcp).not.toHaveBeenCalled();
+    const header = container.querySelector<HTMLElement>(
+      '[class*="headerRow"]',
+    )!;
+    await act(async () => {
+      header.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(299);
+    });
+    expect(client.workspaceMcp).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      header.dispatchEvent(new MouseEvent('pointerout', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    renderSection({
+      client,
+      expanded: false,
+      overviewEnabled: true,
+      reloadToken: 1,
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      header.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    expect(client.workspaceMcp).toHaveBeenCalledTimes(3);
+  });
+
+  it('fetches for a custom header when its menu opens', async () => {
     const client = makeOverviewClient();
     const headerActions = vi.fn(() => null);
     renderSection({
@@ -2222,6 +2536,7 @@ describe('WorkspaceSection overview plumbing', () => {
       overviewEnabled: true,
       renderHeader: () => <span>custom header</span>,
       headerActions,
+      overviewMenuOpen: true,
     });
     await flush();
     await flush();
@@ -2244,11 +2559,20 @@ describe('WorkspaceSection overview plumbing', () => {
       overviewEnabled: true,
       headerActions,
     });
-    await flush();
-    await flush();
+    const dialog = await openDetailsDialog(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
     expect(
       headerActions.mock.calls.some(([, context]) => Boolean(context.overview)),
     ).toBe(true);
+    // Close the hover details so only the retained snapshot — not the live
+    // hook state — can feed the collapsed header actions.
+    await act(async () => {
+      dialog.dispatchEvent(new Event('pointerout', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    vi.useRealTimers();
     headerActions.mockClear();
     renderSection({
       client,
@@ -2259,11 +2583,11 @@ describe('WorkspaceSection overview plumbing', () => {
     await flush();
     const lastCall = headerActions.mock.calls.at(-1);
     expect(lastCall?.[1].overview).toBeDefined();
-    // Collapsed rows do not refetch.
+    // Collapsing with closed consumers does not restart the overview.
     expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
   });
 
-  it('refetches the facets when the reload token changes', async () => {
+  it('refetches the visible facets when the reload token changes', async () => {
     const client = makeOverviewClient();
     renderSection({
       client,
@@ -2271,6 +2595,7 @@ describe('WorkspaceSection overview plumbing', () => {
       overviewEnabled: true,
       reloadToken: 0,
     });
+    await openDetailsDialog();
     await flush();
     expect(client.workspaceMcp).toHaveBeenCalledTimes(1);
     renderSection({
@@ -2315,5 +2640,201 @@ describe('WorkspaceSection overview plumbing', () => {
     await flush();
     await openDetailsDialog();
     expect(sessionCount('Total')).toBe('3+');
+  });
+});
+
+describe('WorkspaceSection session tree', () => {
+  function treeClient(sessions: DaemonSessionSummary[]): DaemonClient {
+    return {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+  }
+
+  function treeRow(
+    session: DaemonSessionSummary,
+    options?: {
+      searchSnippet?: string | undefined;
+      tree?: SessionTreeRenderOptions;
+    },
+  ): ReactNode {
+    const tree = options?.tree;
+    return (
+      <div
+        key={session.sessionId}
+        data-session-id={session.sessionId}
+        data-tree-depth={tree?.depth}
+        data-tree-children={tree?.childCount}
+      >
+        {session.displayName}
+        {tree && tree.childCount > 0 ? (
+          <button
+            type="button"
+            aria-label={`toggle ${session.sessionId}`}
+            aria-expanded={tree.expanded}
+            onClick={tree.onToggle}
+          >
+            toggle
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+
+  const parent: DaemonSessionSummary = {
+    sessionId: 'parent',
+    displayName: 'Parent session',
+    sourceType: 'default',
+    updatedAt: '2026-01-02T00:00:00.000Z',
+  } as DaemonSessionSummary;
+  const child: DaemonSessionSummary = {
+    sessionId: 'child',
+    displayName: 'Derived session',
+    parentSessionId: 'parent',
+    sourceType: 'default',
+    updatedAt: '2026-01-03T00:00:00.000Z',
+  } as DaemonSessionSummary;
+
+  it('renders a derived session under its collapsed parent', async () => {
+    renderSection({
+      client: treeClient([parent, child]),
+      expanded: true,
+      sourceType: 'default',
+      renderSession: treeRow,
+    });
+    await flush();
+
+    expect(container.textContent).toContain('Parent session');
+    expect(container.textContent).not.toContain('Derived session');
+    const toggle = container.querySelector<HTMLElement>(
+      '[aria-label="toggle parent"]',
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      container
+        .querySelector('[data-session-id="parent"]')
+        ?.getAttribute('data-tree-children'),
+    ).toBe('1');
+  });
+
+  it('reveals the derived session after expanding and remembers it', async () => {
+    renderSection({
+      client: treeClient([parent, child]),
+      expanded: true,
+      sourceType: 'default',
+      renderSession: treeRow,
+    });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>('[aria-label="toggle parent"]')
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain('Derived session');
+    expect(
+      container
+        .querySelector('[data-session-id="child"]')
+        ?.getAttribute('data-tree-depth'),
+    ).toBe('1');
+    expect(
+      window.localStorage.getItem(
+        'qwen.web-shell.sidebar.session-tree-expanded:primary',
+      ),
+    ).toContain('parent');
+  });
+
+  it('keeps a matched derived session visible when only it matches', async () => {
+    renderSection({
+      client: treeClient([parent, child]),
+      expanded: true,
+      sourceType: 'default',
+      searchQuery: 'Derived',
+      renderSession: treeRow,
+    });
+    await flush();
+
+    expect(container.textContent).toContain('Derived session');
+    expect(
+      container
+        .querySelector('[data-session-id="child"]')
+        ?.getAttribute('data-tree-depth'),
+    ).toBe('0');
+  });
+
+  it('expands a parent that also matches the search', async () => {
+    const matchingParent = { ...parent, displayName: 'Derived parent' };
+    const matchingChild = { ...child, displayName: 'Derived child' };
+    renderSection({
+      client: treeClient([matchingParent, matchingChild]),
+      expanded: true,
+      sourceType: 'default',
+      searchQuery: 'Derived',
+      renderSession: treeRow,
+    });
+    await flush();
+
+    expect(container.textContent).toContain('Derived child');
+    expect(
+      container
+        .querySelector('[data-session-id="child"]')
+        ?.getAttribute('data-tree-depth'),
+    ).toBe('1');
+  });
+
+  it('keeps a derived session of a pinned-away parent visible', async () => {
+    const pinnedParent = {
+      ...parent,
+      sessionId: 'pinned-parent',
+      displayName: 'Pinned parent',
+      isPinned: true,
+    } as DaemonSessionSummary;
+    const pinnedChild = {
+      ...child,
+      sessionId: 'pinned-child',
+      displayName: 'Pinned parent child',
+      parentSessionId: 'pinned-parent',
+    } as DaemonSessionSummary;
+    renderSection({
+      client: treeClient([pinnedParent, pinnedChild]),
+      expanded: true,
+      sourceType: 'default',
+      excludePinned: true,
+      renderSession: treeRow,
+    });
+    await flush();
+
+    // The project list lifts the pinned parent out, so the child keeps a flat
+    // row instead of being stranded behind a row this list does not render.
+    expect(container.textContent).toContain('Pinned parent child');
+    expect(
+      container
+        .querySelector('[data-session-id="pinned-child"]')
+        ?.getAttribute('data-tree-depth'),
+    ).toBe('0');
+  });
+
+  it('counts a collapsed parent as one preview row', async () => {
+    const others = Array.from({ length: 4 }, (_, index) => ({
+      sessionId: `other-${index}`,
+      displayName: `Other ${index}`,
+      sourceType: 'default',
+      updatedAt: `2026-01-0${index + 4}T00:00:00.000Z`,
+    })) as DaemonSessionSummary[];
+    renderSection({
+      client: treeClient([parent, child, ...others]),
+      expanded: true,
+      sourceType: 'default',
+      renderSession: treeRow,
+    });
+    await flush();
+
+    expect(container.textContent).not.toContain('Derived session');
+    expect(container.textContent).not.toContain('Show all');
   });
 });

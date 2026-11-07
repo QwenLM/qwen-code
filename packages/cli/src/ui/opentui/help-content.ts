@@ -31,23 +31,20 @@ export const HELP_COMMAND_LIST_VISIBLE_LINES = 18;
 export const HELP_DOCS_URL = 'https://qwenlm.github.io/qwen-code-docs/';
 
 /**
- * Row budget that keeps the whole overlay on screen at small terminals
- * (e.g. 80x24). Reserved rows are owned by the surrounding app chrome:
- * banner (3), dialog-mount top margin (1), status bar (1), composer chrome
- * (5). Fixed rows are the overlay's own chrome plus the always-rendered
- * docs footer and key hints: borders (2), vertical padding (2), header (1),
- * footer (1), hints (1) and the three separator margins (3). The tab body
- * receives the remainder, so the footer/hints stay visible at 80x24.
+ * Row budget that keeps the whole overlay on screen. `regionHeight` is the
+ * popup region's own budget, which already accounts for the banner, the status
+ * bar and the composer — while the overlay is open none of those rows is
+ * occupied, the banner living in the scrollbox split the region's height
+ * derivation owns. Fixed rows are the overlay's own chrome plus the
+ * always-rendered docs footer and key hints: borders (2), vertical padding (2),
+ * header (1), footer (1), hints (1) and the three separator margins (3). The
+ * tab body receives the remainder, so the footer/hints stay visible at 80x24.
  */
-export const HELP_LAYOUT_RESERVED_ROWS = 10;
 export const HELP_LAYOUT_FIXED_ROWS = 10;
 
 /** Tab-body rows that fit below the header and above the footer/hints. */
-export function computeHelpBodyRows(terminalHeight: number): number {
-  return Math.max(
-    0,
-    terminalHeight - HELP_LAYOUT_RESERVED_ROWS - HELP_LAYOUT_FIXED_ROWS,
-  );
+export function computeHelpBodyRows(regionHeight: number): number {
+  return Math.max(0, regionHeight - HELP_LAYOUT_FIXED_ROWS);
 }
 
 export type HelpTab = 'general' | 'commands' | 'custom-commands';
@@ -247,6 +244,37 @@ export function buildHelpCustomCommandLines(
   const safeWidth = Math.max(72, width);
   const bodyWidth = safeWidth - 6;
   return buildCommandLines(groupHelpCommands(commands, true), bodyWidth);
+}
+
+/**
+ * Rows the commands tabs spend on their own chrome inside the body budget:
+ * the intro line, the gap under it, the gap above the scroll hint, and the
+ * hint itself.
+ */
+export const HELP_COMMANDS_TAB_CHROME_ROWS = 4;
+
+/**
+ * Command-list rows that fit beside that chrome. The body box clips at
+ * `bodyRows`, and yoga resolves the overflow by dropping the intro line's
+ * bottom margin and clipping the hint away, so the window must not claim rows
+ * the chrome also needs.
+ */
+export function helpCommandWindowRows(bodyRows: number): number {
+  return Math.max(
+    1,
+    Math.min(
+      HELP_COMMAND_LIST_VISIBLE_LINES,
+      bodyRows - HELP_COMMANDS_TAB_CHROME_ROWS,
+    ),
+  );
+}
+
+/** Largest scroll offset that still moves the visible window. */
+export function helpScrollMax(
+  lines: readonly HelpLine[],
+  windowRows: number,
+): number {
+  return Math.max(0, lines.length - windowRows);
 }
 
 function shortcutLine(shortcut: HelpShortcut): string {

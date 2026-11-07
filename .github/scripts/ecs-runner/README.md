@@ -1,0 +1,183 @@
+# ECS Runner host cleanup
+
+This directory contains host-level cleanup for dedicated Linux ECS GitHub
+Actions runner hosts. It complements per-job workflow cleanup; it does not
+replace it.
+
+## What it does
+
+- Runs `qwen-docker-cleanup` once a day at 02:30 UTC, with up to 30 minutes of
+  randomized delay.
+- Removes Qwen CI containers — sandbox-labelled or named `qwen-code-*` —
+  created more than 24 hours ago.
+- Prunes sandbox-labelled Qwen CI images and dangling images older than 24
+  hours.
+- Reclaims unused Docker build cache last used more than 24 hours ago, with
+  a 30 GB cache retention budget. Recent and in-use cache is preserved, so
+  this is not a hard disk-usage cap. Failures mark the service as failed.
+- Uses the existing Qwen sandbox daemon lock for labelled image pruning.
+  Build-cache pruning relies on Docker's in-use protection and runs even
+  when that lock is busy or missing.
+- Changes the host `/tmp` retention policy from 30 days to 1 day through
+  `systemd-tmpfiles` (measured 2026-10-31: CI hosts generate ~120-260k
+  temp files/day and a 7d steady state exceeds the tmpfs inode ceiling).
+
+Use this only on dedicated CI hosts. A sandbox-labelled or `qwen-code-*`-named
+container older than 24 hours is considered leaked and may be removed even if
+it is still running.
+
+## Prerequisites
+
+- Linux with systemd
+- Docker available as `docker.service`
+- `flock` and `timeout`
+- Root access for installation
+- Runner workspaces under `/home/github-runner`
+
+## Install or update
+
+From a Qwen Code checkout, run:
+
+```bash
+sudo .github/scripts/ecs-runner/install-qwen-docker-cleanup.sh
+```
+
+The installer copies the cleanup command and systemd units into the host,
+installs the one-day `/tmp` policy, reloads systemd, and enables the timer.
+Run the same command again after pulling a newer version to update the host.
+Merging changes does not update installed copies. Run the installer on every
+host, including hosts that do not yet have the timer, and check each host's
+timer and journal below. Updating the global Qwen CLI does not install this
+cleanup service.
+
+## Verify
+
+```bash
+systemctl is-enabled qwen-docker-cleanup.timer
+systemctl is-active qwen-docker-cleanup.timer
+systemctl list-timers qwen-docker-cleanup.timer
+systemd-tmpfiles --cat-config | grep '^D /tmp '
+journalctl -u qwen-docker-cleanup.service -n 5 --no-pager
+```
+
+The expected `/tmp` policy is:
+
+```text
+D /tmp 1777 root root 1d
+```
+
+The retention policy is enforced by the daily `qwen-docker-cleanup.service`
+itself (`ExecStartPost=systemd-tmpfiles --clean --prefix=/tmp`), not by the
+distro's `systemd-tmpfiles-clean.timer` — on hardened images that timer can
+be masked, and it reports `static` (unverifiable via `is-enabled`) on stock
+Ubuntu. The journal line above confirms the ExecStartPost ran.
+
+## Run manually
+
+Drain the host first if it may contain a legitimate job or container running
+for more than 24 hours. Then run:
+
+```bash
+sudo systemctl start qwen-docker-cleanup.service
+sudo journalctl -u qwen-docker-cleanup.service --since today
+```
+
+To apply the `/tmp` retention policy immediately:
+
+```bash
+sudo systemd-tmpfiles --clean --prefix=/tmp
+```
+
+## Disable or uninstall
+
+```bash
+sudo systemctl disable --now qwen-docker-cleanup.timer
+sudo systemctl clean --what=state qwen-docker-cleanup.timer
+sudo rm -f /usr/local/sbin/qwen-docker-cleanup
+sudo rm -f /etc/systemd/system/qwen-docker-cleanup.service
+sudo rm -f /etc/systemd/system/qwen-docker-cleanup.timer
+sudo rm -f /etc/tmpfiles.d/tmp.conf
+sudo systemctl daemon-reload
+```
+
+Removing `/etc/tmpfiles.d/tmp.conf` restores the operating system's packaged
+`/tmp` policy on the next `systemd-tmpfiles` invocation.
+
+## Scope
+
+This cleanup intentionally does not delete runner workspaces, package caches,
+containerd leases, or containerd snapshots directly. Those resources require
+separate disk-pressure monitoring and a host drain before manual cleanup.
+
+The PR review workflow creates a private scratch directory under `RUNNER_TEMP`,
+exports it as `TMPDIR`, and asks the top-level agent to keep verification
+copies there and pass the same requirement to its subagents. An `always()`
+step removes that directory after artifact upload, including on failed or
+cancelled reviews when cleanup steps can run. Cleanup failures are reported in
+the job log.
+
+This is a temporary-directory convention, not filesystem isolation: commands
+that explicitly write elsewhere bypass it. Existing arbitrary copies in `/tmp`
+remain covered only by the one-day policy. This service does not remove them
+by name because they may belong to an active job. A later review job on the
+same runner registration retries removing stale `qwen-review-scratch.*`
+directories from `RUNNER_TEMP`; residue on an idle registration still requires
+manual cleanup. Build-cache reclamation does not initialize unused data disks.
+
+## Font baseline
+
+The web-shell smoke suite asserts exact text layout — for example that the
+token-usage header wraps at the 320 px panel minimum — so its verdict depends
+on the host's default `sans-serif`. The x64 ECS pool images ship
+`fonts-dejavu-core`, and fontconfig resolves Latin text to DejaVu Sans. Fresh
+ARM64 pool images (Ubuntu 26.04 minimal) do not: fontconfig falls back to
+WenQuanYi Zen Hei for Latin as well as CJK, the same strings measure about
+26 px narrower, and the wrap never happens (#15383).
+
+Provision a host once with:
+
+```bash
+sudo .github/scripts/ecs-runner/install-qwen-font-baseline.sh
+```
+
+The installer is idempotent: on an already-provisioned host it installs
+nothing and only re-verifies. No runner restart is needed — each job's
+Chromium reads fontconfig when it starts.
+
+Verify at any time:
+
+```bash
+# L0: the family every `sans-serif` request resolves to
+bash .github/scripts/ecs-runner/check-font-baseline.sh
+
+# L0 plus L1: text advance widths in the host's Playwright Chromium
+bash .github/scripts/ecs-runner/check-font-baseline.sh --with-metrics
+```
+
+The web-shell smoke lane is pinned to `ubuntu-latest` to isolate its browsers
+from shared-host network changes (run 40915920935 failed before app startup
+with `ERR_NETWORK_CHANGED` on ARM64). Its retained `Check host font baseline
+(self-hosted)` step is dormant on that routing; should the lane return to a
+shared host, that step runs the L0 half before installing dependencies, so a
+drifted host fails in seconds with an actionable message instead of failing two
+layout assertions 26 minutes into the suite. When L0 fails there, it downloads
+the two DejaVu packages using private APT lists, extracts only their font data
+into `${XDG_DATA_HOME:-$HOME/.local/share}/fonts/qwen-ci`, refreshes the
+runner's font cache, and verifies L0 again. This runs at the runner's existing
+privilege level: CI does not elevate or execute the host-provisioning
+installer. Healthy hosts require no download or extraction; acquisition
+failures and remaining runner-user drift still fail the gate. Before moving
+browser jobs back to a shared host, provide network isolation as well as this
+font baseline; matching fonts alone does not prevent interrupted module loads.
+L1 remains a manual/host-provisioning check requiring an installed Chromium.
+
+## Regression check
+
+```bash
+node --test .github/scripts/ecs-runner/*.test.mjs
+```
+
+The check runs the cleanup script with mocked host commands and temporary
+lock files; it does not contact Docker or remove real containers. The font
+suite stubs `fc-match`, `apt-get`, `dpkg-query` and Chromium the same way, so
+it neither installs packages nor starts a browser.

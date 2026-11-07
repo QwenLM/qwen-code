@@ -6,7 +6,6 @@
 
 import type { Server } from 'node:http';
 import type { Application } from 'express';
-import type { ConversationRuntimeOwnership } from './conversations/conversation-runtime-ownership.js';
 import { conversationRuntimeUnavailableError } from './conversations/conversation-runtime-errors.js';
 
 const SERVE_APP_LIFECYCLE = Symbol('qwen.serveAppLifecycle');
@@ -50,8 +49,8 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
   private listenerClosed = false;
   private sealed = false;
   private closePending?: Promise<void>;
-  private ownership?: ConversationRuntimeOwnership;
   private appDrain?: () => Promise<void>;
+  private readonly additionalAppDrains: Array<() => Promise<void>> = [];
   private hostDrain?: () => Promise<void>;
   private bootStarter?: () => Promise<void> | void;
   private bootPending?: Promise<void>;
@@ -112,15 +111,12 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
     return pending;
   }
 
-  setOwnership(ownership: ConversationRuntimeOwnership): void {
-    if (this.ownership) {
-      throw new Error('Serve app lifecycle ownership is already configured.');
-    }
-    this.ownership = ownership;
-  }
-
   setAppDrain(drain: () => Promise<void>): void {
     this.appDrain = drain;
+  }
+
+  addAppDrain(drain: () => Promise<void>): void {
+    this.additionalAppDrains.push(drain);
   }
 
   setBootStarter(starter: () => Promise<void> | void): void {
@@ -203,6 +199,7 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
     this.seal();
     const drains = [
       this.startDrain(this.appDrain),
+      ...this.additionalAppDrains.map((drain) => this.startDrain(drain)),
       this.startDrain(this.hostDrain),
       this.bootPending?.catch(() => undefined),
     ].filter((value): value is Promise<void> => value !== undefined);
@@ -222,7 +219,6 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
     if (errors.length > 1) {
       throw new AggregateError(errors, 'Serve app shutdown is incomplete.');
     }
-    await this.ownership?.release();
   }
 
   private startDrain(

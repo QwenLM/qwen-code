@@ -8,6 +8,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { InputFormat } from '@qwen-code/qwen-code-core';
 import { createMinimalSettings } from '../../../config/settings.js';
+import { getAvailableCommands } from '../../../nonInteractiveCliCommands.js';
+import { CommandKind } from '../../../ui/commands/types.js';
 import type { StreamJsonOutputAdapter } from '../../io/StreamJsonOutputAdapter.js';
 import type { IControlContext } from '../ControlContext.js';
 import type { IPendingRequestRegistry } from './baseController.js';
@@ -25,6 +27,10 @@ const { mockDebugLogger } = vi.hoisted(() => ({
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
   createDebugLogger: () => mockDebugLogger,
+}));
+
+vi.mock('../../../nonInteractiveCliCommands.js', () => ({
+  getAvailableCommands: vi.fn(),
 }));
 
 function createContext(
@@ -73,6 +79,194 @@ function createRegistry(): IPendingRequestRegistry {
 }
 
 describe('SystemController', () => {
+  it('stages explicit false during initialize without claiming durable application', async () => {
+    const context = createContext();
+    context.config.stageInitialWorkflowMode = vi.fn();
+    context.config.isWorkflowModeSupported = vi.fn(() => true);
+    context.config.setWorkflowMode = vi.fn();
+    const controller = new SystemController(
+      context,
+      createRegistry(),
+      'SystemController',
+    );
+    const response = await controller.handleRequest(
+      { subtype: 'initialize', workflowMode: false },
+      'init-mode',
+    );
+    expect(
+      context.config.stageInitialWorkflowMode,
+    ).toHaveBeenCalledExactlyOnceWith(false);
+    expect(context.config.setWorkflowMode).not.toHaveBeenCalled();
+    expect(response).toMatchObject({
+      capabilities: { can_set_workflow_mode: true },
+    });
+    expect(response).not.toHaveProperty('requested');
+  });
+
+  it('waits for authoritative initialization for both read and write', async () => {
+    const context = createContext();
+    let ready!: () => void;
+    context.waitForInitialization = () =>
+      new Promise<void>((resolve) => {
+        ready = resolve;
+      });
+    context.config.isWorkflowModeSupported = vi.fn(() => true);
+    const state = { requested: true, available: true, effective: true };
+    context.config.getWorkflowMode = vi.fn(() => state);
+    context.config.setWorkflowMode = vi.fn(async () => state);
+    const controller = new SystemController(
+      context,
+      createRegistry(),
+      'SystemController',
+    );
+    const get = controller.handleRequest(
+      { subtype: 'get_workflow_mode' },
+      'get-mode',
+    );
+    await Promise.resolve();
+    expect(context.config.getWorkflowMode).not.toHaveBeenCalled();
+    ready();
+    await expect(get).resolves.toEqual(state);
+    const set = controller.handleRequest(
+      { subtype: 'set_workflow_mode', enabled: false },
+      'set-mode',
+    );
+    await Promise.resolve();
+    expect(context.config.setWorkflowMode).not.toHaveBeenCalled();
+    ready();
+    await set;
+    expect(context.config.setWorkflowMode).toHaveBeenCalledExactlyOnceWith(
+      false,
+    );
+    expect(context.config.setReasoningEffort).not.toHaveBeenCalled();
+  });
+
+  it('propagates a rejected initialization without mutating mode', async () => {
+    const context = createContext({
+      waitForInitialization: async () => {
+        throw new Error('recording failed');
+      },
+    });
+    context.config.setWorkflowMode = vi.fn();
+    const controller = new SystemController(
+      context,
+      createRegistry(),
+      'SystemController',
+    );
+    await expect(
+      controller.handleRequest(
+        { subtype: 'set_workflow_mode', enabled: true },
+        'failed-mode',
+      ),
+    ).rejects.toThrow('recording failed');
+    expect(context.config.setWorkflowMode).not.toHaveBeenCalled();
+  });
+
+  it('returns the committed Workflow mode snapshot without reading a later mutation', async () => {
+    const context = createContext();
+    const committed = { requested: true, available: true, effective: true };
+    context.config.isWorkflowModeSupported = vi.fn(() => true);
+    context.config.setWorkflowMode = vi.fn(async () => committed);
+    context.config.getWorkflowMode = vi.fn(() => ({
+      requested: false,
+      available: true,
+      effective: false,
+    }));
+    const controller = new SystemController(
+      context,
+      createRegistry(),
+      'SystemController',
+    );
+    await expect(
+      controller.handleRequest(
+        { subtype: 'set_workflow_mode', enabled: true },
+        'committed-mode',
+      ),
+    ).resolves.toEqual(committed);
+    expect(context.config.getWorkflowMode).not.toHaveBeenCalled();
+  });
+
+  it.each(['session switch', 'request cancellation'] as const)(
+    'rejects %s after the Workflow mode setter commits but before its response resumes',
+    async (change) => {
+      const context = createContext();
+      const committed = { requested: true, available: true, effective: true };
+      let sessionId = 'original-session';
+      let completeCommit!: (state: typeof committed) => void;
+      const commit = new Promise<typeof committed>((resolve) => {
+        completeCommit = resolve;
+      });
+      context.config.getSessionId = vi.fn(() => sessionId);
+      context.config.isWorkflowModeSupported = vi.fn(() => true);
+      context.config.setWorkflowMode = vi.fn(() => commit);
+      context.config.getWorkflowMode = vi.fn(() => ({
+        requested: false,
+        available: true,
+        effective: false,
+      }));
+      const registry = createRegistry();
+      let requestAbort!: AbortController;
+      vi.mocked(registry.registerIncomingRequest).mockImplementation(
+        (_id, _name, abortController) => {
+          requestAbort = abortController;
+        },
+      );
+      const controller = new SystemController(
+        context,
+        registry,
+        'SystemController',
+      );
+      const response = controller.handleRequest(
+        { subtype: 'set_workflow_mode', enabled: true },
+        'retired-mode',
+      );
+      await vi.waitFor(() =>
+        expect(context.config.setWorkflowMode).toHaveBeenCalledExactlyOnceWith(
+          true,
+        ),
+      );
+      completeCommit(committed);
+      if (change === 'session switch') sessionId = 'replacement-session';
+      else requestAbort.abort();
+      await expect(response).rejects.toThrow(
+        'Session changed or request aborted',
+      );
+      expect(context.config.getWorkflowMode).not.toHaveBeenCalled();
+    },
+  );
+
+  it('loads supported commands with the session settings for Skill registration', async () => {
+    const context = createContext();
+    const controller = new SystemController(
+      context,
+      createRegistry(),
+      'SystemController',
+    );
+    vi.mocked(getAvailableCommands).mockResolvedValueOnce([
+      {
+        name: 'demo:analysis',
+        description: 'Analyze a local dataset',
+        kind: CommandKind.FILE,
+      },
+    ]);
+
+    const result = await controller.handleRequest(
+      { subtype: 'supported_commands' },
+      'supported-commands',
+    );
+
+    expect(result).toEqual({
+      subtype: 'supported_commands',
+      commands: ['demo:analysis'],
+    });
+    expect(getAvailableCommands).toHaveBeenCalledWith(
+      context.config,
+      expect.any(AbortSignal),
+      'non_interactive',
+      context.settings,
+    );
+  });
+
   describe('initialize timeout validation', () => {
     it('accepts valid timeout within bounds', async () => {
       const context = createContext();
@@ -228,7 +422,7 @@ describe('SystemController', () => {
   });
 
   describe('initialize MCP configuration', () => {
-    it('preserves explicit automatic version negotiation', async () => {
+    it('preserves MCP negotiation and App resource limits', async () => {
       const context = createContext();
       const controller = new SystemController(
         context,
@@ -243,6 +437,8 @@ describe('SystemController', () => {
             automatic: {
               command: 'node',
               versionNegotiation: 'auto',
+              appResourceMaxBytes: 4_194_304,
+              appResourceTimeoutMs: 30_000,
             },
           },
         },
@@ -253,6 +449,8 @@ describe('SystemController', () => {
         automatic: expect.objectContaining({
           command: 'node',
           versionNegotiation: 'auto',
+          appResourceMaxBytes: 4_194_304,
+          appResourceTimeoutMs: 30_000,
         }),
       });
     });

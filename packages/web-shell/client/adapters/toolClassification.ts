@@ -7,6 +7,16 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+export function resolveToolCallName(
+  toolName: string | undefined,
+  rawInput: unknown,
+): string | undefined {
+  const name = getRecord(rawInput)?.['name'];
+  return toolName === 'tool_call' && typeof name === 'string' && name.trim()
+    ? name
+    : toolName;
+}
+
 export function isActiveToolStatus(
   status: ACPToolCall['status'] | string,
 ): boolean {

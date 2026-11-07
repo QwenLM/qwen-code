@@ -61,9 +61,9 @@ const updateJobName =
   workflow.match(/\n {2}update:\n {4}name: '([^']*)'/)?.[1] ?? '';
 const poolPrefix = updateJobName.replace(/\$\{\{.*\}\}$/, '');
 
-// Both layouts, because CI runs `prettier --write .` before this suite and
-// prettier reflows the inline matrix array onto its own lines. A parser that
-// reads only the checked-in layout passes locally and finds zero pools there.
+// Both layouts, because the checked-in workflow carries the reflowed form
+// prettier produces for an inline matrix array, and older branches still
+// carry the single-line one. A parser that reads only one finds zero pools.
 function parsePools(text) {
   return (text.match(/\n\s+runner:\s*\[([^\]]*)\]/)?.[1] ?? '')
     .split(',')
@@ -122,6 +122,27 @@ describe('ECS runner qwen update workflow', () => {
     assert.ok(
       workflow.includes('sudo env -u NPM_CONFIG_PREFIX npm install -g'),
     );
+  });
+
+  it('pins the install to the /usr/local prefix', () => {
+    // Clearing NPM_CONFIG_PREFIX only drops the environment variable; npm's
+    // own computed default survives it, and on hk-4 and hk-5 that default is a
+    // bundled Node directory rather than /usr/local. The install then succeeds
+    // into a tree the runner's PATH never reads, while the verify step keeps
+    // checking /usr/local/bin/qwen — which is how those pools served four
+    // releases on a stale binary. This flag is the only thing making the
+    // target explicit, and it was dropped once before without anything
+    // objecting.
+    assert.ok(workflow.includes('npm install -g --prefix /usr/local'));
+  });
+
+  it('pins the 90-minute resolve budget', () => {
+    const resolveJob = workflow.slice(
+      workflow.indexOf('  resolve:'),
+      workflow.indexOf('  update:'),
+    );
+    assert.ok(resolveJob.includes('timeout-minutes: 100'));
+    assert.ok(resolveJob.includes("RESOLVE_TIMEOUT_SECONDS: '5400'"));
   });
 
   it('runs only when this workflow changes on main', () => {

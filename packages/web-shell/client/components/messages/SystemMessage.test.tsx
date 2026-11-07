@@ -1,9 +1,15 @@
+import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import { SystemMessage } from './SystemMessage';
+import {
+  createContextUsageMessageData,
+  serializeContextUsageMessage,
+} from './ContextUsageMessage';
+import type { DaemonSessionContextUsageStatus } from '@qwen-code/web-shell/daemon-react-sdk';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -32,6 +38,87 @@ function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
 }
 
 describe('SystemMessage — prompt_cancelled marker', () => {
+  it('uses shared quota copy in the Chinese Desktop and VS Code message component', () => {
+    const container = render(
+      <SystemMessage
+        content="You've used up your weekly credits. Your credits are expected to reset in 3 hours. Please try again after the reset."
+        variant="error"
+        source="turn_error"
+        data={{
+          subscriptionQuota: {
+            type: 'subscription_quota',
+            memberType: 'pro',
+            resetAt: Math.floor(Date.now() / 1000) + 3 * 3600,
+          },
+        }}
+      />,
+      'zh-CN',
+    );
+    expect(container.textContent).toContain(
+      '周额度已用完，预计将于3小时后恢复，请在额度恢复后重试。',
+    );
+    expect(container.textContent).not.toContain('/upgrade');
+  });
+
+  it('preserves backend public text in the Chinese error component', () => {
+    const container = render(
+      <SystemMessage content="Backend public text" variant="error" />,
+      'zh-CN',
+    );
+    expect(container.textContent).toContain('Backend public text');
+  });
+  it('does not infer quota errors from backend message wording', () => {
+    const message =
+      "You've used up your weekly credits. Please try again after the reset.";
+    const container = render(
+      <SystemMessage content={message} variant="error" />,
+      'zh-CN',
+    );
+    expect(container.textContent).toContain(message);
+  });
+  it.each([
+    ['zh-CN', 10999, '你在 11s 后取消了请求'],
+    ['zh-CN', 999, '你在 1s 后取消了请求'],
+    ['zh-CN', 0, '你在 0s 后取消了请求'],
+    ['zh-CN', 7069, '你在 8s 后取消了请求'],
+    ['zh-CN', 59999, '你在 1m 0s 后取消了请求'],
+    ['zh-CN', 60000, '你在 1m 0s 后取消了请求'],
+    ['zh-CN', 60001, '你在 1m 1s 后取消了请求'],
+    ['zh-CN', 397000, '你在 6m 37s 后取消了请求'],
+    ['en', 10999, 'You cancelled this request after 11s'],
+    ['en', 999, 'You cancelled this request after 1s'],
+    ['en', 397000, 'You cancelled this request after 6m 37s'],
+  ] as const)('renders elapsed duration in %s', (language, elapsedMs, text) => {
+    const container = render(
+      <SystemMessage
+        content=""
+        variant="info"
+        source="prompt_cancelled"
+        data={{ elapsedMs }}
+      />,
+      language,
+    );
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(text);
+  });
+
+  it.each(['1000', -1, NaN, Infinity])(
+    'falls back for invalid elapsed time %s',
+    (elapsedMs) => {
+      const container = render(
+        <SystemMessage
+          content=""
+          variant="info"
+          source="prompt_cancelled"
+          data={{ elapsedMs }}
+        />,
+        'zh-CN',
+      );
+      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+        '你已取消请求',
+      );
+    },
+  );
+
   it('renders the user-cancelled marker as a status region', () => {
     const container = render(
       <SystemMessage content="" variant="info" source="prompt_cancelled" />,
@@ -64,20 +151,46 @@ describe('SystemMessage — prompt_cancelled marker', () => {
 
 describe('SystemMessage — goal status', () => {
   it.each([
-    ['en', 'Goal usage limited', 'Last check: token budget reached'],
-    ['zh-CN', '目标用量受限', '上次检查: token budget reached'],
+    [
+      'usage_limited',
+      'en',
+      'Goal usage limited',
+      'token budget reached',
+      'Last check: token budget reached',
+    ],
+    [
+      'usage_limited',
+      'zh-CN',
+      '目标用量受限',
+      'token budget reached',
+      '上次检查: token budget reached',
+    ],
+    [
+      'blocked',
+      'en',
+      'Goal blocked',
+      'approval required',
+      'Last check: approval required',
+    ],
+    [
+      'blocked',
+      'zh-CN',
+      '目标已阻塞',
+      'approval required',
+      '上次检查: approval required',
+    ],
   ] as const)(
-    'renders a usage-limited goal distinctly in %s',
-    (language, title, reason) => {
+    'renders a %s goal distinctly in %s',
+    (kind, language, title, lastReason, reason) => {
       const container = render(
         <SystemMessage
           content=""
           variant="info"
           source="goal"
           data={{
-            kind: 'usage_limited',
+            kind,
             condition: 'finish the evaluation',
-            lastReason: 'token budget reached',
+            lastReason,
           }}
         />,
         language,
@@ -333,6 +446,133 @@ describe('SystemMessage — vision bridge notice', () => {
   });
 });
 
+describe('SystemMessage — context compression', () => {
+  const result = {
+    originalTokenCount: 263195,
+    newTokenCount: 99799,
+    originalTokenCountIsEstimated: false,
+    newTokenCountIsEstimated: true,
+  };
+  const done = { phase: 'done', ...result };
+
+  it('renders the in-progress row in the UI language', () => {
+    const container = render(
+      <SystemMessage
+        content="Compressing context..."
+        variant="info"
+        source="context_compression"
+        data={{ phase: 'progress' }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('正在压缩');
+    expect(container.textContent).not.toContain('Compressing context...');
+  });
+
+  it('renders a no-op result in the UI language', () => {
+    const container = render(
+      <SystemMessage
+        content="No compression needed."
+        variant="info"
+        source="context_compression"
+        data={{ phase: 'noop' }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('无需压缩。');
+  });
+
+  it('renders the truncation notice in the UI language', () => {
+    const container = render(
+      <SystemMessage
+        content="Compression instructions were truncated to 2000 characters."
+        variant="info"
+        source="context_compression"
+        data={{ phase: 'notice', instructionsLimit: 2000 }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('压缩指令已截断为 2,000 个字符');
+  });
+
+  it('renders the counts in the UI language instead of the daemon sentence', () => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={done}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('上下文已压缩 263,195 → ~99,799');
+    expect(container.textContent).not.toContain('Context compressed');
+  });
+
+  it('renders the English line for an English UI', () => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={done}
+      />,
+      'en',
+    );
+
+    expect(container.textContent).toContain(
+      'Context compressed 263,195 → ~99,799',
+    );
+  });
+
+  it('carries a server-authored warning on a second line', () => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={{ ...done, warning: 'Recent history was left intact.' }}
+      />,
+      'en',
+    );
+
+    expect(container.textContent).toContain(
+      'Context compressed 263,195 → ~99,799',
+    );
+    expect(container.textContent).toContain('Recent history was left intact.');
+    // A hard break, not a soft one: the row renders through Markdown, which
+    // would fold a bare newline into the line above.
+    expect(container.querySelector('br')).not.toBeNull();
+  });
+
+  it.each([
+    [
+      'a malformed count',
+      { phase: 'done', ...result, originalTokenCount: 'many' },
+    ],
+    ['no phase at all', result],
+    ['an unreadable payload', 'not-a-payload'],
+  ])('falls back to the daemon sentence for %s', (_label, data) => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={data}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(
+      'Context compressed (263195 -> ~99799).',
+    );
+  });
+});
+
 describe('SystemMessage — background notification label', () => {
   it('labels background task notifications and preserves display text', () => {
     const container = render(
@@ -406,6 +646,20 @@ describe('SystemMessage — background notification label', () => {
 });
 
 describe('SystemMessage — background notification i18n body', () => {
+  it('renders an overflow summary record without task metadata verbatim', () => {
+    const content =
+      'Dropped 1 background notification (queue full): 1 shell result (shell-0).';
+    const container = render(
+      <SystemMessage
+        content={content}
+        variant="info"
+        source="background_notification"
+      />,
+    );
+
+    expect(container.textContent).toContain(content);
+  });
+
   it('renders shell notifications with structured command via i18n', () => {
     const container = render(
       <SystemMessage
@@ -707,5 +961,200 @@ describe('SystemMessage — inline images', () => {
       mimeType: 'text/plain',
       attachmentId: 'notes.txt',
     });
+  });
+});
+
+describe('background continuation', () => {
+  it('shows task provenance with an accessible source action', () => {
+    const locate = vi.fn(() => true);
+    const details = vi.fn();
+    const turn = {
+      turnId: 'turn-1',
+      taskId: 'task-1',
+      kind: 'agent' as const,
+      startedAt: 100,
+      label: 'Explore',
+      toolUseId: 'tool-1',
+    };
+    const container = render(
+      <SubagentDetailsProvider onOpen={vi.fn()} onOpenBackground={details}>
+        <SystemMessage
+          content="Explore"
+          variant="info"
+          source="background_notification_turn_started"
+          data={{ ...turn, backgroundTask: { status: 'completed' } }}
+          onLocateBackgroundSource={locate}
+        />
+      </SubagentDetailsProvider>,
+    );
+    expect(container.textContent).toContain('Background agent·Explore');
+    expect(
+      container.querySelector('[role="img"]')?.getAttribute('aria-label'),
+    ).toBe('Background task completed');
+    expect(container.querySelector('[title="Explore"]')?.className).toContain(
+      'truncate',
+    );
+    expect(container.querySelector('button')?.textContent).toBe('Source');
+    expect(container.querySelector('button svg')).not.toBeNull();
+    expect(container.querySelector('button')?.className).toContain(
+      'text-muted-foreground',
+    );
+    expect(container.querySelector('button')?.className).toContain(
+      'font-normal',
+    );
+    act(() => container.querySelector('button')!.click());
+    expect(locate).toHaveBeenCalledWith('', 'tool-1');
+    act(() => container.querySelectorAll('button')[1]!.click());
+    expect(details).toHaveBeenCalledWith(expect.objectContaining(turn));
+  });
+  it('names a cross-session message and offers no details to open', () => {
+    const details = vi.fn();
+    const container = render(
+      <SubagentDetailsProvider onOpen={vi.fn()} onOpenBackground={details}>
+        <SystemMessage
+          content="Ask the other session"
+          variant="info"
+          source="background_notification_turn_started"
+          data={{
+            turnId: 'turn-1',
+            taskId: 'msg-1',
+            kind: 'peer',
+            startedAt: 100,
+            label: 'qwen on api',
+            backgroundTask: { status: 'completed' },
+          }}
+        />
+      </SubagentDetailsProvider>,
+    );
+    expect(container.textContent).toContain(
+      'Cross-session message·qwen on api',
+    );
+    // Nothing in the task registry answers to a message id, so the details
+    // button would open a tab that can never load.
+    expect(
+      [...container.querySelectorAll('button')].map((button) =>
+        button.textContent?.trim(),
+      ),
+    ).not.toContain('View details');
+    expect(details).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['failed', 'Background task failed'],
+    ['cancelled', 'Background task cancelled'],
+    [undefined, 'Background result'],
+  ])('does not describe %s results as successful', (status, label) => {
+    const container = render(
+      <SystemMessage
+        content="Explore"
+        variant="info"
+        source="background_notification_turn_started"
+        data={{ backgroundTask: { status } }}
+      />,
+    );
+    expect(
+      container.querySelector('[role="img"]')?.getAttribute('aria-label'),
+    ).toBe(label);
+    expect(container.querySelector('[data-tone="success"]')).toBeNull();
+  });
+  it.each(['completed', 'failed', 'cancelled'])(
+    'shows pending processing without overriding the %s outcome',
+    (status) => {
+      const container = render(
+        <SystemMessage
+          content="Explore completed"
+          variant="info"
+          source="background_task_completed"
+          data={{
+            kind: 'agent',
+            status,
+            description: 'Explore',
+            awaitingProcessing: true,
+          }}
+        />,
+      );
+      expect(container.textContent).toContain('Awaiting processing');
+      expect(
+        container.querySelector('[role="img"]')?.getAttribute('title'),
+      ).toBe(`Background task ${status}`);
+    },
+  );
+});
+
+describe('SystemMessage — context usage instruction files', () => {
+  function contextUsageStatus(): DaemonSessionContextUsageStatus {
+    return {
+      v: 1,
+      sessionId: 's-1',
+      workspaceCwd: '/repo/.qwen/worktrees/task',
+      workspaceRoot: '/repo',
+      formattedText: '',
+      usage: {
+        modelName: 'm',
+        totalTokens: 50,
+        contextWindowSize: 100,
+        breakdown: {
+          systemPrompt: 10,
+          builtinTools: 10,
+          mcpTools: 0,
+          instructionFiles: 5,
+          memoryFiles: 0,
+          skills: 0,
+          messages: 25,
+          freeSpace: 40,
+          autocompactBuffer: 10,
+        },
+        builtinTools: [],
+        mcpTools: [],
+        instructionFiles: [
+          {
+            path: 'AGENTS.md',
+            tokens: 5,
+            absolutePath: '/repo/.qwen/worktrees/task/AGENTS.md',
+          },
+        ],
+        memoryFiles: [],
+        skills: [],
+        showDetails: true,
+      },
+    };
+  }
+
+  it('opens an instruction file through the admission root, like the panel', () => {
+    const status = contextUsageStatus();
+    const onOpenMemoryFile = vi.fn();
+    const container = render(
+      <SystemMessage
+        content={serializeContextUsageMessage(status)}
+        variant="info"
+        data={createContextUsageMessageData(status)}
+        onOpenMemoryFile={onOpenMemoryFile}
+      />,
+    );
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[title="AGENTS.md"]',
+    );
+    expect(button).not.toBeNull();
+    act(() => button!.click());
+    expect(onOpenMemoryFile).toHaveBeenCalledTimes(1);
+    expect(onOpenMemoryFile).toHaveBeenCalledWith(
+      status.usage.instructionFiles![0],
+      '/repo',
+    );
+  });
+
+  it('renders instruction rows as plain text when no opener is supplied', () => {
+    const status = contextUsageStatus();
+    const container = render(
+      <SystemMessage
+        content={serializeContextUsageMessage(status)}
+        variant="info"
+        data={createContextUsageMessageData(status)}
+      />,
+    );
+    expect(container.querySelector('button[title="AGENTS.md"]')).toBeNull();
+    expect(container.querySelector('[title="AGENTS.md"]')?.tagName).toBe(
+      'SPAN',
+    );
   });
 });

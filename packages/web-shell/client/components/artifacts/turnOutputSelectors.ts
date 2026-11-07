@@ -39,6 +39,14 @@ export function getArtifactsByTurn(
       continue;
     }
     if (!currentTurnId) currentTurnId = message.id;
+    if (message.role === 'assistant') {
+      for (const artifact of message.reportedArtifacts ?? []) {
+        recordArtifactReferences.push({
+          turnId: currentTurnId,
+          workspacePath: artifact.workspacePath,
+        });
+      }
+    }
     if (message.role !== 'tool_group') continue;
     for (const tool of message.tools) {
       for (const id of getToolCallIds(tool)) {
@@ -59,7 +67,12 @@ export function getArtifactsByTurn(
       artifact,
       workspaceCwd,
     );
-    if (turnIds.size === 0 && artifact.toolCallId) {
+    // A workspace file's toolCallId follows its latest agent write, so it
+    // joins that turn as well as the turns that recorded it.
+    if (
+      artifact.toolCallId &&
+      (turnIds.size === 0 || artifact.storage === 'workspace')
+    ) {
       const turnId = toolCallTurn.get(artifact.toolCallId);
       if (turnId) turnIds.add(turnId);
     }
@@ -71,6 +84,30 @@ export function getArtifactsByTurn(
         byTurn.set(turnId, [artifact]);
       }
     }
+  }
+  for (const [turnId, list] of byTurn) {
+    const savedUrls = new Set(
+      list
+        .filter(
+          (artifact) =>
+            artifact.metadata?.['artifactType'] === 'web_preview_snapshot',
+        )
+        .map((artifact) => artifact.metadata?.['publishedUrl']),
+    );
+    byTurn.set(
+      turnId,
+      list.filter(
+        (artifact) =>
+          artifact.metadata?.['artifactType'] === 'web_preview_snapshot' ||
+          artifact.storage !== 'published' ||
+          !artifact.url ||
+          // Only a file:// publication is indistinguishable from its saved
+          // twin: the preview cannot frame it either way. A browser-openable
+          // live card opens the hosted page, so it is not a duplicate.
+          /^https?:/i.test(artifact.url) ||
+          !savedUrls.has(artifact.url),
+      ),
+    );
   }
   return byTurn;
 }
@@ -282,7 +319,7 @@ function getFileChange(
   };
 }
 
-function getToolFilePath(tool: ACPToolCall): string | undefined {
+export function getToolFilePath(tool: ACPToolCall): string | undefined {
   const fromArgs = getStringContentField(
     tool.args,
     'file_path',

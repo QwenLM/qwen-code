@@ -115,7 +115,7 @@ export class AgentInteractive {
   start(context: ContextState): Promise<void> {
     return runWithAgentContext(
       this.config.agentId,
-      () => this.startInner(context),
+      () => this.core.runInHookFrame(() => this.startInner(context)),
       this.agentDepth,
     );
   }
@@ -159,7 +159,7 @@ export class AgentInteractive {
   private runLoop(): Promise<void> {
     return runWithAgentContext(
       this.config.agentId,
-      () => this.runLoopInner(),
+      () => this.core.runInHookFrame(() => this.runLoopInner()),
       this.agentDepth,
     );
   }

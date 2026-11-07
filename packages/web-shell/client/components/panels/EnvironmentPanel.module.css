@@ -359,3 +359,11 @@ button.row:disabled {
   font-size: 12px;
   line-height: 1.5;
 }
+
+.sourceTitle {
+  cursor: default;
+}
+
+.sourceTitle:hover {
+  background: transparent;
+}

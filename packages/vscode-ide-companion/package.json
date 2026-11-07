@@ -1,8 +1,9 @@
 {
   "name": "qwen-code-vscode-ide-companion",
+  "private": true,
   "displayName": "Qwen Code Companion",
   "description": "Enable Qwen Code with direct access to your VS Code workspace.",
-  "version": "0.23.0",
+  "version": "0.26.9",
   "publisher": "qwenlm",
   "icon": "assets/icon.png",
   "repository": {
@@ -95,6 +96,14 @@
         "title": "Qwen Code: Auth"
       },
       {
+        "command": "qwen-code.logout",
+        "title": "Qwen Code: Logout"
+      },
+      {
+        "command": "qwen-code.upgrade",
+        "title": "Qwen Code: Upgrade"
+      },
+      {
         "command": "qwen-code.focusChat",
         "title": "Qwen Code: Focus Chat View"
       },
@@ -131,6 +140,14 @@
         },
         {
           "command": "qwen-code.auth"
+        },
+        {
+          "command": "qwen-code.logout",
+          "when": "qwen-code.subscriptionEnabled"
+        },
+        {
+          "command": "qwen-code.upgrade",
+          "when": "qwen-code.subscriptionEnabled"
         },
         {
           "command": "qwen-code.copyMessage",
@@ -267,6 +284,7 @@
     "test:ci": "vitest run"
   },
   "devDependencies": {
+    "@qwen-code/qwen-code": "file:../cli",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "@types/markdown-it": "^14.1.2",
@@ -287,13 +305,15 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@qwen-code/acp-bridge": "*",
+    "@qwen-code/qwen-code-core": "*",
     "@qwen-code/sdk": "*",
     "@qwen-code/web-shell": "*",
-    "@modelcontextprotocol/sdk": "^1.30.0",
     "cors": "^2.8.5",
     "dotenv": "^17.1.0",
     "express": "^5.1.0",
+    "lucide-react": "^1.24.0",
     "markdown-it": "^14.1.0",
     "punycode": "^2.3.1",
     "react": "^19.2.4",

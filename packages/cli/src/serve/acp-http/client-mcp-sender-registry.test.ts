@@ -6,6 +6,8 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
+import { EventBus } from '@qwen-code/acp-bridge/eventBus';
+import { ClientMcpWsConnection } from './client-mcp-ws.js';
 import {
   ClientMcpSenderRegistry,
   createClientMcpServerProvider,
@@ -28,6 +30,151 @@ function setupBridge(
     removeSessionRuntimeMcpServer: vi.fn(async () => ({})),
   } satisfies ClientMcpBridge;
 }
+
+describe('session-scoped client MCP lifetime', () => {
+  function setup() {
+    const bus = new EventBus();
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = {
+      ...setupBridge({ toolCount: 1 }),
+      subscribeEvents: vi.fn(
+        (_sessionId: string, options: { signal: AbortSignal }) =>
+          bus.subscribe(options),
+      ),
+      detachClient: vi.fn(async () => {}),
+    };
+    const frames: unknown[] = [];
+    const connect = (owner: string) =>
+      new ClientMcpWsConnection(
+        (frame) => frames.push(frame),
+        createClientMcpServerProvider(registry, bridge, owner),
+      );
+    const register = (connection: ClientMcpWsConnection) =>
+      connection.handleFrame({
+        type: 'mcp_register',
+        server: 'desktop-node-repl',
+        sessionId: 'session-1',
+      });
+    return { bus, registry, bridge, frames, connect, register };
+  }
+
+  it('holds the live session without a client attachment, and fails closed on session end', async () => {
+    const { bus, registry, bridge, frames, connect, register } = setup();
+    const connection = connect('desktop');
+    expect(await register(connection)).toMatchObject({ kind: 'registered' });
+    expect(bus.subscriberCount).toBe(1);
+    expect(bridge.subscribeEvents).toHaveBeenCalledWith('session-1', {
+      signal: expect.any(AbortSignal),
+    });
+    bus.publish({
+      type: 'session_update',
+      data: { privateContent: 'must not be forwarded' },
+    });
+    expect(frames).toEqual([]);
+    bus.close();
+    await vi.waitFor(() => expect(connection.registeredServers()).toEqual([]));
+    expect(registry.lookup('desktop-node-repl')).toBeUndefined();
+    expect(frames).toEqual([
+      expect.objectContaining({ type: 'mcp_error', code: 'session_closed' }),
+    ]);
+    expect(bridge.removeSessionRuntimeMcpServer).toHaveBeenCalledTimes(1);
+    expect(bridge.detachClient).toHaveBeenCalledWith('session-1');
+    await connection.dispose();
+    expect(bridge.removeSessionRuntimeMcpServer).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-subscribes after subscriber eviction and waits for session close', async () => {
+    const { registry, bridge, frames, connect, register } = setup();
+    let closeSession: (() => void) | undefined;
+    const closed = new Promise<void>((resolve) => {
+      closeSession = resolve;
+    });
+    bridge.subscribeEvents
+      .mockImplementationOnce(async function* () {
+        yield { v: 1 as const, type: 'client_evicted', data: {} };
+      })
+      .mockImplementationOnce(async function* () {
+        await closed;
+        yield { v: 1 as const, type: 'session_closed', data: {} };
+      });
+    const connection = connect('desktop');
+
+    expect(await register(connection)).toMatchObject({ kind: 'registered' });
+    await vi.waitFor(() =>
+      expect(bridge.subscribeEvents).toHaveBeenCalledTimes(2),
+    );
+    expect(registry.hasSession('desktop-node-repl', 'session-1')).toBe(true);
+    expect(frames).toEqual([]);
+
+    closeSession?.();
+    await vi.waitFor(() =>
+      expect(registry.hasSession('desktop-node-repl', 'session-1')).toBe(false),
+    );
+    expect(frames).toEqual([
+      expect.objectContaining({ type: 'mcp_error', code: 'session_closed' }),
+    ]);
+  });
+
+  it.each(['unregister', 'dispose'] as const)(
+    'releases the non-voting hold on %s without reporting a session failure',
+    async (action) => {
+      const { bus, bridge, frames, connect, register } = setup();
+      const connection = connect('desktop');
+      await register(connection);
+      if (action === 'dispose') await connection.dispose();
+      else
+        await connection.handleFrame({
+          type: 'mcp_unregister',
+          server: 'desktop-node-repl',
+        });
+      expect(bus.subscriberCount).toBe(0);
+      expect(bridge.detachClient).toHaveBeenCalledWith('session-1');
+      bus.close();
+      await Promise.resolve();
+      expect(frames).toEqual([]);
+      expect(bridge.removeSessionRuntimeMcpServer).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('replaces the old hold without letting its later disconnect release the new owner', async () => {
+    const { bus, frames, connect, register } = setup();
+    const oldConnection = connect('old');
+    const newConnection = connect('new');
+    await register(oldConnection);
+    await register(newConnection);
+    expect(bus.subscriberCount).toBe(1);
+    await oldConnection.dispose();
+    expect(bus.subscriberCount).toBe(1);
+    expect(newConnection.registeredServers()).toEqual(['desktop-node-repl']);
+    expect(frames).toEqual([]);
+    await newConnection.dispose();
+    expect(bus.subscriberCount).toBe(0);
+  });
+
+  it('does not advertise tools when subscribing fails, and releases a hold if discovery fails', async () => {
+    const { bus, registry, bridge, connect, register } = setup();
+    const connection = connect('desktop');
+    bridge.subscribeEvents.mockImplementationOnce(() => {
+      throw new Error('session unavailable');
+    });
+    expect(await register(connection)).toMatchObject({
+      kind: 'error',
+      code: 'register_failed',
+    });
+    expect(bridge.addSessionRuntimeMcpServer).not.toHaveBeenCalled();
+    bridge.addSessionRuntimeMcpServer.mockRejectedValueOnce(
+      new Error('discovery failed'),
+    );
+    expect(await register(connection)).toMatchObject({
+      kind: 'error',
+      code: 'register_failed',
+    });
+    expect(bus.subscriberCount).toBe(0);
+    expect(registry.lookup('desktop-node-repl')).toBeUndefined();
+    expect(connection.registeredServers()).toEqual([]);
+    await connection.dispose();
+  });
+});
 
 describe('ClientMcpSenderRegistry', () => {
   it('lookup routes to the registered sender; undefined for unknown server', async () => {

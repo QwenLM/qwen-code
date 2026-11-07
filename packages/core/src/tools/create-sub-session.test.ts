@@ -24,6 +24,16 @@ describe('CreateSubSessionTool', () => {
     );
   });
 
+  it('rejects an unsafe model id at validation, matching the daemon boundary', () => {
+    const tool = new CreateSubSessionTool(makeConfig());
+    expect(() =>
+      tool.build({ prompt: 'do X', model: 'm'.repeat(257) }),
+    ).toThrow(/at most 256 characters/);
+    expect(() => tool.build({ prompt: 'do X', model: 'bad\nmodel' })).toThrow(
+      /control characters/,
+    );
+  });
+
   it('defaults to ask permission so delegated prompts face classifier review', async () => {
     const tool = new CreateSubSessionTool(makeConfig());
     const invocation = tool.build({ prompt: 'do X' });
@@ -176,6 +186,8 @@ describe('CreateSubSessionTool', () => {
 
     expect(res.returnDisplay).toBe('Cancelled');
     expect(res.llmContent).toMatch(/cancelled/i);
+    // Returned, not thrown: the scheduler must be told the call did not finish.
+    expect(res.interruptedBeforeCompletion).toBe(true);
     // The sub-session is NOT cancelled — it has no abort seam — so the tool
     // must say so rather than implying the work was undone.
     expect(res.llmContent).toMatch(/runs independently|not cancelled/i);

@@ -5,7 +5,9 @@
  */
 
 import type React from 'react';
+import { isSubagentToolEntry } from '../../utils/tool-group-summary.js';
 import { Box, Text } from 'ink';
+import type { DOMElement } from 'ink';
 import { useMemo, useRef } from 'react';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
@@ -14,6 +16,7 @@ import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import {
   CompactToolGroupDisplay,
   estimateCompactToolGroupHeight,
+  getOverallStatus,
   isCollapsibleTool,
 } from './CompactToolGroupDisplay.js';
 import { InlineParallelAgentsDisplay } from './InlineParallelAgentsDisplay.js';
@@ -21,6 +24,9 @@ import { useConfig } from '../../contexts/ConfigContext.js';
 import { useShowToolCallArgs } from '../../hooks/use-show-tool-call-args.js';
 import { ICON } from '../../constants.js';
 import type { AgentResultDisplay } from '@qwen-code/qwen-code-core';
+import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
+import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
+import { localizeToolDisplayName } from '../../../i18n/index.js';
 
 function isAgentWithPendingConfirmation(
   rd: IndividualToolCallDisplay['resultDisplay'],
@@ -48,20 +54,6 @@ function isRunningAgent(
 
 function hasInlineImageOutput(tool: IndividualToolCallDisplay): boolean {
   return Boolean(tool.images?.length || tool.omittedImageCount);
-}
-
-/**
- * Predicate: tool entry whose `resultDisplay` is an `AgentResultDisplay`
- * (i.e. a `task_execution` subagent invocation), regardless of status.
- */
-function isSubagentToolEntry(tool: IndividualToolCallDisplay): boolean {
-  const rd = tool.resultDisplay;
-  return (
-    typeof rd === 'object' &&
-    rd !== null &&
-    'type' in rd &&
-    (rd as AgentResultDisplay).type === 'task_execution'
-  );
 }
 
 /**
@@ -162,7 +154,57 @@ interface ToolGroupMessageProps {
    * type-based partition baseline).
    */
   fullDetail?: boolean;
+  /** Render only status, tool name/count, elapsed time, and an expand hint. */
+  hideDetails?: boolean;
+  expandHint?: string;
+  summaryRef?: React.Ref<DOMElement>;
 }
+
+const HiddenToolDetailsSummary: React.FC<{
+  toolCalls: IndividualToolCallDisplay[];
+  contentWidth: number;
+  expandHint?: string;
+  summaryRef?: React.Ref<DOMElement>;
+}> = ({ toolCalls, contentWidth, expandHint, summaryRef }) => {
+  if (toolCalls.length === 0) return null;
+
+  const status = getOverallStatus(toolCalls);
+  const activeTool =
+    toolCalls.find((tool) => tool.status === ToolCallStatus.Confirming) ??
+    toolCalls.find((tool) => tool.status === ToolCallStatus.Executing) ??
+    toolCalls.find((tool) => tool.status === ToolCallStatus.Pending) ??
+    toolCalls[toolCalls.length - 1];
+  const names = Array.from(
+    new Set(toolCalls.map((tool) => localizeToolDisplayName(tool.name))),
+  );
+  const label =
+    toolCalls.length === 1
+      ? names[0]
+      : names.length === 1
+        ? `${names[0]} × ${toolCalls.length}`
+        : `${names.join(', ')} · ${toolCalls.length} tool calls`;
+
+  return (
+    <Box ref={summaryRef} flexDirection="row" width={contentWidth}>
+      <ToolStatusIndicator status={status} name={activeTool.name} />
+      <Box flexGrow={1}>
+        <Text bold wrap="truncate-end">
+          {label}
+          {expandHint && (
+            <Text bold={false} dimColor>
+              {' '}
+              · {expandHint}
+            </Text>
+          )}
+        </Text>
+      </Box>
+      <ToolElapsedTime
+        status={status}
+        executionStartTime={activeTool.executionStartTime}
+      />
+    </Box>
+  );
+};
 
 // Main component maps the tools using ToolMessage
 export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
@@ -177,6 +219,9 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   memoryReadCount,
   isUserInitiated,
   fullDetail = false,
+  hideDetails = false,
+  expandHint,
+  summaryRef,
 }) => {
   const config = useConfig();
   const showToolCallArgs = useShowToolCallArgs();
@@ -293,6 +338,18 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     focusedSubagentCallId ?? runningSubagentCallId;
 
   const hasSubagentPendingConfirmation = subagentsAwaitingApproval.length > 0;
+
+  if (hideDetails) {
+    if (isPending && inlineToolCalls.length === 0) return null;
+    return (
+      <HiddenToolDetailsSummary
+        toolCalls={inlineToolCalls}
+        contentWidth={contentWidth}
+        expandHint={expandHint}
+        summaryRef={summaryRef}
+      />
+    );
+  }
 
   // Pure parallel agent group (≥2 agents, nothing else).
   //

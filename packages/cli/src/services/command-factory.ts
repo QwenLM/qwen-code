@@ -34,6 +34,7 @@ import {
   ShellProcessor,
 } from './prompt-processors/shellProcessor.js';
 import { AtFileProcessor } from './prompt-processors/atFileProcessor.js';
+import { extensionOwnerLabel } from './commandMetadata.js';
 
 export interface CommandDefinition {
   prompt: string;
@@ -120,8 +121,12 @@ export function createSlashCommandFromDefinition(
     source: (extensionName
       ? 'plugin-command'
       : 'skill-dir-command') as CommandSource,
+    // `extensionName` reaches the factory already resolved to
+    // `displayName ?? name` by `FileCommandLoader.getCommandDirectories`, so
+    // the id/display chain runs once per extension, not once per surface. The
+    // label format still comes from the single home the skill surfaces use.
     sourceLabel: extensionName
-      ? `${t('Extension:')} ${extensionName}`
+      ? extensionOwnerLabel({ name: extensionName })
       : t('Custom'),
     sourceDetail: extensionName ? 'extension' : 'custom',
     modelInvocable: definition.disableModelInvocation

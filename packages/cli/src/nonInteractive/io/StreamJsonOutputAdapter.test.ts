@@ -124,75 +124,11 @@ describe('StreamJsonOutputAdapter', () => {
         });
       });
 
-      it('should emit active goal stream events', () => {
-        adapter.processEvent({
-          type: LlmEventType.ActiveGoal,
-          value: {
-            condition: 'finish the refactor',
-            iterations: 2,
-            setAt: 123,
-            tokensAtStart: 456,
-            hookId: 'goal-hook-id',
-            lastReason: 'still missing verification',
-          },
-        });
-
-        adapter.processEvent({
-          type: LlmEventType.ActiveGoal,
-          value: null,
-        });
-
-        const activeGoalEvents = stdoutWriteSpy.mock.calls
-          .map((call: unknown[]) => JSON.parse(call[0] as string))
-          .filter(
-            (message: { type?: string; event?: { type?: string } }) =>
-              message.type === 'stream_event' &&
-              message.event?.type === 'active_goal',
-          );
-
-        expect(activeGoalEvents).toEqual([
-          expect.objectContaining({
-            session_id: 'test-session-id',
-            parent_tool_use_id: null,
-            event: {
-              type: 'active_goal',
-              active_goal: {
-                condition: 'finish the refactor',
-                iterations: 2,
-                setAt: 123,
-                tokensAtStart: 456,
-                hookId: 'goal-hook-id',
-                lastReason: 'still missing verification',
-              },
-            },
-          }),
-          expect.objectContaining({
-            session_id: 'test-session-id',
-            parent_tool_use_id: null,
-            event: {
-              type: 'active_goal',
-              active_goal: null,
-            },
-          }),
-        ]);
-      });
-
-      it('emits v2 goal_state before the gated legacy projection', () => {
+      it('emits v2 goal_state as the only Goal stream event', () => {
         adapter.processEvent({
           type: LlmEventType.GoalState,
           value: goalSnapshot,
           cause: 'edit',
-        });
-        adapter.processEvent({
-          type: LlmEventType.ActiveGoal,
-          value: {
-            condition: 'finish the refactor',
-            iterations: 3,
-            setAt: 1,
-            tokensAtStart: 0,
-            hookId: 'goal-v2:goal-1:2',
-            lastReason: 'keep going',
-          },
         });
 
         const goalEvents = stdoutWriteSpy.mock.calls
@@ -200,15 +136,14 @@ describe('StreamJsonOutputAdapter', () => {
           .filter(
             (message: { type?: string; event?: { type?: string } }) =>
               message.type === 'stream_event' &&
-              (message.event?.type === 'goal_state' ||
-                message.event?.type === 'active_goal'),
+              message.event?.type !== 'content_block_delta',
           );
 
         expect(
           goalEvents.map(
             (message: { event: { type: string } }) => message.event.type,
           ),
-        ).toEqual(['goal_state', 'active_goal']);
+        ).toEqual(['goal_state']);
         expect(goalEvents[0]).toMatchObject({
           session_id: 'test-session-id',
           parent_tool_use_id: null,
@@ -358,51 +293,11 @@ describe('StreamJsonOutputAdapter', () => {
       expect(streamEventCall).toBeUndefined();
     });
 
-    it('should not emit active goal stream events', () => {
-      adapter.processEvent({
-        type: LlmEventType.ActiveGoal,
-        value: {
-          condition: 'finish the refactor',
-          iterations: 0,
-          setAt: 123,
-          tokensAtStart: 456,
-          hookId: 'goal-hook-id',
-        },
-      });
-
-      const activeGoalEventCall = stdoutWriteSpy.mock.calls.find(
-        (call: unknown[]) => {
-          try {
-            const parsed = JSON.parse(call[0] as string);
-            return (
-              parsed.type === 'stream_event' &&
-              parsed.event?.type === 'active_goal'
-            );
-          } catch {
-            return false;
-          }
-        },
-      );
-
-      expect(activeGoalEventCall).toBeUndefined();
-    });
-
     it('still emits v2 goal_state without the partial-message gate', () => {
       adapter.processEvent({
         type: LlmEventType.GoalState,
         value: goalSnapshot,
         cause: 'edit',
-      });
-      adapter.processEvent({
-        type: LlmEventType.ActiveGoal,
-        value: {
-          condition: 'finish the refactor',
-          iterations: 3,
-          setAt: 1,
-          tokensAtStart: 0,
-          hookId: 'goal-v2:goal-1:2',
-          lastReason: 'keep going',
-        },
       });
 
       const events = stdoutWriteSpy.mock.calls
