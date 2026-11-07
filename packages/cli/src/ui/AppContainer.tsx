@@ -998,7 +998,10 @@ export const AppContainer = (props: AppContainerProps) => {
   const [userMessages, setUserMessages] = useState<string[]>([]);
 
   // Ctrl+O / Alt+T inline expansion toggle for thinking blocks (expands all at once).
-  const [thoughtExpanded, setThoughtExpanded] = useState(false);
+  // `ui.startExpanded` only seeds the initial value; the toggle owns it afterwards.
+  const [thoughtExpanded, setThoughtExpanded] = useState(
+    () => settings.merged.ui?.startExpanded === true,
+  );
   // Per-thought inline expansion: head ids the user expanded by clicking the
   // collapsed thinking line (VP mode). Replaces the old full-screen viewer —
   // the thought expands in place and scrolls with the conversation.

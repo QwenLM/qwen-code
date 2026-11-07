@@ -1105,6 +1105,38 @@ describe('startOpenTuiUI fallback contract', () => {
   // are computed inside the entry component, which is why this case mounts the
   // captured tree — and why this file runs in jsdom — while every other case
   // here reads that tree's elements without executing them.
+  it('seeds thoughtsExpanded from ui.startExpanded and defaults it closed', async () => {
+    // ui.startExpanded only seeds the initial value; ctrl+o owns it afterwards.
+    const open = async (ui: Record<string, unknown>) => {
+      const started = await startOpenTuiUI(
+        buildConfig(),
+        {
+          merged: { ui: { hideWindowTitle: true, ...ui } },
+        } as unknown as LoadedSettings,
+        [],
+        '/tmp/project',
+        {} as InitializationResult,
+      );
+      expect(started).toBe(true);
+      const write = vi
+        .spyOn(process.stdout, 'write')
+        .mockImplementation(() => true);
+      const calls = mocks.state.root.render.mock.calls;
+      render(calls[calls.length - 1]?.[0] as ReactElement);
+      write.mockRestore();
+      const main = mocks.state.appProps?.renderMain?.() as
+        | { props?: { children?: { props?: Record<string, unknown> } } }
+        | undefined;
+      return main?.props?.children?.props;
+    };
+
+    expect((await open({ startExpanded: true }))?.['thoughtsExpanded']).toBe(
+      true,
+    );
+    mocks.state.keyboard = [];
+    expect((await open({}))?.['thoughtsExpanded']).toBe(false);
+  });
+
   it('threads the parked call and the args setting into the transcript', async () => {
     mocks.state.waitingCalls = [{ callId: 'q1' }, { callId: 'q2' }];
     const raw = '<system-reminder>literal user text</system-reminder> workflow';
