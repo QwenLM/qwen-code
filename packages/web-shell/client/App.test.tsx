@@ -14815,6 +14815,14 @@ describe('App conversation indicator keep-alive (#9487)', () => {
         groupWorkspaceCwds: [],
       },
     );
+    // A cleared session keeps connection.workspaceCwd set; the activity
+    // bridge must not run against it, or it would arm an idle full-catalog
+    // fetch on the welcome view.
+    expect(mockUseDaemonSessionActivityBridge).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      undefined,
+      undefined,
+    );
 
     mockConnection.sessionId = 'session-1';
     rerender({ sidebar: false });
@@ -14828,6 +14836,11 @@ describe('App conversation indicator keep-alive (#9487)', () => {
         workspaceCwds: ['/tmp/project'],
         groupWorkspaceCwds: [],
       },
+    );
+    expect(mockUseDaemonSessionActivityBridge).toHaveBeenLastCalledWith(
+      mockWorkspace.client,
+      '/tmp/project',
+      'session-1',
     );
 
     mockWorkspace.capabilities = {

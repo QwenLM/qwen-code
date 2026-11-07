@@ -4226,8 +4226,13 @@ export function App({
       ),
     [workspaces],
   );
-  const activePromptWorkspaceCwd =
-    connection.sessionContext?.kind === 'live'
+  // A cleared session leaves connection.workspaceCwd set; without the
+  // sessionId gate the activity bridge would keep arming its full-catalog
+  // fallback for that cwd on the welcome view, issuing one idle catalog
+  // fetch for a result it then discards (#16355).
+  const activePromptWorkspaceCwd = !connection.sessionId
+    ? undefined
+    : connection.sessionContext?.kind === 'live'
       ? trustedLiveWorkspaces.length === 1
         ? trustedLiveWorkspaces[0]?.cwd
         : undefined
