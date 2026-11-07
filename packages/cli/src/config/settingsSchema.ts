@@ -1316,7 +1316,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Start in expanded detail mode: thinking blocks and tool output are shown inline from the first turn. Ctrl+O / Alt+T still toggles it. TUI only — the web shell is unaffected.',
+          'Start in expanded detail mode: thinking blocks and tool output are shown inline from the first turn. Takes effect on the next launch; Ctrl+O / Alt+T still toggles it afterwards. This also shows tool output inlined when ui.showToolCallDetails is false, because it seeds the same app-wide flag Ctrl+O uses. TUI only — the web shell is unaffected.',
         showInDialog: true,
       },
       compactMode: {
