@@ -61,15 +61,15 @@ never updated from a job checkout or from PR artifacts.
 
 ## Ownership and lifecycle
 
-| Object                                   | Owner                 | Lifetime                                    |
-| ---------------------------------------- | --------------------- | ------------------------------------------- |
-| ECS, Docker daemon, manager              | Ops / maintainers     | Long term                                   |
-| GitHub App private key and admin token   | Manager               | Never enters a job container                |
-| Clean image                              | Trusted image build   | Versioned, not writable from a job          |
-| JIT configuration, runner identity       | One container instance | Used for a single job                      |
-| Container writable layer and job data    | One container instance | Deleted on destruction                     |
-| Docker bridge network                    | One container instance | Deleted on destruction                     |
-| Diagnostic logs                          | Exported by the manager | Size and retention bounded, unreadable by later jobs |
+| Object                                 | Owner                   | Lifetime                                             |
+| -------------------------------------- | ----------------------- | ---------------------------------------------------- |
+| ECS, Docker daemon, manager            | Ops / maintainers       | Long term                                            |
+| GitHub App private key and admin token | Manager                 | Never enters a job container                         |
+| Clean image                            | Trusted image build     | Versioned, not writable from a job                   |
+| JIT configuration, runner identity     | One container instance  | Used for a single job                                |
+| Container writable layer and job data  | One container instance  | Deleted on destruction                               |
+| Docker bridge network                  | One container instance  | Deleted on destruction                               |
+| Diagnostic logs                        | Exported by the manager | Size and retention bounded, unreadable by later jobs |
 
 Normal path: request JIT → create the isolated network and container → runner
 comes online → run one job → runner exits → export logs → delete the container
