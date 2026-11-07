@@ -8,4 +8,9 @@ describe('formatContextTokens', () => {
     expect(formatContextTokens(1_000_000)).toBe('1.0M');
     expect(formatContextTokens(1_234_567)).toBe('1.2M');
   });
+
+  it('moves to M when rounding reaches a million', () => {
+    expect(formatContextTokens(999_949)).toBe('999.9k');
+    expect(formatContextTokens(999_950)).toBe('1.0M');
+  });
 });
