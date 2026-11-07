@@ -11,7 +11,7 @@ RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.
     && apt-get update -o Acquire::http::Timeout=30 \
     && apt-get install -y --no-install-recommends \
       build-essential ca-certificates curl file gh git git-lfs jq libicu72 \
-      libkrb5-3 libssl3 libunwind8 python3 python3-pip python3-venv \
+      libkrb5-3 libssl3 libunwind8 procps python3 python3-pip python3-venv \
       sudo tmux unzip zip zlib1g \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /opt/ci-tools \
