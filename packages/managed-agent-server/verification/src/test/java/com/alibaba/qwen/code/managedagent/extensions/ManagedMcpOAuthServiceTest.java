@@ -119,8 +119,9 @@ class ManagedMcpOAuthServiceTest {
         var records = mock(ManagedExtensionRecordStore.class);
         var harness = mock(HarnessConnector.class);
         when(harness.supportsSessionExtensions()).thenReturn(true);
+        var session = sessions.requireReadableSession("tenant", "actor", "session");
         when(policy.requireExtensionManagement(eq("tenant"), eq("actor"), eq("session"), anyString(), eq(true)))
-                .thenReturn(sessions.requireReadableSession("tenant", "actor", "session"));
+                .thenReturn(session);
         var management = new ManagedExtensionManagementService(policy, sessions, records, packages, json, harness);
         var beans = new DefaultListableBeanFactory();
         beans.registerSingleton("oauth", service);

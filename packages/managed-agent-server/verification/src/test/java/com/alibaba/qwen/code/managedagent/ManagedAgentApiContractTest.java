@@ -503,6 +503,7 @@ class ManagedAgentApiContractTest {
     void everyMappedPublicRouteIsCoveredByTheSharedSurfacePredicate() {
         // A controller method added outside the predicate's prefixes would
         // silently skip both the tenant filter and the signature filter.
+        // OAuth redirects deliberately use state rather than those request headers.
         Set<String> uncovered = new TreeSet<>();
         handlerMapping.getHandlerMethods().keySet().forEach(info -> {
             for (String pattern : info.getPatternValues()) {
@@ -511,13 +512,13 @@ class ManagedAgentApiContractTest {
                     continue;
                 }
                 if (!com.alibaba.qwen.code.managedagent.security.PublicSurface
-                        .covers(pattern)) {
+                        .covers(pattern) && !"/oauth/mcp/callback".equals(pattern)) {
                     uncovered.add(pattern);
                 }
             }
         });
         assertThat(uncovered)
-                .as("every public controller route must satisfy PublicSurface.covers")
+                .as("every public route must satisfy PublicSurface.covers or be the fixed OAuth callback")
                 .isEmpty();
     }
 
@@ -3408,6 +3409,50 @@ class ManagedAgentApiContractTest {
                 query + ",\"idempotencyKey\":\"extension-apply-web\",\"command\":{\"expectedConfigRevision\":0,\"extensions\":[]}}");
         exchange(drift, "webShellSessionExtensionsContinue", 409, post(WEB_SHELL + "/session-extensions/continue").header(TENANT, tenant).principal(actor), control);
         exchange(drift, "webShellSessionExtensionsRecoverPrevious", 409, post(WEB_SHELL + "/session-extensions/recover-previous").header(TENANT, tenant).principal(actor), control);
+        String metadata = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                ("{\"sourceKind\":\"skill\",\"sourceDigest\":\"" + digest + "\",\"compilerVersion\":1,"
+                        + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"}}")
+                        .getBytes(StandardCharsets.UTF_8));
+        exchange(drift, "importWorkspaceExtensionPackage", 401, post(base + "/imports")
+                .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "import").param("metadata", metadata)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
+        exchange(drift, "previewWorkspaceExtensionImport", 401, post(base + "/imports/preview")
+                .header(TENANT, tenant).param("metadata", metadata)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
+        exchange(drift, "importWebShellExtensionPackage", 401, post(web + "/imports")
+                .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "web-import")
+                .param("workspaceId", "ws-default").param("metadata", metadata)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
+        exchange(drift, "previewWebShellExtensionImport", 401, post(web + "/imports/preview")
+                .header(TENANT, tenant).param("workspaceId", "ws-default").param("metadata", metadata)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
+        exchange(drift, "inspectWorkspaceExtensionPackage", 401, get(base + "/" + id + "/packages/1/inspection")
+                .header(TENANT, tenant).param("packageDigest", digest), null);
+        exchange(drift, "inspectWebShellExtensionPackage", 401, post(web + "/inspection/query").header(TENANT, tenant),
+                workspace + ",\"pin\":{\"extensionId\":\"" + id + "\",\"packageRevision\":1,\"packageDigest\":\"" + digest + "\"}}");
+        exchange(drift, "lookupWorkspaceExtensionOperation", 401, post(base + "/operations/lookup").header(TENANT, tenant),
+                "{\"kind\":\"publish\",\"idempotencyKey\":\"lookup\"}");
+        exchange(drift, "lookupWebShellExtensionOperation", 401, post(web + "/operations/lookup").header(TENANT, tenant),
+                workspace + ",\"kind\":\"publish\",\"idempotencyKey\":\"lookup\"}");
+        exchange(drift, "lookupSessionExtensionOperation", 401, post(session + "/operations/lookup").header(TENANT, tenant),
+                "{\"idempotencyKey\":\"lookup\"}");
+        exchange(drift, "lookupWebShellSessionExtensionOperation", 401, post(WEB_SHELL + "/session-extensions/operations/lookup").header(TENANT, tenant),
+                query + ",\"idempotencyKey\":\"lookup\"}");
+        exchange(drift, "publicRuntimeSkillCandidates", 401, get(session + "/skills/candidates").header(TENANT, tenant), null);
+        exchange(drift, "publicRuntimeSkillSnapshot", 401, post(session + "/skills/snapshot").header(TENANT, tenant), "{}");
+        exchange(drift, "publicRuntimeSkillImports", 401, post(session + "/skills/imports").header(TENANT, tenant)
+                .header(IDEMPOTENCY_KEY, "skill-import"), "{}");
+        exchange(drift, "webShellRuntimeSkillCandidates", 401, post(WEB_SHELL + "/session-extensions/skills/candidates/query").header(TENANT, tenant), query + "}");
+        exchange(drift, "webShellRuntimeSkillSnapshot", 401, post(WEB_SHELL + "/session-extensions/skills/snapshot").header(TENANT, tenant), query + "}");
+        exchange(drift, "webShellRuntimeSkillImports", 401, post(WEB_SHELL + "/session-extensions/skills/imports").header(TENANT, tenant),
+                query + ",\"idempotencyKey\":\"skill-import\"}");
+        for (String action : List.of("Query", "Start", "Status", "Complete", "Revoke")) {
+            String suffix = action.toLowerCase(java.util.Locale.ROOT);
+            exchange(drift, "McpOAuth" + action, 401,
+                    post("/v1/agents/sessions/" + sessionId + "/mcp-oauth/" + suffix).header(TENANT, tenant), "{}");
+            exchange(drift, "webShellMcpOAuth" + action, 401,
+                    post(WEB_SHELL + "/session-mcp-oauth/" + suffix).header(TENANT, tenant), query + "}");
+        }
     }
 
     private String exchange(Map<String, String> drift, String operationId,

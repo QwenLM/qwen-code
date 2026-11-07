@@ -44,7 +44,7 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
     private HarnessConnector harness;
 
     @org.springframework.beans.factory.annotation.Autowired
-    public void configurePreparation(HarnessConnector value) { harness = value; }
+    public void configurePreparation(@org.springframework.context.annotation.Lazy HarnessConnector value) { harness = value; }
 
     public ManagedExtensionPackageService(ExtensionPackageRepository repository,
             ManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties,

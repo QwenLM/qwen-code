@@ -301,6 +301,12 @@ class ManagedExtensionConfigurationAdmissionTest {
         assertThat(ManagedMcpSettings.find(jdbc, "tenant", id).path("phase").asText()).isEqualTo("recovery_required");
         assertThat(grants.credential(scope, grant.id()).state()).isEqualTo("revoked");
         assertThat(ManagedMcpOAuthAdmission.actor(jdbc, "tenant", id)).isEqualTo(DigestUtils.sha256Hex("actor"));
+        assertThat(sessions.supportsPersonalMcpExecution()).isTrue();
+        sessions.requirePersonalMcpActor("tenant", id, "actor");
+        assertThatThrownBy(() -> sessions.requirePersonalMcpActor("tenant", id, "other"))
+                .isInstanceOf(ManagedAgentException.class);
+        assertThatThrownBy(() -> sessions.requirePersonalMcpUnattended("tenant", id))
+                .isInstanceOf(ManagedAgentException.class);
         assertThatThrownBy(() -> ManagedMcpOAuthAdmission.requireActor(jdbc, "tenant", id, "other"))
                 .isInstanceOf(ManagedAgentException.class);
         current = recovery;
@@ -361,7 +367,7 @@ class ManagedExtensionConfigurationAdmissionTest {
         if ("recovery_required".equals(phase)) {
             body.putObject("error").put("code", "mcp_authorization_required");
         }
-        return body;
+        return (ObjectNode) json.readTree(ExtensionRecordJournal.bytes(body));
     }
 
     private void commit(ExtensionRecordJournal journal, String id, String workspace, ObjectNode body,

@@ -293,17 +293,23 @@ public final class ManagedExtensionProtocol {
 
     private static void authBindings(Map<?, ?> command) {
         if (!command.containsKey("selectionVersion")) {
-            if (command.containsKey("mcpAuthBindings")) throw invalid();
+            if (command.containsKey("mcpAuthBindings")) {
+                throw invalid();
+            }
             return;
         }
         if (!counter(command.get("selectionVersion"), 2) || BrokerValues.exactLong(command.get("selectionVersion")) != 2
-                || !(command.get("mcpAuthBindings") instanceof List<?> bindings) || bindings.size() > 32) throw invalid();
+                || !(command.get("mcpAuthBindings") instanceof List<?> bindings) || bindings.size() > 32) {
+            throw invalid();
+        }
         Set<String> ids = new HashSet<>();
         for (Object item : bindings) {
             if (!(item instanceof Map<?, ?> binding) || !binding.keySet().equals(Set.of("serverId", "credentialId", "credentialGeneration"))
                     || !identity(binding.get("serverId")) || !ids.add((String) binding.get("serverId"))
                     || !(binding.get("credentialId") instanceof String credential) || !credential.matches("mcred_[0-9a-f-]{36}")
-                    || !counter(binding.get("credentialGeneration"), 1)) throw invalid();
+                    || !counter(binding.get("credentialGeneration"), 1)) {
+                throw invalid();
+            }
         }
     }
 
