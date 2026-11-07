@@ -511,18 +511,25 @@ public class ManagedNativeJournalSnapshots {
     }
 
     /**
-     * Claims the manifest row, which makes a second publication of the same
-     * snapshot wait until the first commits and then replay it. An upsert
-     * that meets the first publication's uncommitted row queues for it with a
-     * next-key lock, since resource_key is a secondary unique index. The
-     * first Build's page inserts can fall into that lock's gap, and InnoDB
-     * then rolls the waiting publication back, once per such insert while it
-     * waits. So the claim first locks the row by key: at READ COMMITTED that
-     * takes the row's record lock when the row exists, committed or not,
-     * waiting while another transaction holds it, and takes no lock when it
-     * does not; only a missing row is upserted. Two
-     * publications that both pass the read before either row exists can
-     * still meet in the upsert; publish retries the one rolled back.
+     * Claims the manifest row. A second publication of the same snapshot
+     * waits here until the first commits and then replays it, or, when the
+     * first rolls back, finds no row and claims it itself. The wait lasts at
+     * most innodb_lock_wait_timeout from when it queues: a Build that holds
+     * the row longer fails the waiting publication with a lock wait timeout
+     * (MySQL error 1205), which publish does not retry; it retries only
+     * deadlock victims (1213).
+     *
+     * <p>An upsert that meets the first publication's uncommitted row queues
+     * for it with a next-key lock, since resource_key is a secondary unique
+     * index. The first Build's page inserts can fall into that lock's gap,
+     * and InnoDB then rolls the waiting publication back, once per such
+     * insert while it waits. So the claim first locks the row by key: at READ
+     * COMMITTED, which publications run at, that takes the row's record lock
+     * when the row exists, committed or not, waiting while another
+     * transaction holds it, and takes no lock when it does not; only a
+     * missing row is upserted. Two publications that both pass the read
+     * before either row exists can still meet in the upsert; publish retries
+     * the one rolled back.
      */
     private void claim(String tenant, String workspace, String session, String snapshotId) {
         String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);

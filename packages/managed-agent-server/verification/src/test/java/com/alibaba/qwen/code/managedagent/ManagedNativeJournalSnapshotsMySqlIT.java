@@ -94,14 +94,16 @@ class ManagedNativeJournalSnapshotsMySqlIT extends ManagedNativeJournalSnapshots
 
     /**
      * The second publication arrives after the first has claimed the manifest
-     * row and before it writes any page; one publishes, the other replays,
-     * and no claim is rolled back.
+     * row and before it writes any page; one publishes, the other replays
+     * without upserting the row, and no claim is rolled back.
      */
     private void lateSecondPublication(ManagedNativeJournalSnapshots.PublishRequest request) throws Exception {
         var claimed = new java.util.concurrent.CountDownLatch(1);
         var release = new java.util.concurrent.CountDownLatch(1);
+        var isolation = new java.util.concurrent.atomic.AtomicReference<String>();
         jdbc.afterClaim = () -> {
             claimed.countDown();
+            isolation.set(jdbc.queryForObject("SELECT @@transaction_isolation", String.class));
             await(release);
         };
         try (var executor = Executors.newFixedThreadPool(2)) {
@@ -118,6 +120,43 @@ class ManagedNativeJournalSnapshotsMySqlIT extends ManagedNativeJournalSnapshots
             }
         }
         assertThat(jdbc.claimDeadlocks).as("claims rolled back by InnoDB").hasValue(0);
+        // The level the claim's comment relies on; these outcomes would also
+        // hold at REPEATABLE READ, so only this check notices a change to it.
+        assertThat(isolation).as("the publication's isolation level").hasValue("READ-COMMITTED");
+        assertThat(jdbc.claimReads).as("claim locking reads").hasValue(2);
+        assertThat(jdbc.claimUpserts).as("claim upserts").hasValue(1);
+    }
+
+    @Test
+    void aPublicationQueuedOnAClaimThatRollsBackPublishesTheSnapshotItself() throws Exception {
+        // The first publication fails right after its claim while the second
+        // waits on the manifest row; the second's locking read then finds no
+        // row, so it claims the snapshot and publishes it.
+        var request = request("concurrent");
+        var claimed = new java.util.concurrent.CountDownLatch(1);
+        jdbc.afterClaim = () -> {
+            claimed.countDown();
+            try {
+                awaitAClaimQueued("the second publication");
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(interrupted);
+            }
+            throw new SimulatedCrash();
+        };
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var first = executor.submit(() -> publish(request));
+            assertThat(claimed.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            var second = executor.submit(() -> publish(request));
+            assertThatThrownBy(() -> first.get(15, java.util.concurrent.TimeUnit.SECONDS))
+                    .hasCauseInstanceOf(SimulatedCrash.class);
+            assertThat(second.get(15, java.util.concurrent.TimeUnit.SECONDS)).as("whether the second publication replayed")
+                    .isFalse();
+        }
+        assertThat(jdbc.claimReads).as("claim locking reads").hasValue(2);
+        assertThat(jdbc.claimUpserts).as("claim upserts").hasValue(2);
+        assertThat(jdbc.claimDeadlocks).as("claims rolled back by InnoDB").hasValue(0);
+        assertThat(snapshotPins()).isEqualTo(2);
     }
 
     @Test
@@ -150,7 +189,14 @@ class ManagedNativeJournalSnapshotsMySqlIT extends ManagedNativeJournalSnapshots
             assertThat(java.util.List.of(first.get(15, java.util.concurrent.TimeUnit.SECONDS),
                     second.get(15, java.util.concurrent.TimeUnit.SECONDS))).containsExactlyInAnyOrder(false, true);
         }
+        // Checked first: without the barrier hook on both first reads, or
+        // without the page in the manifest's gap, this case is a plain race
+        // and the counts below mean nothing. Then only the retried loser's
+        // read found the row and skipped the upsert.
+        assertThat(jdbc.claimReads.get()).as("claim locking reads").isGreaterThanOrEqualTo(2);
         requirePagesJustBelowTheManifest(1);
+        assertThat(jdbc.claimReads).as("claim locking reads").hasValue(3);
+        assertThat(jdbc.claimUpserts).as("claim upserts").hasValue(2);
         assertThat(jdbc.claimDeadlocks).as("claims rolled back by InnoDB").hasValue(1);
         assertThat(snapshotPins()).isEqualTo(2);
     }
