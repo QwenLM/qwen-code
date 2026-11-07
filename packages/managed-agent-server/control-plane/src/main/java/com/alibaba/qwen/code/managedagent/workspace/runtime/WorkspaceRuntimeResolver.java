@@ -27,6 +27,7 @@ public final class WorkspaceRuntimeResolver {
     private final Map<Storage, Mount> mounts = new LinkedHashMap<>();
     private final String boundSessionIsolationClass;
     private final boolean local;
+    private final boolean measuredTools;
     private final ManagedAgentSettings.ManagedExtensions managedExtensions;
 
     public WorkspaceRuntimeResolver(SessionQueryStore sessions, WorkspaceExecutionStore authority,
@@ -38,6 +39,7 @@ public final class WorkspaceRuntimeResolver {
             ManagedAgentSettings properties, SshWorkspaceService ssh) {
         this.ssh = ssh;
         this.managedExtensions = properties.getManagedExtensions();
+        this.measuredTools = properties.getRuntimeBroker().isToolMeasurements();
         if (managedExtensions.isEnabled() && !properties.getExtensions().isEnabled()) {
             throw new IllegalStateException("Managed extension execution requires extensions to be enabled");
         }
@@ -47,7 +49,9 @@ public final class WorkspaceRuntimeResolver {
         this.local = com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner());
         this.boundSessionIsolationClass = broker.getBoundSessionIsolationClass();
         this.residents = new com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog(broker.getResidentWorkspaces());
-        if (WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
+        if (WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(
+                        properties.getHarness().getCapabilityDigest())
+                || WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
                 properties.getHarness().getCapabilityDigest())
                 || com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile.CAPABILITY_DIGEST.equals(
                         properties.getHarness().getCapabilityDigest())) {
@@ -133,7 +137,9 @@ public final class WorkspaceRuntimeResolver {
 
     private String extensionDigest(String platform) {
         if (!managedExtensions.isEnabled()) {
-            return WorkspaceExecutionProfile.CAPABILITY_DIGEST;
+            return measuredTools
+                    ? WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST
+                    : WorkspaceExecutionProfile.CAPABILITY_DIGEST;
         }
         if ("linux".equals(platform)) {
             return com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST;
@@ -142,6 +148,22 @@ public final class WorkspaceRuntimeResolver {
             return com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST;
         }
         throw new IllegalStateException("Native extension execution requires an explicit supported platform mode");
+    }
+
+    static boolean matchesRecordedScope(RuntimeScope resolved, RuntimeScope recorded) {
+        if (resolved.equals(recorded)) {
+            return true;
+        }
+        // Existing ordinary leases retain their attested profile across a measurement rollout.
+        var ordinary = java.util.Set.of(WorkspaceExecutionProfile.CAPABILITY_DIGEST,
+                WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST);
+        return ordinary.contains(resolved.getCapabilityDigest())
+                && ordinary.contains(recorded.getCapabilityDigest())
+                && resolved.getTenantId().equals(recorded.getTenantId())
+                && resolved.getWorkspaceId().equals(recorded.getWorkspaceId())
+                && resolved.getWorkspaceGeneration().equals(recorded.getWorkspaceGeneration())
+                && resolved.getCanonicalCwd().equals(recorded.getCanonicalCwd())
+                && resolved.getIsolationClass().equals(recorded.getIsolationClass());
     }
 
     /**

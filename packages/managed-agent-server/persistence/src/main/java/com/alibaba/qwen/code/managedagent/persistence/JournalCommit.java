@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHostedRecoveryRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
@@ -275,10 +276,8 @@ final class JournalCommit {
         }
         lifecycleAuthorization.authorizeNewLifecycleDispatch(tenantId, sessionId, authority,
                 validated.recordBytes(), reader);
-        if (diagnosticEvents.stream().anyMatch(event -> event.path("payload").has("diagnosticsRef"))) {
-            ManagedExtensionRecordStore.require(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics
-                    .carrierDigest(diagnosticEvents).equals(request.contentDigest()), "Execution diagnostic commit digest conflicts.");
-        }
+        ManagedExtensionRecordStore.require(ManagedActivityDiagnostics.matchesCommit(diagnosticEvents,
+                request.operation(), request.commandId(), request.contentDigest()), "Execution diagnostic commit digest conflicts.");
         if (authority == null && fencing.lifecycleProtocolFenced(tenantId, sessionId)) {
             extensionRecords.requireLifecycleSettlement(tenantId, sessionId, validated.recordBytes(),
                     reader);

@@ -84,7 +84,7 @@ public final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
         }
         if (request.getIsolationKey() != null) {
             var resolved = resolver.resolve(request.getIsolationKey(), request.getScope().getLifecycleAuthority());
-            if (!resolved.scope().equals(request.getScope())
+            if (!WorkspaceRuntimeResolver.matchesRecordedScope(resolved.scope(), request.getScope())
                     || !resolved.binding().getStorageId().equals(request.getStorageId())) {
                 throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
             }

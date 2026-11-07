@@ -3076,6 +3076,7 @@ export interface components {
                 unavailable: number;
                 unknown: number;
             };
+            measurements?: components["schemas"]["ManagedActivityMeasurementTotals"];
         };
         ManagedActivityFile: {
             /** @enum {string} */
@@ -3120,6 +3121,7 @@ export interface components {
             conflictingEvidence?: boolean;
             taskState?: string;
             taskRuntimeState?: string | null;
+            measurements?: components["schemas"]["ManagedActivityMeasurement"];
         };
         ManagedActivityStatistics: {
             tools: components["schemas"]["ManagedActivityMetrics"];
@@ -3156,6 +3158,7 @@ export interface components {
                 write: components["schemas"]["ManagedActivityMetrics"];
                 edit: components["schemas"]["ManagedActivityMetrics"];
             };
+            measurementStartSequence?: string;
         };
         ManagedDiagnosticActivityStats: {
             /** @constant */
@@ -3233,6 +3236,7 @@ export interface components {
                 conflictingEvidence?: boolean;
                 taskState?: string;
                 taskRuntimeState?: string | null;
+                measurements?: components["schemas"]["ManagedActivityMeasurement"];
             }[];
             hasMore: boolean;
             nextCursor: string | null;
@@ -3279,6 +3283,7 @@ export interface components {
                 conflictingEvidence?: boolean;
                 taskState?: string;
                 taskRuntimeState?: string | null;
+                measurements?: components["schemas"]["ManagedActivityMeasurement"];
             }[];
             hasMore: boolean;
             nextCursor: string | null;
@@ -3293,6 +3298,38 @@ export interface components {
             limit?: number;
         };
         ManagedDiagnosticActivityPage: components["schemas"]["ManagedActivityToolsPage"] | components["schemas"]["ManagedActivityFilesPage"] | components["schemas"]["ManagedActivitySkillsPage"];
+        ManagedActivityMeasurement: {
+            sourceSequence: string;
+            /** @enum {string} */
+            availability: "available" | "partial" | "unsupported";
+            executionDurationMs: string | null;
+            file: {
+                /** @enum {string} */
+                operation: "read" | "write" | "edit";
+                /** @enum {string} */
+                status: "measured" | "unchanged" | "unmeasured";
+                modelLinesAdded: string | null;
+                modelLinesRemoved: string | null;
+                appliedLinesAdded: string | null;
+                appliedLinesRemoved: string | null;
+            } | null;
+        };
+        ManagedActivityMeasurementTotals: {
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            recorded: string;
+            unsupported: string;
+            executionDurationMs: string;
+            executionDurationSamples: string;
+            fileSamples: string;
+            modelDiffSamples: string;
+            appliedDiffSamples: string;
+            modelLinesAdded: string;
+            modelLinesRemoved: string;
+            appliedLinesAdded: string;
+            appliedLinesRemoved: string;
+            partial: string;
+        };
     };
     responses: {
         /** @description The authenticated actor belongs to another tenant than X-Qwen-Tenant-Id or has an invalid ID (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. Artifact content reads may also return artifact_content_forbidden when the actor cannot read the original bytes. */

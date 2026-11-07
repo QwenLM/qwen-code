@@ -996,7 +996,7 @@ describe('managed session header', () => {
   it('refuses a newer format or reader requirement', () => {
     headerError({ formatVersion: 2 }, /is not supported by this reader/);
     headerError(
-      { minimumReader: 'managed-session/3' },
+      { minimumReader: 'managed-session/4' },
       /is not supported by this reader/,
     );
   });
