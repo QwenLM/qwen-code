@@ -35,8 +35,10 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -44,6 +46,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMIT_MARKER;
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.CSI_REGISTRATION;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
@@ -68,7 +71,9 @@ class ToolPublicationLifecycleMySqlIT {
             var source = new ScheduledDataSource(new DriverManagerDataSource(
                     url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password));
             Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
-            var journal = PublicationJournalFixture.create(source);
+            // Ordinary receipts skip the tenant guard. This scenario specifically
+            // exercises contention on that guard, so keep the original on CSI.
+            var journal = PublicationJournalFixture.create(source, CSI_REGISTRATION);
             journal.reserve();
             var jdbc = journal.jdbc;
             var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
@@ -94,6 +99,12 @@ class ToolPublicationLifecycleMySqlIT {
                     .put("captureReason", "storage_failed").put("previewTruncated", false)
                     .put("deliveryStatus", "pending").putNull("manifest"));
             data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", envelope.toString().getBytes(StandardCharsets.UTF_8));
+            // CSI admission requires the original execution to be settled with
+            // the finished envelope. Settle after finish, which still needs the
+            // runtime authorization available to the prepared execution.
+            var prepared = journal.executions.findByExecutionCallId("execution-1");
+            assertThat(journal.executions.settlePrepared(prepared, JSON.convertValue(envelope, Map.class), Instant.now()))
+                    .isNotNull();
             var outcome = JSON.createObjectNode().put("schemaVersion", 1).put("decision", "blocked").putNull("manifestRef");
             outcome.set("envelope", envelope);
             var history = JSON.createObjectNode().put("messageId", "11111111-1111-4111-8111-111111111111")

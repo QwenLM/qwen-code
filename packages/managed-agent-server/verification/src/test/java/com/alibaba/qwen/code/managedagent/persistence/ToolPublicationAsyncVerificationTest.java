@@ -7,7 +7,6 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationStor
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
@@ -48,6 +47,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.CSI_REGISTRATION;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -122,9 +122,7 @@ public class ToolPublicationAsyncVerificationTest {
     private DataSource acceptCsiOperation() {
         DataSource source = dataSource();
         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
-        var registration = new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
-                "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
-                "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1);
+        var registration = CSI_REGISTRATION;
         fixture = PublicationJournalFixture.create(source, registration);
         fixture.reserve();
         fixture.store.verifyDispatch(fixture.executions.findByExecutionCallId("execution-1"),
@@ -168,9 +166,7 @@ public class ToolPublicationAsyncVerificationTest {
     @Test
     void settledCsiRetirementStillVerifiesAcceptedWork() {
         acceptCsiOperation();
-        var registration = new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
-                "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
-                "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1);
+        var registration = CSI_REGISTRATION;
         new WorkspaceCsiReservationStore(fixture.jdbc, fixture.manager, JSON).beginRetirement(
                 registration, fixture.bindings, fixture.bindings.findById("binding-1"),
                 fixture.csiReservation, UUID.randomUUID().toString());

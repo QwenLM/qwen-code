@@ -54,6 +54,10 @@ public final class PublicationJournalFixture {
             + ToolPublicationContract.PRODUCER_BYTES
             + ToolPublicationContract.ADMISSION_BYTES;
     public static final String ACTIVATION_ID = "activation-1";
+    public static final WorkspaceCsiRegistration CSI_REGISTRATION = new WorkspaceCsiRegistration(
+            "tenant-1", "fixture-storage", "fixture-cluster", "fixture", "fixture-claim", "fixture-pvc",
+            "fixture-volume", "fixture-pv", "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial",
+            "/workspace", 1);
     /** The commit-marker record line, byte-stable: the marker byte cap and
      * the shared contract fixture pin its shape. */
     public static final String COMMIT_MARKER =
