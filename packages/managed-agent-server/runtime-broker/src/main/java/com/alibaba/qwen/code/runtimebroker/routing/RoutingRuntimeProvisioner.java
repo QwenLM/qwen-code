@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -43,9 +44,9 @@ public final class RoutingRuntimeProvisioner implements RuntimeProvisioner {
             Function<RuntimeScope, String> kindSelector, BiConsumer<String, RuntimeLease> leaseRegistrar,
             Consumer<RuntimeLease> leaseReleaser) {
         this.delegates = Map.copyOf(delegates);
-        this.kindSelector = java.util.Objects.requireNonNull(kindSelector, "kindSelector");
-        this.leaseRegistrar = java.util.Objects.requireNonNull(leaseRegistrar, "leaseRegistrar");
-        this.leaseReleaser = java.util.Objects.requireNonNull(leaseReleaser, "leaseReleaser");
+        this.kindSelector = Objects.requireNonNull(kindSelector, "kindSelector");
+        this.leaseRegistrar = Objects.requireNonNull(leaseRegistrar, "leaseRegistrar");
+        this.leaseReleaser = Objects.requireNonNull(leaseReleaser, "leaseReleaser");
         if (delegates.isEmpty() || delegates.entrySet().stream()
                 .anyMatch(entry -> !entry.getValue().supportsKind(entry.getKey()))) {
             throw new IllegalArgumentException("Each routed provider must own its exact kind");

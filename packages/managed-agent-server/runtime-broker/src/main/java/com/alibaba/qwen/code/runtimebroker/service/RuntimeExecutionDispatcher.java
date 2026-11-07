@@ -14,10 +14,12 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
 
 import java.time.Clock;
@@ -381,8 +383,8 @@ final class RuntimeExecutionDispatcher {
                     }
                     return null;
                 }).thenCompose(ignored -> {
-                    if (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(context.binding().getRequest().getProvisionerKind())
-                            && !com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())) {
+                    if (!RuntimeProviderKinds.SSH_PROCESS.equals(context.binding().getRequest().getProvisionerKind())
+                            && !WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())) {
                         return CompletableFuture.completedFuture(null);
                     }
                     ToolExecutionRecord settled = executionRepository.findByExecutionCallId(executing.getExecutionCallId());
@@ -545,7 +547,7 @@ final class RuntimeExecutionDispatcher {
     }
 
     CompletionStage<Void> acknowledgePersistedTools(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
-        boolean external = com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest());
+        boolean external = WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest());
         if (external && (!execution.isSettled() || execution.getResult() == null
                 || execution.getResult().containsKey("capture")
                 || !execution.getReference().keySet().equals(
@@ -553,7 +555,7 @@ final class RuntimeExecutionDispatcher {
                 || !"deferred".equals(execution.getReference().get("dispatchMode")))) {
             return failed(conflict("workspace_close_identity_unverified", "External drain requires settled file Tool v2 results"));
         }
-        if ((!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind()) && !external)
+        if ((!RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind()) && !external)
                 || !execution.isSettled() || execution.getResult() == null
                 || ProviderRuntimeProtocol.isReference(execution.getReference())) {
             return CompletableFuture.completedFuture(null);

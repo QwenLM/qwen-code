@@ -1,5 +1,10 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+
+import java.time.Instant;
+import java.util.Objects;
+
 /** Checks performed while the parent generation admission lock is held. */
 public final class RuntimeAdmission {
     private RuntimeAdmission() {
@@ -41,12 +46,12 @@ public final class RuntimeAdmission {
     }
 
     public static void requireStoppedRelease(RuntimeBindingRecord binding, RuntimeBindingRecord claim,
-            RuntimeSessionRecord session, java.time.Instant now) {
+            RuntimeSessionRecord session, Instant now) {
         requireRelease(binding, session);
         if (!binding.sameIdentity(claim) || !binding.getRequest().isManagedContext()
-                || !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(binding.getRequest().getProvisionerKind())
-                        && !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
-                        && !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE
+                || !RuntimeProviderKinds.LOCAL_PROCESS.equals(binding.getRequest().getProvisionerKind())
+                        && !RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
+                        && !RuntimeProviderKinds.EXTERNAL_WORKSPACE
                                 .equals(binding.getRequest().getProvisionerKind())
                 || !(HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
                         || WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
@@ -56,7 +61,7 @@ public final class RuntimeAdmission {
                 || !binding.isDrainRequested()
                 || binding.getDrainReceipt() == null || !binding.getDrainReceipt().matches(binding)
                 || !binding.getDrainReceipt().equals(claim.getDrainReceipt())
-                || !java.util.Objects.equals(binding.getResourceHandle(), claim.getResourceHandle())
+                || !Objects.equals(binding.getResourceHandle(), claim.getResourceHandle())
                 || WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())
                         && (binding.getResourceHandle() == null || binding.getProvisionSeed() == null
                                 || !binding.getProvisionSeed().equals(claim.getProvisionSeed())

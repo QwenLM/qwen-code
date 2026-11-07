@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+
 /**
  * Says who owns the Harness fences on a Runtime binding. A Session-isolated
  * binding belongs to the Harness Session its isolation key names; a

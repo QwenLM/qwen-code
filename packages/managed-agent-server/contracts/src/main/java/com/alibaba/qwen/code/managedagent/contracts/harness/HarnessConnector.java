@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.contracts.harness;
 
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRuntimeRecovery;
+import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -109,28 +111,28 @@ public interface HarnessConnector extends AutoCloseable {
     public default boolean supportsLifecycle() { return false; }
 
     public default boolean supportsLifecycle(String profile) {
-        return com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES.equals(profile) && supportsLifecycle();
+        return WorkspaceToolProfiles.FILES.equals(profile) && supportsLifecycle();
     }
 
     default boolean supportsSavedLifecycle(String profile) {
         return supportsLifecycle(profile);
     }
 
-    public default void prepareLifecycleResources(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
+    public default void prepareLifecycleResources(StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted resource lifecycle is unavailable");
     }
 
-    public default void settleLifecycleResources(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
+    public default void settleLifecycleResources(StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted resource lifecycle is unavailable");
     }
 
     public default boolean supportsFencedTitles() { return false; }
 
-    public default JsonNode settleLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
+    public default JsonNode settleLifecycle(StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
     }
 
-    public default void detachLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
+    public default void detachLifecycle(StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
     }
 

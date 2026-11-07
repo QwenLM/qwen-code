@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.repository;
 
+import com.alibaba.qwen.code.managedagent.model.ApiModels;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 

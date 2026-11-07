@@ -13,6 +13,7 @@ import org.apache.commons.lang3.StringUtils;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 
@@ -126,7 +127,7 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
         BrokerValues.requireId(runtimeBroker.getWorkspaceId(), "External Runtime workspace ID");
         String cwd = runtimeBroker.getWorkspaceCwd();
         if (cwd == null || !cwd.startsWith("/")
-                || java.util.Arrays.stream(cwd.substring(1).split("/", -1))
+                || Arrays.stream(cwd.substring(1).split("/", -1))
                         .anyMatch(part -> part.isEmpty() || part.equals(".") || part.equals(".."))) {
             throw new IllegalStateException("External Runtime workspace cwd must be an absolute normalized"
                     + " worker path other than the filesystem root");
