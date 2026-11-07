@@ -22566,6 +22566,40 @@ describe('Hosted Harness no-tool session', () => {
     expect(stop).toHaveBeenCalledWith('runtime_lost');
   });
 
+  it('settles a blocked v2 Session on the runtime_lost line when the drain proved nothing owed (R26-1)', async () => {
+    const toolProfile = 'hosted-workspace-shell/1';
+    const f = await recoveryFileSession(toolProfile);
+    await f.submit();
+    await f.idle();
+    f.resident.monitorWake?.close();
+    // No held Runtime, so the drain is trivially proven and heldDrainUnproven
+    // stays false. The Session's own settlement already failed, which is the
+    // other reason v1 refuses to certify a stop: nothing proved to the Runtime
+    // that the writer stopped, and only the runtime_lost line keeps
+    // rebuildFromRuntimeLost able to recover the record.
+    expect(f.resident.heldRuntimeTurns.size).toBe(0);
+    f.resident.blocked = true;
+    const stop = vi.fn(
+      async (_settle?: 'stop_requested' | 'runtime_lost') => {},
+    );
+    const shell = (f.resident.shell ??= {});
+    shell.monitorLoops = new Map([
+      ['m1', { prepareLifecycle: () => {}, stop }],
+    ]);
+    await f
+      .authorize(supertest(f.server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send({
+        protocolVersion: 2,
+        phase: 'settle_resources',
+        kind: 'close',
+        toolProfile,
+        sessionKey: f.resident.managed.authority.sessionHeader.sessionKey,
+        authority: { operationId: 'close-blocked-settle', claimGeneration: 1 },
+      })
+      .expect(200);
+    expect(stop).toHaveBeenCalledWith('runtime_lost');
+  });
+
   it.each([false, true])(
     'keeps a later active Turn safe from a delayed original cancellation (public children: %s)',
     async (publicChildren) => {

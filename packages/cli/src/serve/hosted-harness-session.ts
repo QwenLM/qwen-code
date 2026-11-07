@@ -8400,12 +8400,15 @@ export function registerHostedHarnessSessionRoutes(
           // re-acquirable across the reload (R14-1).
           await session.hooks?.close({ terminal: kind === 'delete' });
           await releaseLeaseNow(session);
-          // A drain the restarted Broker could not prove is not a confirmed
-          // stop: settle the loops on the runtime_lost line so the record
-          // keeps an honest rebuild path (R25-1, matching the v1 close).
-          const stopSettle = heldDrainUnproven
-            ? 'runtime_lost'
-            : 'stop_requested';
+          // Neither an unprovable drain nor a Session whose own settlement
+          // already failed proved to the Runtime that anything stopped, so
+          // both settle on the runtime_lost line — the only state
+          // rebuildFromRuntimeLost accepts (R25-1/R26-1, matching the v1
+          // close). v2 has no heldDrainFailed: that arm throws above instead.
+          const stopSettle =
+            session.blocked || heldDrainUnproven
+              ? 'runtime_lost'
+              : 'stop_requested';
           for (const loop of session.shell?.monitorLoops?.values() ?? [])
             await loop.stop(stopSettle);
           for (const loop of session.backgroundLane?.monitorLoops?.values() ??
