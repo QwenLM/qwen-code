@@ -68,7 +68,9 @@ host credentials; ordinary container isolation does not change that boundary.
 Copy `config.example.json` to `/etc/qwen-ephemeral-runner/config.json` and
 replace the placeholders: repository, actual runner group ID, unique host/pool
 ID, immutable image reference, and matching architecture and labels. Use a
-unique test label and a controlled test repository for a trial. The example runs
+unique test label and a controlled test repository for a trial. The supplied
+manual smoke workflow selects only `ecs-qwen-ephemeral-smoke`; a trial runner
+can register with just that label to avoid matching generic Linux jobs. The example runs
 one slot; increase only after measuring the host. Restrict configuration and
 credential directories to the manager account.
 
