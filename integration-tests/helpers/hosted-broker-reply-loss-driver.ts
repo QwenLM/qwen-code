@@ -57,7 +57,7 @@ async function json(route: string, body?: unknown, expected = 200) {
   return text ? JSON.parse(text) : undefined;
 }
 
-async function upstream(route: string, body?: Buffer) {
+async function upstream(route: string, body?: Buffer<ArrayBuffer>) {
   const response = await fetch(new URL(route, config.brokerUrl), {
     method: body?.length ? 'POST' : 'GET',
     headers: {
@@ -95,6 +95,7 @@ const proxy = createServer(async (req, res) => {
       req.method === 'POST' &&
       [
         '/internal/runtime-broker/v1/runtimes:warm',
+        '/internal/runtime-broker/v1/runtimes:capabilities',
         '/internal/runtime-broker/v1/tool-sessions:active-holds',
       ].includes(route.pathname);
     const executionCallId = route.pathname.match(/\/executions\/([^/:]+)/)?.[1];

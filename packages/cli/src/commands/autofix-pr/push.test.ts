@@ -40,9 +40,15 @@ import {
   MAX_PUSHES,
   autofixPrPaths,
   readState,
+  writeAnchor,
   writeState,
   type AutofixPrState,
 } from './state.js';
+import type { RefusalCode } from './refusal.js';
+
+/** A refusal with its code: what the skill acts on. */
+const refused = (code: RefusalCode, message: RegExp) =>
+  expect.objectContaining({ code, message: expect.stringMatching(message) });
 
 describe('runPush (real git, bare remote)', () => {
   let base: string;
@@ -122,6 +128,7 @@ describe('runPush (real git, bare remote)', () => {
       postedCommentIds: [],
     };
     writeState(paths.statePath, initial);
+    writeAnchor({ host: 'github.com', owner: 'o', repo: 'r' }, 7, repo);
 
     live = {
       state: 'OPEN',
@@ -182,7 +189,9 @@ describe('runPush (real git, bare remote)', () => {
   it('refuses uncommitted changes, untracked files included', () => {
     commitIn(paths.worktreePath, 'fix.txt');
     writeFileSync(join(paths.worktreePath, 'stray.txt'), 'x');
-    expect(() => runPush(7)).toThrow(/uncommitted changes/);
+    expect(() => runPush(7)).toThrow(
+      refused('worktree_dirty', /uncommitted changes/),
+    );
     expect(remoteFeat()).toBe(featSha);
   });
 
@@ -303,7 +312,7 @@ describe('runPush (real git, bare remote)', () => {
     writeFileSync(hook, '#!/bin/sh\necho "hook says no" >&2\nexit 1\n');
     chmodSync(hook, 0o755);
     commitIn(paths.worktreePath, 'fix.txt');
-    expect(() => runPush(7)).toThrow(/hook says no/);
+    expect(() => runPush(7)).toThrow(refused('push_failed', /hook says no/));
     expect(remoteFeat()).toBe(featSha);
     expect(state().pushCount).toBeUndefined();
   });
@@ -349,12 +358,31 @@ describe('runPush (real git, bare remote)', () => {
     expect(() => runPush(7)).toThrow(/invalid pushTarget/);
   });
 
+  it('pushes nothing for a round its task no longer drives', () => {
+    writeState(paths.statePath, {
+      ...state(),
+      watch: { every: 2, reply: true, instructions: '', task: 'bbbbbbbbbbbb' },
+    });
+    expect(() => runPush(7, 'aaaaaaaaaaaa')).toThrow(/no longer drives/);
+  });
+
+  it('pushes nothing for a watch cleanup ended, whose work it kept', () => {
+    writeState(paths.statePath, {
+      ...state(),
+      ended: { at: '2026-10-25T00:00:00.000Z', reason: 'kept' },
+    });
+    expect(() => runPush(7)).toThrow(/watch was stopped/);
+  });
+
   it('refuses a worktree on another branch, or a symlink in its place', () => {
     run(repo, 'branch', 'mine', featSha);
     run(paths.worktreePath, 'switch', '-q', 'mine');
     commitIn(paths.worktreePath, 'user-work.txt');
     expect(() => runPush(7)).toThrow(
-      /branch mine checked out, not qwen-autofix\/pr-7/,
+      refused(
+        'worktree_dirty',
+        /branch mine checked out, not qwen-autofix\/pr-7/,
+      ),
     );
     expect(remoteFeat()).toBe(featSha);
 
@@ -513,6 +541,49 @@ describe('runPush (real git, bare remote)', () => {
     process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
     expect(() => runPush(7)).toThrow(/watched by another session/);
     expect(remoteFeat()).toBe(featSha);
+  });
+
+  describe('in place', () => {
+    beforeEach(() => {
+      // Turn the fixture's watch into an in-place one on repo itself.
+      run(repo, 'worktree', 'remove', '--force', paths.worktreePath);
+      run(repo, 'branch', '-D', paths.branch);
+      run(repo, 'switch', '-q', 'feat');
+      writeState(paths.statePath, {
+        ...state(),
+        inPlace: true,
+        worktreePath: repo,
+        branch: 'feat',
+      });
+    });
+
+    it("pushes the user's commits along, under the lease", () => {
+      // The watch's own files under .qwen/tmp are not uncommitted work.
+      const mine = commitIn(repo, 'mine.txt');
+      expect(runPush(7)).toMatchObject({ pushed: true, sha: mine, pushes: 1 });
+      expect(remoteFeat()).toBe(mine);
+      expect(state().lastKnownHeadSha).toBe(mine);
+    });
+
+    it('refuses uncommitted changes of the user', () => {
+      commitIn(repo, 'mine.txt');
+      writeFileSync(join(repo, 'dirty.txt'), 'x');
+      expect(() => runPush(7)).toThrow(/uncommitted changes/);
+      expect(remoteFeat()).toBe(featSha);
+    });
+
+    it('answers resync when someone else pushed', () => {
+      const other = join(base, 'other');
+      run(base, 'clone', '-q', remote, other);
+      run(other, 'config', 'user.email', 't@example.com');
+      run(other, 'config', 'user.name', 't');
+      run(other, 'checkout', '-q', 'feat');
+      const theirs = commitIn(other, 'theirs.txt');
+      run(other, 'push', '-q', 'origin', 'feat');
+      commitIn(repo, 'mine.txt');
+      expect(runPush(7)).toMatchObject({ pushed: false, action: 'resync' });
+      expect(remoteFeat()).toBe(theirs);
+    });
   });
 });
 

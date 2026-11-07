@@ -1533,7 +1533,8 @@ const SETTINGS_SCHEMA = {
         category: 'Privacy',
         requiresRestart: true,
         default: true,
-        description: 'Enable collection of usage statistics',
+        description:
+          'Enable collection of usage statistics. Disabling this also stops the models.dev catalog refresh.',
         showInDialog: true,
       },
     },
@@ -1861,6 +1862,16 @@ const SETTINGS_SCHEMA = {
           type: 'string',
           enum: ['none', ...REASONING_EFFORT_TIERS],
         },
+      },
+      catalogRefresh: {
+        type: 'boolean',
+        label: 'Refresh Models.dev Catalog',
+        category: 'Model',
+        requiresRestart: true,
+        default: true,
+        description:
+          'Download the models.dev model catalog in the background at most once every 24 hours. Disable it in managed installations that must not contact models.dev; the bundled and previously downloaded catalog data remain available. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored. QWEN_CODE_MODELS_DEV_REFRESH=off in the process environment still wins, and disabling privacy.usageStatisticsEnabled also disables the refresh.',
+        showInDialog: false,
       },
       maxSessionTurns: {
         type: 'integer',
@@ -3079,7 +3090,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: {},
         description:
-          'Settings for the built-in WebSearch tool (DashScope Responses API backend). On by default at startup for Alibaba ModelStudio Standard API Key / Token Plan and OpenAI-compatible entries on recognized DashScope Responses hosts with a direct key; set enabled=false to turn it off. Which providers can activate the tool is decided at startup; once active, the search backend follows the currently selected model on the next search. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR, WEB_SEARCH_TIMEOUT_MS, WEB_SEARCH_MAX_PER_SESSION. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.',
+          'Settings for the built-in WebSearch tool (DashScope Responses API backend). On by default at startup for Alibaba ModelStudio Standard API Key / Token Plan and OpenAI-compatible entries on recognized DashScope Responses hosts with a direct key; set enabled=false to turn it off. Which providers can activate the tool is decided at startup; once active, the search backend follows the currently selected model on the next search. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR, WEB_SEARCH_TIMEOUT_MS, WEB_SEARCH_MAX_PER_SESSION, WEB_SEARCH_ALLOWED_HOSTS. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.',
         showInDialog: false,
         properties: {
           enabled: {
@@ -3133,6 +3144,17 @@ const SETTINGS_SCHEMA = {
             maximum: MAX_WEB_SEARCH_MAX_PER_SESSION,
             description: `Maximum web_search calls in one session (default ${DEFAULT_WEB_SEARCH_MAX_PER_SESSION}, max ${MAX_WEB_SEARCH_MAX_PER_SESSION}; other values fall back to the default). The count is shared with subagents and resets when the session changes (/clear, /resume, branching). Once it is reached, further searches are skipped and the model is told to continue with what it has gathered. Env override: WEB_SEARCH_MAX_PER_SESSION.`,
             showInDialog: true,
+          },
+          allowedHosts: {
+            type: 'array',
+            label: 'Extra Search Hosts',
+            category: 'Tools',
+            requiresRestart: true,
+            default: undefined as string[] | undefined,
+            items: { type: 'string' },
+            description:
+              'Extra host suffixes trusted for an explicitly configured search backend, for gateways that serve the DashScope Responses API under their own domain (exact host, or any subdomain of a listed suffix). Empty by default, so behaviour is unchanged unless set. Automatic derivation never uses this list, so a custom host is only used when WEB_SEARCH_BASE_URL or a modelProviders entry names it. The configured host receives the API key. Env override: WEB_SEARCH_ALLOWED_HOSTS (comma-separated).',
+            showInDialog: false,
           },
         },
       },
@@ -3880,7 +3902,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: true,
         description:
-          'Let Qwen Code sessions on this machine send each other messages over a per-session local socket. On by default: this session is discoverable by the others, takes peer messages under the review rules of agents.crossSessionInbound, and its model can address them from send_message. Two senders are delivered without review unless agents.crossSessionInbound is "hold" or "refuse": processes this session starts, which inherit its child token, and a same-user process that claims this session\'s own review class, which nothing authenticates. Set to false to keep this session invisible and unreachable.',
+          'Let Qwen Code sessions on this machine send each other messages over a per-session local socket. On by default: this session is discoverable by the others, takes peer messages under the review rules of agents.crossSessionInbound, and its model can address them from send_message. Two senders are delivered without review unless agents.crossSessionInbound is "hold" or "refuse": processes this session starts, which inherit its child token, and a same-user process that claims this session\'s own review class, which nothing authenticates. Set to false to disable peer discovery and messaging. --bare and --safe-mode disable messaging regardless of this setting. Interactive sessions can still appear in qwen sessions ps without a messaging address. Daemon- or editor-hosted sessions register only while messaging is active; Agent View managed rows are listed independently.',
         showInDialog: false,
       },
       crossSessionInbound: {
@@ -4358,6 +4380,18 @@ const SETTINGS_SCHEMA = {
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,
       },
+      FileChanged: {
+        type: 'array',
+        label: 'File Changed Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when a watched file is added, changed, or deleted in a local session.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
     },
   },
 
@@ -4375,9 +4409,9 @@ const SETTINGS_SCHEMA = {
         label: 'Generated UI',
         category: 'Experimental',
         requiresRestart: true,
-        default: false,
+        default: true,
         description:
-          'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+          'Show interactive views from bundled Generated UI in supported local sessions, such as Web Shell. Enabled by default; set to false to turn it off. Restart the owning session to apply changes.',
         showInDialog: true,
       },
       mods: {
@@ -4527,6 +4561,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.',
+        showInDialog: true,
+      },
+      unifiedAgentLoop: {
+        type: 'boolean',
+        label: 'Unified Agent Loop',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI sends its model requests and runs its tool batches through it, while its turn continuation, OpenTUI and subagents keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.',
         showInDialog: true,
       },
       agentCollaboration: {

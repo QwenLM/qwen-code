@@ -31,6 +31,22 @@ import type {
 } from '../../src/daemon/ui/index.js';
 
 describe('daemon UI normalizer and transcript reducer', () => {
+  it('treats config option updates as state metadata rather than chat or progress', () => {
+    expect(
+      normalizeDaemonEvent({
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session',
+          update: {
+            sessionUpdate: 'config_option_update',
+            configOptions: [{ id: 'workflow_mode', currentValue: 'on' }],
+          },
+        },
+      }),
+    ).toEqual([]);
+  });
+
   it('retains tool prompt ownership after byte eviction and journal-only replay', () => {
     const event = {
       v: 1 as const,
@@ -2679,6 +2695,19 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(event).not.toHaveProperty('errorKind');
   });
 
+  it.each(['', 'bailian'])(
+    'keeps automatic logout model changes silent (%s)',
+    (modelId) => {
+      expect(
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'model_switched',
+          data: { sessionId: 'session', modelId, subscriptionSignedOut: true },
+        }),
+      ).toEqual([]);
+    },
+  );
+
   it('normalizes daemon lifecycle and control events', () => {
     expect(
       normalizeDaemonEvent({
@@ -3353,6 +3382,17 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(output).toContain('ok');
     expect(output).not.toContain('bad');
     expect(output).not.toContain('\x00');
+  });
+
+  it('renders nothing for a lifecycle name-only tool event', () => {
+    expect(
+      daemonUiEventToTerminalText({
+        type: 'tool.update',
+        toolCallId: 'c',
+        toolName: 'read_file',
+        nameOnly: true,
+      }),
+    ).toBe('');
   });
 
   it('renders managed memory events without a source fallback leak', () => {

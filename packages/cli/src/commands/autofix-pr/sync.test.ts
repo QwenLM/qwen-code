@@ -15,6 +15,7 @@ import {
 } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -24,6 +25,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -38,6 +40,11 @@ const mocks = vi.hoisted(() => ({
     headRepository: { name: 'r' },
     headRepositoryOwner: { login: 'o' },
   } as Record<string, unknown>,
+  // Runs right after a real networkGit call: a concurrent fetch or branch
+  // switch in the user's checkout, for the in-place race regressions.
+  afterFetch: null as (() => void) | null,
+  // Makes the ignored-file listing throw, for the fail-closed regression.
+  failListings: false,
 }));
 vi.mock('../review/lib/gh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../review/lib/gh.js')>()),
@@ -53,14 +60,43 @@ vi.mock('../review/lib/remote-match.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../review/lib/remote-match.js')>()),
   matchRemotes: () => ({ matched: ['origin'] }),
 }));
+vi.mock('./worktree.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./worktree.js')>();
+  return {
+    ...actual,
+    networkGit: (args: string[]) => {
+      const out = actual.networkGit(args);
+      mocks.afterFetch?.();
+      return out;
+    },
+  };
+});
+vi.mock('../review/lib/git.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../review/lib/git.js')>();
+  return {
+    ...actual,
+    gitRaw: (...args: string[]) => {
+      if (mocks.failListings && args.includes('--ignored')) {
+        throw new Error('simulated listing failure (ENOBUFS)');
+      }
+      return actual.gitRaw(...args);
+    },
+  };
+});
 
 import { runSync } from './sync.js';
 import {
   autofixPrPaths,
   readState,
+  writeAnchor,
   writeState,
   type AutofixPrState,
 } from './state.js';
+import type { RefusalCode } from './refusal.js';
+
+/** A refusal with its code: what the skill acts on. */
+const refused = (code: RefusalCode, message: RegExp) =>
+  expect.objectContaining({ code, message: expect.stringMatching(message) });
 
 describe('runSync (real git, bare remote)', () => {
   let base: string;
@@ -161,6 +197,7 @@ describe('runSync (real git, bare remote)', () => {
       postedCommentIds: [],
     };
     writeState(paths.statePath, initial);
+    writeAnchor({ host: 'github.com', owner: 'o', repo: 'r' }, 7, repo);
     mocks.live = {
       state: 'OPEN',
       headRefName: 'feat',
@@ -176,6 +213,8 @@ describe('runSync (real git, bare remote)', () => {
   });
 
   afterEach(() => {
+    mocks.afterFetch = null;
+    mocks.failListings = false;
     process.chdir(savedCwd);
     if (savedSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
     else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
@@ -191,6 +230,76 @@ describe('runSync (real git, bare remote)', () => {
     expect(known()).toBe(featSha);
   });
 
+  it('removes a background fix its session left behind, with its round, and says so', () => {
+    const startedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    writeFileSync(
+      paths.fixPath,
+      JSON.stringify({
+        version: 1,
+        attempt: '0123456789ab',
+        task: 't',
+        head: featSha,
+        startedAt,
+      }),
+    );
+    writeFileSync(paths.snapshotPath, '{}');
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(paths.fixPath, old, old);
+    expect(runSync(7)).toEqual({
+      synced: true,
+      headSha: featSha,
+      moved: false,
+      abandonedFix: { startedAt },
+    });
+    expect(existsSync(paths.fixPath)).toBe(false);
+    expect(existsSync(paths.snapshotPath)).toBe(false);
+    expect(runSync(7)).not.toHaveProperty('abandonedFix');
+  });
+
+  it('keeps a marker its session left behind for the next sync when this one fails', () => {
+    writeFileSync(paths.fixPath, '{}');
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(paths.fixPath, old, old);
+    mocks.live = { ...mocks.live!, state: 'CLOSED' };
+    expect(() => runSync(7)).toThrow(refused('pr_closed', /closed/));
+    expect(existsSync(paths.fixPath)).toBe(true);
+  });
+
+  it("leaves the marker alone for another session's sync", () => {
+    writeFileSync(paths.fixPath, '{}');
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(paths.fixPath, old, old);
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    expect(() => runSync(7)).toThrow(
+      refused('watched_elsewhere', /watched by another session/),
+    );
+    expect(existsSync(paths.fixPath)).toBe(true);
+  });
+
+  it('starts a round only for the task that drives the watch, and none of a watch cleanup ended', () => {
+    const state = readState(paths.statePath)!;
+    writeState(paths.statePath, {
+      ...state,
+      watch: { every: 2, reply: true, instructions: '', task: 'aaaaaaaaaaaa' },
+    });
+    expect(runSync(7, false, 'aaaaaaaaaaaa')).toMatchObject({ synced: true });
+    // A fire its task queued before a later schedule replaced it.
+    expect(() => runSync(7, false, 'bbbbbbbbbbbb')).toThrow(
+      // The refusal names which task to delete, and which one to keep.
+      /task bbbbbbbbbbbb no longer drives PR #7's watch; delete the task whose gate has --task bbbbbbbbbbbb, not the one with --task aaaaaaaaaaaa/,
+    );
+    // Its kept work is not discarded by a round still under way.
+    writeState(paths.statePath, {
+      ...state,
+      ended: { at: '2026-10-25T00:00:00.000Z', reason: 'kept' },
+    });
+    expect(() => runSync(7, true)).toThrow(/watch was stopped/);
+    // Whichever session asks: a stopped watch is no other session's to
+    // resume, and the answer says how to get it back.
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    expect(() => runSync(7)).toThrow(/Start it again with \/autofix-pr 7/);
+  });
+
   it('fast-forwards the worktree to a head someone else pushed and records it', () => {
     const theirs = pushFromElsewhere('theirs.txt');
     expect(runSync(7)).toEqual({ synced: true, headSha: theirs, moved: true });
@@ -199,6 +308,38 @@ describe('runSync (real git, bare remote)', () => {
     // The user's own branches are untouched.
     expect(run(repo, 'rev-parse', 'refs/heads/feat')).toBe(theirs);
     expect(run(repo, 'rev-parse', 'HEAD')).toBe(run(repo, 'rev-parse', 'main'));
+  });
+
+  it("gives every check its fix pushes back when it adopts someone else's push", () => {
+    // The watch pushed `fix`; a check failed on it once.
+    const fix = commitIn(paths.worktreePath, 'fix.txt');
+    run(paths.worktreePath, 'push', '-q', 'origin', 'HEAD:feat');
+    run(remote, 'update-ref', 'refs/pull/7/head', fix);
+    // Recorded on the head before the watch's push, counting from none.
+    const red = {
+      identity: 'run:1:2:pull_request:Test',
+      check: 'Test',
+      head: featSha,
+      pushes: 2,
+    };
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      lastKnownHeadSha: featSha,
+      pushedShas: [fix],
+      failingChecks: [red],
+    });
+    // Following its own push spends and gives back nothing.
+    expect(runSync(7)).toMatchObject({ synced: true, headSha: fix });
+    expect(readState(paths.statePath)!.failingChecks).toEqual([red]);
+    // Someone else pushes on top: whether or not a round reads it, the
+    // check's pushes are back, counted from the watch's latest push.
+    run(repo, 'fetch', '-q', 'origin', 'feat');
+    run(repo, 'branch', '-f', 'feat', 'FETCH_HEAD');
+    const theirs = pushFromElsewhere('theirs.txt');
+    expect(runSync(7)).toMatchObject({ synced: true, headSha: theirs });
+    expect(readState(paths.statePath)!.failingChecks).toEqual([
+      { ...red, pushes: 0, lastPush: fix },
+    ]);
   });
 
   it('asks for a merge when the worktree holds work the new head lacks, and changes nothing', () => {
@@ -292,6 +433,15 @@ describe('runSync (real git, bare remote)', () => {
       dropped: 1,
     });
     expect(worktreeHead()).toBe(again);
+  });
+
+  it('keeps uncommitted changes from a head the author rewrote, for --discard to clear', () => {
+    writeFileSync(join(paths.worktreePath, 'stray.txt'), 'x');
+    forcePushFromElsewhere('rewritten.txt');
+    expect(() => runSync(7)).toThrow(
+      refused('worktree_dirty', /uncommitted changes/),
+    );
+    expect(existsSync(join(paths.worktreePath, 'stray.txt'))).toBe(true);
   });
 
   it('follows the author rolling back a push the watch made, so the next push cannot restore it', () => {
@@ -433,12 +583,34 @@ describe('runSync (real git, bare remote)', () => {
     run(author, 'commit', '-q', '-m', 'bump to nowhere');
     run(author, 'push', '-q', 'origin', 'feat');
     expect(runSync(7)).toMatchObject({ synced: false, moved: true });
-    // Discarding cannot check it out either, and says the worktree is
-    // still not clean.
+    // The author pushes once more. Discarding cannot check it out either,
+    // and says the worktree is still not clean — having adopted the push
+    // all the same, which gives a spent check its pushes back.
+    const red = {
+      identity: 'run:1:2:pull_request:Test',
+      check: 'Test',
+      head: withSub,
+      pushes: 3,
+    };
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      failingChecks: [red],
+    });
+    run(
+      author,
+      'update-index',
+      '--cacheinfo',
+      `160000,${'d'.repeat(40)},vendor/sub`,
+    );
+    run(author, 'commit', '-q', '-m', 'bump to nowhere again');
+    run(author, 'push', '-q', 'origin', 'feat');
     expect(runSync(7, true)).toMatchObject({
       synced: false,
       reason: expect.stringContaining('still not clean after discarding'),
     });
+    expect(readState(paths.statePath)!.failingChecks).toEqual([
+      { ...red, pushes: 0 },
+    ]);
   });
 
   it('never recurses into a submodule the worktree has not checked out, whatever submodule.recurse says', () => {
@@ -849,6 +1021,138 @@ describe('runSync (real git, bare remote)', () => {
     expect(run(repo, 'rev-parse', 'mine')).toBe(featSha);
   });
 
+  it('with --discard answers synced: false for a worktree git cannot switch back', () => {
+    run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
+    // The watch's branch checked out in another worktree: git refuses to
+    // check it out twice. The worktree cannot be cleaned (the round stops),
+    // and a refusal of `discard` would only ask for the same again.
+    run(repo, 'worktree', 'add', '-q', join(base, 'other-wt'), paths.branch);
+    expect(runSync(7, true)).toEqual({
+      synced: false,
+      headSha: featSha,
+      moved: false,
+      reason: expect.stringMatching(
+        /could not switch it back: qwen-autofix\/pr-7 is checked out in .*other-wt\. .*worktree remove .*other-wt/,
+      ),
+    });
+    // The cleanup it names last could not delete the branch either: the
+    // reason does not send the user there first.
+    expect(runSync(7, true).reason).not.toMatch(/cleanup 7 --force/);
+  });
+
+  // What holds the branch decides what frees it: `git worktree remove`
+  // refuses a locked worktree and one whose `.git` is gone, and `git
+  // worktree prune` drops a stale record but not a locked one. The git
+  // commands the reason gives, run by a shell as printed from outside the
+  // clone, let the next round through, wherever the holder is: its path
+  // quoted, spaces, quotes and a newline in it are one argument. POSIX shell
+  // syntax, run by `sh`.
+  const holders: Array<[string, (holder: string) => void, RegExp, RegExp]> = [
+    ['a checkout', () => {}, /\. Switch that checkout/, /worktree prune/],
+    [
+      'a directory deleted by hand',
+      (holder) => rmSync(holder, { recursive: true, force: true }),
+      /nothing is checked out there any more\. Drop its record with `git -C '.*' worktree prune`/,
+      /worktree remove|Switch that checkout/,
+    ],
+    [
+      'a checkout whose .git is deleted',
+      (holder) => rmSync(join(holder, '.git')),
+      /nothing is checked out there any more\. Drop its record with `git -C '.*' worktree prune`/,
+      /worktree remove|Switch that checkout/,
+    ],
+    [
+      'a locked checkout',
+      (holder) => run(repo, 'worktree', 'lock', holder),
+      /, which is locked\. Unlock it \(`git -C '.*' worktree unlock '[^`]*'`\), then switch that checkout/,
+      /worktree prune/,
+    ],
+    [
+      'a locked directory deleted by hand',
+      (holder) => {
+        run(repo, 'worktree', 'lock', holder);
+        rmSync(holder, { recursive: true, force: true });
+      },
+      /, a locked worktree git still records .*\. Unlock it \(`git -C '.*' worktree unlock '[^`]*'`\), then drop its record with `git -C '.*' worktree prune`/,
+      /worktree remove|Switch that checkout/,
+    ],
+  ];
+  it
+    .skipIf(process.platform === 'win32')
+    .each(
+      holders.flatMap(([name, ...rest]) => [
+        [name, 'other-wt', ...rest] as const,
+        [
+          `${name} at a path with spaces and quotes`,
+          `other wt "q" it's`,
+          ...rest,
+        ] as const,
+        [`${name} at a path with a newline`, 'other\nwt', ...rest] as const,
+      ]),
+    )(
+    'with --discard says how to free a branch held by %s',
+    (_name, dirName, damage, says, saysNot) => {
+      run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
+      const holder = join(base, dirName);
+      run(repo, 'worktree', 'add', '-q', holder, paths.branch);
+      damage(holder);
+      const { synced, reason } = runSync(7, true);
+      expect(synced).toBe(false);
+      expect(reason).toMatch(says);
+      expect(reason).not.toMatch(saysNot);
+      const commands = [...String(reason).matchAll(/`(git -C [^`]+)`/g)];
+      expect(commands.length).toBeGreaterThan(0);
+      for (const [, command] of commands) {
+        execFileSync('sh', ['-c', command], {
+          cwd: tmpdir(),
+          env: { ...process.env, GIT_CONFIG_GLOBAL: gitConfig },
+          stdio: 'pipe',
+        });
+      }
+      expect(runSync(7, true)).toMatchObject({
+        synced: true,
+        headSha: featSha,
+      });
+    },
+  );
+
+  it('with --discard asks only for a switch of the clone checkout that holds the branch', () => {
+    run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
+    // git removes no main worktree: switching it is all there is.
+    run(repo, 'switch', '-q', paths.branch);
+    const { synced, reason } = runSync(7, true);
+    expect(synced).toBe(false);
+    expect(reason).toMatch(
+      /is checked out in .*\. Switch that checkout to another branch; until then/,
+    );
+    expect(reason).not.toMatch(/worktree (?:remove|prune|unlock)/);
+    run(repo, 'switch', '-q', 'main');
+    expect(runSync(7, true)).toMatchObject({ synced: true, headSha: featSha });
+  });
+
+  it('with --discard sends to cleanup a switch git refuses for no other checkout', () => {
+    run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
+    // A lock git left behind stops the switch; no worktree holds the branch.
+    writeFileSync(
+      run(
+        paths.worktreePath,
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-path',
+        'index.lock',
+      ),
+      '',
+    );
+    expect(runSync(7, true)).toEqual({
+      synced: false,
+      headSha: featSha,
+      moved: false,
+      reason: expect.stringMatching(
+        /could not switch it back; remove the watch with `qwen autofix-pr cleanup 7 --force` and prepare it again\.$/,
+      ),
+    });
+  });
+
   it('with --discard takes the worktree back to the watch branch from one a fix switched to', () => {
     run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
     const theirs = commitIn(paths.worktreePath, 'on-fix-branch.txt');
@@ -865,10 +1169,422 @@ describe('runSync (real git, bare remote)', () => {
   it('refuses to move or reset a worktree with uncommitted changes', () => {
     pushFromElsewhere('theirs.txt');
     writeFileSync(join(paths.worktreePath, 'stray.txt'), 'x');
-    expect(() => runSync(7)).toThrow(/uncommitted changes/);
+    expect(() => runSync(7)).toThrow(
+      refused('worktree_dirty', /uncommitted changes/),
+    );
     forcePushFromElsewhere('rewritten.txt');
     expect(() => runSync(7)).toThrow(/uncommitted changes/);
     expect(worktreeHead()).toBe(featSha);
     expect(known()).toBe(featSha);
+  });
+
+  describe('in place', () => {
+    let other: string;
+    /** Someone else pushes to the PR branch, from a checkout of their own. */
+    const pushFromOther = (file: string) => {
+      const sha = commitIn(other, file);
+      run(other, 'push', '-q', 'origin', 'feat');
+      run(remote, 'update-ref', 'refs/pull/7/head', sha);
+      return sha;
+    };
+
+    beforeEach(() => {
+      // Turn the fixture's watch into an in-place one on repo itself.
+      run(repo, 'worktree', 'remove', '--force', paths.worktreePath);
+      run(repo, 'branch', '-D', paths.branch);
+      run(repo, 'switch', '-q', 'feat');
+      writeState(paths.statePath, {
+        ...readState(paths.statePath)!,
+        inPlace: true,
+        worktreePath: repo,
+        branch: 'feat',
+      });
+      other = join(base, 'other');
+      run(base, 'clone', '-q', remote, other);
+      run(other, 'config', 'user.email', 't@example.com');
+      run(other, 'config', 'user.name', 't');
+      run(other, 'checkout', '-q', 'feat');
+    });
+
+    it('refuses --discard and keeps what the checkout holds', () => {
+      writeFileSync(join(repo, 'dirty.txt'), 'mine');
+      expect(() => runSync(7, true)).toThrow(/never discards/);
+      expect(existsSync(join(repo, 'dirty.txt'))).toBe(true);
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(featSha);
+      expect(known()).toBe(featSha);
+    });
+
+    it('answers synced:false for a dirty checkout, without --discard advice', () => {
+      const theirs = pushFromOther('theirs.txt');
+      writeFileSync(join(repo, 'dirty.txt'), 'mine');
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({
+        synced: false,
+        headSha: theirs,
+        moved: true,
+      });
+      expect(outcome.reason).toMatch(/commit or stash/);
+      expect(outcome.reason).not.toMatch(/--discard/);
+      // The branch did not move, and the dirty file survived.
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(featSha);
+      expect(existsSync(join(repo, 'dirty.txt'))).toBe(true);
+    });
+
+    it('never resets the branch when the author rewrote history', () => {
+      run(other, 'checkout', '-q', '--orphan', 'rewrite');
+      run(other, 'commit', '-q', '--allow-empty', '-m', 'rewrite');
+      const sha = run(other, 'rev-parse', 'HEAD');
+      run(other, 'push', '-q', '--force', 'origin', 'rewrite:feat');
+      run(remote, 'update-ref', 'refs/pull/7/head', sha);
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, headSha: sha });
+      expect(outcome.reason).toMatch(/rewrote the PR's history/);
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(featSha);
+      expect(run(repo, 'symbolic-ref', 'HEAD')).toBe('refs/heads/feat');
+    });
+
+    it('fast-forwards a clean checkout to the new head', () => {
+      const theirs = pushFromOther('theirs.txt');
+      expect(runSync(7)).toMatchObject({
+        synced: true,
+        headSha: theirs,
+        moved: true,
+      });
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(theirs);
+      expect(known()).toBe(theirs);
+    });
+
+    it('asks for a merge when the checkout holds unpushed commits', () => {
+      commitIn(repo, 'mine.txt');
+      pushFromOther('theirs.txt');
+      expect(runSync(7)).toMatchObject({ synced: false, action: 'merge' });
+      // Nothing moved: the merge is the round's to make, attended.
+      expect(run(repo, 'rev-parse', 'HEAD')).not.toBe(known());
+    });
+
+    it('refuses when the user switched the checkout to another branch', () => {
+      run(repo, 'switch', '-q', 'main');
+      expect(() => runSync(7)).toThrow(/branch main checked out/);
+      expect(run(repo, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+    });
+
+    /** A submodule the PR records, checked out in the user's checkout. */
+    const withSubmodule = () => {
+      const sub = join(base, 'sub-ip');
+      run(base, 'init', '-q', '-b', 'main', sub);
+      run(sub, 'config', 'user.email', 't@example.com');
+      run(sub, 'config', 'user.name', 't');
+      const s1 = commitIn(sub, 's1.txt');
+      run(
+        repo,
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        sub,
+        'vendor/sub',
+      );
+      run(repo, 'commit', '-q', '-m', 'add sub');
+      run(repo, 'push', '-q', 'origin', 'HEAD:feat');
+      run(
+        join(repo, 'vendor', 'sub'),
+        'config',
+        'protocol.file.allow',
+        'always',
+      );
+      const withSub = run(repo, 'rev-parse', 'HEAD');
+      run(remote, 'update-ref', 'refs/pull/7/head', withSub);
+      writeState(paths.statePath, {
+        ...readState(paths.statePath)!,
+        lastKnownHeadSha: withSub,
+      });
+      // The author bumps the submodule to s2 in a clone of their own.
+      const s2 = commitIn(sub, 's2.txt');
+      const author = join(base, 'author-ip');
+      run(base, 'clone', '-q', '-b', 'feat', remote, author);
+      run(author, 'config', 'user.email', 'a@example.com');
+      run(author, 'config', 'user.name', 'a');
+      run(author, 'update-index', '--cacheinfo', `160000,${s2},vendor/sub`);
+      run(author, 'commit', '-q', '-m', 'bump sub');
+      run(author, 'push', '-q', 'origin', 'feat');
+      const bump = run(author, 'rev-parse', 'HEAD');
+      run(remote, 'update-ref', 'refs/pull/7/head', bump);
+      return { s1, s2, bump, inSub: join(repo, 'vendor', 'sub') };
+    };
+
+    it('moves a checked-out submodule along on a clean fast-forward', () => {
+      const { s2, bump, inSub } = withSubmodule();
+      expect(runSync(7)).toMatchObject({ synced: true, moved: true });
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(bump);
+      expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s2);
+    });
+
+    it('leaves a submodule holding work alone, and moves nothing', () => {
+      const { s1, inSub } = withSubmodule();
+      const before = run(repo, 'rev-parse', 'HEAD');
+      writeFileSync(join(inSub, 'mine.txt'), 'mine');
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/commit or stash/);
+      expect(outcome.reason).not.toMatch(/--discard/);
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(before);
+      expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s1);
+      expect(existsSync(join(inSub, 'mine.txt'))).toBe(true);
+    });
+
+    it('names an unfetchable submodule commit in the in-place reason', () => {
+      const { inSub } = withSubmodule();
+      // The recorded commit exists only in the author's clone: the
+      // submodule's own remote can never serve it, and nothing is dirty.
+      run(inSub, 'remote', 'set-url', 'origin', join(base, 'no-such-remote'));
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/could not be fetched/);
+      expect(outcome.reason).not.toMatch(/--discard/);
+    });
+
+    it('refuses to overwrite an ignored user file the PR head starts tracking', () => {
+      writeFileSync(join(repo, 'secret.env'), 'LOCAL_WORK=do-not-delete');
+      writeFileSync(join(repo, '.git', 'info', 'exclude'), 'secret.env\n');
+      // The PR head starts tracking secret.env.
+      const author = join(base, 'author-ign');
+      run(base, 'clone', '-q', remote, author);
+      run(author, 'config', 'user.email', 'a@example.com');
+      run(author, 'config', 'user.name', 'a');
+      run(author, 'checkout', '-q', 'feat');
+      writeFileSync(join(author, 'secret.env'), 'REMOTE_REPLACEMENT=1');
+      run(author, 'add', 'secret.env');
+      run(author, 'commit', '-q', '-m', 'track secret');
+      run(author, 'push', '-q', 'origin', 'feat');
+      const sha = run(author, 'rev-parse', 'HEAD');
+      run(remote, 'update-ref', 'refs/pull/7/head', sha);
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/secret\.env/);
+      expect(outcome.reason).toMatch(/ignored/);
+      // The user's bytes and the branch tip both survive.
+      expect(readFileSync(join(repo, 'secret.env'), 'utf8')).toBe(
+        'LOCAL_WORK=do-not-delete',
+      );
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(featSha);
+      expect(known()).toBe(featSha);
+    });
+
+    it('refuses to overwrite an ignored file inside a submodule the PR head bumps', () => {
+      const { s1, inSub } = withSubmodule();
+      // The user's ignored file inside the checked-out submodule. A
+      // submodule's .git is a gitfile: its exclude lives in the git
+      // directory it names.
+      writeFileSync(
+        join(inSub, 'secret.env'),
+        'SUBMODULE_LOCAL_WORK=do-not-delete',
+      );
+      const subGitDir = run(inSub, 'rev-parse', '--absolute-git-dir');
+      mkdirSync(join(subGitDir, 'info'), { recursive: true });
+      writeFileSync(join(subGitDir, 'info', 'exclude'), 'secret.env\n');
+      // A further submodule commit that starts tracking secret.env, bumped
+      // by the PR head.
+      const sub = join(base, 'sub-ip');
+      writeFileSync(join(sub, 'secret.env'), 'REMOTE_BYTES=1');
+      run(sub, 'add', 'secret.env');
+      run(sub, 'commit', '-q', '-m', 'track secret in sub');
+      const s3 = run(sub, 'rev-parse', 'HEAD');
+      const author = join(base, 'author-ip');
+      run(author, 'update-index', '--cacheinfo', `160000,${s3},vendor/sub`);
+      run(author, 'commit', '-q', '-m', 'bump sub to secret-tracking');
+      run(author, 'push', '-q', 'origin', 'HEAD:feat');
+      run(
+        remote,
+        'update-ref',
+        'refs/pull/7/head',
+        run(author, 'rev-parse', 'HEAD'),
+      );
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/vendor\/sub: secret\.env/);
+      // The user's bytes and the submodule tip both survive.
+      expect(readFileSync(join(inSub, 'secret.env'), 'utf8')).toBe(
+        'SUBMODULE_LOCAL_WORK=do-not-delete',
+      );
+      expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s1);
+    });
+
+    /** Bumps the PR head's gitlink to a submodule commit tracking `files`. */
+    const bumpSubmoduleTo = (files: Record<string, string>) => {
+      const sub = join(base, 'sub-ip');
+      for (const [name, content] of Object.entries(files)) {
+        const p = join(sub, name);
+        mkdirSync(dirname(p), { recursive: true });
+        writeFileSync(p, content);
+        run(sub, 'add', name);
+      }
+      run(sub, 'commit', '-q', '-m', 'bump sub files');
+      const s3 = run(sub, 'rev-parse', 'HEAD');
+      const author = join(base, 'author-ip');
+      run(author, 'update-index', '--cacheinfo', `160000,${s3},vendor/sub`);
+      run(author, 'commit', '-q', '-m', 'bump gitlink');
+      run(author, 'push', '-q', 'origin', 'HEAD:feat');
+      run(
+        remote,
+        'update-ref',
+        'refs/pull/7/head',
+        run(author, 'rev-parse', 'HEAD'),
+      );
+    };
+
+    /** Ignores `pattern` inside the checked-out submodule. */
+    const ignoreInSubmodule = (inSub: string, pattern: string) => {
+      const subGitDir = run(inSub, 'rev-parse', '--absolute-git-dir');
+      mkdirSync(join(subGitDir, 'info'), { recursive: true });
+      writeFileSync(join(subGitDir, 'info', 'exclude'), `${pattern}\n`);
+    };
+
+    it('refuses when the target tracks a blob where an ignored directory sits', () => {
+      const { s1, inSub } = withSubmodule();
+      mkdirSync(join(inSub, 'local-dir'), { recursive: true });
+      writeFileSync(
+        join(inSub, 'local-dir', 'secret.env'),
+        'DIR_LOCAL_WORK=do-not-delete',
+      );
+      ignoreInSubmodule(inSub, 'local-dir/');
+      bumpSubmoduleTo({ 'local-dir': 'REMOTE_BLOB=1' });
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/vendor\/sub: local-dir/);
+      expect(readFileSync(join(inSub, 'local-dir', 'secret.env'), 'utf8')).toBe(
+        'DIR_LOCAL_WORK=do-not-delete',
+      );
+      expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s1);
+    });
+
+    it('refuses when the target tracks a directory where an ignored file sits', () => {
+      const { s1, inSub } = withSubmodule();
+      writeFileSync(join(inSub, 'local-file'), 'FILE_LOCAL_WORK=do-not-delete');
+      ignoreInSubmodule(inSub, 'local-file');
+      bumpSubmoduleTo({ 'local-file/remote.txt': 'REMOTE=1' });
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/vendor\/sub: local-file\/remote\.txt/);
+      expect(readFileSync(join(inSub, 'local-file'), 'utf8')).toBe(
+        'FILE_LOCAL_WORK=do-not-delete',
+      );
+      expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s1);
+    });
+
+    it('refuses the reset when the ignored-file listing cannot be read', () => {
+      const { s1, inSub } = withSubmodule();
+      writeFileSync(
+        join(inSub, 'secret.env'),
+        'SUBMODULE_LOCAL_WORK=do-not-delete',
+      );
+      ignoreInSubmodule(inSub, 'secret.env');
+      bumpSubmoduleTo({ 'secret.env': 'REMOTE_BYTES=1' });
+      // A failed enumeration (e.g. a listing past the command buffer) must
+      // refuse the reset, not read as "no ignored files".
+      mocks.failListings = true;
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/unreadable/);
+      expect(readFileSync(join(inSub, 'secret.env'), 'utf8')).toBe(
+        'SUBMODULE_LOCAL_WORK=do-not-delete',
+      );
+      expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s1);
+    });
+
+    it('refuses a differently cased collision when the submodule is case-insensitive', () => {
+      const { s1, inSub } = withSubmodule();
+      // Git's own view of a case-insensitive filesystem: differently cased
+      // names identify the same path, so the guard must fold case too.
+      run(inSub, 'config', 'core.ignorecase', 'true');
+      writeFileSync(
+        join(inSub, 'CaseSecret.env'),
+        'CASE_COLLISION_USER_BYTES=keep',
+      );
+      ignoreInSubmodule(inSub, 'CaseSecret.env');
+      bumpSubmoduleTo({ 'casesecret.env': 'REMOTE_BYTES=1' });
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/vendor\/sub: casesecret\.env/);
+      expect(readFileSync(join(inSub, 'CaseSecret.env'), 'utf8')).toBe(
+        'CASE_COLLISION_USER_BYTES=keep',
+      );
+      expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s1);
+    });
+
+    // The coexistence case needs differently cased names to be distinct
+    // files. Probe the tmpdir the fixtures live on: on a case-insensitive
+    // filesystem git sets core.ignorecase itself, the guard rightly
+    // refuses, and only the refusal case above applies.
+    const caseSensitiveTmp = (() => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-case-probe-'));
+      try {
+        writeFileSync(join(dir, 'CaseProbe'), 'upper');
+        writeFileSync(join(dir, 'caseprobe'), 'lower');
+        return readdirSync(dir).length === 2;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })();
+
+    it.skipIf(!caseSensitiveTmp)(
+      'does not fold case on a case-sensitive submodule',
+      () => {
+        const { inSub } = withSubmodule();
+        // Default core.ignorecase on a case-sensitive filesystem: the two
+        // names are different files, and the alignment must still proceed.
+        writeFileSync(
+          join(inSub, 'CaseSecret.env'),
+          'CASE_COLLISION_USER_BYTES=keep',
+        );
+        ignoreInSubmodule(inSub, 'CaseSecret.env');
+        bumpSubmoduleTo({ 'casesecret.env': 'REMOTE_BYTES=1' });
+        const outcome = runSync(7);
+        expect(outcome).toMatchObject({ synced: true, moved: true });
+        expect(readFileSync(join(inSub, 'CaseSecret.env'), 'utf8')).toBe(
+          'CASE_COLLISION_USER_BYTES=keep',
+        );
+        expect(readFileSync(join(inSub, 'casesecret.env'), 'utf8')).toBe(
+          'REMOTE_BYTES=1',
+        );
+      },
+    );
+
+    it('reads the PR head from the private ref when a concurrent fetch rewrites FETCH_HEAD', () => {
+      // A descendant of the PR head on another remote branch: an
+      // interleaved fetch of it would fast-forward the user's branch to
+      // the wrong commit if sync read the shared FETCH_HEAD.
+      run(repo, 'switch', '-q', '-c', 'extra');
+      const wrong = commitIn(repo, 'extra.txt');
+      run(repo, 'push', '-q', 'origin', 'extra');
+      run(repo, 'switch', '-q', 'feat');
+      mocks.afterFetch = () => {
+        run(repo, 'fetch', '-q', 'origin', 'extra');
+      };
+      expect(runSync(7)).toMatchObject({
+        synced: true,
+        headSha: featSha,
+        moved: false,
+      });
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(featSha);
+      expect(known()).toBe(featSha);
+      expect(wrong).not.toBe(featSha);
+    });
+
+    it('refuses when the user switches branches during the fetch', () => {
+      const theirs = pushFromOther('theirs.txt');
+      const mainBefore = run(repo, 'rev-parse', 'main');
+      mocks.afterFetch = () => {
+        run(repo, 'switch', '-q', 'main');
+      };
+      expect(() => runSync(7)).toThrow(
+        refused('worktree_dirty', /branch main checked out/),
+      );
+      // Neither branch advanced.
+      expect(run(repo, 'rev-parse', 'feat')).toBe(featSha);
+      expect(run(repo, 'rev-parse', 'main')).toBe(mainBefore);
+      expect(known()).toBe(featSha);
+      expect(theirs).not.toBe(featSha);
+    });
   });
 });

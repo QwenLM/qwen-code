@@ -22,17 +22,21 @@ import {
   rerunFrom,
 } from './snapshot.js';
 import {
-  assertOwnedBySession,
+  assertWatching,
+  TASK_OPTION,
+  taskArg,
   assertPositiveInteger,
   autofixPrPaths,
   checkAttemptKey,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
   rerunFloors,
   withWatchLock,
   writeState,
   type AutofixPrPaths,
 } from './state.js';
+import { assertNoFixInFlight } from './fix.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 export interface RerunOutcome {
   rerun: boolean;
@@ -45,11 +49,15 @@ export interface RerunOutcome {
   reason?: string;
 }
 
-export function runRerun(prNumber: number, runId: number): RerunOutcome {
+export function runRerun(
+  prNumber: number,
+  runId: number,
+  task?: string,
+): RerunOutcome {
   assertPositiveInteger(runId, 'run id');
-  const paths = autofixPrPaths(repoRoot(), prNumber);
+  const paths = autofixPrPaths(resolveWatchRoot(prNumber), prNumber);
   return withWatchLock(paths, prNumber, () =>
-    rerunLocked(paths, prNumber, runId),
+    rerunLocked(paths, prNumber, runId, task),
   );
 }
 
@@ -57,14 +65,17 @@ function rerunLocked(
   paths: AutofixPrPaths,
   prNumber: number,
   runId: number,
+  task: string | undefined,
 ): RerunOutcome {
   const state = requireState(paths.statePath, prNumber);
-  assertOwnedBySession(state);
+  assertWatching(state, task);
+  assertNoFixInFlight(paths, prNumber);
   setGhHost(state.host);
   ensureAuthenticated();
   const { pr } = fetchPrData(state);
   if (pr.state !== 'OPEN') {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'pr_closed',
       `PR #${prNumber} is ${pr.state.toLowerCase()}; nothing is re-run on it.`,
     );
   }
@@ -190,7 +201,8 @@ function rerunLocked(
           : {}),
       });
     }
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'rerun_failed',
       `GitHub did not re-run run ${runId}${refused ? '' : ' (or its answer was lost; the re-run is counted)'}: ${message.trim().split('\n').slice(-3).join(' ')} — answer its failures as needing a human.`,
     );
   }
@@ -219,10 +231,13 @@ export const rerunCommand: CommandModule = {
         type: 'number',
         demandOption: true,
         describe: 'Actions run id (`runId` of a ci_failed event)',
-      }),
+      })
+      .option('task', TASK_OPTION),
   handler: (argv) => {
     writeStdoutLine(
-      JSON.stringify(runRerun(Number(argv['pr']), Number(argv['runId']))),
+      JSON.stringify(
+        runRerun(Number(argv['pr']), Number(argv['runId']), taskArg(argv)),
+      ),
     );
   },
 };

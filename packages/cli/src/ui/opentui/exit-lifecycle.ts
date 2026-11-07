@@ -19,15 +19,15 @@
  * Every OpenTUI exit path (Ctrl+C/Ctrl+D double press, /quit, render-error
  * bailout) must go through `exitSession()`, which signals the client to stop
  * spawning background work, drains the shared cleanup chain first and only then
- * exits — with signal-style exit codes (130/143) for interrupt-like exits
- * instead of a bare 0.
+ * exits with the caller’s code. Confirmed keyboard exits and /quit use 0;
+ * actual OS-signal exits retain signal-style codes (130/143).
  */
 
 import type { Config } from '@qwen-code/qwen-code-core';
 import { runExitCleanup } from '../../utils/cleanup.js';
 import { exitCleanly } from '../../utils/processUtils.js';
 
-/** Exit code for interrupt-style exits (Ctrl+C / Ctrl+D double press). */
+/** Exit code for actual SIGINT-style termination, not confirmed keyboard exit. */
 export const EXIT_CODE_INTERRUPT = 130;
 /** Exit code for termination-style exits (SIGTERM semantics). */
 export const EXIT_CODE_TERMINATED = 143;

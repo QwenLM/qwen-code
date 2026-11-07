@@ -40,6 +40,7 @@ vi.mock('../agents/forkedAgent.js', async (importOriginal) => {
 });
 
 import {
+  _setWordSegmenterForTest,
   generatePromptSuggestion,
   getFilterReason,
   shouldFilterSuggestion,
@@ -219,6 +220,125 @@ describe('shouldFilterSuggestion', () => {
 
   it('allows slash commands as single word', () => {
     expect(shouldFilterSuggestion('/commit')).toBe(false);
+  });
+
+  it('uses character bounds for CJK suggestions', () => {
+    expect(shouldFilterSuggestion('运行测试')).toBe(false);
+    expect(shouldFilterSuggestion('テストを実行')).toBe(false);
+    expect(shouldFilterSuggestion('테스트실행')).toBe(false);
+    expect(getFilterReason('好')).toBe('too_few_words');
+    expect(getFilterReason('运'.repeat(31))).toBe('too_many_words');
+  });
+
+  it('counts words with a segmenter for Thai, Lao, Khmer and Myanmar suggestions', () => {
+    // These scripts are written without spaces between words, so a whole
+    // suggestion is one whitespace-delimited "word".
+    expect(getFilterReason('รันเทสต์อีกครั้ง')).toBeNull(); // Thai
+    expect(getFilterReason('แก้บั๊กนี้ให้หน่อย')).toBeNull(); // Thai
+    expect(getFilterReason('ແລ່ນການທົດສອບ')).toBeNull(); // Lao
+    expect(getFilterReason('ដំណើរការតេស្ត')).toBeNull(); // Khmer
+    expect(getFilterReason('စမ်းသပ်မှုလုပ်ပါ')).toBeNull(); // Myanmar
+    expect(getFilterReason('ใช่')).toBeNull(); // "yes"
+    // Long but within 12 words: the CJK 30-char cap would reject these.
+    expect(getFilterReason('ช่วยรันเทสต์ทั้งหมดอีกครั้งหนึ่ง')).toBeNull();
+    expect(
+      getFilterReason('ช่วยรันเทสต์ทั้งหมด แล้ว commit ให้หน่อย'),
+    ).toBeNull();
+    expect(getFilterReason('ก')).toBe('too_few_words');
+    expect(
+      getFilterReason(
+        'ช่วยรันเทสต์ทั้งหมดอีกครั้งแล้วแก้บั๊กที่เจอและอธิบายสาเหตุให้ละเอียด',
+      ),
+    ).toBe('too_many_words');
+    // Cases where the word count and the 60-character fallback disagree, so
+    // they fail if the segmenter is silently disabled.
+    // 37 characters, 13 words: over the 12-word window.
+    expect(getFilterReason('กดปุ่มนี้แล้วรอสักครู่นะครับผมจะไปเอง')).toBe(
+      'too_many_words',
+    );
+    // 76 characters, 11 words: over the fallback cap, within the window.
+    expect(
+      getFilterReason(
+        'ปรับปรุงประสิทธิภาพการประมวลผลฐานข้อมูลอิเล็กทรอนิกส์ของมหาวิทยาลัยเทคโนโลยี',
+      ),
+    ).toBeNull();
+  });
+
+  // Thai mixed with paths or commands: few whitespace words, but many
+  // segments and over the 60-character fallback.
+  const MIXED_WITH_SPACES = [
+    'รันเทสต์ใน packages/core/src/followup และ packages/cli/src/ui ให้หน่อย',
+    'รัน npx vitest run src/followupแล้วรายงานผลให้ฟังหน่อยนะครับ',
+  ];
+
+  it('keeps the slash command exemption for these scripts', () => {
+    // 61 characters and 15 segments: over both bounds without the exemption.
+    const slash =
+      '/อธิบายโค้ดส่วนนี้ให้ละเอียดหน่อยนะครับผมอยากเข้าใจมันมากขึ้น';
+    expect(getFilterReason(slash)).toBeNull();
+    _setWordSegmenterForTest(null);
+    try {
+      expect(getFilterReason(slash)).toBeNull();
+    } finally {
+      _setWordSegmenterForTest(undefined);
+    }
+  });
+
+  it('keeps whitespace bounds for these scripts when the suggestion has spaces', () => {
+    for (const suggestion of MIXED_WITH_SPACES) {
+      expect(getFilterReason(suggestion)).toBeNull();
+    }
+    _setWordSegmenterForTest(null);
+    try {
+      for (const suggestion of MIXED_WITH_SPACES) {
+        expect(getFilterReason(suggestion)).toBeNull();
+      }
+    } finally {
+      _setWordSegmenterForTest(undefined);
+    }
+  });
+
+  it('falls back to a character bound for these scripts without full ICU', () => {
+    _setWordSegmenterForTest(null);
+    try {
+      expect(getFilterReason('รันเทสต์อีกครั้ง')).toBeNull();
+      expect(getFilterReason('ก')).toBe('too_few_words');
+      expect(getFilterReason('ก'.repeat(61))).toBe('too_many_words');
+    } finally {
+      _setWordSegmenterForTest(undefined);
+    }
+  });
+
+  it('does not create a segmenter on a small-icu build', () => {
+    // process.config.variables is frozen, but process.config itself is
+    // reconfigurable (see withIcuSmall in packages/cli/src/startup/icu-check.test.ts).
+    const original = Object.getOwnPropertyDescriptor(process, 'config')!;
+    const withIcuSmall = (value: unknown, fn: () => void) => {
+      const variables = {
+        ...(original.value as { variables: Record<string, unknown> }).variables,
+        icu_small: value,
+      };
+      Object.defineProperty(process, 'config', {
+        ...original,
+        value: { ...(original.value as object), variables },
+      });
+      _setWordSegmenterForTest(undefined);
+      try {
+        fn();
+      } finally {
+        Object.defineProperty(process, 'config', original);
+        _setWordSegmenterForTest(undefined);
+      }
+    };
+    // 76 characters, 11 words: only the segmenter lets it through.
+    const long =
+      'ปรับปรุงประสิทธิภาพการประมวลผลฐานข้อมูลอิเล็กทรอนิกส์ของมหาวิทยาลัยเทคโนโลยี';
+    withIcuSmall(true, () => {
+      expect(getFilterReason(long)).toBe('too_many_words');
+    });
+    withIcuSmall(false, () => {
+      expect(getFilterReason(long)).toBeNull();
+    });
   });
 
   it('filters too many words', () => {

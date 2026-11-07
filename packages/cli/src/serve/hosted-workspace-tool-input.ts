@@ -4,11 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// #15076: the argument check for the `todo_write` tool only the `/3`
-// profiles declare. It runs before the Runtime is acquired, so a malformed
-// call costs no durable work and its refusal stays model-correctable. The
-// exact rules stay in the core tool (TodoWriteTool); this check keeps the
-// shapes that tool rejects from reaching a Runtime round trip.
+// The argument check for `todo_write`, declared by `files/3` and `shell/1`.
+// Admission rejects malformed shapes before durable work, so the refusal
+// stays model-correctable. Core's todo validation enforces list-level rules when
+// the Harness persists Session todos; this does not require a Runtime call.
 
 const TODO_STATUSES = new Set(['pending', 'in_progress', 'completed']);
 
@@ -26,11 +25,8 @@ export const HOSTED_TODO_MAX_DEPENDENCIES = 32;
 /**
  * The serialized-size ceiling for one incoming list. It keeps an admitted call
  * inside the store's encoded-input limit, so the refusal happens before
- * acquisition. It does not bound the stored list: core re-injects the
- * `blockedBy` edges it preserved from earlier calls, nothing re-counts them,
- * and the success result echoes the stored list, so a long-lived list can grow
- * past this value. Bounding the stored list needs the Worker to account for
- * the merged result, which is follow-up work.
+ * acquisition. The durable writer applies the same bound after preserving
+ * dependencies.
  */
 export const HOSTED_TODO_MAX_SERIALIZED_BYTES = 16 * 1024;
 

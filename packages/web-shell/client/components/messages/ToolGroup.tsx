@@ -9,6 +9,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import type {
   ACPToolCall,
   PermissionRequest,
@@ -1018,6 +1019,7 @@ function areToolLinePropsEqual(
   const b = next.tool;
   return (
     a.callId === b.callId &&
+    a.generatedUiToolCallId === b.generatedUiToolCallId &&
     a.toolName === b.toolName &&
     a.status === b.status &&
     a.subagentSessionReady === b.subagentSessionReady &&
@@ -1048,6 +1050,7 @@ function areSubToolsEqual(
     const b = next[i];
     if (
       a.callId !== b.callId ||
+      a.generatedUiToolCallId !== b.generatedUiToolCallId ||
       a.toolName !== b.toolName ||
       a.status !== b.status ||
       a.subagentSessionReady !== b.subagentSessionReady ||
@@ -1361,9 +1364,12 @@ export const ToolLine = memo(function ToolLine({
   // Document exports carry a bounded, safe text preview. Keep the full answer
   // in an expanded row instead of reducing it to the one-line header summary.
   const result =
-    transcriptRenderMode === 'document' && expanded
+    (tool.status === 'failed'
+      ? formatSubscriptionQuotaDisplay(tool.rawOutput, t)
+      : undefined) ??
+    (transcriptRenderMode === 'document' && expanded
       ? (extractText(tool) ?? getToolResultSummary(tool))
-      : getToolResultSummary(tool);
+      : getToolResultSummary(tool));
   const summaryShell = isShellToolName(tool.toolName);
   const description = summaryShell
     ? getToolSummaryDescription(tool, workspaceCwd)
@@ -1540,7 +1546,11 @@ export const ToolLine = memo(function ToolLine({
       {mcpApp &&
         (!summaryOnly || expanded) &&
         (mcpAppAllowed ? (
-          <McpApp display={mcpApp} />
+          <McpApp
+            display={mcpApp}
+            toolId={tool.generatedUiToolCallId}
+            visible={detailsVisible}
+          />
         ) : (
           <GeneratedUiFallback display={mcpApp} />
         ))}

@@ -152,11 +152,16 @@ workflow 共用的汇总 issue 上追加评论，找到匹配的已关闭 issue 
 起已没有 `pull_request` 触发。
 
 当合入后 push 失败的 head 已不再是 main 的 tip 时，如果新 tip 上存在同一 workflow
-的更新 push 运行、且它能自行上报结果，这次失败只记录在 analyze 运行的步骤摘要里，
-不会记录到 workflow issue 上。仍在排队或运行中的后继算作延迟上报；以 `success` 或
-`failure` 结束的后继同样算数——失败后继自己的完成事件会重新进入本 workflow。以
-`cancelled`、`timed_out`、`skipped` 或 `startup_failure` 结束的后继永远不会被分析，
-因此此时仍然上报原始失败。
+的更新 push 运行、且它**已经定论**，这次失败只记录在 analyze 运行的步骤摘要里，不会
+记录到 workflow issue 上：`success` 表示该处代码是绿的，`failure` 会通过自己的完成
+事件上报。以 `cancelled`、`timed_out`、`skipped` 或 `startup_failure` 结束的后继永远
+不会被分析，因此此时仍然上报原始失败。
+
+尚未 `completed` 的后继什么都证明不了，而本 job 也等不起它——报告所在
+的 runner 池把它排了 20-100 分钟，准备好报告时 tip 上的运行通常刚开始不久。此时仍然
+上报，并在正文顶部标注为临时性（provisional）。之所以负担得起，是因为按签名路由的新
+issue 交给人工分诊而不是 autofix：一条过期的临时报告只需关掉，丢掉一条则丢掉整个回归
+（#15470）。
 
 ## 成本
 

@@ -23,7 +23,6 @@ import {
 } from './managed-session-assembly.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { readManagedSessionTitleInfoSync } from '../utils/sessionStorageUtils.js';
-import type { ManagedSessionDurableRef } from './managed-session-records.js';
 import { ManagedSessionAppendUnsettledError } from './managed-session-records.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import {
@@ -32,7 +31,6 @@ import {
   type ManagedSessionResourceStore,
 } from './managed-session-storage.js';
 
-const DIGEST = '9'.repeat(64);
 const sessionId = '550e8400-e29b-41d4-a716-446655440000';
 const sessionKey = { tenantId: 't1', workspaceId: 'w1', sessionId };
 const temporaryDirectories = new Set<string>();
@@ -45,16 +43,6 @@ afterEach(async () => {
   }
   temporaryDirectories.clear();
 });
-
-function ref(kind = 'managed-test'): ManagedSessionDurableRef {
-  return {
-    resourceId: 'res-1',
-    kind,
-    schemaVersion: 1,
-    byteLength: 4,
-    digest: DIGEST,
-  };
-}
 
 interface Workspace {
   runtimeBaseDir: string;
@@ -78,7 +66,7 @@ async function createWorkspace(): Promise<Workspace> {
   return { runtimeBaseDir, projectRoot, transcriptPath };
 }
 
-function open(
+async function open(
   workspace: Workspace,
   options: {
     create?: boolean;
@@ -88,6 +76,10 @@ function open(
     requireNew?: boolean;
   } = {},
 ): Promise<ManagedSession> {
+  const roots = LocalManagedSessionResourceStore.create({
+    runtimeBaseDir: workspace.runtimeBaseDir,
+    sessionKey,
+  });
   return openManagedSession({
     runtimeBaseDir: workspace.runtimeBaseDir,
     sessionId,
@@ -109,8 +101,14 @@ function open(
       ? {}
       : {
           create: {
-            definitionRef: ref('managed-definition'),
-            rootSnapshotRef: ref('managed-root'),
+            definitionRef: await roots.publish(
+              'managed-session-definition',
+              Buffer.from('{}'),
+            ),
+            rootSnapshotRef: await roots.publish(
+              'managed-session-root-snapshot',
+              Buffer.from('{}'),
+            ),
             createdBy: 'daemon',
           },
         }),

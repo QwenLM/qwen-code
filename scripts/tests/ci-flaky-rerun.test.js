@@ -545,13 +545,35 @@ describe('ci flaky rerun patrol', () => {
     expect(kinds).toContain('comment');
   });
 
-  it('reruns before recording the hidden action marker', async () => {
+  it('reruns before posting the visible rerun notice', async () => {
     const c = client();
     await actOnDecision(c, target(), decision());
-    expect(c.calls).toEqual([
-      ['rerunFailedJobs', 123],
-      ['comment', 42, expect.stringMatching(/^<!-- .*action=rerun.* -->$/)],
+    expect(c.calls.map((call) => call[0])).toEqual([
+      'rerunFailedJobs',
+      'comment',
     ]);
+    const body = c.calls[1][2];
+    expect(body).toContain('runner timeout');
+    expect(body).toContain('re-run on the same commit');
+    expect(body).toContain('No Update Branch');
+    expect(body).toContain('<summary>中文说明</summary>');
+    expect(body).toContain('runner 超时');
+    expect(body.split('</details>').length - 1).toBe(1);
+    expect(body).toMatch(/<!-- .*action=rerun.* -->$/);
+  });
+
+  it('keeps markers parseable inside the visible notices', async () => {
+    // The visible text must not break dedup or the per-head action count:
+    // both read the marker back out of the posted comment body.
+    const c = client();
+    await actOnDecision(c, target(), decision());
+    const posted = {
+      body: c.calls.find((call) => call[0] === 'comment')[2],
+      createdAt: '2026-07-12T07:25:00.000Z',
+      author: { login: 'patrol-bot' },
+    };
+    expect(alreadyHandled([posted], target(), 'patrol-bot')).toBe(true);
+    expect(currentActionCount(pr(), [posted], 'patrol-bot')).toBe(1);
   });
 
   it('posts deterministic failures in English with folded Chinese', async () => {
@@ -566,22 +588,36 @@ describe('ci flaky rerun patrol', () => {
       }),
     );
     expect(c.calls).toHaveLength(1);
-    expect(c.calls[0][2]).toContain('TypeScript cannot resolve');
-    expect(c.calls[0][2]).toContain('<details>');
-    expect(c.calls[0][2]).toContain('TypeScript 无法解析');
-    expect(c.calls[0][2]).toContain('action=comment');
+    const body = c.calls[0][2];
+    expect(body).toContain('TypeScript cannot resolve');
+    expect(body).toContain('<details>');
+    expect(body).toContain('TypeScript 无法解析');
+    expect(body).toContain('action=comment');
+    // Pin the bilingual placement, not just the presence of both strings:
+    // English before the fold, Chinese inside it.
+    const enIndex = body.indexOf('TypeScript cannot resolve');
+    const foldIndex = body.indexOf('<summary>中文说明</summary>');
+    const zhIndex = body.indexOf('TypeScript 无法解析');
+    expect(enIndex).toBeLessThan(foldIndex);
+    expect(foldIndex).toBeLessThan(zhIndex);
+    expect(body.split('</details>').length - 1).toBe(1);
   });
 
-  it('records no_action without a visible comment', async () => {
+  it('records no_action with a visible manual-review notice', async () => {
     const c = client();
     await actOnDecision(
       c,
       target(),
       decision({ action: 'no_action', confidence: 'low' }),
     );
-    expect(c.calls).toEqual([
-      ['comment', 42, expect.stringMatching(/^<!-- .*action=no_action.* -->$/)],
-    ]);
+    expect(c.calls).toHaveLength(1);
+    const body = c.calls[0][2];
+    expect(body).toContain('could not be confidently classified');
+    expect(body).toContain('runner timeout');
+    expect(body).toContain('<summary>中文说明</summary>');
+    expect(body).toContain('未采取自动动作');
+    expect(body.split('</details>').length - 1).toBe(1);
+    expect(body).toMatch(/<!-- .*action=no_action.* -->$/);
   });
 
   it('rejects malformed, unsafe, or mismatched decisions', async () => {
@@ -604,19 +640,110 @@ describe('ci flaky rerun patrol', () => {
   });
 
   it('neutralizes mentions and markup copied into visible reasons', async () => {
-    const c = client();
-    await actOnDecision(
-      c,
-      target(),
-      decision({
-        action: 'comment',
-        reason_en: '@qwen-maintainers <script>alert(1)</script>',
-        reason_zh: '@全体成员 </details>',
-      }),
-    );
-    expect(c.calls[0][2]).toContain('@\u200bqwen-maintainers');
-    expect(c.calls[0][2]).toContain('&lt;script&gt;');
-    expect(c.calls[0][2]).toContain('@\u200b全体成员 &lt;/details&gt;');
+    // All three actions now surface the reason in a visible comment, so the
+    // escaping must hold for every action, not just `comment`.
+    for (const action of ['rerun', 'comment', 'no_action']) {
+      const c = client();
+      await actOnDecision(
+        c,
+        target(),
+        decision({
+          action,
+          confidence: action === 'no_action' ? 'low' : 'high',
+          reason_en: '@qwen-maintainers <script>alert(1)</script>',
+          reason_zh: '@全体成员 </details>',
+        }),
+      );
+      const body = c.calls.find((call) => call[0] === 'comment')[2];
+      expect(body).toContain('@\u200bqwen-maintainers');
+      expect(body).toContain('&lt;script&gt;');
+      expect(body).toContain('@\u200b全体成员 &lt;/details&gt;');
+    }
+  });
+
+  it('strips bidi overrides that could visually rewrite a notice', async () => {
+    // The reason is classifier output derived from untrusted logs; a bidi
+    // override could make "no Update Branch needed" read as its opposite.
+    // Every member of the Unicode Bidi_Control set is also fed individually
+    // so narrowing the strip class cannot survive this pin.
+    const bidiControls = [
+      '\u061C',
+      '\u200E',
+      '\u200F',
+      '\u202A',
+      '\u202B',
+      '\u202C',
+      '\u202D',
+      '\u202E',
+      '\u2066',
+      '\u2067',
+      '\u2068',
+      '\u2069',
+    ];
+    for (const action of ['rerun', 'comment', 'no_action']) {
+      const confidence = action === 'no_action' ? 'low' : 'high';
+      const c = client();
+      await actOnDecision(
+        c,
+        target(),
+        decision({
+          action,
+          confidence,
+          reason_en: 'safe \u202Ereversed\u202C text',
+          reason_zh: '安全 \u2066隔离\u2069 \u061C文本',
+        }),
+      );
+      const body = c.calls.find((call) => call[0] === 'comment')[2];
+      expect(body).not.toMatch(
+        /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/,
+      );
+      expect(body).toContain('safe reversed text');
+      expect(body).toContain('安全 隔离 文本');
+      for (const ch of bidiControls) {
+        const cc = client();
+        await actOnDecision(
+          cc,
+          target(),
+          decision({
+            action,
+            confidence,
+            reason_en: `a${ch}b`,
+            reason_zh: `a${ch}b`,
+          }),
+        );
+        const single = cc.calls.find((call) => call[0] === 'comment')[2];
+        expect(single).not.toContain(ch);
+        expect(single).toContain('ab');
+      }
+    }
+  });
+
+  it('collapses newlines so a reason cannot open a block-level fence', async () => {
+    // A line-start fence in a reason swallows the folded Chinese block and
+    // renders the tracking marker as visible code; keep reasons single-line.
+    for (const action of ['rerun', 'comment', 'no_action']) {
+      const c = client();
+      await actOnDecision(
+        c,
+        target(),
+        decision({
+          action,
+          confidence: action === 'no_action' ? 'low' : 'high',
+          reason_en: 'npm error:\n```\nnpm error code ETIMEDOUT',
+          reason_zh: 'npm 错误：\n```\nnpm error code ETIMEDOUT',
+        }),
+      );
+      const body = c.calls.find((call) => call[0] === 'comment')[2];
+      expect(body).not.toMatch(/^```/m);
+      expect(body).toContain('npm error: ``` npm error code ETIMEDOUT');
+      expect(body.split('</details>').length - 1).toBe(1);
+      const posted = {
+        body,
+        createdAt: '2026-07-12T07:25:00.000Z',
+        author: { login: 'patrol-bot' },
+      };
+      expect(alreadyHandled([posted], target(), 'patrol-bot')).toBe(true);
+    }
   });
 
   it('stops after three actions on the same head', async () => {

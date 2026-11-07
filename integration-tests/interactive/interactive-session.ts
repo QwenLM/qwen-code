@@ -86,6 +86,8 @@ export interface InteractiveSessionOptions {
   command?: { bin: string; args: string[] };
   /** Replace inherited environment for deterministic, credential-free fixtures. */
   inheritEnv?: boolean;
+  /** Preserve raw startup evidence when no session can be returned. */
+  onStartupFailure?: (output: string) => void;
 }
 
 export class InteractiveSession {
@@ -212,9 +214,13 @@ export class InteractiveSession {
       // start() must not orphan the child, pty, and terminal it refuses to
       // hand out.
       try {
-        await session.close();
+        try {
+          options?.onStartupFailure?.(session.output());
+        } finally {
+          await session.close();
+        }
       } catch {
-        // Cleanup must not mask the startup failure.
+        // Evidence capture and cleanup must not mask the startup failure.
       }
       throw err;
     }
