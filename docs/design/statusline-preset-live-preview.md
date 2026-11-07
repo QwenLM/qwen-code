@@ -62,8 +62,14 @@ Do not save intermediate selections or change custom-command output semantics.
 A draft must override a command or disabled status line while open, then restore
 that configuration on cancellation. Keep saved overrides distinct from drafts
 so stale saved overrides cannot override a command or `null` settings value.
-Preserve existing search and compact-picker behavior. No new persisted settings,
+Keep search in compact pickers with at least seven available rows: three search
+rows and at least four option rows. Smaller pickers use all rows for options;
+full chrome still requires sixteen rows. No new persisted settings,
 configuration migration, unlimited status-line height or unrelated layout work.
+
+OpenTUI starts with a seven-row composer/footer reservation, then measures the
+controls below the picker. Wrapped drafts and additional footer rows reduce the
+picker height; shrinking the draft restores the available picker rows.
 
 ## Validation and acceptance criteria
 

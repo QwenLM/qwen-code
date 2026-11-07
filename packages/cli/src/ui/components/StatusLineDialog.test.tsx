@@ -156,6 +156,23 @@ describe('StatusLineDialog', () => {
     expect(onPreviewChange).toHaveBeenLastCalledWith(undefined);
   });
 
+  it('keeps compact-picker search usable within twelve rows', async () => {
+    const { lastFrame, stdin, unmount } = renderDialog(
+      {
+        availableTerminalHeight: 12,
+      },
+      80,
+    );
+    act(() => stdin.write('context'));
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('Type to search');
+      expect(lastFrame()).toContain('context-remaining');
+      expect(lastFrame()).not.toContain('model-only');
+    });
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(12);
+    unmount();
+  });
+
   it('persists selected presets on enter', async () => {
     const settings = createSettings();
     const addItem = vi.fn();
@@ -436,7 +453,7 @@ describe('StatusLineDialog', () => {
     expect(lastFrame()).toContain('session-id');
     expect(lastFrame()).not.toContain('project-name');
 
-    rerender(renderAt(12));
+    rerender(renderAt(6));
     expect(lastFrame()).not.toContain('Type to search');
     expect(lastFrame()).toContain('project-name');
 
@@ -447,7 +464,7 @@ describe('StatusLineDialog', () => {
   });
 
   it('closes on escape in the compact layout', async () => {
-    // Below the full-layout threshold, query input and backspace are gated
+    // Below the search-layout threshold, query input and backspace are gated
     // off and MultiSelect has no escape handling of its own — the
     // fall-through to onClose() is the dialog's only dismissal path.
     const onClose = vi.fn();

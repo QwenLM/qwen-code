@@ -21,6 +21,7 @@ import {
   getEffectiveStatusLineScope,
   STATUS_LINE_OPTIONS,
   STATUS_LINE_DIALOG_FIXED_ROWS,
+  STATUS_LINE_DIALOG_SEARCH_ROWS,
   STATUS_LINE_DIALOG_MIN_ITEMS,
 } from '../status-line-model.js';
 
@@ -52,17 +53,20 @@ export function StatusLineDialog({
   const hasFullLayout =
     terminalHeight >=
     STATUS_LINE_DIALOG_FIXED_ROWS + STATUS_LINE_DIALOG_MIN_ITEMS;
+  const hasSearch =
+    terminalHeight >=
+    STATUS_LINE_DIALOG_SEARCH_ROWS + STATUS_LINE_DIALOG_MIN_ITEMS;
 
   const filteredOptions = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    if (!hasFullLayout || !normalizedQuery) {
+    if (!hasSearch || !normalizedQuery) {
       return STATUS_LINE_OPTIONS;
     }
     return STATUS_LINE_OPTIONS.filter(
       ({ key, label, separator }) =>
         !separator && `${label} ${key}`.toLowerCase().includes(normalizedQuery),
     );
-  }, [hasFullLayout, query]);
+  }, [hasSearch, query]);
 
   const presetConfig = useMemo(
     () => buildConfigFromKeys(selectedKeys, settings),
@@ -95,7 +99,7 @@ export function StatusLineDialog({
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
-        if (hasFullLayout && query) {
+        if (hasSearch && query) {
           setQuery('');
           return;
         }
@@ -103,10 +107,7 @@ export function StatusLineDialog({
         return;
       }
 
-      if (
-        hasFullLayout &&
-        (key.name === 'backspace' || key.name === 'delete')
-      ) {
+      if (hasSearch && (key.name === 'backspace' || key.name === 'delete')) {
         setQuery((current) => current.slice(0, -1));
         return;
       }
@@ -122,7 +123,7 @@ export function StatusLineDialog({
       }
 
       if (
-        hasFullLayout &&
+        hasSearch &&
         !key.ctrl &&
         !key.meta &&
         key.sequence.length === 1 &&
@@ -141,7 +142,7 @@ export function StatusLineDialog({
       10,
       hasFullLayout
         ? terminalHeight - STATUS_LINE_DIALOG_FIXED_ROWS
-        : terminalHeight,
+        : terminalHeight - (hasSearch ? STATUS_LINE_DIALOG_SEARCH_ROWS : 0),
     ),
   );
 
@@ -162,14 +163,16 @@ export function StatusLineDialog({
           <Text color={theme.text.secondary} wrap="truncate">
             Select which items to display in the status line.
           </Text>
-
-          <Box marginTop={1} flexDirection="column">
-            <Text color={theme.text.secondary} wrap="truncate">
-              Type to search
-            </Text>
-            <Text wrap="truncate">{query ? `> ${query}` : '>'}</Text>
-          </Box>
         </>
+      )}
+
+      {hasSearch && (
+        <Box marginTop={1} flexDirection="column">
+          <Text color={theme.text.secondary} wrap="truncate">
+            Type to search
+          </Text>
+          <Text wrap="truncate">{query ? `> ${query}` : '>'}</Text>
+        </Box>
       )}
 
       <Box marginTop={hasFullLayout ? 1 : 0} flexDirection="column">

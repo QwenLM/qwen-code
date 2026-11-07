@@ -60,7 +60,7 @@ import { useWorktreeSession } from '../hooks/useWorktreeSession.js';
 import { useGitBranchName } from '../hooks/useGitBranchName.js';
 import { useStatusLineState } from '../hooks/useStatusLine.js';
 import type { StatusLinePresetConfig } from '../statusLinePresets.js';
-import { STATUS_LINE_COMPOSER_ROWS } from '../status-line-model.js';
+import { useStatusLinePreviewHeight } from './use-status-line-preview-height.js';
 import { useSubscriptionCommandVisibility } from '../hooks/use-subscription-command-visibility.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 import {
@@ -668,22 +668,28 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     addInfoItem({ type: MessageType.INFO, text }),
   );
 
+  const confirmationReplacesComposer = Boolean(
+    activeModal ||
+      activeToolCall ||
+      (mcpApproval.isMcpApprovalDialogOpen && mcpApproval.currentMcpApproval) ||
+      (hooksApproval.isProjectHooksApprovalDialogOpen &&
+        hooksApproval.pendingProjectHooks),
+  );
+  const confirmationReplacesComposerRef = useRef(confirmationReplacesComposer);
+  useEffect(() => {
+    confirmationReplacesComposerRef.current = confirmationReplacesComposer;
+  }, [confirmationReplacesComposer]);
   const showStatusLinePreview =
-    isStatusLineDialogOpen &&
-    !activeModal &&
-    !activeToolCall &&
-    !(mcpApproval.isMcpApprovalDialogOpen && mcpApproval.currentMcpApproval) &&
-    !(
-      hooksApproval.isProjectHooksApprovalDialogOpen &&
-      hooksApproval.pendingProjectHooks
-    );
+    isStatusLineDialogOpen && !confirmationReplacesComposer;
+  const statusLinePreviewHeight = useStatusLinePreviewHeight(
+    showStatusLinePreview,
+  );
   // Match Ink's bounded dialog region. Status-line preview keeps the composer
   // mounted and reserves its rows; other dialogs replace it. Unlike Ink's
   // show-more-lines mode, OpenTUI always constrains this region.
   const dialogRegionHeight = getDialogMaxHeight(
     terminalHeight,
-    STATIC_EXTRA_HEIGHT +
-      (showStatusLinePreview ? STATUS_LINE_COMPOSER_ROWS : 0),
+    STATIC_EXTRA_HEIGHT + statusLinePreviewHeight.reservedRows,
   );
 
   const shellControl = props.foregroundShellControl;
@@ -1186,8 +1192,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               return true;
             }
           }
-          // Read before the render that mounts the dialog, so a drain that
-          // opened it sees the composer is about to unmount.
+          // The drain must see the new dialog before its next render.
           dialogRef.current = outcome.request;
           setDialog(outcome.request);
           return true;
@@ -1531,7 +1536,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           returnToComposer(
             props.composerHandle,
             restoreInputSubmissions(refused),
-            { unmounting: dialogRef.current !== null },
+            {
+              unmounting:
+                confirmationReplacesComposerRef.current ||
+                (dialogRef.current !== null &&
+                  dialogRef.current.dialog !== 'statusline'),
+            },
           );
         drainingRef.current = false;
         // Entries that arrived mid-drain strand unless the completion re-arms
@@ -1638,9 +1648,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           ref={(el) => {
             controlsRef.current = el as BoxRenderable | null;
           }}
-          onSizeChange={() =>
-            setControlsHeight(controlsRef.current?.height ?? 0)
-          }
+          onSizeChange={() => {
+            const height = controlsRef.current?.height ?? 0;
+            setControlsHeight(height);
+            statusLinePreviewHeight.measure(height, dialogRegionHeight);
+          }}
         >
           {mcpApproval.isMcpApprovalDialogOpen &&
           mcpApproval.currentMcpApproval ? (
@@ -1726,7 +1738,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                     config={config}
                     settings={settings}
                     commands={presentedCommands}
-                    onClose={() => setDialog(null)}
+                    onClose={() => {
+                      if (dialog.dialog === 'auth') {
+                        setCurrentModel(config.getModel());
+                      }
+                      setDialog(null);
+                    }}
                     notify={notify}
                     fillInput={fillComposer}
                     onSelectSetting={handleSelectSetting}

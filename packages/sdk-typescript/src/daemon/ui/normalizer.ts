@@ -38,6 +38,7 @@ import {
   stringifyJson,
   stringifyRedactedJson,
 } from './utils.js';
+import { extractToolLifecycle } from './tool-lifecycle.js';
 
 /**
  * Common base fields stamped on every normalized UI event. Centralized as a
@@ -1087,10 +1088,10 @@ function normalizeSessionUpdate(
     }
     case 'tool_call':
     case 'tool_call_update': {
-      // Silent-shell liveness heartbeat: a meta-only in_progress frame with
-      // no kind/title/content. Normalizing it would overwrite the tool
-      // block's human-readable title with the bare tool name from _meta;
-      // the web UI has its own activity indicator, so drop the frame.
+      // A metadata-only lifecycle frame (no status/kind/title/content) is
+      // forwarded as a name-only event: it may name an existing block by
+      // `toolCallId` and must never create one. The name is deliberately not
+      // folded into the block's human-readable `title`.
       const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
       if (
         meta &&
@@ -1099,8 +1100,24 @@ function normalizeSessionUpdate(
         update['content'] === undefined &&
         update['title'] === undefined &&
         update['kind'] === undefined
-      )
-        return [];
+      ) {
+        // Lifecycle frames are the only name carrier for a subagent's tool
+        // call, so forward the name alone: the reducer names an existing
+        // block by `toolCallId` and never creates a card from it.
+        const lifecycle = extractToolLifecycle(update);
+        const lifecycleCallId =
+          getString(update, 'toolCallId') ?? lifecycle?.callId;
+        if (!lifecycle?.toolName || !lifecycleCallId) return [];
+        return [
+          {
+            ...base,
+            type: 'tool.update' as const,
+            toolCallId: lifecycleCallId,
+            toolName: lifecycle.toolName,
+            nameOnly: true,
+          },
+        ];
+      }
       if (
         getString(update, 'status') === 'in_progress' &&
         getString(update, 'kind') === undefined &&
@@ -1278,7 +1295,14 @@ function normalizeToolUpdate(
     getString(update, 'toolName') ??
     getString(update, 'name') ??
     (metadata ? getString(metadata, 'toolName') : undefined) ??
-    (metadata ? getString(metadata, 'name') : undefined);
+    (metadata ? getString(metadata, 'name') : undefined) ??
+    // Lifecycle frames name the tool only under `_meta.toolLifecycle` (see
+    // transcript-replay's `createTranscriptToolLifecycleUpdate`), so a
+    // subagent tool call whose surviving frame carries no explicit title or
+    // toolName would otherwise project as the generic "Tool". Explicit names
+    // above still win. Read it through the same validator as the metadata-only
+    // arm so one payload gets one trust decision. #16301
+    extractToolLifecycle(update)?.toolName;
   const toolKind = getString(update, 'kind');
   const explicitTitle = getString(update, 'title');
   const title =

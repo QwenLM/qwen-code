@@ -171,8 +171,32 @@ describe('DefaultAppLayout', () => {
       unmount();
     },
   );
+  it.each([
+    [true, 12],
+    [false, 19],
+  ] as const)(
+    'reserves composer rows only for the picker (picker=%s)',
+    (isStatusLineDialogOpen, lastRow) => {
+      dialogManagerMockState.lineCount = 20;
+      const { lastFrame, unmount } = renderLayout({
+        ...baseUIState,
+        terminalHeight: 24,
+        staticExtraHeight: 3,
+        constrainHeight: true,
+        dialogsVisible: true,
+        isStatusLineDialogOpen,
+      });
+      expect(lastFrame()).toContain(`DialogManager ${lastRow}`);
+      expect(lastFrame()).not.toContain(`DialogManager ${lastRow + 1}`);
+      unmount();
+    },
+  );
   beforeEach(() => {
     dialogManagerMockState.lineCount = 1;
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
   });
 
   it('renders sticky todo list before the composer in the main view', () => {

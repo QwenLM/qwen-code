@@ -3522,6 +3522,99 @@ describe('OpenTuiApp shell wiring', () => {
     );
   });
 
+  it('restores refused queued input while the status-line composer stays mounted', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.handleResults.push(
+      { kind: 'refused' },
+      { kind: 'open_dialog', request: { dialog: 'statusline' } },
+    );
+    const restoreSubmission = vi.fn();
+    const composerHandle: OpenTuiComposerSlot = {
+      current: { getText: () => '', setText: vi.fn(), restoreSubmission },
+    };
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      composerHandle,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('?compress now');
+    await submit('/statusline');
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(screen.getByText('dialog:statusline')).toBeTruthy(),
+    );
+    expect(mocks.state.handledTexts).toEqual(['?compress now', '/statusline']);
+    expect(screen.getByText('input-prompt')).toBeTruthy();
+    expect(restoreSubmission).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ text: '?compress now' }),
+    );
+    expect(composerHandle.returned).toBeUndefined();
+  });
+
+  it('parks refused input when approval replaces the status-line composer during a drain', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.holdHandleOn = '/statusline';
+    mocks.state.handleResults.push(
+      { kind: 'refused' },
+      { kind: 'open_dialog', request: { dialog: 'statusline' } },
+    );
+    const restoreSubmission = vi.fn();
+    const composerHandle: OpenTuiComposerSlot = {
+      current: { getText: () => '', setText: vi.fn(), restoreSubmission },
+    };
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      composerHandle,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    await submit('?compress now');
+    await submit('/statusline');
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(mocks.state.releaseHandle).not.toBeNull());
+    await act(async () => {
+      mocks.state.mcpQueue.push({ name: 'acceptance-server' });
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    expect(screen.getByText('mcp-approval')).toBeTruthy();
+    expect(screen.queryByText('input-prompt')).toBeNull();
+    await act(async () => {
+      mocks.state.releaseHandle?.();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(mocks.state.handledTexts).toEqual([
+        '?compress now',
+        '/statusline',
+      ]),
+    );
+    expect(screen.getByText('mcp-approval')).toBeTruthy();
+    expect(screen.queryByText('input-prompt')).toBeNull();
+    expect(restoreSubmission).not.toHaveBeenCalled();
+    expect(composerHandle.returned).toEqual(
+      expect.objectContaining({ text: '?compress now' }),
+    );
+  });
+
   it('keeps ?-form input the Mods refused at once in the composer', async () => {
     mocks.state.handleResults.push({ kind: 'refused' });
     renderApp({ streaming: false });

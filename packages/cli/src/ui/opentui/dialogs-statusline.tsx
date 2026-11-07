@@ -17,6 +17,7 @@ import {
   getEffectiveStatusLineScope,
   STATUS_LINE_OPTIONS,
   STATUS_LINE_DIALOG_FIXED_ROWS,
+  STATUS_LINE_DIALOG_SEARCH_ROWS,
   STATUS_LINE_DIALOG_MIN_ITEMS,
 } from '../status-line-model.js';
 import type { StatusLinePresetConfig } from '../statusLinePresets.js';
@@ -51,6 +52,9 @@ export function OpenTuiStatusLineDialog({
   const full =
     availableTerminalHeight >=
     STATUS_LINE_DIALOG_FIXED_ROWS + STATUS_LINE_DIALOG_MIN_ITEMS;
+  const hasSearch =
+    availableTerminalHeight >=
+    STATUS_LINE_DIALOG_SEARCH_ROWS + STATUS_LINE_DIALOG_MIN_ITEMS;
   const budget = Math.max(
     0,
     full ? dialogContentWidth(width) : dialogAreaWidth(width) - 2,
@@ -62,14 +66,14 @@ export function OpenTuiStatusLineDialog({
   const selectedRef = useRef(selected);
   const items = useMemo(() => {
     const search = query.trim().toLowerCase();
-    return !full || !search
+    return !hasSearch || !search
       ? STATUS_LINE_OPTIONS
       : STATUS_LINE_OPTIONS.filter(
           (item) =>
             !item.separator &&
             `${item.label} ${item.key}`.toLowerCase().includes(search),
         );
-  }, [query, full]);
+  }, [query, hasSearch]);
   const preset = useMemo(
     () => buildConfigFromKeys(selected, settings),
     [selected, settings],
@@ -84,7 +88,8 @@ export function OpenTuiStatusLineDialog({
       10,
       full
         ? availableTerminalHeight - STATUS_LINE_DIALOG_FIXED_ROWS
-        : availableTerminalHeight,
+        : availableTerminalHeight -
+            (hasSearch ? STATUS_LINE_DIALOG_SEARCH_ROWS : 0),
     ),
   );
   const save = () => {
@@ -122,14 +127,17 @@ export function OpenTuiStatusLineDialog({
   useKeyboard((event) => {
     const key = toOriginalKey(event);
     if (key.name === 'escape') {
-      if (full && query) setQuery('');
+      if (hasSearch && query) setQuery('');
       else onClose();
     } else if (key.name === 'space' || key.sequence === ' ') {
       toggle(list.activeIndexRef.current);
-    } else if (full && (key.name === 'backspace' || key.name === 'delete')) {
+    } else if (
+      hasSearch &&
+      (key.name === 'backspace' || key.name === 'delete')
+    ) {
       setQuery((value) => value.slice(0, -1));
     } else if (
-      full &&
+      hasSearch &&
       !['j', 'k', 'up', 'down', 'return'].includes(key.name) &&
       !key.ctrl &&
       !key.meta &&
@@ -153,11 +161,13 @@ export function OpenTuiStatusLineDialog({
               budget,
             )}
           </text>
-          <box marginTop={1} flexDirection="column">
-            <text fg={C.dim}>{truncateToWidth('Type to search', budget)}</text>
-            <text>{truncateToWidth(query ? `> ${query}` : '>', budget)}</text>
-          </box>
         </>
+      )}
+      {hasSearch && (
+        <box marginTop={1} flexDirection="column">
+          <text fg={C.dim}>{truncateToWidth('Type to search', budget)}</text>
+          <text>{truncateToWidth(query ? `> ${query}` : '>', budget)}</text>
+        </box>
       )}
       <box marginTop={full ? 1 : 0} flexDirection="column">
         {items.length ? (
