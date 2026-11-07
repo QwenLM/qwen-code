@@ -428,12 +428,27 @@ export function eligibleAttemptJob(job, target, runAttempt, options = {}) {
 }
 
 function safeReason(reason) {
-  return reason
-    .trim()
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('@', '@\u200b');
+  return (
+    reason
+      .trim()
+      // A newline lets a reason open a block-level Markdown construct: a
+      // line-start fence swallows the folded Chinese block and renders the
+      // tracking marker as visible code. Keep the reason a single line.
+      .replace(/\s*\n\s*/g, ' ')
+      // Bidi overrides can visually rewrite a notice maintainers trust when
+      // deciding whether to update a branch; the reason is classifier output
+      // derived from untrusted logs, so drop them like the markup below.
+      // The class is the full Unicode Bidi_Control set.
+      .replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('@', '@\u200b')
+  );
+}
+
+function bilingualComment(en, zh, marker) {
+  return `${en}\n\n<details>\n<summary>中文说明</summary>\n\n${zh}\n\n</details>\n\n${marker}`;
 }
 
 export async function actOnDecision(client, target, decision) {
@@ -474,7 +489,17 @@ export async function actOnDecision(client, target, decision) {
   const marker = markerFor(target, decision.action, count);
   if (decision.action === 'rerun') {
     await client.rerunFailedJobs(target.runId);
-    await client.comment(target.prNumber, marker);
+    // The notice must be visible: a marker-only comment left maintainers
+    // unable to tell a patrolled flake from a deterministic failure, so they
+    // clicked Update Branch — advancing the head and dismissing approvals.
+    await client.comment(
+      target.prNumber,
+      bilingualComment(
+        `CI Failure Patrol: this failure looks transient, not a PR regression: ${safeReason(decision.reason_en)}\n\nFailed jobs were re-run on the same commit. No Update Branch is needed — if the rerun passes, the failure was a flake.`,
+        `CI 失败巡逻：此失败疑似瞬时问题，而非 PR 引入的回归：${safeReason(decision.reason_zh)}\n\n已在同一 commit 上重跑失败的 job，无需 Update Branch；重跑通过即为 flake。`,
+        marker,
+      ),
+    );
     // A flaky TEST (not infra) also gets a deflake issue so the autofix loop
     // can stabilize it. Best-effort: the rerun + marker already succeeded, so a
     // transient issue-creation failure must not propagate (it would surface as
@@ -490,10 +515,21 @@ export async function actOnDecision(client, target, decision) {
   } else if (decision.action === 'comment') {
     await client.comment(
       target.prNumber,
-      `CI is failing because: ${safeReason(decision.reason_en)}\n\n<details>\n<summary>中文说明</summary>\n\n${safeReason(decision.reason_zh)}\n\n</details>\n\n${marker}`,
+      bilingualComment(
+        `CI is failing because: ${safeReason(decision.reason_en)}`,
+        safeReason(decision.reason_zh),
+        marker,
+      ),
     );
   } else {
-    await client.comment(target.prNumber, marker);
+    await client.comment(
+      target.prNumber,
+      bilingualComment(
+        `CI Failure Patrol: this failure could not be confidently classified: ${safeReason(decision.reason_en)}\n\nNo automatic action was taken. Inspect the failed job before rerunning or updating the branch.`,
+        `CI 失败巡逻：无法确信归类此失败：${safeReason(decision.reason_zh)}\n\n未采取自动动作。请先人工查看失败 job，再决定重跑或更新分支。`,
+        marker,
+      ),
+    );
   }
 }
 

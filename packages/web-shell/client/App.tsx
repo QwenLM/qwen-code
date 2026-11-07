@@ -126,6 +126,10 @@ import {
   type SplitSessionOutcome,
 } from './utils/standalone-session-routing';
 import { setBoundedMapEntry } from './utils/bounded-map';
+import {
+  buildWaitingActivity,
+  buildWaitingTokenUsage,
+} from './utils/waitingActivity';
 import { type SessionGitIntent } from './components/GitModePopover';
 import { gitModeIntentMustReset } from './utils/gitModeIntent';
 import { LocalControlQrButton } from './components/LocalControlQrButton';
@@ -208,9 +212,15 @@ import type { AttachmentPreviewRequest } from './adapters/messageTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { GoalStatusStrip } from './components/GoalStatusStrip';
 import { SessionRecoveryBanner } from './components/SessionRecoveryBanner';
+import { SessionLimitBanner } from './components/SessionLimitBanner';
 import composerStatusStyles from './components/ComposerStatusStack.module.css';
 import { GoalEditDialog } from './components/dialogs/GoalEditDialog';
 import { StreamingStatus } from './components/StreamingStatus';
+import {
+  WaitingMinigame,
+  WaitingMinigameButton,
+} from './components/WaitingMinigame';
+import { readWaitingGamesEnabled } from './utils/waitingGamesConfig';
 import {
   ToastHost,
   TOAST_REQUEST_EVENT,
@@ -369,7 +379,10 @@ import {
 } from './settings';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { WorkspaceDirectoriesSection } from './components/workspaces/WorkspaceDirectoriesSection';
-import { isAskUserPermission } from './utils/askUserPermission';
+import {
+  formatAskUserQuestions,
+  isAskUserPermission,
+} from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
 import { AskUserQuestion } from './components/messages/AskUserQuestion';
 import { HelpDialog } from './components/dialogs/HelpDialog';
@@ -741,6 +754,7 @@ function availableSkillInfos(status: {
     name: string;
     description?: string;
     argumentHint?: string;
+    extensionName?: string;
   }>;
 }): SkillInfo[] {
   return (status.skills ?? [])
@@ -749,6 +763,7 @@ function availableSkillInfos(status: {
       name: skill.name,
       description: skill.description ?? '',
       ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
+      ...(skill.extensionName ? { extensionName: skill.extensionName } : {}),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -1965,6 +1980,8 @@ const SIDEBAR_COLLAPSED_STORAGE_KEY = 'qwen-code-web-shell-sidebar-collapsed';
 const ENVIRONMENT_PANEL_OPEN_STORAGE_KEY =
   'qwen-code-web-shell-environment-panel-open';
 const RIGHT_PANEL_STATE_STORAGE_KEY = 'qwen-code-web-shell-right-panel-state';
+const DETAILS_CHILDREN_STORAGE_KEY = 'qwen-code-web-shell-details-children';
+const DETAILS_TAB_ID_PREFIX = 'side-task:details:';
 
 function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   enabled: boolean;
@@ -2078,6 +2095,67 @@ function writeStoredBooleanMap(
   } catch (error) {
     console.warn(
       '[web-shell] failed to persist environment panel state:',
+      error,
+    );
+  }
+}
+
+// Pending AskUser request -> details side-task child, per parent session.
+// Survives closing the details tab (and reloads) so "Ask for details" reopens
+// the existing child instead of provisioning a duplicate. One entry per
+// parent: a session has at most one pending question, so a newer details
+// task supersedes the resolved question's association.
+type StoredDetailsChildren = Record<string, Record<string, string>>;
+
+function readStoredDetailsChildren(key: string): StoredDetailsChildren {
+  if (typeof window === 'undefined') return {};
+  try {
+    const stored = window.localStorage.getItem(key);
+    if (!stored) return {};
+    const parsed = JSON.parse(stored) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    const storedStates = { ...(parsed as Record<string, unknown>) };
+    if (storedStates['v'] !== undefined && storedStates['v'] !== 1) return {};
+    delete storedStates['v'];
+    const result: StoredDetailsChildren = {};
+    for (const [sessionKey, value] of Object.entries(storedStates).slice(
+      -MAX_ARTIFACT_PANEL_SESSION_STATES,
+    )) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        continue;
+      }
+      const entries: Record<string, string> = {};
+      for (const [requestId, childId] of Object.entries(
+        value as Record<string, unknown>,
+      )) {
+        if (typeof childId === 'string' && childId)
+          entries[requestId] = childId;
+      }
+      if (Object.keys(entries).length > 0) result[sessionKey] = entries;
+    }
+    return result;
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+  return {};
+}
+
+function writeStoredDetailsChildren(
+  key: string,
+  value: StoredDetailsChildren,
+): void {
+  try {
+    while (Object.keys(value).length > MAX_ARTIFACT_PANEL_SESSION_STATES) {
+      const oldestSessionKey = Object.keys(value)[0];
+      if (!oldestSessionKey) break;
+      delete value[oldestSessionKey];
+    }
+    window.localStorage.setItem(key, JSON.stringify({ v: 1, ...value }));
+  } catch (error) {
+    console.warn(
+      '[web-shell] failed to persist details side-task associations:',
       error,
     );
   }
@@ -4867,6 +4945,25 @@ export function App({
   }, []);
 
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
+  const waitingMinigameActivity = useMemo(
+    () => buildWaitingActivity(messages),
+    [messages],
+  );
+  const waitingMinigameTokens = useMemo(
+    () =>
+      buildWaitingTokenUsage(
+        messages,
+        connection.tokenUsage ?? {},
+        connection.tokenCount,
+        connection.contextWindow,
+      ),
+    [
+      messages,
+      connection.tokenUsage,
+      connection.tokenCount,
+      connection.contextWindow,
+    ],
+  );
   const messagesRef = useRef(messages);
   const [failedPrompt, setFailedPrompt] = useState<FailedPrompt | null>(null);
   const failedPromptRef = useRef<FailedPrompt | null>(failedPrompt);
@@ -5210,6 +5307,13 @@ export function App({
   const artifactPanelPersistedStatesRef = useRef(
     initialArtifactPanelPersistedStates,
   );
+  const [initialDetailsChildren] = useState(() =>
+    readStoredDetailsChildren(DETAILS_CHILDREN_STORAGE_KEY),
+  );
+  const detailsChildrenRef = useRef(initialDetailsChildren);
+  // Details creations that are still in flight, keyed by tab id: the parent
+  // identity must survive the draft tab closing before creation resolves.
+  const detailsParentByTabRef = useRef(new Map<string, string>());
   const initialArtifactPanelOpen = Boolean(
     panelStateKey && initialArtifactPanelPersistedStates[panelStateKey]?.open,
   );
@@ -5684,22 +5788,87 @@ export function App({
           !archivedSideTaskCatalog.loaded)));
   const nextSideTaskTabIdRef = useRef(0);
   const createSideTask = useCallback(
-    (initialPrompt?: string) => {
+    (
+      initialPrompt?: string,
+      detailsRequestId?: string,
+      existingChildSessionId?: string,
+    ) => {
       const parentSessionId = connection.sessionId;
       if (!parentSessionId || !sideTasksAvailable) return false;
+      // This question already has a details child: focus whichever tab shows
+      // it (the details tab or a catalog reopen) instead of adding a second
+      // tab for the same session.
+      if (existingChildSessionId) {
+        const openTab = artifactPanelTabsRef.current.find(
+          (item): item is Extract<ArtifactPanelTab, { kind: 'side_task' }> =>
+            item.kind === 'side_task' &&
+            item.sessionId === existingChildSessionId,
+        );
+        if (openTab) {
+          // A catalog reopen carries no prompt. If the original details tab
+          // was closed before the pane admitted it, the child is still empty;
+          // supply the pending prompt so the pane's empty-session guard can
+          // deliver it (it never re-sends once the child has a user prompt).
+          const prompt = initialPrompt?.trim();
+          if (prompt && openTab.initialPrompt !== prompt) {
+            setArtifactPanelTabs((tabs) =>
+              tabs.map((tab) =>
+                tab.id === openTab.id ? { ...tab, initialPrompt: prompt } : tab,
+              ),
+            );
+          }
+          setActiveArtifactPanelTabId(openTab.id);
+          setArtifactPanelOpen(true);
+          return true;
+        }
+      }
+      // A details side task is one-per-pending-question: repeat clicks focus
+      // the existing tab instead of provisioning a duplicate child session.
+      // /btw side keeps the unique draft id — each invocation is a new task.
+      // The id must stay short: SideTaskPanel derives the pane's clientId as
+      // `side-task:<parentSessionId>:<tabId>` and the daemon rejects client
+      // ids over 128 chars. The request id alone is unique (uuid); tabs are
+      // already bucketed per parent session.
+      const id = detailsRequestId
+        ? `${DETAILS_TAB_ID_PREFIX}${detailsRequestId}`
+        : `side-task:draft:${Date.now()}:${++nextSideTaskTabIdRef.current}`;
       const tab: ArtifactPanelTab = {
-        id: `side-task:draft:${Date.now()}:${++nextSideTaskTabIdRef.current}`,
+        id,
         kind: 'side_task',
         title: t('sideTask.title'),
         parentSessionId,
         workspaceCwd: connection.workspaceCwd,
-        nameFromFirstPrompt: true,
-        ...(initialPrompt?.trim()
-          ? { initialPrompt: initialPrompt.trim() }
-          : {}),
+        // Reopening an existing child attaches to it directly. Keep the
+        // prompt on the reopened tab: creation resolves before the pane
+        // admits the prompt, so a tab closed in that window leaves an empty
+        // child. SideTaskPanel's empty-session guard sends the prompt only
+        // while the child has no user prompt yet, and never re-sends it.
+        ...(existingChildSessionId
+          ? {
+              sessionId: existingChildSessionId,
+              ...(initialPrompt?.trim()
+                ? { initialPrompt: initialPrompt.trim() }
+                : {}),
+            }
+          : {
+              nameFromFirstPrompt: true,
+              ...(initialPrompt?.trim()
+                ? { initialPrompt: initialPrompt.trim() }
+                : {}),
+            }),
       };
-      setArtifactPanelTabs((tabs) => [...tabs, tab]);
-      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelTabs((tabs) => {
+        if (!tabs.some((item) => item.id === id)) return [...tabs, tab];
+        // A same-id tab that reaches this point is bound to a different child
+        // than the one being reopened: the openTab lookup above already focused
+        // any tab showing existingChildSessionId, so a survivor carries a stale
+        // sessionId (an archived child the read-site check forgot, or a binding
+        // copied from another browser tab). Replace it so the pane attaches to
+        // the right child instead of re-focusing an unloadable pane. The id
+        // stays the same (clientId budget).
+        return tabs.map((item) => (item.id === id ? tab : item));
+      });
+      setActiveArtifactPanelTabId(id);
       setArtifactPanelOpen(true);
       return true;
     },
@@ -5766,6 +5935,11 @@ export function App({
     (tabId: string, parentSessionId: string, title: string) => {
       const pending = sideTaskCreationPromisesRef.current.get(tabId);
       if (pending) return pending;
+      if (tabId.startsWith(DETAILS_TAB_ID_PREFIX)) {
+        // Capture the parent identity now: the draft tab may close before
+        // creation resolves, and the association must still be recorded.
+        detailsParentByTabRef.current.set(tabId, parentSessionId);
+      }
       const creation = (async () => {
         const owner = sessionOwnerGuard.capture();
         const ownerCwd = connection.workspaceCwd;
@@ -5793,7 +5967,15 @@ export function App({
           sessionId: session.sessionId,
           displayName: session.displayName,
         };
-      })().finally(() => sideTaskCreationPromisesRef.current.delete(tabId));
+      })()
+        .catch((error: unknown) => {
+          // A failed creation never reaches handleSideTaskCreated, so release
+          // the captured parent identity here or it leaks until reload. The
+          // success path keeps it: handleSideTaskCreated reads then deletes it.
+          detailsParentByTabRef.current.delete(tabId);
+          throw error;
+        })
+        .finally(() => sideTaskCreationPromisesRef.current.delete(tabId));
       sideTaskCreationPromisesRef.current.set(tabId, creation);
       return creation;
     },
@@ -5863,6 +6045,33 @@ export function App({
             artifactPanelPersistedStatesRef.current,
           );
           break;
+        }
+      }
+      if (tabId.startsWith(DETAILS_TAB_ID_PREFIX)) {
+        // Remember which child explains this pending question so closing the
+        // tab (or reloading) cannot trick "Ask for details" into provisioning
+        // a duplicate. Record it even when the draft tab already closed:
+        // server-side creation is not cancelled by closing the tab. One entry
+        // per parent supersedes the resolved question's association.
+        const requestId = tabId.slice(DETAILS_TAB_ID_PREFIX.length);
+        const parentId =
+          (createdTab?.kind === 'side_task'
+            ? createdTab.parentSessionId
+            : undefined) ?? detailsParentByTabRef.current.get(tabId);
+        detailsParentByTabRef.current.delete(tabId);
+        if (requestId && parentId) {
+          // Re-insert the parent so a re-recorded entry moves to the newest
+          // key slot: the writer evicts the oldest key, and a plain spread
+          // would leave a live, frequently re-recorded parent first in line
+          // (see utils/bounded-map.ts).
+          const nextParents = { ...detailsChildrenRef.current };
+          delete nextParents[parentId];
+          nextParents[parentId] = { [requestId]: sessionId };
+          detailsChildrenRef.current = nextParents;
+          writeStoredDetailsChildren(
+            DETAILS_CHILDREN_STORAGE_KEY,
+            detailsChildrenRef.current,
+          );
         }
       }
       const sideTaskTab =
@@ -8386,6 +8595,8 @@ export function App({
       ? pendingApproval
       : null
     : null;
+  const pendingAskUserApprovalRef = useRef(pendingAskUserApproval);
+  pendingAskUserApprovalRef.current = pendingAskUserApproval;
   const pendingToolApproval =
     pendingApproval && !isAskUserPermission(pendingApproval)
       ? canActOnPendingApproval
@@ -8910,6 +9121,9 @@ export function App({
   );
   const statusBarRef = useRef<StatusBarHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
+  const locateWaitingActivity = useCallback((messageId: string) => {
+    messageListRef.current?.scrollToMessage(messageId);
+  }, []);
   const editorRef = useRef<EditorHandle | null>(null);
   const chatFocusBlockedRef = useRef(false);
   const focusChatAfterNavigation = useCallback(() => {
@@ -9022,6 +9236,14 @@ export function App({
       failedPromptRetryIsCurrent &&
       (!failedPromptRetry.admitted || failedPromptRetry.settled),
   );
+  const waitingMinigameVisible =
+    !suppressFailedPromptRetryStreaming &&
+    (streamingState !== 'idle' || sessionHasActivePrompt);
+  const waitingGamesEnabled = useMemo(() => readWaitingGamesEnabled(), []);
+  const [waitingMinigameOpen, setWaitingMinigameOpen] = useState(false);
+  useEffect(() => {
+    if (!waitingMinigameVisible) setWaitingMinigameOpen(false);
+  }, [waitingMinigameVisible]);
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
   streamingStateRef.current = streamingState;
   // Cleared in three places: the session-switch effect, the drain loop, and
@@ -9054,6 +9276,12 @@ export function App({
   }
   previousStreamingStateRef.current = streamingState;
   const activeTurnStartedAt = useMemo(() => {
+    if (
+      connection.localPrompt &&
+      connection.localPrompt.sessionId === connection.sessionId
+    ) {
+      return connection.localPrompt.startedAt;
+    }
     if (connection.backgroundTurn) return connection.backgroundTurn.startedAt;
     if (streamingState === 'idle') return undefined;
     for (let i = displayMessages.length - 1; i >= 0; i--) {
@@ -9063,7 +9291,13 @@ export function App({
       }
     }
     return localStreamingStartedAtRef.current;
-  }, [displayMessages, streamingState, connection.backgroundTurn]);
+  }, [
+    displayMessages,
+    streamingState,
+    connection.backgroundTurn,
+    connection.localPrompt,
+    connection.sessionId,
+  ]);
   const lastSubmittedPromptRef = useRef<string>('');
   const lastSubmittedImagesRef = useRef<PromptImage[] | undefined>(undefined);
   const lastSubmittedFilesRef = useRef<PromptFile[] | undefined>(undefined);
@@ -9806,6 +10040,10 @@ export function App({
   const [showResumeDialog, setShowResumeDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showReleaseDialog, setShowReleaseDialog] = useState(false);
+  const [sessionLimitReached, setSessionLimitReached] = useState(false);
+  const sessionLimitScopeRef = useRef<
+    { sessionId?: string; workspaceCwd?: string } | undefined
+  >(undefined);
   const [showRewindDialog, setShowRewindDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
@@ -12185,6 +12423,30 @@ export function App({
     },
     [pushToast, t],
   );
+  // Drop any details association pointing at one of these children. Shared by
+  // the panel archive path and the read-site check so every route that retires
+  // a child forgets it the same way; an archived child's load 409s
+  // (session_archived), so a surviving binding would trap later clicks.
+  const forgetDetailsChildren = useCallback((childIds: ReadonlySet<string>) => {
+    if (childIds.size === 0) return;
+    const next: StoredDetailsChildren = {};
+    let changed = false;
+    for (const [parentKey, entries] of Object.entries(
+      detailsChildrenRef.current,
+    )) {
+      const kept = Object.fromEntries(
+        Object.entries(entries).filter(([, childId]) => !childIds.has(childId)),
+      );
+      if (Object.keys(kept).length !== Object.keys(entries).length) {
+        changed = true;
+      }
+      if (Object.keys(kept).length > 0) next[parentKey] = kept;
+    }
+    if (changed) {
+      detailsChildrenRef.current = next;
+      writeStoredDetailsChildren(DETAILS_CHILDREN_STORAGE_KEY, next);
+    }
+  }, []);
   const archiveSideTasks = useCallback(
     async (sideTasks: readonly SideTaskListItem[]) => {
       if (!sideTaskArchiveAvailable) return;
@@ -12247,6 +12509,11 @@ export function App({
             ),
           }));
           removeSideTaskTabs(archived);
+          // An archived child can no longer be attached (the daemon's load
+          // route 409s session_archived), so drop any details association
+          // pointing at it; the next click provisions a fresh child instead
+          // of reopening an unloadable one.
+          forgetDetailsChildren(archived);
           setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
         }
         const errorMessages = [
@@ -12275,6 +12542,7 @@ export function App({
       }
     },
     [
+      forgetDetailsChildren,
       reportError,
       removeSideTaskTabs,
       sideTaskArchiveAvailable,
@@ -13268,6 +13536,8 @@ export function App({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canQueryPendingPrompts:
+      connection.capabilities?.features.includes('session_prompt') === true,
     canInjectMidTurnMedia,
     workspaceFileActions: artifactWorkspaceActions,
     streamingState,
@@ -13581,6 +13851,12 @@ export function App({
         dismissNotice(notice.id);
         continue;
       }
+      if (
+        notice.code === 'session_limit_exceeded' &&
+        notice.operation === 'create_session'
+      ) {
+        setSessionLimitReached(true);
+      }
       if (shouldToastNotice(notice)) {
         pushToast(
           toastToneFromNotice(notice),
@@ -13606,6 +13882,22 @@ export function App({
     setBtwMessage(null);
     setTasksDialogMessage(null);
     lastRecapBlockCountRef.current = 0;
+  }, [connection.sessionId, connection.workspaceCwd]);
+
+  useEffect(() => {
+    const scope = {
+      sessionId: connection.sessionId,
+      workspaceCwd: connection.workspaceCwd,
+    };
+    const previous = sessionLimitScopeRef.current;
+    sessionLimitScopeRef.current = scope;
+    if (
+      previous !== undefined &&
+      (previous.sessionId !== scope.sessionId ||
+        previous.workspaceCwd !== scope.workspaceCwd)
+    ) {
+      setSessionLimitReached(false);
+    }
   }, [connection.sessionId, connection.workspaceCwd]);
 
   // A recap is one local annotation shared by both triggers: the latest request
@@ -15403,6 +15695,8 @@ export function App({
     autoRecapVersionRef.current += 1;
   }, [logicalSessionKey]);
   useEffect(() => {
+    // OpenAPI and Managed hosts may not expose the daemon's recap route.
+    if (!connection.capabilities?.features.includes('session_recap')) return;
     const AWAY_THRESHOLD_MS = 3 * 60 * 1000;
     const MIN_NEW_BLOCKS = 4;
     function onVisibilityChange() {
@@ -15473,6 +15767,7 @@ export function App({
     return () =>
       document.removeEventListener('visibilitychange', onVisibilityChange);
   }, [
+    connection.capabilities,
     connection.sessionId,
     sessionActions,
     sessionOwnerGuard,
@@ -19852,6 +20147,74 @@ export function App({
     [sessionActions],
   );
 
+  // The composer is hidden while a question is pending, so the panel itself
+  // offers the /btw-side escape hatch: a side task that explains the question
+  // without answering it or touching the main session.
+  const handleAskUserDetails = useCallback(async () => {
+    const request = pendingAskUserApproval;
+    const parentSessionId = connection.sessionId;
+    const workspaceCwd = connection.workspaceCwd;
+    if (!request || !parentSessionId) return;
+    // The association outlives the details tab (and reloads): a closed tab
+    // must reopen its existing child, not provision a second one.
+    const existingChild =
+      detailsChildrenRef.current[parentSessionId]?.[request.id];
+    const questions = formatAskUserQuestions(request.rawInput);
+    const prompt = t('askUser.detailsPrompt', { questions });
+    let childToReuse: string | undefined = existingChild;
+    if (existingChild && workspaceCwd) {
+      // A child can be archived from any surface (sidebar, overview, activity
+      // catalog) or another browser tab, none of which touch this binding.
+      // Confirm it is still active before attaching: an archived child's load
+      // 409s (session_archived), which would otherwise trap every later click.
+      // On a query failure fall back to the persisted binding (no worse than
+      // trusting it outright).
+      try {
+        const page = await loadSessionCatalogOnce(
+          workspace.client,
+          {
+            routeKind: 'legacy',
+            workspaceCwd,
+            options: {
+              pageSize: SESSION_LIST_PAGE_SIZE,
+              archiveState: 'active',
+              sourceType: WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
+              sourceId: parentSessionId,
+            },
+          },
+          { fresh: true },
+        );
+        if (
+          !page.sessions.some((session) => session.sessionId === existingChild)
+        ) {
+          forgetDetailsChildren(new Set([existingChild]));
+          childToReuse = undefined;
+        }
+      } catch {
+        // Keep the persisted binding when the check cannot run.
+      }
+    }
+    // The catalog query is async: the question may have been answered, ignored
+    // or cancelled, or the user may have switched sessions, during the
+    // round-trip. Re-check before opening a tab so we do not add a details tab
+    // for a resolved question or into another session's tab list.
+    if (
+      pendingAskUserApprovalRef.current?.id !== request.id ||
+      connectionRef.current.sessionId !== parentSessionId
+    ) {
+      return;
+    }
+    createSideTask(prompt, request.id, childToReuse);
+  }, [
+    pendingAskUserApproval,
+    connection.sessionId,
+    connection.workspaceCwd,
+    createSideTask,
+    forgetDetailsChildren,
+    t,
+    workspace.client,
+  ]);
+
   // Runs once the daemon has settled the cancelled turn, so the transcript
   // holds everything the turn produced.
   const takeBackCancelledPrompt = useCallback(
@@ -20453,6 +20816,7 @@ export function App({
     handleCancel,
     handleCycleMode,
     artifactPanelFullscreen,
+    waitingMinigameOpen,
   });
   escLiveRef.current = {
     streamingState,
@@ -20464,6 +20828,7 @@ export function App({
     handleCancel,
     handleCycleMode,
     artifactPanelFullscreen,
+    waitingMinigameOpen,
   };
 
   // Clear a half-armed two-press whenever the streaming/idle boundary flips — the
@@ -20555,6 +20920,11 @@ export function App({
         }
         return;
       }
+
+      // The open waiting minigame owns Escape: its own window listener
+      // collapses the board. Don't also arm the two-press stream cancel
+      // behind it, or a second Escape would stop the turn by surprise.
+      if (live.waitingMinigameOpen) return;
 
       // Streaming takes priority over clearing text (queued prompts stay intact
       // and drain after the turn settles); see decideEscapeIntent for the rules.
@@ -22647,6 +23017,7 @@ export function App({
               <ReleaseSessionDialog
                 workspaceCwd={lockedWorkspaceCwd}
                 onReleased={(sessionId) => {
+                  setSessionLimitReached(false);
                   store.dispatch([
                     {
                       type: 'status',
@@ -24737,6 +25108,11 @@ export function App({
                             variant="floating"
                             keyboardActive={askUserOverlayVisible}
                             customInputLabel={askUserFreeTextLabel}
+                            onAskDetails={
+                              sideTasksAvailable
+                                ? handleAskUserDetails
+                                : undefined
+                            }
                           />
                         </div>
                       )}
@@ -24897,6 +25273,16 @@ export function App({
                             </span>
                           </div>
                         )}
+                        {waitingMinigameVisible && (
+                          <WaitingMinigame
+                            open={waitingMinigameOpen}
+                            onClose={() => setWaitingMinigameOpen(false)}
+                            activity={waitingMinigameActivity}
+                            tokenUsage={waitingMinigameTokens}
+                            onSelectActivity={locateWaitingActivity}
+                            gamesEnabled={waitingGamesEnabled}
+                          />
+                        )}
                         {streamingState !== 'idle' ||
                         sessionHasActivePrompt ? (
                           suppressFailedPromptRetryStreaming ? null : (
@@ -24911,6 +25297,14 @@ export function App({
                               backgroundLabel={
                                 connection.backgroundTurn?.label ??
                                 connection.backgroundTurn?.kind
+                              }
+                              trailing={
+                                <WaitingMinigameButton
+                                  open={waitingMinigameOpen}
+                                  onToggle={() =>
+                                    setWaitingMinigameOpen((value) => !value)
+                                  }
+                                />
                               }
                             />
                           )
@@ -25069,6 +25463,12 @@ export function App({
                             unknownPromptAdmission?.payloadAvailable === true
                           }
                         />
+                        {sessionLimitReached && workspaceContextActive && (
+                          <SessionLimitBanner
+                            onRelease={() => setShowReleaseDialog(true)}
+                            onDismiss={() => setSessionLimitReached(false)}
+                          />
+                        )}
                         <ChatEditor
                           ref={setEditorHandle}
                           liveVoicePortalContainer={

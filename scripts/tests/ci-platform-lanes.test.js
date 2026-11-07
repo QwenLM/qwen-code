@@ -28,15 +28,18 @@
 
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
@@ -113,8 +116,7 @@ describe('complete macOS test groups', () => {
 // The extended ceilings below, except the test lane's, are scoped to the
 // self-hosted pool: `runs-on` falls back to ubuntu-latest when
 // MAINTAINER_ECS_RUNNER_DISABLED=true (and, for the association-gated lanes,
-// for fork PRs from untrusted authors — lint_and_static reads lint_runner,
-// which routes every PR to the pool), so those hosted paths keep the
+// for untrusted fork PRs with the disposable pool disabled), so hosted paths keep the
 // pre-contention ceiling. The ARM64 fleet renders
 // `["self-hosted", "linux", "arm64"]` — no `ecs-qwen` label — so the scope
 // cannot key on the x64 fleet's name. Evaluate the real timeout expression for
@@ -388,8 +390,11 @@ it('reports the required Linux check only when the build and every shard pass', 
   const gate = ci.jobs.test_ubuntu;
   expect(gate.name).toBe('Test (ubuntu-latest, Node 22.x)');
   expect(gate.needs).toEqual(['classify_pr', 'test_build', 'test']);
-  // On the shards' runners, not a hosted one that can queue it for minutes.
-  expect(gate['runs-on']).toBe(ci.jobs.test['runs-on']);
+  // The gate remains on the original association-gated runner, while test
+  // shards can opt into the disposable pool for untrusted forks.
+  expect(gate['runs-on']).toBe(
+    '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+  );
   expect(condOf('test_ubuntu')).toBe(condOf('test'));
   expect(gate.steps[0].run).toBe(
     'test "$BUILD_RESULT" = success && test "$SHARDS_RESULT" = success',
@@ -439,6 +444,66 @@ it('pins the build-to-shard artifact handoff on both ends', () => {
     `\${RUNNER_TEMP}/${name}/${name}.tgz`,
   );
 });
+
+it
+  .skipIf(process.platform === 'win32')
+  .each(['test', 'web_shell_e2e_smoke', 'integration_no_ak'])(
+  'refreshes host assets on older PR checkouts in %s',
+  (job) => {
+    const root = mkdtempSync(join(tmpdir(), 'ci-host-assets-'));
+    try {
+      mkdirSync(join(root, 'scripts'));
+      mkdirSync(join(root, 'dist', 'opentui-assets'), { recursive: true });
+      writeFileSync(join(root, 'package.json'), '{"type":"module"}');
+      writeFileSync(
+        join(root, 'scripts', 'ci-build-cache.mjs'),
+        'throw new Error("usage: ci-build-cache.mjs key | build <dir> | pack <dir> | paths");',
+      );
+      writeFileSync(
+        join(root, 'scripts', 'copy_bundle_assets.js'),
+        `import { copyFileSync } from 'node:fs';
+export function copyOpenTuiAssets() {
+  copyFileSync('host-native.so', 'dist/opentui-assets/native.so');
+}
+`,
+      );
+      writeFileSync(join(root, 'host-native.so'), 'consumer-host');
+      writeFileSync(join(root, 'dist', 'cli.js'), 'built-bundle');
+      writeFileSync(
+        join(root, 'dist', 'opentui-assets', 'native.so'),
+        'build-host',
+      );
+      const runnerTemp = join(root, 'runner-temp');
+      const artifact = join(runnerTemp, 'unit-test-tree');
+      mkdirSync(artifact, { recursive: true });
+      execFileSync(
+        'tar',
+        ['-czf', join(artifact, 'unit-test-tree.tgz'), 'dist'],
+        {
+          cwd: root,
+        },
+      );
+      rmSync(join(root, 'dist'), { recursive: true });
+
+      const unpack = ci.jobs[job].steps.find(
+        (step) => step.name === 'Unpack the built tree',
+      );
+      execFileSync('bash', ['-e', '-o', 'pipefail', '-c', unpack.run], {
+        cwd: root,
+        env: { ...process.env, RUNNER_TEMP: runnerTemp },
+      });
+
+      expect(readFileSync(join(root, 'dist', 'cli.js'), 'utf8')).toBe(
+        'built-bundle',
+      );
+      expect(
+        readFileSync(join(root, 'dist', 'opentui-assets', 'native.so'), 'utf8'),
+      ).toBe('consumer-host');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 it('keeps the no-AK gate above its dependency-install budget on ECS', () => {
   expect(timeoutMinutesOn('integration_no_ak', ECS_RUNNER)).toBe(60);
@@ -799,15 +864,11 @@ describe('post-merge push lane', () => {
     ).toContain('classify_pr');
   });
 
-  it('keeps test on the association-gated output', () => {
-    // Nothing else reads test's runs-on: switching it to lint_runner would
-    // hand every untrusted fork the pool while the timeout pins above stayed
-    // green — timeoutMinutesOn derives each lane's output from its own
-    // runs-on, so it cannot catch a lane pointed at the wrong output. Pin the
-    // expression, not an equality with lint_and_static — the two are meant
-    // to differ.
+  it('keeps test on the opt-in disposable output', () => {
+    // The classifier defaults this output to ubuntu_runner, but selects the
+    // disposable pool for untrusted forks only when explicitly enabled.
     expect(String(ci.jobs.test['runs-on'])).toBe(
-      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+      '${{ fromJSON(needs.classify_pr.outputs.pr_test_runner || \'["ubuntu-latest"]\') }}',
     );
   });
 
@@ -951,7 +1012,7 @@ describe('post-merge push lane', () => {
         body,
         `${job} must scope the reset to the shard-owned path`,
       ).toContain(
-        'if [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then',
+        'if [ -n "${RUNNER_TEMP:-}" ] && [ "${COREPACK_HOME:-}" = "${RUNNER_TEMP:-}/qwen-ci-corepack" ]; then',
       );
       const reset = body.indexOf('rm -rf -- "${COREPACK_HOME}"');
       expect(
@@ -1143,7 +1204,7 @@ describe('post-merge push lane', () => {
         (s) => s.name === 'Install dependencies',
       );
       const body = String(step.run ?? '');
-      const start = body.indexOf('if [ "${COREPACK_HOME:-}"');
+      const start = body.indexOf('if [ -n "${RUNNER_TEMP:-}" ]');
       const end = body.indexOf('corepack pnpm install');
       expect(
         start,
@@ -1909,4 +1970,183 @@ describe('platform lanes — a failing nightly is visible', () => {
     expect(cond).toContain("workflow_run.head_branch == 'main'");
     expect(cond).toContain("workflow_run.conclusion == 'failure'");
   });
+});
+
+describe('run-local pnpm cache startup', () => {
+  const install = ci.jobs.test.steps.find(
+    (step) => step.name === 'Install dependencies',
+  );
+  const version = JSON.parse(
+    readFileSync('package.json', 'utf8'),
+  ).packageManager.match(/^pnpm@([^+]+)/)[1];
+  // Exercise installation without the unrelated Linux disk sampler.
+  const [, commandChain] = install.run.split(/\ntrap [^\n]*\n/);
+
+  for (const scenario of [
+    {
+      name: 'recreates a broken run-local cache before installing',
+      local: true,
+      healthy: false,
+      succeeds: true,
+    },
+    {
+      name: 'recreates a healthy run-local cache before installing',
+      local: true,
+      healthy: true,
+      succeeds: true,
+    },
+    {
+      name: 'fails installation when the fresh package manager is unavailable',
+      local: true,
+      healthy: false,
+      bootstrapFails: true,
+      succeeds: false,
+    },
+    {
+      name: 'leaves a broken shared cache untouched',
+      local: false,
+      healthy: false,
+      succeeds: false,
+    },
+    {
+      name: 'installs from a healthy shared cache without rewriting it',
+      local: false,
+      healthy: true,
+      succeeds: true,
+    },
+  ]) {
+    it(scenario.name, () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'pnpm-startup-')));
+      const runnerTemp = join(root, 'runner-temp');
+      const home = scenario.local
+        ? `${runnerTemp}/qwen-ci-corepack`
+        : join(root, 'shared-corepack');
+      const cache = join(home, 'v1', 'pnpm', version);
+      const entry = join(cache, 'bin', 'pnpm.mjs');
+      const bin = join(root, 'bin');
+      const seed = join(root, 'pnpm.mjs');
+      const marker = join(root, 'installed');
+      const trace = join(root, 'trace.jsonl');
+      const oldEntryMarker = join(root, 'old-entry-ran');
+      const sentinel = join(root, 'bystander');
+      const cacheNeighbor = join(home, 'v1', 'pnpm', 'other-version');
+      try {
+        mkdirSync(join(cache, 'bin'), { recursive: true });
+        mkdirSync(runnerTemp, { recursive: true });
+        mkdirSync(bin);
+        writeFileSync(
+          join(cache, '.corepack'),
+          '{"bin":{"pnpm":"bin/pnpm.mjs"}}',
+        );
+        writeFileSync(sentinel, 'keep');
+        writeFileSync(cacheNeighbor, 'old-cache');
+        writeFileSync(
+          seed,
+          String.raw`
+import { appendFileSync, writeFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+appendFileSync(process.env.FIXTURE_TRACE, JSON.stringify({ stage: 'pnpm', args }) + '\n');
+if (args.length === 1 && args[0] === '--version') {
+  console.log(process.env.FIXTURE_PINNED_VERSION);
+} else if (JSON.stringify(args) === JSON.stringify(['install', '--frozen-lockfile', '--prefer-offline', '--reporter=append-only'])) {
+  writeFileSync(process.env.FIXTURE_INSTALL_MARKER, 'installed');
+} else {
+  process.exit(2);
+}
+`,
+        );
+        if (scenario.healthy) {
+          writeFileSync(
+            entry,
+            `${readFileSync(seed, 'utf8')}\nwriteFileSync(process.env.FIXTURE_OLD_ENTRY_MARKER, 'ran');\n`,
+          );
+        }
+        writeFileSync(
+          join(bin, 'corepack'),
+          String.raw`#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const root = fs.realpathSync(process.env.FIXTURE_ROOT);
+const configuredHome = path.resolve(process.env.COREPACK_HOME);
+const parent = fs.realpathSync(path.dirname(configuredHome));
+if (parent !== root && !parent.startsWith(root + path.sep)) throw new Error('Not a private fixture parent');
+fs.mkdirSync(configuredHome, { recursive: true });
+const home = fs.realpathSync(configuredHome);
+if (!home.startsWith(root + path.sep)) throw new Error('Not a private fixture');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.FIXTURE_TRACE, JSON.stringify({ stage: 'corepack', args }) + '\n');
+if (args[0] !== 'pnpm') throw new Error('Unexpected package manager');
+const cache = path.join(home, 'v1', 'pnpm', process.env.FIXTURE_PINNED_VERSION);
+const entry = path.join(cache, 'bin', 'pnpm.mjs');
+if (!fs.existsSync(cache)) {
+  fs.appendFileSync(process.env.FIXTURE_TRACE, JSON.stringify({ stage: 'hydrate' }) + '\n');
+  fs.mkdirSync(path.dirname(entry), { recursive: true });
+  fs.writeFileSync(path.join(cache, '.corepack'), '{"bin":{"pnpm":"bin/pnpm.mjs"}}');
+  if (process.env.FIXTURE_BOOTSTRAP_FAILS !== '1') fs.copyFileSync(process.env.FIXTURE_SEED, entry);
+}
+const result = spawnSync(process.execPath, [entry, ...args.slice(1)], { stdio: 'inherit' });
+process.exit(result.status ?? 1);
+`,
+        );
+        chmodSync(join(bin, 'corepack'), 0o755);
+        writeFileSync(
+          join(bin, 'corepack.cmd'),
+          `@"${process.execPath}" "%~dp0corepack" %*\r\n`,
+        );
+        const before = statSync(cache).ino;
+        const run = () =>
+          execFileSync('bash', ['-e', '-o', 'pipefail', '-c', commandChain], {
+            cwd: process.cwd(),
+            env: {
+              ...process.env,
+              PATH: `${bin}${delimiter}${process.env.PATH}`,
+              COREPACK_ENABLE_NETWORK: '0',
+              COREPACK_HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              FIXTURE_ROOT: root,
+              FIXTURE_TRACE: trace,
+              FIXTURE_OLD_ENTRY_MARKER: oldEntryMarker,
+              FIXTURE_PINNED_VERSION: version,
+              FIXTURE_INSTALL_MARKER: marker,
+              FIXTURE_SEED: seed,
+              FIXTURE_BOOTSTRAP_FAILS: scenario.bootstrapFails ? '1' : '0',
+            },
+            stdio: 'pipe',
+          });
+        expect(commandChain).toBeTruthy();
+        if (scenario.succeeds) expect(run).not.toThrow();
+        else expect(run).toThrow();
+        expect(existsSync(marker)).toBe(scenario.succeeds);
+        expect(readFileSync(sentinel, 'utf8')).toBe('keep');
+        expect(existsSync(cacheNeighbor)).toBe(!scenario.local);
+        expect(existsSync(oldEntryMarker)).toBe(
+          !scenario.local && scenario.healthy,
+        );
+        const installArgs = [
+          'install',
+          '--frozen-lockfile',
+          '--prefer-offline',
+          '--reporter=append-only',
+        ];
+        const events = readFileSync(trace, 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line));
+        expect(events).toEqual([
+          { stage: 'corepack', args: ['pnpm', ...installArgs] },
+          ...(scenario.local ? [{ stage: 'hydrate' }] : []),
+          ...(scenario.succeeds ? [{ stage: 'pnpm', args: installArgs }] : []),
+        ]);
+        if (!scenario.local) {
+          expect(statSync(cache).ino).toBe(before);
+          expect(readFileSync(join(cache, '.corepack'), 'utf8')).toBe(
+            '{"bin":{"pnpm":"bin/pnpm.mjs"}}',
+          );
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
 });
