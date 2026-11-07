@@ -10,6 +10,7 @@ import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { useFilterInput } from '../../hooks/useFilterInput';
 import { SessionRow } from './SessionRow';
 import { useScopedSessions } from '../../hooks/useScopedSessions';
+import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
 
 interface ReleaseSessionDialogProps {
   onReleased: (sessionId: string) => void;
@@ -42,7 +43,11 @@ export function ReleaseSessionDialog({
   } = useScopedSessions(workspaceCwd, {
     autoLoad: true,
     maxAgeMs: 1_000,
+    // The daemon caps the live page at 100 rows; request the shared max so a
+    // full workspace fits in one page.
+    pageSize: SESSION_LIST_PAGE_SIZE,
     sourceType: null,
+    liveOnly: true,
   });
   const currentSessionId = connection.sessionId;
   const [deleting, setDeleting] = useState(false);

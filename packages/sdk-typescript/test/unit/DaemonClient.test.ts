@@ -6631,6 +6631,25 @@ describe('DaemonClient', () => {
       );
     });
 
+    it('serializes liveOnly into both workspace session-list clients', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessions: [{ sessionId: 's-live', workspaceCwd: '/work/a' }],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.listWorkspaceSessionsPage('/work/a', { liveOnly: true });
+      await client
+        .workspaceByCwd('/work/a')
+        .listWorkspaceSessionsPage({ liveOnly: true });
+
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=20&liveOnly=1',
+        'http://daemon/workspaces/%2Fwork%2Fa/sessions?size=20&liveOnly=1',
+      ]);
+    });
+
     it('serializes source filters into both workspace session-list clients', async () => {
       const { fetch, calls } = recordingFetch((request) =>
         request.url.endsWith('/capabilities')

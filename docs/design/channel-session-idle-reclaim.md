@@ -99,9 +99,11 @@ where no session client has been created yet.
 
 The dialog cannot reuse the sidebar's default source filter: that filter
 excludes `sourceType: "channel"`, which is exactly the population that can fill
-the cap. The recovery list queries the workspace catalog without a source
-filter and keeps the default, channel, and qwen-live rows, preserving the old
-live-session behavior while exposing the channel sessions.
+the cap. It also cannot read persisted history page by page, because closed
+channel sessions can fill the first page and hide the live rows that still hold
+slots. The recovery list therefore asks the workspace for its live bridge
+sessions (`liveOnly`), the established sessions consuming the cap, and keeps
+the default, channel, and qwen-live rows.
 
 The banner is cleared when the session or workspace changes, or when the user
 dismisses it. This path is a fallback for the remaining 503 cases (for example,
@@ -139,10 +141,14 @@ every slot is held by active work); it does not replace automatic reclamation.
 - `packages/web-shell/client/components/SessionLimitBanner.test.tsx`: the
   banner exposes release and dismiss actions.
 - `packages/web-shell/client/hooks/useScopedSessions.test.tsx`: the release
-  query can omit the source filter; the sidebar default still applies it.
+  query can request live-only sessions without a source filter; the sidebar
+  default still applies the filter.
 - `packages/web-shell/client/components/dialogs/ReleaseSessionDialog.test.tsx`:
   channel sessions are listed, qwen-live keeps its existing place, and agent
   sessions stay out.
+- `packages/cli/src/serve/multi-workspace-sessions.test.ts`: a live session
+  stays reachable when twenty newer closed channel sessions fill the persisted
+  page.
 - Manual browser run on the built Web Shell against a daemon with
   `--max-sessions 1`, filled by a real `sourceType: "channel"` session: submit
   a prompt, confirm the banner, release the channel session, and create a
@@ -155,7 +161,8 @@ every slot is held by active work); it does not replace automatic reclamation.
 2. A non-channel session with a live subscriber is not closed by the reaper.
 3. A create rejected by the workspace cap produces a visible release action.
 4. Releasing an idle session, including a workspace filled only by channel
-   sessions, frees a slot and the next create succeeds.
+   sessions, frees a slot and the next create succeeds even when newer closed
+   persisted history fills the first catalog page.
 5. Existing reaper tests and web-shell type checks pass.
 
 ## 10. Follow-ups

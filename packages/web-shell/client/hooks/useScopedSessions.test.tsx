@@ -45,13 +45,16 @@ let scopedResult: ReturnType<typeof useScopedSessions> | undefined;
 function Probe({
   cwd,
   sourceType,
+  liveOnly,
 }: {
   cwd?: string;
   sourceType?: string | null;
+  liveOnly?: boolean;
 }) {
   const result = useScopedSessions(cwd, {
     autoLoad: true,
     ...(sourceType !== undefined ? { sourceType } : {}),
+    ...(liveOnly === true ? { liveOnly: true } : {}),
   });
   scopedResult = result;
   const { sessions, deleteSessions, releaseSession } = result;
@@ -76,8 +79,12 @@ function Probe({
   );
 }
 
-function render(cwd?: string, sourceType?: string | null) {
-  act(() => root!.render(<Probe cwd={cwd} sourceType={sourceType} />));
+function render(cwd?: string, sourceType?: string | null, liveOnly?: boolean) {
+  act(() =>
+    root!.render(
+      <Probe cwd={cwd} sourceType={sourceType} liveOnly={liveOnly} />,
+    ),
+  );
 }
 
 beforeEach(() => {
@@ -184,7 +191,7 @@ describe('useScopedSessions', () => {
     expect(primaryDeleteSessions).not.toHaveBeenCalled();
   });
 
-  it('omits the source filter when the release dialog asks for all sources', async () => {
+  it('omits the source filter and requests live sessions for the release dialog', async () => {
     listWorkspaceSessionsPage.mockResolvedValue({
       sessions: [
         {
@@ -195,15 +202,31 @@ describe('useScopedSessions', () => {
       ] satisfies DaemonSessionSummary[],
     });
 
-    render('/all-sources', null);
+    render('/all-sources', null, true);
     await act(async () => {
       await listWorkspaceSessionsPage.mock.results[0]?.value;
     });
 
-    expect(listWorkspaceSessionsPage).toHaveBeenCalledWith({});
+    expect(listWorkspaceSessionsPage).toHaveBeenCalledWith({ liveOnly: true });
     expect(
       container!.querySelector('[data-testid="sessions"]')?.textContent,
     ).toBe('channel');
+  });
+
+  it('forwards liveOnly through the unscoped primary catalog', async () => {
+    workspaceClient.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [],
+    });
+
+    render(undefined, null, true);
+    await act(async () => {
+      await workspaceClient.listWorkspaceSessionsPage.mock.results[0]?.value;
+    });
+
+    expect(workspaceClient.listWorkspaceSessionsPage).toHaveBeenCalledWith(
+      '/primary',
+      { liveOnly: true },
+    );
   });
 
   it('releases a scoped session without invalidating the primary catalog', async () => {

@@ -128,7 +128,9 @@ describe('ReleaseSessionDialog selection', () => {
     expect(scopedSessionsOptions).toEqual({
       autoLoad: true,
       maxAgeMs: 1_000,
+      pageSize: 1_000,
       sourceType: null,
+      liveOnly: true,
     });
     // The dialog opens with no highlight at all; Enter has nothing to act on.
     expect(rows().some(isCursor)).toBe(false);

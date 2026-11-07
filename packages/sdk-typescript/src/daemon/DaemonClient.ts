@@ -3656,6 +3656,9 @@ export class DaemonClient {
     if (options?.sourceId !== undefined) {
       query.set('sourceId', options.sourceId);
     }
+    if (options?.liveOnly === true) {
+      query.set('liveOnly', '1');
+    }
     return await this.jsonRequest<DaemonSessionListPage>(
       `/workspace/${urlEncode(workspaceCwd)}/sessions?${query.toString()}`,
       'GET /workspace/sessions',
@@ -9080,6 +9083,9 @@ export class WorkspaceDaemonClient {
     }
     if (options?.sourceId !== undefined) {
       query.set('sourceId', options.sourceId);
+    }
+    if (options?.liveOnly === true) {
+      query.set('liveOnly', '1');
     }
     return await this.get(
       `/sessions?${query.toString()}`,

@@ -21,6 +21,8 @@ interface ScopedSessionsOptions {
   pollIntervalMs?: number;
   /** `null` queries every source type; omitted keeps the sidebar default. */
   sourceType?: string | null;
+  /** List live bridge sessions only, so closed history cannot hide them. */
+  liveOnly?: boolean;
 }
 
 export function useScopedSessions(
@@ -37,6 +39,7 @@ export function useScopedSessions(
     view,
     group,
     pollIntervalMs,
+    liveOnly,
     sourceType: sourceTypeOption,
   } = options;
   const sourceType =
@@ -52,6 +55,7 @@ export function useScopedSessions(
     view,
     group,
     ...(sourceType !== undefined ? { sourceType } : {}),
+    ...(liveOnly === true ? { liveOnly: true } : {}),
     ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
   });
   const primaryDeleteSession = primary.deleteSession;
@@ -71,10 +75,11 @@ export function useScopedSessions(
               ...(view !== undefined ? { view } : {}),
               ...(group !== undefined ? { group } : {}),
               ...(sourceType !== undefined ? { sourceType } : {}),
+              ...(liveOnly === true ? { liveOnly: true } : {}),
             },
           }
         : undefined,
-    [archiveState, group, pageSize, sourceType, view, workspaceCwd],
+    [archiveState, group, liveOnly, pageSize, sourceType, view, workspaceCwd],
   );
   const scoped = useSessionCatalogQuery(workspace.client, query, {
     autoLoad,
