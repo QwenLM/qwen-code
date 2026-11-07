@@ -430,6 +430,7 @@ export interface ChatRecord {
   subtype?:
     | 'chat_compression'
     | 'memory_catalog_snapshot'
+    | 'startup_context'
     | 'slash_command'
     | 'ui_telemetry'
     | 'at_command'
@@ -1385,6 +1386,13 @@ export class ChatRecordingService {
   private bytesSinceTitleAnchor = 0;
   private hasNonTitleContentSinceTitleAnchor = false;
   private bytesSinceSourceAnchor = 0;
+  /**
+   * A startup prelude recorded before the transcript exists. Persisting it
+   * eagerly would create a JSONL for a session that never sent a turn, which
+   * the session list then treats as a real conversation. Flushed ahead of the
+   * first real record instead, so replay order is preserved.
+   */
+  private pendingStartupContext?: ChatRecord;
 
   constructor(
     config: Config,
@@ -1957,6 +1965,13 @@ export class ChatRecordingService {
       );
       return;
     }
+    const parentBeforeFlush = this.lastRecordUuid;
+    if (
+      this.flushPendingStartupContext() &&
+      record.parentUuid === parentBeforeFlush
+    ) {
+      record.parentUuid = this.lastRecordUuid;
+    }
     if (this.topologyFence) {
       this.topologyFence.buffered.push({ record, options });
       return;
@@ -1982,6 +1997,13 @@ export class ChatRecordingService {
       throw new SessionWriterUnavailableError();
     if (this.refusesManagedRecord(record)) {
       throw new ManagedSessionRecordRefusedError(record);
+    }
+    const parentBeforeFlush = this.lastRecordUuid;
+    if (
+      this.flushPendingStartupContext() &&
+      record.parentUuid === parentBeforeFlush
+    ) {
+      record.parentUuid = this.lastRecordUuid;
     }
     if (this.topologyFence) {
       await new Promise<void>((resolve, reject) => {
@@ -3724,6 +3746,48 @@ export class ChatRecordingService {
     } catch (error) {
       debugLogger.error('Error saving memory catalog snapshot:', error);
     }
+  }
+
+  /**
+   * Persists the exact startup prelude the model saw so a resumed session can
+   * replay the same prefix instead of rebuilding it with fresh date/git data.
+   * The latest record wins on recovery.
+   */
+  recordStartupContext(message: Content): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'startup_context',
+        message: {
+          ...message,
+          ...(message.parts
+            ? { parts: message.parts.map((part) => ({ ...part })) }
+            : {}),
+        },
+      };
+      // A brand-new session has no transcript yet. Writing this record now
+      // would create one, making a session that never sent a turn visible in
+      // the persisted session list. Hold it until the first real record.
+      if (this.lastRecordUuid === null) {
+        this.pendingStartupContext = record;
+        return;
+      }
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving startup context record:', error);
+    }
+  }
+
+  private flushPendingStartupContext(): boolean {
+    const record = this.pendingStartupContext;
+    if (!record) return false;
+    this.pendingStartupContext = undefined;
+    // The prelude is held across records that may arrive before it flushes,
+    // so re-anchor its parent to keep a single transcript chain.
+    record.parentUuid = this.lastRecordUuid;
+    this.appendRecord(record);
+    return true;
   }
 
   /**

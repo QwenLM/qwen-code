@@ -343,6 +343,11 @@ export class SessionApiHistoryAccumulator {
   private compressionCandidate: unknown;
   private completedToolCallIds = new Set<string>();
   private lastMaterialRecord?: ChatRecord;
+  /**
+   * Latest startup prelude recorded at session start (or rebuilt after
+   * compaction). Replayed as the first API entry, never as a user turn.
+   */
+  private startupContext?: Content;
 
   add(record: ChatRecord): void {
     // Internal calls have no model-emitted function-call partner.
@@ -350,6 +355,12 @@ export class SessionApiHistoryAccumulator {
       return;
     }
     if (record.type === 'system') {
+      if (record.subtype === 'startup_context') {
+        if (record.message?.role === 'user') {
+          this.startupContext = record.message;
+        }
+        return;
+      }
       if (record.subtype === 'memory_catalog_snapshot') {
         const snapshot = record.message?.parts?.[0];
         if (
@@ -516,13 +527,19 @@ export class SessionApiHistoryAccumulator {
     apiHistory: Content[];
     trailingSystemNotifications: number;
   } {
+    const withStartupContext = (history: Content[]): Content[] =>
+      this.startupContext
+        ? [copyContentForApiHistory(this.startupContext), ...history]
+        : history;
     if (
       this.compressionCandidate !== undefined &&
       !Array.isArray(this.compressionCandidate)
     ) {
       return {
-        apiHistory: (this.compressionCandidate as Content[]).map(
-          copyContentForApiHistory,
+        apiHistory: withStartupContext(
+          (this.compressionCandidate as Content[]).map(
+            copyContentForApiHistory,
+          ),
         ),
         trailingSystemNotifications: 0,
       };
@@ -540,6 +557,10 @@ export class SessionApiHistoryAccumulator {
       }
       apiHistory = keptHistory;
       flags = keptFlags;
+    }
+    if (this.startupContext) {
+      apiHistory = withStartupContext(apiHistory);
+      flags = [false, ...flags];
     }
     let trailingSystemNotifications = 0;
     for (let i = flags.length - 1; i >= 0 && flags[i]; i--) {

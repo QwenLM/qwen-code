@@ -14,7 +14,7 @@ import type {
 } from '../tools/tool-registry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
-import { escapeSystemReminderTags } from '../utils/xml.js';
+import { escapeSystemReminderTags, unescapeXml } from '../utils/xml.js';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
@@ -544,6 +544,49 @@ export async function buildAvailableSkillsReminder(
 }
 
 /**
+ * Reconstructs the skill/command entries a stored startup prelude listed, so a
+ * resume can seed reminder dedup from what the model actually saw instead of
+ * re-announcing the whole listing on the first turn.
+ */
+export function parseAvailableSkillsFromPrelude(
+  prelude: Content,
+): AvailableSkillEntry[] {
+  // Anchor on the listing's own part, like isSkillListingReminder: MCP
+  // instructions and ordinary messages can quote the same tags.
+  const listing = (prelude.parts ?? []).find((part) =>
+    part.text?.startsWith(
+      `${SYSTEM_REMINDER_OPEN}\n${SKILLS_AVAILABLE_OPENER}`,
+    ),
+  )?.text;
+  if (listing === undefined) return [];
+
+  const block = /<available_skills>([\s\S]*?)<\/available_skills>/.exec(
+    listing,
+  );
+  if (block?.[1] === undefined) return [];
+
+  const entries: AvailableSkillEntry[] = [];
+  for (const match of block[1].matchAll(/<skill>([\s\S]*?)<\/skill>/g)) {
+    const body = match[1] ?? '';
+    const name = /<name>\s*([\s\S]*?)\s*<\/name>/.exec(body)?.[1];
+    if (name === undefined) continue;
+    const location = /<location>\s*([\s\S]*?)\s*<\/location>/.exec(body)?.[1];
+    entries.push({
+      name: unescapeXml(name.trim()),
+      description: '',
+      ...(location !== undefined
+        ? {
+            level: unescapeXml(location.trim()) as NonNullable<
+              AvailableSkillEntry['level']
+            >,
+          }
+        : {}),
+    });
+  }
+  return entries;
+}
+
+/**
  * Builds the per-turn "newly available skills/commands" delta reminder. Used by
  * the client to announce skills enabled mid-session (e.g. via /skills) and MCP
  * prompts added after startup — WITHOUT mutating the cached prefix (it is a tail
@@ -706,6 +749,16 @@ export async function getInitialChatHistory(
   const includeAvailableSkillsReminder =
     (options.includeAvailableSkillsReminder ?? true) &&
     toolRegistry.getAllToolNames().includes(ToolNames.SKILL);
+
+  // A resumed session replays the prelude it originally sent. Rebuilding it
+  // here would change the date/git snapshot in the middle of an otherwise
+  // byte-identical conversation and invalidate an implicit prefix cache from
+  // the first user message onward. Skills are restored from history by the
+  // caller (`restoreLoadedSkillsFromHistory`), so no fresh snapshot is needed.
+  if (extraHistory?.[0] && isSystemReminderContent(extraHistory[0])) {
+    return [[...extraHistory], []];
+  }
+
   const today = formatDateForContext();
   const startupReminder = config.getSkipStartupContext()
     ? null

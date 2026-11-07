@@ -17646,7 +17646,19 @@ class QwenAgent implements Agent {
           }
           await replaySessionHistory();
           await options.beforeStartPostReplayServices?.(session);
-          await config.getLlmClient().refreshStartupContextReminder();
+          // A resumed session replays the startup prelude it originally sent.
+          // Rebuilding it here would change the first user message and drop
+          // any provider-side prefix cache; the history-derived date reminder
+          // still refreshes the date at the tail. New sessions have no
+          // previous prefix to preserve, so they keep the post-activation
+          // refresh. `sessionData` is the legacy replay signal; today's
+          // projection restore reports itself through the restore runtime.
+          const resumedSession =
+            sessionData !== undefined ||
+            config.getSessionRestoreRuntime?.() !== undefined;
+          if (!resumedSession) {
+            await config.getLlmClient().refreshStartupContextReminder();
+          }
           session.installRewriter();
           config.finalizeSessionRestore?.();
           startNonInteractiveOpenAILogHousekeeping(config, settings);

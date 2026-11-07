@@ -10,6 +10,7 @@ import {
   escapeXml,
   escapeXmlElementText,
   escapeXmlWithinBudget,
+  unescapeXml,
 } from './xml.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
@@ -38,6 +39,14 @@ describe('xml utils', () => {
       expect(escapeXml(`a&b&c <tag attr="x">'y'</tag>`)).toBe(
         'a&amp;b&amp;c &lt;tag attr=&quot;x&quot;&gt;&apos;y&apos;&lt;/tag&gt;',
       );
+    });
+  });
+
+  describe('unescapeXml', () => {
+    it('round-trips escaped XML without double-decoding', () => {
+      const original = `a&b <tag attr="x">'y'</tag>`;
+      expect(unescapeXml(escapeXml(original))).toBe(original);
+      expect(unescapeXml('&amp;lt;')).toBe('&lt;');
     });
   });
 

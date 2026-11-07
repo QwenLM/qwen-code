@@ -186,6 +186,8 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  isSystemReminderContent,
+  parseAvailableSkillsFromPrelude,
   wrapSystemReminder,
   type AgentAvailabilityEntry,
 } from './environmentContext.js';
@@ -710,6 +712,12 @@ export class LlmClient {
       snapshotEntries.map(LlmClient.skillEntryKey),
     );
     this.skillRemindersInitialized = true;
+  }
+
+  private seedSkillReminderDedupFromPrelude(prelude: Content): void {
+    this.seedSkillReminderDedupFromSnapshot(
+      parseAvailableSkillsFromPrelude(prelude),
+    );
   }
 
   private async seedAgentReminderDedupFromCurrent(): Promise<void> {
@@ -2292,6 +2300,11 @@ export class LlmClient {
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
+    if (startupContext) {
+      this.config
+        .getChatRecordingService()
+        ?.recordStartupContext?.(startupContext);
+    }
     this.getChat().setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
       this.getChat().getCompletedToolCallIds(),
@@ -2334,6 +2347,9 @@ export class LlmClient {
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
     if (startupContext) {
+      this.config
+        .getChatRecordingService()
+        ?.recordStartupContext?.(startupContext);
       this.getChat().setHistory(
         [startupContext, ...currentHistory],
         this.getChat().getCompletedToolCallIds(),
@@ -3010,6 +3026,9 @@ export class LlmClient {
           (isDeferredToolBridgeAvailable(toolRegistry) &&
             deferredSummary.some(({ name }) => name === ToolNames.AGENT)),
       );
+      const storedPrelude = Boolean(
+        extraHistory?.[0] && isSystemReminderContent(extraHistory[0]),
+      );
       [history, snapshotEntries] = await profiler.time(
         'initial_chat_history',
         () =>
@@ -3017,13 +3036,29 @@ export class LlmClient {
             gitStatus: this.getCachedGitStatus(),
           }),
       );
+      if (!storedPrelude && history[0] && isSystemReminderContent(history[0])) {
+        try {
+          this.config
+            .getChatRecordingService()
+            ?.recordStartupContext?.(history[0]);
+        } catch (error) {
+          debugLogger.warn('Failed to record startup context', error);
+        }
+      }
       this.config
         .getMemoryManager()
         .restoreMemoryBodiesPresentInHistory(
           collectResidentMemoryBodies(history),
         );
       profiler.timeSync('skill_reminder_seed', () => {
-        this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
+        // A replayed prelude is the listing the model actually saw; seed from
+        // that block rather than re-announcing every currently available
+        // skill/command on the first turn.
+        if (storedPrelude && extraHistory?.[0]) {
+          this.seedSkillReminderDedupFromPrelude(extraHistory[0]);
+        } else {
+          this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
+        }
       });
       await profiler.time('agent_reminder_seed', () =>
         this.seedAgentReminderDedupFromCurrent(),

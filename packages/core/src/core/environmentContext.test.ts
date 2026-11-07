@@ -27,6 +27,7 @@ import {
   markCompressedHistory,
   isSkillListingReminder,
   isSystemReminderContent,
+  parseAvailableSkillsFromPrelude,
   stripSystemReminderBlocks,
   stripStartupContext,
   wrapSystemReminder,
@@ -404,6 +405,20 @@ describe('date announcements', () => {
         'Thursday, June 4, 2026',
       );
       expect(await startupDate(undefined, null)).toBeUndefined();
+    });
+
+    it('reuses a stored startup prelude instead of rebuilding it', async () => {
+      const stored = userText(
+        '<system-reminder>\nstored prelude\n</system-reminder>',
+      );
+      const extra = [stored, userText('Earlier')];
+      const { config } = chatHistorySetup();
+
+      const [history] = await getInitialChatHistory(config as Config, extra, {
+        gitStatus: 'dirty',
+      });
+
+      expect(history).toEqual(extra);
     });
   });
 });
@@ -1430,6 +1445,77 @@ describe('buildAvailableSkillsReminder', () => {
     expect(result!.reminder).toContain('Bundled when-to-use');
     expect(result!.reminder).not.toContain('Project second line');
     expect(result!.reminder).not.toContain('Project when-to-use');
+  });
+});
+
+describe('parseAvailableSkillsFromPrelude', () => {
+  const prelude = (body: string): Content => ({
+    role: 'user',
+    parts: [{ text: wrapSystemReminder(body) }],
+  });
+
+  it('recovers skills and commands from a rendered listing', () => {
+    const content = prelude(
+      [
+        'The following skills are available for use with the Skill tool.',
+        '<available_skills>',
+        '<skill>',
+        '<name>',
+        'alpha &amp; beta',
+        '</name>',
+        '<description>',
+        'A &amp; B',
+        '</description>',
+        '<location>',
+        'project',
+        '</location>',
+        '</skill>',
+        '<skill>',
+        '<name>',
+        'mcp &lt;prompt&gt;',
+        '</name>',
+        '<description>',
+        'A command',
+        '</description>',
+        '</skill>',
+        '</available_skills>',
+      ].join('\n'),
+    );
+
+    expect(parseAvailableSkillsFromPrelude(content)).toEqual([
+      { name: 'alpha & beta', description: '', level: 'project' },
+      { name: 'mcp <prompt>', description: '' },
+    ]);
+  });
+
+  it('ignores a quoted listing outside the skill-listing part', () => {
+    const content: Content = {
+      role: 'user',
+      parts: [
+        {
+          text: wrapSystemReminder(
+            '<available_skills>\n<skill>\n<name>\nfake</name>\n</skill>\n</available_skills>',
+          ),
+        },
+        {
+          text: wrapSystemReminder(
+            'The following skills are available for use with the Skill tool.\n<available_skills>\n<skill>\n<name>\nreal</name>\n<location>\nuser\n</location>\n</skill>\n</available_skills>',
+          ),
+        },
+      ],
+    };
+
+    expect(parseAvailableSkillsFromPrelude(content)).toEqual([
+      { name: 'real', description: '', level: 'user' },
+    ]);
+  });
+
+  it('returns no entries without an available_skills block', () => {
+    expect(
+      parseAvailableSkillsFromPrelude(
+        prelude('No skills are currently available.'),
+      ),
+    ).toEqual([]);
   });
 });
 
