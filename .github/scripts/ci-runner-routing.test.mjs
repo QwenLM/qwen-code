@@ -8,7 +8,7 @@
 // scarce pool (2026-10-31 decision, same accepted risk class as lint).
 // The association routing for DOWNSTREAM lanes lives in the `pick_runner`
 // shell step, which publishes `ubuntu_runner` (association-gated) and
-// `lint_runner` (every pull request reaches the fleet). The matrix below
+// `lint_runner` (untrusted forks default to hosted). The matrix below
 // pins the gate's unconditional routing AND that ubuntu_runner keeps the
 // association gate for the test/integration lanes.
 //
@@ -314,11 +314,7 @@ describe('ci.yml lint_runner routing', () => {
   const ARM = '["self-hosted", "linux", "arm64"]';
   const lintRunner = (inputs) => runPickRunnerOutputs(inputs).lintRunner;
 
-  it('routes every pull request to the fleet, untrusted forks included', () => {
-    // The maintainer decision this pins: Lint & Static executes PR code on
-    // the shared pool for ALL authors. If this matrix ever flips back to
-    // hosted for the negative associations without a deliberate decision,
-    // the lane silently regrows its hosted quota spend.
+  it('keeps untrusted fork lint hosted when the disposable switch is unset', () => {
     for (const sameRepo of [true, false]) {
       for (const assoc of ASSOCIATIONS) {
         assert.equal(
@@ -328,8 +324,8 @@ describe('ci.yml lint_runner routing', () => {
             assoc,
             eventName: 'pull_request',
           }),
-          ECS,
-          `lint sameRepo=${sameRepo} assoc='${assoc}' must route to ECS`,
+          sameRepo || TRUSTED.includes(assoc) ? ECS : HOSTED,
+          `lint sameRepo=${sameRepo} assoc='${assoc}'`,
         );
       }
     }
@@ -366,7 +362,7 @@ describe('ci.yml lint_runner routing', () => {
       lintRunner({
         ecsDisabled: false,
         sameRepo: false,
-        assoc: 'NONE',
+        assoc: 'MEMBER',
         eventName: 'pull_request',
         fleet: 'arm64',
       }),
@@ -455,6 +451,18 @@ describe('ci.yml lint_runner routing', () => {
 });
 
 describe('ci.yml disposable runner routing', () => {
+  it('keeps all selected fork jobs hosted unless the switch is exactly true', () => {
+    for (const ephemeralEnabled of [undefined, '', 'false', 'invalid']) {
+      const out = runPickRunnerOutputs({
+        eventName: 'pull_request',
+        sameRepo: false,
+        assoc: 'NONE',
+        ephemeralEnabled,
+      });
+      assert.equal(out.prTestRunner, HOSTED);
+      assert.equal(out.lintRunner, HOSTED);
+    }
+  });
   it('selects ARM64 only when explicitly configured', () => {
     const inputs = {
       eventName: 'pull_request',

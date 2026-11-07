@@ -194,11 +194,13 @@ export function createManager(config, dependencies = {}) {
       } catch {
         throw new Error('Invalid slot state; manual reconciliation required');
       }
+      // Reconcile identities created before the ECS-compatible name prefix.
+      const name =
+        typeof state?.name === 'string' ? state.name.replace(/^ecs-/, '') : '';
       const prefix = `qwen-${config.poolId}-${slot}-`;
       if (
-        typeof state?.name !== 'string' ||
-        !state.name.startsWith(prefix) ||
-        !/^[0-9a-f-]{36}$/.test(state.name.slice(prefix.length)) ||
+        !name.startsWith(prefix) ||
+        !/^[0-9a-f-]{36}$/.test(name.slice(prefix.length)) ||
         typeof state.uncertain !== 'boolean' ||
         (!state.uncertain &&
           (!Number.isSafeInteger(state.runnerId) || state.runnerId < 1)) ||
@@ -270,7 +272,7 @@ export function createManager(config, dependencies = {}) {
     for (const entry of await readdir(logDir, { withFileTypes: true })) {
       if (
         !entry.isFile() ||
-        !entry.name.startsWith(`qwen-${config.poolId}-`) ||
+        !entry.name.replace(/^ecs-/, '').startsWith(`qwen-${config.poolId}-`) ||
         !/\.(log|tar)$/.test(entry.name)
       )
         continue;
@@ -397,7 +399,7 @@ export function createManager(config, dependencies = {}) {
       );
     const token = await installationToken();
     state = {
-      name: `qwen-${config.poolId}-${slot}-${randomUUID()}`,
+      name: `ecs-qwen-${config.poolId}-${slot}-${randomUUID()}`,
       createdAt: new Date().toISOString(),
       uncertain: true,
     };

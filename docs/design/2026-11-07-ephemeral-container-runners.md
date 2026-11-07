@@ -53,7 +53,14 @@ Each container
 The manager keeps a configured number of slots, at most one container per slot;
 the single-machine trial run uses one slot. It takes no webhook, schedules no PR
 itself, and introduces neither Kubernetes nor a database. GitHub assigns work by
-runner label.
+runner label. Each ECS runs its own manager against its local Docker socket,
+with a unique `poolId` and a per-host `slots` count. Hosts share the scheduling
+labels; no central manager is needed. New names use `ecs-qwen-` for compatibility
+with CI worker caps and timeouts; recovery still accepts old `qwen-` identities.
+
+systemd starts the manager at boot when enabled and restarts unexpected exits
+after ten seconds (`Restart=always`). An explicit service stop remains stopped.
+This supervises process exits; it does not detect a live but stuck manager.
 
 Images are produced by a trusted build and pinned by digest. The manager and the
 image may only be deployed from versions maintained under maintainer control,
@@ -107,12 +114,18 @@ before accepting new work.
 ## Initial routing decision
 
 Keep the existing `ubuntu_runner` output and all of its former semantics, and add
-a `pr_test_runner` output used by `test_build` and `test`. Default it to the old
-output; only when the switch is enabled and the event belongs to an external
-untrusted-author PR does it select the new pool. Under the same condition
-`lint_runner` also selects the new pool, affecting `lint_and_static` and
-`integration_no_ak`. The global kill-switch and the hosted setting take
-precedence.
+a `pr_test_runner` output used by `test_build` and `test`. For an untrusted fork
+PR, `EXTERNAL_PR_EPHEMERAL_RUNNER_ENABLED=true` selects the disposable pool;
+unset, `false`, or any other value selects `ubuntu-latest`. `lint_runner` follows
+the same switch for `lint_and_static` and `integration_no_ak`, replacing the old
+shared-ECS fallback for these fork jobs. Trusted and same-repository PR routing
+stays unchanged. The global kill-switch and hosted setting take precedence.
+
+The switch selects a destination when a job is evaluated, without querying
+runner availability. It cannot move an already queued job; cancel queued work
+and start a new workflow run to apply a rollback. Verify unset/false/invalid,
+true for both architectures, and the global overrides against the actual shell
+selector before rollout.
 
 `classify_pr`, `web_shell_e2e_smoke`, `integration_cli` and the other workflows
 keep their current routing. This avoids migrating browser system dependencies

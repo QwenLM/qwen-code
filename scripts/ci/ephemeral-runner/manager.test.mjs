@@ -112,6 +112,11 @@ test('creates a new runner and container per job and keeps GitHub token out of D
       c.program === 'gh' &&
       c.args.includes('/repos/owner/repo/actions/runners/generate-jitconfig'),
   );
+  assert.ok(
+    requests.every((c) =>
+      JSON.parse(c.options.input).name.startsWith('ecs-qwen-'),
+    ),
+  );
   assert.equal(creates.length, 2);
   assert.notEqual(
     JSON.parse(requests[0].options.input).name,
@@ -293,6 +298,43 @@ test('rejects same-name runner with a different ID without deleting it', async (
       .runnerId,
     42,
   );
+});
+
+test('reconciles a legacy runner identity before registering its replacement', async (t) => {
+  const f = await fixture(t);
+  const name = 'qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
+  await writeFile(
+    join(f.config.stateDir, 'slot-1.json'),
+    JSON.stringify({
+      name,
+      runnerId: 42,
+      uncertain: false,
+    }),
+  );
+  let deleted = false;
+  const command = (program, args, options) => {
+    if (program === 'gh' && args.includes('--paginate') && !deleted) {
+      return Promise.resolve(JSON.stringify([{ runners: [{ name, id: 42 }] }]));
+    }
+    if (
+      program === 'gh' &&
+      args.includes('/repos/owner/repo/actions/runners/42')
+    ) {
+      deleted = true;
+    }
+    if (
+      program === 'gh' &&
+      args.includes('/repos/owner/repo/actions/runners/generate-jitconfig')
+    ) {
+      assert.ok(
+        deleted,
+        'legacy registration must be removed before replacement',
+      );
+    }
+    return f.command(program, args, options);
+  };
+  await createManager(f.config, { command }).cycle(1);
+  assert.ok(deleted);
 });
 
 test('accepts immutable local image IDs and rejects mutable tags and invalid configuration', async (t) => {

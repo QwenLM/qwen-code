@@ -116,8 +116,7 @@ describe('complete macOS test groups', () => {
 // The extended ceilings below, except the test lane's, are scoped to the
 // self-hosted pool: `runs-on` falls back to ubuntu-latest when
 // MAINTAINER_ECS_RUNNER_DISABLED=true (and, for the association-gated lanes,
-// for fork PRs from untrusted authors — lint_and_static reads lint_runner,
-// which routes every PR to the pool), so those hosted paths keep the
+// for untrusted fork PRs with the disposable pool disabled), so hosted paths keep the
 // pre-contention ceiling. The ARM64 fleet renders
 // `["self-hosted", "linux", "arm64"]` — no `ecs-qwen` label — so the scope
 // cannot key on the x64 fleet's name. Evaluate the real timeout expression for

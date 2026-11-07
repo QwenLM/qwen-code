@@ -44,7 +44,13 @@
 
 管理程序按配置维护固定数量的槽位，每个槽位最多一个容器；单机试运行使用
 一个槽位。不接 webhook、不自行调度 PR、不引入 Kubernetes 或数据库。
-GitHub 根据 runner 标签分配任务。
+GitHub 根据 runner 标签分配任务。每台 ECS 各运行一个管理程序，只连接本机
+Docker socket，使用独立的 `poolId` 和按主机配置的 `slots`。各主机共用调度
+标签，无需中央管理器。新名称使用 `ecs-qwen-` 前缀以兼容 CI 并发上限和超时；
+恢复时仍接受旧的 `qwen-` 身份。
+
+启用 systemd 服务后开机启动，意外退出时十秒后重启（`Restart=always`）；
+显式停止服务后保持停止。它监督进程退出，不检测进程存活但卡住的情况。
 
 镜像由可信构建生成并固定 digest。管理程序和镜像只能从经过维护者控制的版本
 部署，不从任务 checkout 或 PR artifacts 更新。
@@ -87,9 +93,15 @@ JIT 提供正常协议下的单任务注册语义；宿主机管理程序负责�
 ## 首期路由决策
 
 保留现有 `ubuntu_runner` 输出及其所有旧语义，新增 `pr_test_runner` 输出，
-用于 `test_build` 和 `test`。默认复制旧输出；仅在开关开启且事件属于外部
-非可信作者 PR 时，改选新池；同条件下 `lint_runner` 也改选新池，影响
-`lint_and_static` 和 `integration_no_ak`。全局 kill-switch 和 hosted 设置优先。
+用于 `test_build` 和 `test`。对于非可信作者的外部 fork PR，变量
+`EXTERNAL_PR_EPHEMERAL_RUNNER_ENABLED=true` 选择一次性池；未设置、`false`
+或其他值选择 `ubuntu-latest`。`lint_runner` 在 `lint_and_static` 和
+`integration_no_ak` 中遵循同一个开关，替代这些 fork 任务原有的共享 ECS
+回退行为。可信作者和同仓库 PR 路由不变。全局 kill-switch 和 hosted 设置优先。
+
+开关在 job 求值时选择目标，不查询 runner 是否空闲，也不能迁移已排队任务；
+回滚时取消已排队任务并启动新的 workflow run。上线前用实际 shell 选择器
+验证未设置/false/非法值、开启时的两种架构，以及全局覆盖开关。
 
 `classify_pr`、`web_shell_e2e_smoke`、`integration_cli`、其他 workflow
 保持当前路由。这样不把新镜像尚未验证的浏览器系统依赖一起迁入，也不改变

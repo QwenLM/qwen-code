@@ -41,6 +41,12 @@ used for a trial. Runner and base versions need routine security updates.
 
 ## Configure the manager
 
+Run one manager on each host, managing only that host's Docker socket. Give each
+host a unique `poolId`; matching runner labels let GitHub share work across the
+hosts without a central scheduler. `slots` is a per-host limit, not a fleet total.
+New runner names start with `ecs-qwen-` so the existing CI worker caps and test
+timeouts apply. Restart recovery also accepts the earlier `qwen-` identities.
+
 Install Docker, Node 22, `gh`, and `flock` on the host. Create a GitHub App
 installed only on the intended repository with repository Administration:
 write, and store its private key in a root-readable file. The manager uses it to
@@ -66,7 +72,16 @@ disk quotas or a dedicated data volume as appropriate for the host.
 
 Install `manager.mjs` in `/opt/qwen-ephemeral-runner/`, install the supplied
 unit in `/etc/systemd/system/`, and create the configured state/log directories
-with permissions restricted to the manager account. A Docker-authorized user
+with permissions restricted to the manager account. From the trusted checkout:
+
+```sh
+sudo install -d /opt/qwen-ephemeral-runner
+sudo install -d -m 700 /etc/qwen-ephemeral-runner /var/lib/qwen-ephemeral-runner /var/log/qwen-ephemeral-runner
+sudo install -m 644 scripts/ci/ephemeral-runner/manager.mjs /opt/qwen-ephemeral-runner/manager.mjs
+sudo install -m 644 scripts/ci/ephemeral-runner/qwen-ephemeral-runner.service /etc/systemd/system/qwen-ephemeral-runner.service
+```
+
+Finish the configuration and private-key setup above before starting. A Docker-authorized user
 has host-level power; the unit is intended for a trusted dedicated host.
 
 ```sh
@@ -75,6 +90,11 @@ sudo systemctl enable --now qwen-ephemeral-runner.service
 sudo systemctl status qwen-ephemeral-runner.service
 sudo journalctl -u qwen-ephemeral-runner.service -f
 ```
+
+systemd restarts an unexpectedly exited manager after ten seconds, including a
+clean exit. An explicit `systemctl stop` leaves it stopped. This is process
+supervision, not hang detection; inspect the journal and runner availability if
+slots are not replenishing.
 
 Stopping the service stops replenishment, waits up to the configured grace
 period, and cleans up its containers. The next start reconciles abandoned
@@ -86,9 +106,13 @@ remove unrelated runners or run a global Docker prune.
 sudo systemctl stop qwen-ephemeral-runner.service
 ```
 
-After validating a single runner and its recovery paths, the repository variable
-`EXTERNAL_PR_EPHEMERAL_RUNNER_ENABLED=true` opts the selected PR build, test,
-lint and no-AK integration jobs into the new pool. Leave it unset until the host and GitHub access policies have been
-verified. Setting it back to `false` affects newly evaluated runs; cancel and
-rerun already queued work when rolling back.
+After validating a single runner and its recovery paths, set the repository
+variable `EXTERNAL_PR_EPHEMERAL_RUNNER_ENABLED=true` to route untrusted fork PR
+build, test, lint and no-AK integration jobs to this pool. Unset, `false`, or any
+other value keeps those jobs on `ubuntu-latest`. Trusted and same-repository PRs
+retain their existing routing. The global kill-switch and hosted-fleet override
+still win. Leave the switch off until the host and GitHub access policies have
+been verified. Changing it affects newly evaluated jobs; cancel queued work and
+start a new workflow run when rolling back. It does not detect idle runners or
+migrate a queued job automatically.
 Set `EXTERNAL_PR_EPHEMERAL_ARCH=arm64` for an ARM64 pool; the default is x64.
