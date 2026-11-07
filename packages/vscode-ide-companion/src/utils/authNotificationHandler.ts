@@ -5,6 +5,7 @@
  */
 
 import * as vscode from 'vscode';
+import { withQwenChatTracking } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import type { AuthenticateUpdateNotification } from '../types/acpTypes.js';
 
 // Store reference to the current notification
@@ -19,7 +20,7 @@ let currentNotification: Thenable<string | undefined> | null = null;
 export function handleAuthenticateUpdate(
   data: AuthenticateUpdateNotification,
 ): void {
-  const authUri = data._meta.authUri;
+  const authUri = withQwenChatTracking(data._meta.authUri, 'plugin');
 
   // Store reference to the current notification
   currentNotification = vscode.window.showInformationMessage(

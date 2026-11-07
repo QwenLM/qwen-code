@@ -8,7 +8,8 @@
  * `qwen agents join <link>`: make the running local `qwen serve` join a
  * coordinator as an Agent Host, without restarting it. It calls the daemon's
  * own `POST /workspaces/<cwd>/agent/hosts/connect`; the daemon enrolls,
- * remembers the connection and reconnects after restarts.
+ * remembers the connection and reconnects after restarts. When it cannot
+ * save the connection it still joins, and this says it will not reconnect.
  */
 
 import type { CommandModule } from 'yargs';
@@ -22,6 +23,26 @@ import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 export const DEFAULT_DAEMON_URL = 'http://127.0.0.1:4170';
 export const ENROLLMENT_TOKEN_ENV = 'QWEN_AGENT_HOST_ENROLLMENT_TOKEN';
+
+/**
+ * Whether a request that failed may still have reached the daemon: it timed
+ * out, or the connection dropped after it was sent. A refused connection
+ * did not.
+ */
+function mayHaveReachedDaemon(error: unknown): boolean {
+  if ((error as Error | undefined)?.name === 'TimeoutError') return true;
+  const code = (error as { cause?: { code?: string } } | undefined)?.cause
+    ?.code;
+  return code === 'ECONNRESET' || code === 'EPIPE' || code === 'UND_ERR_SOCKET';
+}
+
+/**
+ * `answered`: an answer arrived without the connection failing under it,
+ * but it is not one a join gives (not JSON, or without `connected`).
+ */
+function mayStillComplete(baseUrl: string, answered = false): string {
+  return `The daemon at ${baseUrl} ${answered ? 'answered without confirming the join' : 'did not finish answering'}; the join may still complete. Check its log before trying again, with a new token if it did not.`;
+}
 
 export interface JoinArgs {
   link: string;
@@ -180,21 +201,47 @@ export async function runAgentsJoin(
         allowHttp: argv['allow-http'] === true,
       }),
       redirect: 'error',
-      // Enrollment plus the first heartbeat, each bounded at 10 s.
-      signal: AbortSignal.timeout(60_000),
+      // The daemon probes its programs, enrolls and sends up to three
+      // heartbeats (each bounded at 10 s), saves the connection, which can
+      // wait about 13.5 s for its lock, and probes its programs again.
+      signal: AbortSignal.timeout(90_000),
     });
-  } catch {
+  } catch (error) {
+    // The join may still land, and the token may already be spent.
+    if (mayHaveReachedDaemon(error)) {
+      deps.err(mayStillComplete(baseUrl));
+      return 1;
+    }
     deps.err(`No running qwen serve daemon answered at ${baseUrl}.`);
     deps.err(
       `Start one that joins directly instead:\n  ${ENROLLMENT_TOKEN_ENV}=<token> qwen serve --join ${argv.link}${argv['allow-http'] ? ' --agent-host-allow-http' : ''}`,
     );
     return 1;
   }
-  const result = (await response.json().catch(() => ({}))) as {
+  let bodyError: unknown;
+  // `?? {}`: a proxy may answer JSON `null`.
+  const result = ((await response.json().catch((error: unknown) => {
+    bodyError = error;
+    return {};
+  })) ?? {}) as {
     error?: string;
     connected?: boolean;
+    saved?: boolean;
+    saveError?: string;
     providers?: string[];
   };
+  // The daemon answers 2xx only once the join went through, with
+  // `connected: true`: any other 2xx (cut off, not JSON, or saying nothing
+  // of the join) leaves the outcome unknown, not failed.
+  if (response.ok && (bodyError !== undefined || result.connected !== true)) {
+    deps.err(
+      mayStillComplete(
+        baseUrl,
+        bodyError === undefined || !mayHaveReachedDaemon(bodyError),
+      ),
+    );
+    return 1;
+  }
   if (!response.ok || !result.connected) {
     if (response.status === 401 || response.status === 403) {
       deps.err(
@@ -211,13 +258,21 @@ export async function runAgentsJoin(
     }
     return 1;
   }
+  // An older daemon does not send `saved`; it always claimed the save.
+  const saved = result.saved !== false;
   deps.out(
     `Joined ${target.serverUrl} as a runtime for workspace ${target.workspaceId}${
       result.providers?.length
         ? ` (programs: ${result.providers.join(', ')})`
         : ''
-    }. The daemon reconnects after restarts.`,
+    }.${saved ? ' The daemon reconnects after restarts.' : ''}`,
   );
+  // Still a successful join: the token is spent, so rerunning with it fails.
+  if (!saved) {
+    deps.err(
+      `Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: ${result.saveError || 'no detail'}`,
+    );
+  }
   return 0;
 }
 
