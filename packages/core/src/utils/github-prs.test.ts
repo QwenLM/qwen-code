@@ -13,6 +13,27 @@ vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
 }));
 
+// Root enters any directory, so a test that needs one it cannot enter sets
+// the error accessSync throws instead of relying on chmod.
+const fsControl = vi.hoisted(() => ({
+  accessError: undefined as NodeJS.ErrnoException | undefined,
+}));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    // Refuses only the search (X_OK) check, so a check for another mode
+    // passes and the test notices.
+    accessSync: (...args: Parameters<typeof actual.accessSync>) => {
+      const mode = args[1] ?? actual.constants.F_OK;
+      if (fsControl.accessError && mode & actual.constants.X_OK) {
+        throw fsControl.accessError;
+      }
+      return actual.accessSync(...args);
+    },
+  };
+});
+
 import { execFile } from 'node:child_process';
 import {
   aggregateChecks,
@@ -599,18 +620,20 @@ describe('parseGhPrView', () => {
       expect(nameless.failingChecks).toEqual([]);
     }
 
+    // The cap is pinned, not derived from the constant it is checked by.
+    expect(GITHUB_PR_VIEW_FAILING_CHECKS_MAX).toBe(20);
     const many = parse({
-      statusCheckRollup: Array.from({ length: 30 }, (_, i) => ({
-        __typename: 'CheckRun',
-        name: `job-${i}`,
-        conclusion: 'FAILURE',
-      })),
+      statusCheckRollup: Array.from(
+        { length: GITHUB_PR_VIEW_FAILING_CHECKS_MAX + 1 },
+        (_, i) => ({
+          __typename: 'CheckRun',
+          name: `job-${i}`,
+          conclusion: 'FAILURE',
+        }),
+      ),
     });
     expect(many.failingChecks).toEqual(
-      Array.from(
-        { length: GITHUB_PR_VIEW_FAILING_CHECKS_MAX },
-        (_, i) => `job-${i}`,
-      ),
+      Array.from({ length: 20 }, (_, i) => `job-${i}`),
     );
   });
 
@@ -782,8 +805,55 @@ describe('fetchGitHubPullRequestView', () => {
     expect(result).toEqual({
       kind: 'failed',
       reason: 'cwd_missing',
-      message: 'gh pr view working directory is not a directory',
+      message: 'gh pr view working directory does not exist',
     });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses a working directory below a file as missing', async () => {
+    const file = path.join(tmp.dir, 'file');
+    fs.writeFileSync(file, '');
+    mockGhSuccess(ghPrView());
+    expect(
+      await fetchGitHubPullRequestView(url, path.join(file, 'sub')),
+    ).toEqual({
+      kind: 'failed',
+      reason: 'cwd_missing',
+      message: 'gh pr view working directory does not exist',
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  // Creating a symlink needs a privilege Windows runners may lack.
+  it.skipIf(process.platform === 'win32')(
+    'names a working directory that cannot be inspected, without spawning gh',
+    async () => {
+      const loop = path.join(tmp.dir, 'loop');
+      fs.symlinkSync(loop, loop);
+      mockGhSuccess(ghPrView());
+      expect(await fetchGitHubPullRequestView(url, loop)).toEqual({
+        kind: 'failed',
+        reason: 'cwd_unusable',
+        message: 'gh pr view working directory cannot be inspected (ELOOP)',
+      });
+      expect(mockExecFile).not.toHaveBeenCalled();
+    },
+  );
+
+  it('names a working directory that cannot be entered, without spawning gh', async () => {
+    mockGhSuccess(ghPrView());
+    fsControl.accessError = Object.assign(new Error('permission denied'), {
+      code: 'EACCES',
+    });
+    try {
+      expect(await fetchGitHubPullRequestView(url, tmp.dir)).toEqual({
+        kind: 'failed',
+        reason: 'cwd_unusable',
+        message: 'gh pr view working directory cannot be entered (EACCES)',
+      });
+    } finally {
+      fsControl.accessError = undefined;
+    }
     expect(mockExecFile).not.toHaveBeenCalled();
   });
 
@@ -892,6 +962,19 @@ describe('createGitHubPullRequest', () => {
     expect(seen.env).toBeDefined();
     expect(seen.env).not.toHaveProperty('GIT_DIR');
     expect(seen.env).not.toHaveProperty('GIT_WORK_TREE');
+  });
+
+  it('gives gh pr create its longer 30 s timeout', async () => {
+    mockExecFile.mockClear();
+    const dir = tmp.repo();
+    answerWithUrl('https://github.com/o/r/pull/7');
+
+    await createGitHubPullRequest(dir, { title: 'My PR' });
+
+    expect(mockExecFile).toHaveBeenCalledTimes(1);
+    expect(mockExecFile.mock.calls[0]?.[2]).toMatchObject({
+      timeout: 30_000,
+    });
   });
 
   it('spawns the fallback gh when PATH cannot resolve it', async () => {
