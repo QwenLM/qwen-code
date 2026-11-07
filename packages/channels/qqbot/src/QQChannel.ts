@@ -99,6 +99,16 @@ const QQ_OPENID_RE = /^[A-F0-9]{32}$/i;
 const QQ_BOT_SENDER_TAG = 'bot';
 const QQ_BOT_TAG = `[${QQ_BOT_SENDER_TAG}] `;
 
+/**
+ * The two prompt lines that tell the model what `[bot]` means and how to stop
+ * replying. One definition: the default prompt embeds them, and an operator's
+ * own `instructions` gets them appended (connect() re-runs, so the append is
+ * idempotent per line).
+ */
+const FORWARD_BOT_INSTRUCTION =
+  '消息前缀 [bot] 表示该消息来自另一个机器人（不是人类成员）；是否回复由你自主判断。';
+const NOREPLY_INSTRUCTION = '不想回复时只输出 <noreply> 即可，消息不会发出。';
+
 export type DeliveryErrorCode =
   | 'RATE_LIMITED'
   | 'RETRY_EXHAUSTED'
@@ -1100,11 +1110,9 @@ export class QQChannel extends ChannelBase {
         '支持 Markdown 格式，回复自然流畅即可。',
         '消息前缀 [atMention=true] 表示该消息 @了你，[atMention=false] 表示未 @你。',
         ...(this.qqConfig.forwardBotMessages === true
-          ? [
-              '消息前缀 [bot] 表示该消息来自另一个机器人（不是人类成员）；是否回复由你自主判断。',
-            ]
+          ? [FORWARD_BOT_INSTRUCTION]
           : []),
-        '不想回复时只输出 <noreply> 即可，消息不会发出。',
+        NOREPLY_INSTRUCTION,
         '',
         '以下规则仅适用于群聊消息。C2C 私聊中请始终正常回复。',
         '## 群聊唤醒与静默规则',
@@ -1153,10 +1161,7 @@ export class QQChannel extends ChannelBase {
       // which would drop the feature's own brake (what `[bot]` means and how to
       // stay silent). Attach it to the operator text. Per-line `includes` guard
       // makes the append idempotent: connect() re-runs on every reconnect.
-      const supplements = [
-        '消息前缀 [bot] 表示该消息来自另一个机器人（不是人类成员）；是否回复由你自主判断。',
-        '不想回复时只输出 <noreply> 即可，消息不会发出。',
-      ];
+      const supplements = [FORWARD_BOT_INSTRUCTION, NOREPLY_INSTRUCTION];
       const existing = this.config.instructions;
       const missing = supplements.filter((line) => !existing.includes(line));
       if (missing.length > 0) {
