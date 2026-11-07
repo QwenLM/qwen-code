@@ -286,7 +286,7 @@ export class TeamManager {
    * model still gets the whole report.
    */
   private leaderMessageCallback:
-    | ((message: string, display: string) => void)
+    | ((message: string, display: string, senders?: readonly string[]) => void)
     | null = null;
 
   /**
@@ -788,14 +788,18 @@ export class TeamManager {
     summary?: string,
     automatic = false,
   ): Promise<void> {
+    const sender = from
+      ? findMemberByName(this.teamFile.members, from)
+      : undefined;
+    const fromName =
+      this.getSenderPriority(from) === MessagePriority.LEADER
+        ? LEADER_NAME
+        : (sender?.name ?? 'unknown');
     // Messages addressed to the leader go to leader's mailbox.
     if (
       toName.toLowerCase() === LEADER_NAME ||
       toName === this.teamFile.leadAgentId
     ) {
-      const sender = from
-        ? findMemberByName(this.teamFile.members, from)
-        : undefined;
       const responseCandidate =
         sender && !automatic ? classifyShutdownResponse(message) : undefined;
       const shutdownReservation =
@@ -809,7 +813,7 @@ export class TeamManager {
 
       try {
         await writeMessage(this.teamFile.name, LEADER_NAME, {
-          from: from ?? 'unknown',
+          from: fromName,
           text: message,
           summary,
           timestamp: new Date().toISOString(),
@@ -834,7 +838,7 @@ export class TeamManager {
       }
       try {
         this.teamEventEmitter.emit(TeamEventType.MESSAGE_SENT, {
-          from: from ?? 'unknown',
+          from: fromName,
           to: LEADER_NAME,
           message,
           timestamp: Date.now(),
@@ -880,11 +884,11 @@ export class TeamManager {
           `through its backlog before sending more.`,
       );
     }
-    queue.push({ text: message, from: from ?? '', priority });
+    queue.push({ text: message, from: fromName, priority });
 
     this.teamEventEmitter.emit(TeamEventType.MESSAGE_SENT, {
-      from: from ?? 'unknown',
-      to: toName,
+      from: fromName,
+      to: member.name,
       message,
       timestamp: Date.now(),
     });
@@ -1069,10 +1073,17 @@ export class TeamManager {
    * Pass `null` to detach a previously-installed callback.
    */
   setLeaderMessageCallback(
-    cb: ((message: string, display: string) => void) | null,
+    cb:
+      | ((
+          message: string,
+          display: string,
+          senders?: readonly string[],
+        ) => void)
+      | null,
   ): void {
     this.leaderMessageCallback = cb
-      ? (message, display) => runOutsideAgentContext(() => cb(message, display))
+      ? (message, display, senders) =>
+          runOutsideAgentContext(() => cb(message, display, senders))
       : null;
   }
 
@@ -1235,9 +1246,22 @@ export class TeamManager {
       return;
     }
 
+    const senders = newMessages.map(({ from }) =>
+      !from ||
+      from === 'unknown' ||
+      from.toLowerCase() === LEADER_NAME ||
+      from === this.teamFile.leadAgentId
+        ? undefined
+        : findMemberByName(this.teamFile.members, from)?.name,
+    );
     callback(
       this.formatLeaderEnvelope(newMessages).join('\n\n'),
       this.formatLeaderDisplay(newMessages),
+      // Senders travel with the batch so a host can attribute the report
+      // structurally instead of parsing it out of the formatted envelope.
+      senders.every((sender) => sender !== undefined)
+        ? [...new Set(senders)]
+        : undefined,
     );
   }
 
@@ -1743,6 +1767,15 @@ export class TeamManager {
     this.taskUpdateUnsubscribe?.();
     this.taskUpdateUnsubscribe = undefined;
 
+    // A teammate that never reported a terminal status still holds a bridge
+    // entry. `backend.cleanup()` terminates it later, when the STATUS_CHANGE
+    // bridge is detached and this emitter has no listeners, so the sole
+    // TEAMMATE_EXITED site cannot fire for it. Publish those exits here, while
+    // listeners are still attached: a client that reconstructs roster
+    // membership from joins and exits would otherwise keep a deleted team's
+    // teammates for the rest of the session.
+    const survivingAgentIds = [...this.eventBridgeCleanups.keys()];
+
     for (const cleanup of this.eventBridgeCleanups.values()) {
       cleanup();
     }
@@ -1750,6 +1783,18 @@ export class TeamManager {
 
     while (this.pendingAsyncWork.size > 0) {
       await Promise.allSettled([...this.pendingAsyncWork]);
+    }
+
+    for (const agentId of survivingAgentIds) {
+      this.teamEventEmitter.emit(TeamEventType.TEAMMATE_EXITED, {
+        agentId,
+        name: this.agentIdentities.get(agentId)?.agentName ?? agentId,
+        // The team is being torn down; `backend.cleanup()` below is what ends
+        // them, so the terminal status is a cancellation, not a completion.
+        status: AgentStatus.CANCELLED,
+        timestamp: Date.now(),
+        teardown: true,
+      });
     }
 
     this.pendingMessages.clear();
