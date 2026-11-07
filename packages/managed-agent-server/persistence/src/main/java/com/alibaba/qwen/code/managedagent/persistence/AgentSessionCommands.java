@@ -768,18 +768,19 @@ final class AgentSessionCommands {
             }
             return;
         }
-        // Cross-Session reuse of a tenant-global key: gate on the caller's own
-        // requested Session (the creator gate, matching the service pre-read),
-        // never the recorded Session's grant — that would answer 404 for a
-        // Session the caller owns. The collision then answers
-        // idempotency_conflict, the same refusal requireSameMutation gives on
-        // the DuplicateKey arm, so the answer does not depend on whether the
-        // receipt was visible before the insert.
+        // Cross-Session reuse of a tenant-global key, matching the service
+        // pre-read (requireRecordedSessionGrant) so the answer does not depend
+        // on whether the receipt was visible before the insert.
         if (requested.workspace() == null) {
+            // Unbound Sessions are private: gate on the recorded Session's
+            // ownership to hide a foreign key's existence (404); the owner's
+            // own collision falls through to idempotency_conflict.
             ManagedSessionPrincipal.requireOwnership(jdbc, tenantId,
-                    requested.sessionId(), principal);
+                    command.sessionId(), principal);
         } else if (!workspaces.createdSession(tenantId, actorId,
                 requested.sessionId())) {
+            // Bound Workspace Sessions gate on the caller's own requested
+            // Session, never the recorded Session's grant.
             throw new ManagedAgentException(409, "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }

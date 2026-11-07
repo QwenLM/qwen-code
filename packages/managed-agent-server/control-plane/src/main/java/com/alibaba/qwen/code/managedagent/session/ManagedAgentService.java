@@ -2599,13 +2599,22 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             requireReadGrant(requested, principal);
             return requested;
         }
-        // Cross-Session reuse of a tenant-global key: gate on the caller's own
-        // requested Session, never the recorded Session's read grant (which
-        // would answer 404 for a Session the caller owns). The key collision
-        // then answers idempotency_conflict exactly as the in-store receipt
-        // probe (requireSameMutation) does, so the refusal does not depend on
-        // whether the receipt was visible before the insert.
-        requireReplayCreator(requested, principal);
+        // Cross-Session reuse of a tenant-global key. The refusal must match the
+        // in-store receipt probe (requireMutationReceiptGrant) so it does not
+        // depend on whether the receipt was visible before the insert.
+        if (requested.workspace() == null) {
+            // Unbound Sessions are private: hide a foreign key's existence by
+            // gating on the recorded Session's ownership. A caller that cannot
+            // read the recorded Session gets 404; the owner's own collision
+            // falls through to idempotency_conflict.
+            store.requireSessionOwnership(requested.tenantId(),
+                    command.sessionId(), principal);
+        } else {
+            // Bound Workspace Sessions share their workspace context: gate on
+            // the caller's own requested Session, never the recorded Session's
+            // read grant (which would answer 404 for a Session the caller owns).
+            requireReplayCreator(requested, principal);
+        }
         throw new ManagedAgentException(409, "idempotency_conflict",
                 "The idempotency key was reused with different content.");
     }
