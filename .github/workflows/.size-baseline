@@ -27,6 +27,7 @@
 2038 docs-page-action.yml
 10005 dsw-swe-verified-release.yml
 40188 e2e.yml
+651 ephemeral-runner-smoke.yml
 13135 finalize-release.yml
 16647 live-host-release.yml
 5950 live-host.yml
