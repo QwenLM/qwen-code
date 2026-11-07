@@ -656,11 +656,13 @@ describe('gateCommandError', () => {
   });
 
   it('refuses a wrapper whose payload expansion cannot be resolved', () => {
-    // `safetyCommand` equals the gate here, so only the unresolved flag can
-    // tell that the shell runs a script the rules never read.
-    const error = gateCommandError('bash -c "$X"');
+    // The flag-only shape: for an UNQUOTED expansion `safetyCommand` equals the
+    // gate, so `checked !== gate.trim()` cannot fire and only
+    // `wrapperPayloadUnresolved` can tell that the shell runs a script the
+    // rules never read (#16540 review, R1-9).
+    const error = gateCommandError('bash -c $X');
     expect(error).toContain('wrapped in a shell');
-    expect(error).toContain('"$X"');
+    expect(error).toContain('bash -c $X');
   });
 
   it('names a long checked command cut short, without halving a character', () => {

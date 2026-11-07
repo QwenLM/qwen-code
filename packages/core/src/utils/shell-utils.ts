@@ -601,11 +601,13 @@ const ANSI_C_SIMPLE: Record<string, string> = {
 export function decodeAnsiCEscape(
   body: string,
   index: number,
-): { text: string; length: number } | null {
+): { text: string; length: number; bytes?: number[] } | null {
   if (body[index] !== '\\' || index + 1 >= body.length) return null;
   const next = body[index + 1]!;
   const simple = ANSI_C_SIMPLE[next];
-  if (simple !== undefined) return { text: simple, length: 2 };
+  if (simple !== undefined) {
+    return { text: simple, bytes: [...Buffer.from(simple, 'utf8')], length: 2 };
+  }
   if (next === 'x' || next === 'u' || next === 'U') {
     const max = next === 'x' ? 2 : next === 'u' ? 4 : 8;
     const digits = new RegExp(`^[0-9a-fA-F]{1,${max}}`).exec(
@@ -620,9 +622,17 @@ export function decodeAnsiCEscape(
       if (next !== 'x' && code > 0x10ffff) {
         return { text: body.slice(index, index + length), length };
       }
+      // bash writes BYTES for `\xHH` (and octal below); decoding each byte as
+      // U+00xx turned a UTF-8 sequence into mojibake, so the byte is carried
+      // alongside the legacy text form (#16540 review, R1-4).
+      const bytes =
+        next === 'x'
+          ? [code & 0xff]
+          : [...Buffer.from(String.fromCodePoint(code), 'utf8')];
       return {
         text:
           next === 'x' ? String.fromCharCode(code) : String.fromCodePoint(code),
+        bytes,
         length,
       };
     }
@@ -633,17 +643,19 @@ export function decodeAnsiCEscape(
   // ANSI-C state open and swallowed the rest of the command line
   // (#16075 review, R8-2 / R10-1).
   if (next === 'c' && index + 2 < body.length && body[index + 2] !== "'") {
-    return {
-      text: String.fromCharCode(
-        body[index + 2]!.toUpperCase().charCodeAt(0) & 0x1f,
-      ),
-      length: 3,
-    };
+    const operand = body[index + 2]!;
+    const code =
+      operand === '?'
+        ? 0x7f // `\c?` is DEL in bash, not the 0x1F mask (#16540 review, R1-6)
+        : operand.toUpperCase().charCodeAt(0) & 0x1f;
+    return { text: String.fromCharCode(code), bytes: [code], length: 3 };
   }
   if (next >= '0' && next <= '7') {
     const digits = /^[0-7]{1,3}/.exec(body.slice(index + 1))![0];
+    const code = parseInt(digits, 8) & 0xff;
     return {
-      text: String.fromCharCode(parseInt(digits, 8) & 0xff),
+      text: String.fromCharCode(code),
+      bytes: [code],
       length: 1 + digits.length,
     };
   }
@@ -651,12 +663,19 @@ export function decodeAnsiCEscape(
 }
 
 export function decodeAnsiCWord(body: string): string {
-  let out = '';
+  // bash builds BYTES from an ANSI-C word and hands them to the program, so a
+  // multi-byte UTF-8 sequence spelled `\xc3\xa9` is `é`, not `Ã©`
+  // (#16540 review, R1-4). Literal characters and `\u`/`\U` code points are
+  // encoded to bytes too, and the word is decoded as UTF-8 at the end.
+  const bytes: number[] = [];
+  const pushText = (text: string) => {
+    for (const byte of Buffer.from(text, 'utf8')) bytes.push(byte);
+  };
   for (let index = 0; index < body.length; index++) {
     const escape = decodeAnsiCEscape(body, index);
     if (!escape) {
       // Unknown escape: bash keeps the backslash and the letter.
-      out += body[index]!;
+      pushText(body[index]!);
       continue;
     }
     // A NUL ends the word bash builds: `$'--\0x'` is the word `--`, so the
@@ -664,10 +683,11 @@ export function decodeAnsiCWord(body: string): string {
     // segment — bash appends any following concatenation segment (`f $'a\0b'c`
     // is `ac`), and the caller decodes each segment separately (#16075 R11-2).
     if (escape.text === '\0') break;
-    out += escape.text;
+    if (escape.bytes) bytes.push(...escape.bytes);
+    else pushText(escape.text);
     index += escape.length - 1;
   }
-  return out;
+  return Buffer.from(bytes).toString('utf8');
 }
 
 /**
@@ -877,10 +897,19 @@ export function stripShellWrapper(command: string): string {
       }
       const commandToken = takeLeadingToken(markerRest);
       if (!commandToken) return trimmed;
-      const { value: innerCommand, quote } = stripSymmetricQuotes(
-        commandToken.token,
-      );
-      if (!quote && shellWrapperCommandConsumesRest(wrapperToken.token)) {
+      const payloadQuote = shellWordQuoteRemoval(commandToken.token);
+      const { value, quote } = stripSymmetricQuotes(commandToken.token);
+      // An ANSI-C payload (`bash -c $'cat > /etc/motd'`) is the decoded text
+      // the shell runs, not a quoted literal: handing back the `$'…'` spelling
+      // made op extraction and the self-kill gate miss the payload
+      // (#16540 review, R1-3).
+      const innerCommand =
+        commandToken.token.includes("$'") &&
+        payloadQuote !== null &&
+        !payloadQuote.hasExpansion
+          ? payloadQuote.text
+          : value;
+      if (quote === '' && shellWrapperCommandConsumesRest(wrapperToken.token)) {
         return markerRest.trimStart() || trimmed;
       }
       return innerCommand || trimmed;
@@ -1450,7 +1479,23 @@ function buildMonitorSpawnOverride(
   rest: string,
 ): string {
   const suffix = stripTrailingBackgroundAmp(rest.replace(/^[ \t]+/, ''));
-  return [...wrapperTokens, payloadToken, suffix].filter(Boolean).join(' ');
+  return stripPayloadBackgroundAmp(
+    [...wrapperTokens, payloadToken, suffix].filter(Boolean).join(' '),
+  );
+}
+
+/** Strip the background `&` the monitored shell would run for the payload,
+ * whether it sits just inside the payload's closing quote (`bash -c "tail -f
+ * $LOG &"`), glued after it (`bash -c "$X"&`), or after the whole command.
+ * `&&` and `\&` stay untouched, like `stripTrailingBackgroundAmp`
+ * (#16540 review, R1-1). */
+function stripPayloadBackgroundAmp(command: string): string {
+  const outer = stripTrailingBackgroundAmp(command);
+  const quoted = /^(.*?)([ \t]*)&([ \t]*)(["'])$/s.exec(outer);
+  if (quoted) {
+    return stripTrailingBackgroundAmp(`${quoted[1]}${quoted[4]}`);
+  }
+  return outer;
 }
 
 export function hasNonFinalTopLevelBackgroundOperator(
@@ -1890,21 +1935,60 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
       }
       const commandToken = takeLeadingToken(markerRest);
       if (!commandToken) {
+        // `sh -c --` with no script after it: the shell runs an empty program
+        // this scan cannot see, so the cron gate has to refuse it
+        // (#16540 review, R1-7).
         return {
           innerCommand: trimmed,
           innerQuote: '',
+          wrapperPayloadUnresolved: true,
+        };
+      }
+      // The payload after `--` goes through the SAME resolution as the one
+      // before it: an expansion may be the script or may assemble it, so it
+      // fails closed instead of being analysed as literal text
+      // (#16540 review, R1-2).
+      const payloadRemoval = shellWordQuoteRemoval(commandToken.token);
+      const payloadIsAnsiC = commandToken.token.includes("$'");
+      if (payloadRemoval?.hasExpansion) {
+        if (payloadRemoval.fullyQuoted) {
+          return {
+            wrapperTokens,
+            innerCommand: payloadRemoval.text,
+            innerQuote: '',
+            innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
+            wrapperPayloadUnresolved: true,
+            spawnOverride: buildMonitorSpawnOverride(
+              wrapperTokens,
+              commandToken.token,
+              commandToken.rest,
+            ),
+          };
+        }
+        return {
+          innerCommand: trimmed,
+          innerQuote: '',
+          wrapperPayloadUnresolved: true,
         };
       }
       const { value: innerCommand, quote: innerQuote } = stripSymmetricQuotes(
         commandToken.token,
       );
+      // An ANSI-C payload is the decoded text for op extraction and the
+      // self-kill gate, while the command still spawns as written
+      // (#16540 review, R1-3).
+      const decodedPayload =
+        payloadIsAnsiC && payloadRemoval ? payloadRemoval.text : innerCommand;
       return {
         wrapperTokens,
-        innerCommand,
-        innerQuote,
+        innerCommand: decodedPayload,
+        innerQuote: payloadIsAnsiC ? '' : innerQuote,
         // Blanks only: a newline right after the script separates the
         // next command, which the script's positional words are not.
         innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
+        ...(payloadIsAnsiC
+          ? { spawnOverride: stripPayloadBackgroundAmp(trimmed) }
+          : {}),
       };
     }
 

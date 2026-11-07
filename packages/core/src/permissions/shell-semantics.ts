@@ -158,13 +158,24 @@ function tokenize(
           i += escape.length - 1;
           continue;
         }
-        current += escape.text;
+        const escapeText = escape.bytes
+          ? Buffer.from(escape.bytes).toString('utf8')
+          : escape.text;
+        current += escapeText;
         // `bare` is one entry per UTF-16 unit of `current`; an escape such as
         // `\U0001F600` decodes to a two-unit astral char, so a single '0' here
         // desynced the positional map for the rest of the word and left
         // trailing syntax (`)`) glued to the token (#16075 review, R13-2).
-        bare += '0'.repeat(escape.text.length);
-        i += escape.length - 1;
+        bare += '0'.repeat(escapeText.length);
+        // Inside `$'…'` a scanning backslash escapes only its operand, so the
+        // operand of `\c` does not swallow the backslash after it: in
+        // `$'a\c\''` that second backslash still escapes the quote and the word
+        // stays open. Consuming all three desynced the state and swallowed the
+        // rest of the line (#16540 review, R1-5).
+        i +=
+          escape.length === 3 && command[i + 2] === '\\'
+            ? 1
+            : escape.length - 1;
         continue;
       }
       if (ch === "'") {

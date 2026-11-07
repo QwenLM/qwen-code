@@ -610,6 +610,20 @@ describe('extractShellOperations', () => {
 });
 
 // Shared compound shell analysis for permission rules and AUTO review.
+// R1-5 (#16540 review): `\c\` before a quote leaves the backslash free to
+// escape that quote, so the ANSI-C word stays open and the following
+// redirection is still part of the command.
+describe('ANSI-C word boundaries with \\c\\ before a quote', () => {
+  it('keeps the redirect after a \\c\\ word', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        "echo $'a\\c\\'' > /etc/motd",
+        '/repo',
+      ),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/etc/motd' }]);
+  });
+});
+
 describe('extractShellOperationsAcrossCommand', () => {
   it.each<Row>([
     [

@@ -14,6 +14,7 @@ import {
   checkCommandPermissions,
   COMMAND_SUBSTITUTION_WARNING,
   detectSelfKillCommand,
+  decodeAnsiCWord,
   doesToolInvocationMatch,
   escapeShellArg,
   getCommandRoot,
@@ -1031,6 +1032,59 @@ describe('normalizeMonitorCommand', () => {
   // verbatim but normalises the trailing background `&` away. Keeping it made
   // the monitor's tracked child fork the payload and exit, so a non-zero exit
   // was reported as success.
+  // R1-2 (#16540 review): the payload after `--` is resolved like the one
+  // before it — an expansion there can assemble the script, so it fails closed
+  // instead of being analysed as literal text.
+  it.each([
+    "bash -c -- 'cat /etc/hostname '$(touch${IFS}/tmp/x)''",
+    "bash -c -- 'cat /etc/hostname '$X''",
+  ])('fails closed on an unresolvable payload after --: %s', (command) => {
+    const normalized = normalizeMonitorCommand(command);
+    expect(normalized.wrapperPayloadUnresolved).toBe(true);
+    expect(normalized.spawnCommand).toBe(command);
+    expect(normalized.safetyCommand).toBe(command);
+  });
+
+  // R1-3 (#16540 review): an ANSI-C payload is the decoded text the shell runs.
+  it('decodes an ANSI-C payload for analysis and spawns it as written', () => {
+    expect(stripShellWrapper("bash -c $'cat > /etc/motd'")).toBe(
+      'cat > /etc/motd',
+    );
+    expect(normalizeMonitorCommand("bash -c $'cat > /etc/motd'")).toEqual({
+      analysisCommand: 'cat > /etc/motd',
+      safetyCommand: 'cat > /etc/motd',
+      spawnCommand: "bash -c $'cat > /etc/motd'",
+      strippedTrailingAmp: false,
+    });
+    // The static payload after `--` still unwraps (existing behaviour).
+    expect(stripShellWrapper("sh -c -- 'ls -l'")).toBe('ls -l');
+  });
+
+  // R1-7 (#16540 review): `sh -c --` with no script leaves the shell running a
+  // program the scan never reads, so the cron gate must refuse it.
+  it('flags a wrapper that carries no payload after --', () => {
+    expect(normalizeMonitorCommand('sh -c --').wrapperPayloadUnresolved).toBe(
+      true,
+    );
+  });
+
+  it('strips an inner or glued payload & and reports it', () => {
+    expect(normalizeMonitorCommand('bash -c "echo $(id)"&')).toEqual({
+      analysisCommand: 'echo $(id)',
+      safetyCommand: 'echo $(id)',
+      spawnCommand: 'bash -c "echo $(id)"',
+      strippedTrailingAmp: true,
+      wrapperPayloadUnresolved: true,
+    });
+    expect(
+      normalizeMonitorCommand('bash -c "tail -f $LOG &"').spawnCommand,
+    ).toBe('bash -c "tail -f $LOG"');
+    // `&&` and `\&` stay untouched.
+    expect(
+      normalizeMonitorCommand('bash -c "echo $(id) && echo done"').spawnCommand,
+    ).toBe('bash -c "echo $(id) && echo done"');
+  });
+
   it('strips a trailing background & from the spawn override', () => {
     const command = 'bash -c "echo $(id)" &';
     expect(normalizeMonitorCommand(command)).toEqual({
@@ -1465,5 +1519,28 @@ describe('splitCommands', () => {
     ])('splits %s', (command, expected) => {
       expect(splitCommands(command)).toEqual(expected);
     });
+  });
+});
+
+// R1-4 / R1-6 (#16540 review): bash builds BYTES from an ANSI-C word, so a
+// multi-byte UTF-8 sequence spelled with `\xHH` decodes to the character it
+// writes, and `\c?` is DEL.
+describe('decodeAnsiCWord byte semantics', () => {
+  it.each([
+    ['\\xc3\\xa9', 'é'],
+    ['\\xe4\\xbd\\xa0', '你'],
+    ['\\U0001F600', '😀'],
+    ['caf\\xc3\\xa9', 'café'],
+  ])('decodes %s as the bytes bash writes', (body, expected) => {
+    const decoded = decodeAnsiCWord(body);
+    expect(decoded).toBe(expected);
+    expect(Buffer.from(decoded, 'utf8').toString('hex')).toBe(
+      Buffer.from(expected, 'utf8').toString('hex'),
+    );
+  });
+
+  it('maps \\c? to DEL', () => {
+    expect(decodeAnsiCWord('\\c?').charCodeAt(0)).toBe(0x7f);
+    expect(decodeAnsiCWord('\\cA').charCodeAt(0)).toBe(0x01);
   });
 });
