@@ -21,22 +21,38 @@ created. Operators discover the deployment's state one failure at a time.
 preflight and exits. It uses the existing server artifact, so the reference
 distribution needs no additional component.
 
-The command binds the same inputs Spring would load:
+The command reads the configuration the server reads, prepared as
+`SpringApplication` prepares it before it creates a context, so every input
+keeps Spring's precedence:
 
-- the classpath `application.yml` that maps `QWEN_MANAGED_AGENT_*` variables;
-- the command line (`--server.address=...`, `--qwen.managed-agent.*`), which
-  keeps Spring's precedence;
-- the external YAML named by `--spring.config.additional-location` (which an
-  operator can pass) or by `SPRING_CONFIG_ADDITIONAL_LOCATION` (which the
-  launcher sets when `config/application.yml` exists);
-- the process environment, which keeps precedence over both files.
+- the command line (`--server.address=...`, `--qwen.managed-agent.*`);
+- the process environment, `SPRING_APPLICATION_JSON` included, and the JVM
+  system properties (`-D…`, such as those in `JAVA_TOOL_OPTIONS`);
+- the configuration files Spring Boot reads: those named by
+  `spring.config.location`, `spring.config.additional-location` or
+  `spring.config.import`, as an argument or a `SPRING_CONFIG_*` variable (the
+  launcher sets `SPRING_CONFIG_ADDITIONAL_LOCATION` when
+  `config/application.yml` exists, and the systemd unit's `server.env` names
+  `/etc/qwen-managed-agent/application.yml`); those at its default locations
+  `./`, `./config/` and `./config/*/`, unless `spring.config.location`
+  replaces them; as `.yml`, `.yaml`, `.properties` or `.xml`, under
+  `spring.config.name`; their profile variants, the files they import and
+  config trees;
+- the classpath `application.yml` that maps `QWEN_MANAGED_AGENT_*` variables.
+
+Relative locations, the default ones among them, are read in the working
+directory, as the server reads them, so the command runs in the server's
+working directory: the distribution root, or the unit's `WorkingDirectory`.
+Before [#16057](https://github.com/QwenLM/qwen-code/issues/16057) it read only
+the file the launcher or `server.env` named, and missed a `server.port` the
+server read from `config/application.yml` in its working directory.
 
 ## Checks
 
 | Check        | Passing condition                                                                                                                                                                                                                                                                                    |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `java`       | Runtime feature version is 21 or later.                                                                                                                                                                                                                                                              |
-| `config`     | The external YAML exists and is readable; a file containing secrets is not group- or world-readable.                                                                                                                                                                                                 |
+| `config`     | One row per file the server reads: readable by the service account, not group- or world-readable when it holds a secret; WARN for none. FAIL where Spring would not start, for a YAML error, with its line and usually its file, or where this process cannot look in a directory or read a file.    |
 | `key-ring`   | At least an active key ID is configured; previous key IDs are reported.                                                                                                                                                                                                                              |
 | `validation` | The startup property validations accept the bound configuration.                                                                                                                                                                                                                                     |
 | `auth`       | A non-loopback bind does not use `auto`; signed mode has a signing key; insecure bind is reported.                                                                                                                                                                                                   |
@@ -68,10 +84,62 @@ describes the Harness negotiation, the `workers` row and `--online`.
 
 `ManagedAgentServerApplication` intercepts `--check` before
 `SpringApplication.run`, so no listener, scheduler, datasource pool or worker
-starts. A `StandardEnvironment` receives the external and packaged YAML
-property sources, `Binder` produces `ManagedAgentProperties`, the Harness probe
-uses the JDK HTTP client, and the database probe uses JDBC with a five-second
-connect and socket timeout.
+starts. `ServerEnvironment` prepares a servlet environment as
+`SpringApplication` does: the arguments, the process environment, then every
+environment post-processor on the class path through
+`EnvironmentPostProcessorApplicationListener`, and relaxed binding. It starts
+no context, and `ResolvedConfiguration`, which the upgrade command reads its
+settings through, prepares the same environment. The `config` rows name the
+files the prepared property sources came from, then the files Spring read at a
+location without finding a setting. The check does not read a location's
+spelling itself: it records each file Spring's own resolver looks a
+configuration file up at, there or not, so a scheme in another case, a
+`resource:` prefix, an extension hint, a bare name with a colon, an empty
+`spring.config.location` or `spring.config.name`, and each variant of a profile
+Spring activates come out as Spring reads them. Spring opens a config tree and
+lists a wildcard's directories without such a lookup, so those two come from the
+location values, read with Spring's location rules: a wildcard's directories,
+but none whose name starts with `..`, as Spring skips those, and in each, the
+files of a directory location or the one name of a file's wildcard. A directory
+there that this process cannot list or enter is named as one it cannot look in.
+When the preparation throws, the row names what Spring refused: the file, read
+as missing or unreadable, or the YAML error's file and line, found among the
+files Spring looked for before it refused, since Spring's error names neither: each file whose own error is Spring's, the same
+problem at the same place, unless a profile the arguments or the environment
+activate tells which one Spring read; a file this process cannot read names the
+service account when that cannot read it either, and otherwise says to run the
+check as that account. The other rows then read the arguments, the process
+environment and the packaged defaults. Where the preparation succeeds but a
+setting a row reads does not resolve, such as a placeholder with no value and
+no default, that row fails with Spring's reason and the others still print.
+
+Spring skips an optional file it cannot see, so where this process cannot enter
+a directory the server looks in for a configuration file or a config tree, or
+list one it lists, as it lists `config/` for `config/*/`, a `config` row names
+that directory and says to run the check as the service account or as root, or
+as root alone when that is the service account. When that account cannot look
+in it either, Spring reads nothing there, and the directory gets no row; nor
+does it without a service account, or when the check runs as that account, as
+this process then stands in for the server's, as it does for every file row. A
+service account of root reads and enters whatever the modes say, as the kernel
+lets it.
+
+A file holds a secret by one rule, the configuration reference's: a key named as
+a password, token, key or secret, or a map of keys, in any spelling Spring
+binds, and not an ID or the path to a file that holds one. The rule judges every
+key a file holds: those of each document, including one no profile activates,
+those in a comment, a commented-out line or, in a file that may be YAML, the
+comment after a value, the property a config tree value file holds, and a
+parameter of a value, such as a JDBC URL's `?password=`, or the password of a
+URL's user information. A UTF-8 byte order mark, which YAML drops, does not hide
+a commented-out key on the first line. A path can be a configuration file and a
+config tree value file at once, as `config/application.yml` is under a config
+tree imported over `config/`, and so is a file whose extension a location hints,
+as `file:app.conf[.properties]` does, under one imported over its directory; it
+is then judged both ways. A value file Spring reads as no configuration file
+holds its value alone, whatever its name. `Binder` produces
+`ManagedAgentProperties`, the Harness probe uses the JDK HTTP client, and the
+database probe uses JDBC with a five-second connect and socket timeout.
 
 ## Acceptance
 

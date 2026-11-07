@@ -18,15 +18,18 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
 import org.flywaydb.core.api.FlywayException;
 import org.flywaydb.core.api.MigrationVersion;
+import org.springframework.boot.ApplicationContextFactory;
+import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.web.ServerProperties;
 import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
 import org.springframework.boot.context.properties.bind.Bindable;
 import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.env.PropertiesPropertySourceLoader;
+import org.springframework.boot.env.PropertySourceLoader;
 import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.env.EnumerablePropertySource;
 import org.springframework.core.env.PropertySource;
-import org.springframework.core.env.SimpleCommandLinePropertySource;
-import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
@@ -61,6 +64,7 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -71,21 +75,21 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
  * Read-only deployment preflight for the reference distribution.
  *
- * <p>It binds the same configuration Spring would load, checks the inputs that
- * otherwise fail during startup or on the first Turn, and never opens the web
- * server, a scheduler or a worker.
+ * <p>It binds the configuration the server reads, prepared as
+ * {@link ServerEnvironment} prepares it, so files at Spring Boot's default
+ * locations count, read in the working directory; run it with the server
+ * unit's working directory. It checks the inputs that otherwise fail during
+ * startup or on the first Turn, and never opens the web server, a scheduler
+ * or a worker.
  */
 public final class ManagedAgentPreflight {
-    static final String CONFIG_LOCATION_ARG =
-            "--spring.config.additional-location=";
-    static final String CONFIG_LOCATION_ENV =
-            "SPRING_CONFIG_ADDITIONAL_LOCATION";
     static final String ONLINE_ARG = "--online";
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String WORKER_ARG = "managed-runtime-worker";
@@ -93,14 +97,31 @@ public final class ManagedAgentPreflight {
     private static final String DELETED_SUFFIX = " (deleted)";
     private static final String SHELL_MCP_FEATURE = "workspace-shell-mcp/1";
     private static final Pattern QWEN_CODE_VERSION = Pattern.compile("[0-9A-Za-z.+-]{1,64}");
-    private static final String OPTIONAL_PREFIX = "optional:";
-    private static final String FILE_PREFIX = "file:";
     private static final Pattern DIGEST =
             Pattern.compile("sha256:[0-9a-f]{64}");
     private static final int TIMEOUT_MILLIS = 5_000;
     private static final int KEY_BYTES = 32;
     private static final int MIN_JAVA_FEATURE = 21;
     private static final int DEFAULT_SERVER_PORT = 8080;
+    // A property whose last word is one of these holds a secret, in the
+    // configuration reference's terms; credential-key-id and the paths to
+    // files that hold one end otherwise.
+    private static final List<String> SECRET_SUFFIXES =
+            List.of("password", "token", "key", "keys", "secret");
+    // A key and its value on a commented-out line of YAML or .properties,
+    // such as "# credential-key: <key>" or "#spring.datasource.password=".
+    private static final Pattern COMMENTED_KEY = Pattern.compile(
+            "\\s*[#!]+\\s*(?:-\\s+)?[\"']?([^\\s:=\"'#!]+)[\"']?\\s*[:=](.*)");
+    // An entry of an XML properties file that a comment holds.
+    // Where a YAML comment after a value may start, which whitespace sets apart.
+    private static final Pattern INLINE_COMMENT = Pattern.compile("\\s#");
+    private static final Pattern XML_COMMENT = Pattern.compile("<!--(.*?)-->", Pattern.DOTALL);
+    private static final Pattern XML_ENTRY = Pattern.compile(
+            "<entry\\s+key\\s*=\\s*[\"']([^\"']*)[\"']\\s*>([^<]*)");
+    // A parameter of a value, such as a JDBC URL's ?password=, and the
+    // password of a URL's user information, as in https://user:secret@host.
+    private static final Pattern VALUE_PARAMETER = Pattern.compile("[?&;]([^=?&;#\\s]+)=");
+    private static final Pattern URL_PASSWORD = Pattern.compile("//[^/?#@\\s]*:[^/?#@\\s]+@");
 
     private ManagedAgentPreflight() {
     }
@@ -140,32 +161,43 @@ public final class ManagedAgentPreflight {
     }
 
     static List<Check> checks(String[] args) {
+        return checks(args, ApplicationContextFactory.DEFAULT
+                .createEnvironment(WebApplicationType.SERVLET));
+    }
+
+    /**
+     * The checks against {@code base}, prepared as the server prepares its
+     * environment; a test may replace its process variables.
+     */
+    static List<Check> checks(String[] args, ConfigurableEnvironment base) {
         List<Check> checks = new ArrayList<>();
         // While the server runs it holds its ports and its Runtime workers.
         boolean online = online(args, checks);
-        ConfigurableEnvironment environment = baseEnvironment(args);
-        List<String> locations = configLocations(args, environment);
-        loadConfiguration(environment, locations, checks);
+        Prepared prepared = prepare(args, base, checks);
+        ConfigurableEnvironment environment = prepared.environment();
         ManagedAgentProperties properties = bind(environment, checks);
         checks.add(javaCheck());
-        AccessCheck access = serviceUserCheck(properties.getServiceUser(),
-                System.getProperty("user.name", ""), ServiceAccount::lookup);
+        String runner = System.getProperty("user.name", "");
+        AccessCheck access = serviceUserCheck(properties.getServiceUser(), runner,
+                ServiceAccount::lookup);
         checks.add(access.check());
-        checks.add(configFileCheck(locations, access.account()));
+        checks.addAll(configChecks(prepared, access.account(), runner));
         checks.add(startupValidationCheck(properties));
         checks.add(keyRingCheck(properties));
-        checks.add(authCheck(environment, properties));
+        checks.add(row("auth", () -> authCheck(environment, properties)));
         checks.add(harnessCheck(properties, distributionQwenCodeVersion()));
         checks.add(credentialsFileCheck(properties, access.account()));
         checks.add(sessionStoreCheck(properties));
         checks.add(toolPathCheck(properties));
         checks.addAll(brokerChecks(properties));
         checks.add(workspaceCheck(properties));
-        String serverAddress = environment.getProperty("server.address", "127.0.0.1");
-        int serverPort = environment.getProperty("server.port", Integer.class,
-                DEFAULT_SERVER_PORT);
-        checks.add(online ? listeningCheck("server", serverAddress, serverPort)
-                : portCheck("server", serverAddress, serverPort));
+        checks.add(row("server-port", () -> {
+            String serverAddress = environment.getProperty("server.address", "127.0.0.1");
+            int serverPort = environment.getProperty("server.port", Integer.class,
+                    DEFAULT_SERVER_PORT);
+            return online ? listeningCheck("server", serverAddress, serverPort)
+                    : portCheck("server", serverAddress, serverPort);
+        }));
         if (properties.getRuntimeBroker().isEnabled()) {
             ManagedAgentProperties.RuntimeBroker broker = properties.getRuntimeBroker();
             checks.add(online ? listeningCheck("broker", broker.getHost(), broker.getPort())
@@ -173,79 +205,162 @@ public final class ManagedAgentPreflight {
         }
         checks.add(workersCheck(properties, () -> ProcessHandle.allProcesses()
                 .collect(Collectors.toList()), online));
-        Check database = databaseCheck(environment);
+        Check database = row("database", () -> databaseCheck(environment));
         checks.add(database);
         checks.add(database.status() == Status.PASS
-                ? capacityCheck(environment)
+                ? row("capacity", () -> capacityCheck(environment))
                 : new Check("capacity", Status.SKIP,
                         "database check did not pass; capacity not measured",
                         null));
         return checks;
     }
 
-    static ConfigurableEnvironment baseEnvironment(String[] args) {
-        StandardEnvironment environment = new StandardEnvironment();
-        if (args.length > 0) {
-            environment.getPropertySources().addFirst(
-                    new SimpleCommandLinePropertySource(args));
-        }
-        return environment;
-    }
-
-    static List<String> configLocations(
-            String[] args, ConfigurableEnvironment environment) {
-        List<String> locations = new ArrayList<>();
-        for (String arg : args) {
-            if (arg.startsWith(CONFIG_LOCATION_ARG)) {
-                addLocations(locations,
-                        arg.substring(CONFIG_LOCATION_ARG.length()));
-            }
-        }
-        if (locations.isEmpty()) {
-            String configured = environment.getProperty(CONFIG_LOCATION_ENV);
-            if (configured != null) {
-                addLocations(locations, configured);
-            }
-        }
-        return locations;
-    }
-
-    private static void addLocations(List<String> locations, String value) {
-        for (String part : value.split(",")) {
-            String trimmed = part.trim();
-            if (!trimmed.isEmpty()) {
-                locations.add(trimmed);
-            }
+    /**
+     * A row that reads the environment, which fails as Spring would where a
+     * setting does not resolve, such as a placeholder with no value and no
+     * default, rather than stop the check before it prints a row.
+     */
+    private static Check row(String name, Supplier<Check> check) {
+        try {
+            return check.get();
+        } catch (RuntimeException error) {
+            return new Check(name, Status.FAIL, rootMessage(error),
+                    "correct the configured value");
         }
     }
 
-    static void loadConfiguration(
-            ConfigurableEnvironment environment, List<String> locations,
+    /**
+     * The environment the checks read, and either the configuration files it
+     * holds from the file system, with the property each config tree value
+     * file holds, those of them Spring also reads as configuration files and
+     * the directories this process cannot look in for more, or why Spring
+     * would refuse to start.
+     */
+    record Prepared(ConfigurableEnvironment environment, List<Path> files,
+            Map<Path, String> values, Set<Path> configurations,
+            List<ServerEnvironment.Hidden> hidden, ServerEnvironment.Failure failure) {
+    }
+
+    /**
+     * The environment as the server prepares it. When Spring would refuse to
+     * start, as for a named location that does not exist or a file it cannot
+     * read, the failure is kept for the config row, which names an account
+     * once the service-user row has found it, and the other rows read the
+     * arguments, the process environment and the packaged defaults.
+     */
+    static Prepared prepare(String[] args, ConfigurableEnvironment base,
             List<Check> checks) {
-        YamlPropertySourceLoader loader = new YamlPropertySourceLoader();
-        for (int index = locations.size() - 1; index >= 0; index--) {
-            String location = locations.get(index);
-            boolean optional = location.startsWith(OPTIONAL_PREFIX);
-            String path = optional
-                    ? location.substring(OPTIONAL_PREFIX.length()) : location;
-            if (path.startsWith(FILE_PREFIX)) {
-                path = path.substring(FILE_PREFIX.length());
-            }
-            Resource resource = new FileSystemResource(path);
-            if (!resource.exists()) {
-                if (!optional) {
-                    checks.add(new Check("config", Status.FAIL,
-                            path + " does not exist",
-                            "copy config/application.example.yml to "
-                                    + "config/application.yml"));
-                }
-                continue;
-            }
-            addYaml(loader, environment, resource, "external-" + index,
-                    checks);
+        try {
+            ConfigurableEnvironment environment =
+                    ServerEnvironment.prepare(args, base);
+            return new Prepared(environment, ServerEnvironment.files(environment),
+                    ServerEnvironment.valueFiles(environment),
+                    ServerEnvironment.configurationFiles(environment),
+                    ServerEnvironment.hidden(environment), null);
+        } catch (RuntimeException error) {
+            ServerEnvironment.Failure failure = ServerEnvironment.failure(error, base);
+            // Spring adds the files' sources once it has read them all, so
+            // base holds what the arguments and the process environment set.
+            loadDefaults(base, checks);
+            return new Prepared(base, List.of(), Map.of(), Set.of(), List.of(), failure);
         }
-        addYaml(loader, environment, new ClassPathResource("application.yml"),
-                "defaults", checks);
+    }
+
+    /**
+     * The config rows: why the server would not start with its
+     * configuration, or one row for each file it reads and for each
+     * directory it may read one in that this process cannot look in.
+     */
+    static List<Check> configChecks(Prepared prepared, ServiceAccount account,
+            String runner) {
+        if (prepared.failure() != null) {
+            return List.of(configFailureCheck(prepared.failure(), account, runner));
+        }
+        List<Check> hidden = new ArrayList<>();
+        for (ServerEnvironment.Hidden directory : prepared.hidden()) {
+            Check check = hiddenCheck(directory, account, runner);
+            if (check != null) {
+                hidden.add(check);
+            }
+        }
+        List<Check> checks = new ArrayList<>();
+        // A directory it cannot look in is no sign that the server reads no file.
+        if (!prepared.files().isEmpty() || hidden.isEmpty()) {
+            checks.addAll(configFileChecks(prepared.files(), account, prepared.values(),
+                    prepared.configurations()));
+        }
+        checks.addAll(hidden);
+        return checks;
+    }
+
+    /**
+     * The row for a directory the server looks in for a configuration file
+     * that this process cannot look in, which then cannot check what the
+     * server reads; or null where the service account cannot either, as
+     * Spring then reads nothing there, and without one, as this process then
+     * stands in for it.
+     */
+    static Check hiddenCheck(ServerEnvironment.Hidden hidden, ServiceAccount account,
+            String runner) {
+        if (account == null) {
+            return null;
+        }
+        Path directory = hidden.directory();
+        try {
+            if (!account.canEnter(directory)
+                    || hidden.listed() && !account.canRead(directory)) {
+                return null;
+            }
+        } catch (IOException | UnsupportedOperationException error) {
+            // This process cannot look along the path; the account may.
+        }
+        return new Check("config", Status.FAIL,
+                directory + " cannot be " + (hidden.listed() ? "listed" : "entered") + " by "
+                        + runner + ", which runs this check, and the server may read a"
+                        + " configuration file in it",
+                runAs(account));
+    }
+
+    // The account the check sees the server's files as.
+    private static String runAs(ServiceAccount account) {
+        return "run --check as " + account.name()
+                + (account.superuser() ? "" : " or as root");
+    }
+
+    /**
+     * The row for a configuration Spring refused. A file this process cannot
+     * read is named with the account that must read it: the service account,
+     * when that cannot read it either, and otherwise this process, which
+     * then cannot check what the server reads.
+     */
+    static Check configFailureCheck(ServerEnvironment.Failure failure,
+            ServiceAccount account, String runner) {
+        Path file = failure.unreadable();
+        if (file == null || account == null) {
+            return new Check("config", Status.FAIL, failure.detail(), failure.fix());
+        }
+        String path = file.toString();
+        boolean serverReads;
+        try {
+            serverReads = account.canRead(file);
+        } catch (IOException | UnsupportedOperationException error) {
+            // This process cannot look along the path; the account may.
+            serverReads = true;
+        }
+        return serverReads
+                ? new Check("config", Status.FAIL,
+                        path + " is not readable by " + runner + ", which runs this check",
+                        runAs(account))
+                : new Check("config", Status.FAIL,
+                        path + " is not readable by " + account.name(),
+                        unreadableFix(account.name(), path));
+    }
+
+    /** Adds the packaged defaults, below what the environment holds. */
+    static void loadDefaults(ConfigurableEnvironment environment,
+            List<Check> checks) {
+        addYaml(new YamlPropertySourceLoader(), environment,
+                new ClassPathResource("application.yml"), "defaults", checks);
     }
 
     private static void addYaml(
@@ -353,54 +468,207 @@ public final class ManagedAgentPreflight {
         }
     }
 
-    static Check configFileCheck(List<String> locations) {
-        return configFileCheck(locations, null);
+    /**
+     * One row for each configuration file the server reads, which Spring
+     * found at a location named or at one of its defaults, such as
+     * ./config/application.yml in the working directory.
+     */
+    static List<Check> configFileChecks(List<Path> files,
+            ServiceAccount account) {
+        return configFileChecks(files, account, Map.of(), new HashSet<>(files));
     }
 
-    static Check configFileCheck(List<String> locations,
-            ServiceAccount account) {
-        if (locations.isEmpty()) {
-            return new Check("config", Status.WARN,
-                    "no external configuration; environment only",
-                    "create config/application.yml for the credential key ring");
+    /**
+     * As above, with the property each config tree value file holds, and the
+     * files Spring reads as configuration files, which a value file may be.
+     */
+    static List<Check> configFileChecks(List<Path> files, ServiceAccount account,
+            Map<Path, String> values, Set<Path> configurations) {
+        if (files.isEmpty()) {
+            return List.of(new Check("config", Status.WARN,
+                    "no configuration file; packaged defaults and the"
+                            + " environment only",
+                    "create a configuration file at a location Spring reads, such as"
+                            + " config/application.yml, for the credential key ring"));
         }
-        String location = locations.get(0);
-        boolean optional = location.startsWith(OPTIONAL_PREFIX);
-        String path = optional
-                ? location.substring(OPTIONAL_PREFIX.length()) : location;
-        if (path.startsWith(FILE_PREFIX)) {
-            path = path.substring(FILE_PREFIX.length());
+        List<Check> checks = new ArrayList<>();
+        for (Path file : files) {
+            checks.add(configFileCheck(file, account, values.get(file),
+                    configurations.contains(file)));
         }
-        Path file = Path.of(path);
-        if (!Files.exists(file) && optional) {
-            return new Check("config", Status.WARN,
-                    path + " does not exist (optional)", null);
-        }
+        return checks;
+    }
+
+    static Check configFileCheck(Path file, ServiceAccount account) {
+        return configFileCheck(file, account, null, true);
+    }
+
+    /** As above, for a config tree value file that holds this property's value. */
+    static Check configFileCheck(Path file, ServiceAccount account, String property) {
+        return configFileCheck(file, account, property, property == null);
+    }
+
+    /**
+     * As above, for a config tree value file that holds this property's
+     * value, or null for none, and whether Spring reads the file as a
+     * configuration file. One path can be both, as application.yml is under a
+     * config tree imported over config/, and app.conf is where a location
+     * hints its extension, as file:app.conf[.properties] does.
+     */
+    static Check configFileCheck(Path file, ServiceAccount account, String property,
+            boolean configuration) {
+        String path = file.toString();
         if (!readable(file, account)) {
             return account == null
                     ? new Check("config", Status.FAIL,
                             path + " is not readable", "chmod 600 " + path)
                     : new Check("config", Status.FAIL,
                             path + " is not readable by " + account.name(),
-                            unreadableFix(account, path));
+                            unreadableFix(account.name(), path));
         }
-        String content;
-        try {
-            content = Files.readString(file, StandardCharsets.UTF_8);
-        } catch (IOException error) {
-            return new Check("config", Status.WARN,
-                    path + ": cannot inspect permissions", null);
+        boolean secrets;
+        if (property != null && secretProperty(property)) {
+            // The property's name tells; its value need not be read.
+            secrets = true;
+        } else {
+            try {
+                secrets = holdsSecret(file, configuration, text(Files.readAllBytes(file)));
+            } catch (IOException error) {
+                return new Check("config", Status.WARN,
+                        path + ": cannot inspect permissions", null);
+            }
         }
-        boolean secrets = content.contains("credential-key")
-                || content.contains("signing-key")
-                || content.contains("password");
         return secrets ? sharedSecretFileCheck("config", file, path)
                 : new Check("config", Status.PASS, path, null);
     }
 
-    private static String unreadableFix(ServiceAccount account, String path) {
-        return "chown " + account.name() + " " + path + ", chmod 600 " + path
-                + ", and let " + account.name()
+    /**
+     * Whether a file holds a secret, by secretProperty's one rule: a key it
+     * declares names a secret, in any of its documents, which a profile may
+     * leave inactive, or in a comment, or a value holds one, as a JDBC URL's
+     * ?password= does. A config tree value file Spring reads as no
+     * configuration file holds a value alone, whatever its name.
+     */
+    private static boolean holdsSecret(Path file, boolean configuration, String content) {
+        if (!configuration) {
+            return valueSecret(content);
+        }
+        String name = file.getFileName().toString().toLowerCase(Locale.ROOT);
+        boolean yaml = name.endsWith(".yml") || name.endsWith(".yaml");
+        boolean xml = name.endsWith(".xml");
+        boolean properties = name.endsWith(".properties") || xml;
+        // An extension hint, such as file:app.conf[.yml], names either loader.
+        List<PropertySourceLoader> loaders = yaml ? List.of(new YamlPropertySourceLoader())
+                : properties ? List.of(new PropertiesPropertySourceLoader())
+                : List.of(new YamlPropertySourceLoader(), new PropertiesPropertySourceLoader());
+        for (PropertySourceLoader loader : loaders) {
+            try {
+                for (PropertySource<?> source : loader.load(name, new FileSystemResource(file))) {
+                    if (source instanceof EnumerablePropertySource<?> declared) {
+                        for (String key : declared.getPropertyNames()) {
+                            Object held = declared.getProperty(key);
+                            if (secretProperty(key)
+                                    || held != null && valueSecret(held.toString())) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            } catch (IOException | RuntimeException error) {
+                // What does not parse declares no key; its comments still tell.
+            }
+        }
+        return commentedSecret(content, xml, !properties);
+    }
+
+    /**
+     * Whether a comment holds a secret, as it would uncommented: a
+     * commented-out line, or in YAML, which a hint may name, the comment
+     * after a value.
+     */
+    private static boolean commentedSecret(String content, boolean xml, boolean yaml) {
+        if (xml) {
+            Matcher comment = XML_COMMENT.matcher(content);
+            while (comment.find()) {
+                Matcher entry = XML_ENTRY.matcher(comment.group(1));
+                while (entry.find()) {
+                    if (secretProperty(entry.group(1)) || valueSecret(entry.group(2))) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        for (String line : content.split("\\R")) {
+            Matcher inline = INLINE_COMMENT.matcher(line);
+            while (yaml && inline.find()) {
+                // A quoted value may hold the first one.
+                if (commentedSecret(line.substring(inline.start() + 1), false, false)) {
+                    return true;
+                }
+            }
+            Matcher key = COMMENTED_KEY.matcher(line);
+            if (key.matches() && (secretProperty(key.group(1)) || valueSecret(key.group(2)))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether a value holds a secret: a parameter named as a secret
+     * property, or the password of a URL's user information.
+     */
+    private static boolean valueSecret(String value) {
+        if (URL_PASSWORD.matcher(value).find()) {
+            return true;
+        }
+        Matcher parameter = VALUE_PARAMETER.matcher(value);
+        while (parameter.find()) {
+            if (secretProperty(parameter.group(1))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether a property holds a secret, as the configuration reference
+     * marks them: a password, token or key, or one of a map of keys, such as
+     * previous-credential-keys.<id>. A path to a file that holds one, such as
+     * kubernetes-token-file, and credential-key-id hold none.
+     */
+    static boolean secretProperty(String property) {
+        for (String element : property.split("[./\\[\\]]+")) {
+            // Spring matches names ignoring case, dashes and underscores, so
+            // credential-key, credentialKey, credential_key and credentialkey
+            // are one name, and each ends in key.
+            String lower = element.toLowerCase(Locale.ROOT);
+            if (SECRET_SUFFIXES.stream().anyMatch(lower::endsWith)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Spring reads YAML as UTF-8, or UTF-16 after a byte order mark, and
+    // .properties as ISO-8859-1. A comment's key is ASCII, which ISO-8859-1,
+    // decoding any byte, reads in all but UTF-16. YAML drops a UTF-8 byte
+    // order mark, as an editor may write one, so its first line is read
+    // without it.
+    private static String text(byte[] bytes) {
+        boolean utf16 = bytes.length >= 2
+                && ((bytes[0] & 0xff) == 0xfe && (bytes[1] & 0xff) == 0xff
+                        || (bytes[0] & 0xff) == 0xff && (bytes[1] & 0xff) == 0xfe);
+        int start = !utf16 && bytes.length >= 3 && (bytes[0] & 0xff) == 0xef
+                && (bytes[1] & 0xff) == 0xbb && (bytes[2] & 0xff) == 0xbf ? 3 : 0;
+        return new String(bytes, start, bytes.length - start,
+                utf16 ? StandardCharsets.UTF_16 : StandardCharsets.ISO_8859_1);
+    }
+
+    static String unreadableFix(String account, String path) {
+        return "chown " + account + " " + path + ", chmod 600 " + path
+                + ", and let " + account
                 + " enter every directory on its path, following symbolic links";
     }
 
@@ -534,7 +802,7 @@ public final class ManagedAgentPreflight {
                                     + file)
                     : new Check("credentials", Status.FAIL,
                             file + " is not readable by " + account.name(),
-                            unreadableFix(account, file));
+                            unreadableFix(account.name(), file));
         }
         return sharedSecretFileCheck("credentials", path, file);
     }
@@ -1691,7 +1959,8 @@ public final class ManagedAgentPreflight {
     }
 
     private static void print(List<Check> checks) {
-        System.out.println("Managed Agent preflight");
+        // Relative locations, Spring Boot's defaults among them, are read here.
+        System.out.println("Managed Agent preflight in " + Path.of("").toAbsolutePath());
         System.out.printf("%-6s %-14s %s%n", "STATUS", "CHECK", "DETAIL");
         for (Check check : checks) {
             System.out.printf("%-6s %-14s %s%n",
