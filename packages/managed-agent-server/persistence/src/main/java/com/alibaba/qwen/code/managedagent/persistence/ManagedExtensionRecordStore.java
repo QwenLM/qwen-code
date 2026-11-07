@@ -116,7 +116,6 @@ public class ManagedExtensionRecordStore
     private static final String MODEL_CONTEXT_DOMAIN = "hosted_context_usage";
     private static final String MODEL_CONTEXT_ID = "latest";
     private static final String MODEL_USAGE_KIND = "managed-hosted-model-usage";
-    private static final long MAX_SAFE_INTEGER = 9_007_199_254_740_991L;
     // Parses as strictly as the Session authority's reader: no duplicate
     // keys, no trailing content, no deeper nesting, and, checked after
     // parsing, only finite numbers. The store never accepts a line or a body
@@ -265,7 +264,7 @@ public class ManagedExtensionRecordStore
                     byte[] bytes = row.getBytes("inline_bytes");
                     if (bytes != null && bytes.length == row.getLong("byte_length")
                             && sha256(bytes).equals(row.getString("sha256"))) {
-                        WebShellModelContext context = modelContext(bytes,
+                        WebShellModelContext context = ManagedModelDiagnosticProjection.modelContext(bytes,
                                 row.getLong("settled_at"), row.getString("kind"));
                         if (context != null) {
                             contexts.put(row.getString("session_id"), context);
@@ -273,45 +272,6 @@ public class ManagedExtensionRecordStore
                     }
                 }, arguments.toArray());
         return contexts;
-    }
-
-    private static WebShellModelContext modelContext(byte[] bytes, long observedAt, String kind) {
-        JsonNode body = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
-        if (ManagedModelDiagnostics.MAIN_KIND.equals(kind) && body != null && body.path("version").asInt() == 2) {
-            try {
-                ManagedModelDiagnostics.requireBody(ManagedModelDiagnostics.MAIN_KIND, body);
-                JsonNode context = body.get("context");
-                return context.isNull() ? null : new WebShellModelContext(context.path("model").textValue(),
-                        tokenCount(context, "inputTokens", 0), tokenCount(context, "contextWindowSize", 1),
-                        context.path("observedAt").longValue());
-            } catch (InvalidRecordException error) {
-                return null;
-            }
-        }
-        if (body == null || !body.path("version").isIntegralNumber()
-                || !body.path("version").canConvertToLong()
-                || body.path("version").longValue() != 1) {
-            return null;
-        }
-        JsonNode model = body.path("model");
-        if (!model.isTextual() || StringUtils.isBlank(model.textValue())
-                || model.textValue().getBytes(StandardCharsets.UTF_8).length > 512
-                || model.textValue().chars().anyMatch(Character::isISOControl)) {
-            return null;
-        }
-        JsonNode attempts = body.path("attempts");
-        JsonNode latest = attempts.isArray() && !attempts.isEmpty()
-                ? attempts.get(attempts.size() - 1) : null;
-        return new WebShellModelContext(model.textValue(), tokenCount(latest, "promptTokenCount", 0),
-                tokenCount(latest, "contextWindowSize", 1), observedAt);
-    }
-
-    private static Long tokenCount(JsonNode usage, String field, long minimum) {
-        JsonNode value = usage == null ? null : usage.get(field);
-        return value != null && value.isNumber() && value.canConvertToLong()
-                && value.decimalValue().stripTrailingZeros().scale() <= 0
-                && value.longValue() >= minimum && value.longValue() <= MAX_SAFE_INTEGER
-                ? value.longValue() : null;
     }
 
     public Optional<JsonNode> latestHookRegistration(String tenantId, String sessionId) {

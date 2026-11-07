@@ -2,14 +2,18 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords.InvalidRecordException;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedMcpRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.ModelDiagnostics;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -22,6 +26,7 @@ import static com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRec
 
 /** Two bounded projections updated under the native journal's existing Session fence. */
 final class ManagedModelDiagnosticProjection {
+    private static final long MAX_SAFE_INTEGER = 9_007_199_254_740_991L;
     private static final String MODEL_CONTEXT_DOMAIN = ManagedModelDiagnostics.CONTEXT_DOMAIN;
     private static final String MODEL_USAGE_KIND = "managed-hosted-model-usage";
     private final JdbcTemplate jdbc;
@@ -257,4 +262,44 @@ final class ManagedModelDiagnosticProjection {
             jdbc.update("DELETE FROM ma_session_record WHERE session_scope_key = ? AND record_key = ?", scope, key);
         }
     }
+
+    static WebShellModelContext modelContext(byte[] bytes, long observedAt, String kind) {
+        JsonNode body = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
+        if (ManagedModelDiagnostics.MAIN_KIND.equals(kind) && body != null && body.path("version").asInt() == 2) {
+            try {
+                ManagedModelDiagnostics.requireBody(ManagedModelDiagnostics.MAIN_KIND, body);
+                JsonNode context = body.get("context");
+                return context.isNull() ? null : new WebShellModelContext(context.path("model").textValue(),
+                        tokenCount(context, "inputTokens", 0), tokenCount(context, "contextWindowSize", 1),
+                        context.path("observedAt").longValue());
+            } catch (InvalidRecordException error) {
+                return null;
+            }
+        }
+        if (body == null || !body.path("version").isIntegralNumber()
+                || !body.path("version").canConvertToLong()
+                || body.path("version").longValue() != 1) {
+            return null;
+        }
+        JsonNode model = body.path("model");
+        if (!model.isTextual() || StringUtils.isBlank(model.textValue())
+                || model.textValue().getBytes(StandardCharsets.UTF_8).length > 512
+                || model.textValue().chars().anyMatch(Character::isISOControl)) {
+            return null;
+        }
+        JsonNode attempts = body.path("attempts");
+        JsonNode latest = attempts.isArray() && !attempts.isEmpty()
+                ? attempts.get(attempts.size() - 1) : null;
+        return new WebShellModelContext(model.textValue(), tokenCount(latest, "promptTokenCount", 0),
+                tokenCount(latest, "contextWindowSize", 1), observedAt);
+    }
+
+    private static Long tokenCount(JsonNode usage, String field, long minimum) {
+        JsonNode value = usage == null ? null : usage.get(field);
+        return value != null && value.isNumber() && value.canConvertToLong()
+                && value.decimalValue().stripTrailingZeros().scale() <= 0
+                && value.longValue() >= minimum && value.longValue() <= MAX_SAFE_INTEGER
+                ? value.longValue() : null;
+    }
+
 }

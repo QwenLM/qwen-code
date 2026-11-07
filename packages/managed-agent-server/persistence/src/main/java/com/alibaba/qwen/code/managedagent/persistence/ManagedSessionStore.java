@@ -180,6 +180,8 @@ public class ManagedSessionStore
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public WriterGrant acquireWriter(String tenantId, String sessionId, String writerToken,
             AcquireWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
+        fencing.requireCredential(tenantId, request.workspaceId(), sessionId, writerToken);
         for (;;) {
             WriterGrant grant = writerTransactions.execute(status -> writerLifecycle.acquireWriter(tenantId, sessionId, writerToken, request, authority));
             if (grant != null) {

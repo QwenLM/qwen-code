@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.RestoreHead;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
@@ -701,4 +702,26 @@ final class JournalStoreRows {
             String storageKind, byte[] bytes, String objectKey,
             String objectVersionId, String encryptionKeyId, String state, String captureState, String deletionOperation) {
     }
+
+    /**
+     * Converts the last activation.changed payload of a committed transaction, so the head row can
+     * answer authorization reads without rescanning the journal. The payload was already parsed by
+     * the extension record pass of this commit.
+     */
+    static ActivationChange activationChange(JsonNode payload) {
+        if (payload == null) {
+            return null;
+        }
+        return new ActivationChange(
+                ToolPublicationContract.text(payload, "activationId"),
+                ToolPublicationContract.text(payload, "phase"),
+                payload.path("epoch").asLong(),
+                ManagedExtensionRecords.millisLenient(
+                        payload.path("expiresAt")));
+    }
+
+    record ActivationChange(String id, String phase, long epoch,
+            Long expiresAt) {
+    }
+
 }

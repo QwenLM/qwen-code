@@ -361,7 +361,7 @@ final class JournalCommit {
                 request.latestCheckpointResourceId(),
                 validated.recordBytes(), validated.recordBytes().length,
                 validated.recordDigest(), now.getTime());
-        ActivationChange activation = activationChange(
+        var activation = JournalStoreRows.activationChange(
                 applied.lastActivation());
         if (placement != null && "QUIESCING".equals(placement.state()) && activation != null
                 && "active".equals(activation.phase())
@@ -871,27 +871,6 @@ final class JournalCommit {
                 existing.operation(), existing.firstSequence(),
                 existing.lastSequence(), existing.lastSequence(),
                 existing.commitDigest(), true);
-    }
-
-    /**
-     * Converts the last activation.changed payload of a committed transaction, so the head row can
-     * answer authorization reads without rescanning the journal. The payload was already parsed by
-     * the extension record pass of this commit.
-     */
-    static ActivationChange activationChange(JsonNode payload) {
-        if (payload == null) {
-            return null;
-        }
-        return new ActivationChange(
-                ToolPublicationContract.text(payload, "activationId"),
-                ToolPublicationContract.text(payload, "phase"),
-                payload.path("epoch").asLong(),
-                ManagedExtensionRecords.millisLenient(
-                        payload.path("expiresAt")));
-    }
-
-    record ActivationChange(String id, String phase, long epoch,
-            Long expiresAt) {
     }
 
     record ValidatedCommit(byte[] recordBytes, String recordDigest,

@@ -938,24 +938,13 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
 
     public CompletionStage<RuntimeScope> capabilities(
             String harnessSessionId, RuntimeLifecycleAuthority authority) {
-        requireOpen(closed);
-        String harnessId = BrokerValues.requirePathSafe(
-                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
-                "harnessSessionId");
-        return capabilitiesContext(harnessId, authority).thenApply(HarnessSessionResolver.Capabilities::scope);
+        return capabilitiesContext(harnessSessionId, authority).thenApply(HarnessSessionResolver.Capabilities::scope);
     }
 
     @Override
     public CompletionStage<HarnessSessionResolver.Capabilities> capabilitiesContext(String harnessSessionId, RuntimeLifecycleAuthority authority) {
         requireOpen(closed);
-        String id = BrokerValues.requirePathSafe(BrokerValues.requireId(harnessSessionId, "harnessSessionId"), "harnessSessionId");
-        return mapFailure(safeStage(() -> sessionResolver.resolveCapabilities(id, authority)),
-                "runtime_scope_resolution_failed", "Runtime scope resolution failed").thenApply(value -> {
-                    if (value == null || value.scope() == null) {
-                        throw unavailable("runtime_scope_resolution_failed", "Runtime scope resolver returned no scope");
-                    }
-                    return value;
-                });
+        return RuntimeBrokerSupport.resolveCapabilities(sessionResolver, harnessSessionId, authority);
     }
 
     public CompletionStage<List<Map<String, Object>>> mcpDefinitions(String harnessSessionId, String runtimeSessionId) {
@@ -3920,10 +3909,6 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         scheduler.shutdownNow();
         renewalScheduler.shutdownNow();
         provisioner.close();
-    }
-
-    private CompletionStage<RuntimeScope> resolveScope(String harnessSessionId) {
-        return resolveScope(harnessSessionId, null);
     }
 
     private CompletionStage<RuntimeScope> resolveScope(
