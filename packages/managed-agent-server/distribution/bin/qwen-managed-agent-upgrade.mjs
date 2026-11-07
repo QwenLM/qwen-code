@@ -1809,8 +1809,9 @@ function shellWord(word) {
     return word;
   }
   // Quoted, a control character would still reach the terminal; $'...'
-  // spells each as the escapes of its UTF-8 bytes, which any bash turns
-  // back into it.
+  // spells each as the three-digit octal escapes of its UTF-8 bytes, which
+  // bash, zsh and ksh turn back into it. ksh would read a \x escape on
+  // through a hex digit after it.
   // eslint-disable-next-line no-control-regex -- matching control bytes is the point
   if (/[\u0000-\u001F\u007F-\u009F]/.test(word)) {
     return `$'${word.replace(
@@ -1820,7 +1821,7 @@ function shellWord(word) {
         character === '\\' || character === "'"
           ? `\\${character}`
           : [...Buffer.from(character)]
-              .map((byte) => `\\x${byte.toString(16).padStart(2, '0')}`)
+              .map((byte) => `\\${byte.toString(8).padStart(3, '0')}`)
               .join(''),
     )}'`;
   }
@@ -1854,7 +1855,7 @@ function planFlags(options, names) {
 
 async function phaseCheck(system, deployment, options) {
   // The plan repeats --server-url, so check judges it as start and verify
-  // will.
+  // will, an empty one too, as "$CONTROL_PLANE" leaves with it unset.
   if (options.serverUrl !== undefined) {
     refuseServerUrl(options.serverUrl);
   }
@@ -2629,7 +2630,8 @@ async function listeners(
   { reachesHarness = true, readsApi = false } = {},
 ) {
   let urls = {};
-  if (reachesHarness || !options.serverUrl) {
+  const named = options.serverUrl !== undefined;
+  if (reachesHarness || !named) {
     const resolved = await resolvedConfiguration(system, deployment);
     if (resolved.error) {
       const environment = deployment.serverEnvironment;
@@ -2642,7 +2644,7 @@ async function listeners(
           'http://127.0.0.1:4170',
       };
       system.out(
-        `Cannot resolve the server's listeners: ${resolved.error}; ${options.serverUrl ? 'using the Harness URL server.env names' : 'using the URLs server.env names, or pass --server-url'}.`,
+        `Cannot resolve the server's listeners: ${resolved.error}; ${named ? 'using the Harness URL server.env names' : 'using the URLs server.env names, or pass --server-url'}.`,
       );
     } else {
       urls = {
@@ -2655,7 +2657,7 @@ async function listeners(
       };
     }
   }
-  if (options.serverUrl !== undefined) {
+  if (named) {
     refuseServerUrl(options.serverUrl);
     urls.server = options.serverUrl;
     urls.health = `${options.serverUrl}/actuator/health`;
@@ -2876,17 +2878,22 @@ function harnessUrlReason(text, url) {
 }
 
 // The Harness base URLs start takes when the server gives no verdict: an
-// http(s) URL whose authority is a host name as java.net.URI reads one,
-// labels of letters, digits and inner hyphens whose last is not purely
-// numeric, with or without the final dot of a fully qualified name, a
-// dotted-quad IPv4 address or a bracketed IPv6 address, which may end in an
-// IPv4 one, as ::ffff:127.0.0.1 does, and an optional port, and whose path
-// holds only the characters a URI path may, untrimmed, a % only as the start
-// of an escape. It is narrower than the server's rule, never wider: it
-// refuses a non-IPv4 name whose last label is purely numeric, since the URL
-// parser fetch uses reads 1234 as an IPv4 address, an octet with a leading
-// zero, which it reads as octal, and an empty port.
+// http(s) URL whose authority is a host name as java.net.URI reads one, labels
+// of letters, digits and inner hyphens whose last starts with a letter unless
+// it is the only one, with or without the final dot of a fully qualified name,
+// a dotted-quad IPv4 address or a bracketed IPv6 address, which may end in an
+// IPv4 one, as ::ffff:127.0.0.1 does, and an optional port, which may be empty,
+// and whose path holds only the characters a URI path may, untrimmed, a % only
+// as the start of an escape. It is narrower than the server's rule, never
+// wider, by the hosts the URL parser fetch uses reads as another address: a
+// name of one label that it reads as a number, of digits, as 1234 is 0.0.4.210,
+// or of 0x and hex digits, and an octet with a leading zero, which it reads as
+// octal, as 010.0.0.1 is 8.0.0.1.
 const LABEL = '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?';
+const NAME = [
+  `(?:${LABEL}\\.)*[A-Za-z](?:[A-Za-z0-9-]*[A-Za-z0-9])?\\.?`,
+  `(?!(?:[0-9]+|0x[0-9a-f]*)\\.?(?::|/|$))[0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\\.?`,
+].join('|');
 const OCTET = '(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])';
 const IPV4 = `${OCTET}(?:\\.${OCTET}){3}`;
 const H16 = '[0-9A-Fa-f]{1,4}';
@@ -2906,7 +2913,7 @@ const IPV6 = [
   ),
 ].join('|');
 const PLAIN_HTTP_URL = new RegExp(
-  `^https?://(?:(?:${LABEL}\\.)*(?![0-9]+\\.?(?::|/|$))${LABEL}\\.?|${IPV4}|\\[(?:${IPV6})\\])(?::[0-9]{1,5})?(?:/(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9\\-._~!$&'()*+,;=:@/])*)?$`,
+  `^https?://(?:${NAME}|${IPV4}|\\[(?:${IPV6})\\])(?::[0-9]{0,5})?(?:/(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9\\-._~!$&'()*+,;=:@/])*)?$`,
   'i',
 );
 
@@ -2965,7 +2972,7 @@ async function phaseStart(system, deployment, options) {
             fetchRefusal(urls.harness) ??
             (PLAIN_HTTP_URL.test(urls.harness)
               ? undefined
-              : 'is not a plain http or https URL, a host and port with a path, which is all start takes while the configuration does not resolve'));
+              : 'is not a plain http or https URL, a host java.net.URI and fetch read alike with a port of up to five digits and a path of URI characters, which is all start takes while the configuration does not resolve'));
   if (unusable) {
     throw new Refusal(
       `The control plane reaches ${harness.name} at ${quoted(withoutCredentials(urls.harness))}, which ${unusable}; correct qwen.managed-agent.harness.base-url.`,

@@ -2633,6 +2633,12 @@ test('start and verify use server.env when the configuration does not resolve', 
     ),
   );
   assert.deepEqual([...new Set(host.connections)], ['127.0.0.1:4172']);
+  // An empty one is refused, as check refuses it, rather than dropped.
+  assert.equal(await host.upgrade('verify', '--server-url', ''), 1);
+  assert.equal(
+    host.output.at(-1),
+    'verify refused: --server-url "" is not a URL.',
+  );
   // verify reaches no Harness, so it has nothing to resolve.
   host.services = [];
   assert.equal(
@@ -2646,11 +2652,18 @@ test('start and verify use server.env when the configuration does not resolve', 
     'PASS http://127.0.0.1:18081/actuator/health is UP',
   );
 
+  await host.stop();
+  assert.equal(await host.upgrade('start', '--server-url', ''), 1);
+  assert.equal(
+    host.output.at(-1),
+    'start refused: --server-url "" is not a URL.',
+  );
+  assert.ok(!host.output.includes(`Starting ${HARNESS}`));
+
   // Without the resolver's verdict, start takes only a plain http(s) URL, a
   // rule of its own and narrower than the server's, since a pool would drop
   // every member over a value the server refuses, and leaves the rest to
   // the preflight.
-  await host.stop();
   const env = path.join(host.etc, 'server.env');
   const base = await readFile(env, 'utf8');
   for (const harnessUrl of [
@@ -2667,6 +2680,16 @@ test('start and verify use server.env when the configuration does not resolve', 
     'http://qwen_harness:4172',
     'http:/@127.0.0.1:4172',
     'http://127.0.0.1:4172\\\\@x',
+    // What the URL parser fetch uses reads as another address: a number,
+    // with or without a final dot or a port, in hex in either case too, or
+    // a bare 0x, and an octet with a leading zero, which it reads as octal.
+    'http://1234:4172',
+    'http://1234.:4172',
+    'http://1234/',
+    'http://0x1f:4172',
+    'http://0X1F:4172',
+    'http://0x:4172',
+    'http://010.0.0.1:4172',
   ]) {
     await writeFile(
       env,
@@ -2675,7 +2698,7 @@ test('start and verify use server.env when the configuration does not resolve', 
     assert.equal(await host.upgrade('start'), 1, harnessUrl);
     assert.match(
       host.output.at(-1),
-      /^start refused: The control plane reaches qwen-hosted-harness at "([^"]*\*\*\*@(127\.0\.0\.1:4172\/?|x)|http:\/\/127\.0\.0\.1:4172\/\?tenant=acme|http:\/\/qwen_harness:4172)", which (carries (a query or a fragment|a user name or password|an @ before its host)|is not a plain http or https URL, a host and port with a path, which is all start takes while the configuration does not resolve); correct/,
+      /^start refused: The control plane reaches qwen-hosted-harness at "([^"]*\*\*\*@(127\.0\.0\.1:4172\/?|x)|http:\/\/127\.0\.0\.1:4172\/\?tenant=acme|http:\/\/((qwen_harness|1234\.?|0x1f|0X1F|0x|010\.0\.0\.1):4172|1234\/))", which (carries (a query or a fragment|a user name or password|an @ before its host)|is not a plain http or https URL, a host java.net.URI and fetch read alike with a port of up to five digits and a path of URI characters, which is all start takes while the configuration does not resolve); correct/,
     );
     assert.ok(!host.output.join('\n').includes('s3cret'), harnessUrl);
     assert.ok(!host.output.includes(`Starting ${HARNESS}`), harnessUrl);
@@ -2693,27 +2716,38 @@ test('start and verify use server.env when the configuration does not resolve', 
   // The rest goes to the preflight, such as a plain URL with an @ in its
   // path, which java.net.URI reads as the path.
   host.preflightStatus = 1;
-  for (const harnessUrl of [
-    'http://127.0.0.1:4172/@acme/harness',
-    'http://gateway.example.com/@acme/harness',
-    // An escape, an IPv6 address, one that ends in an IPv4 address, digit-led
-    // labels including the last one, and the final dot of a fully qualified
-    // name, all of which java.net.URI reads as a host.
-    'http://127.0.0.1:4172/a%20b',
-    'http://[::1]:4172',
-    'http://[::ffff:127.0.0.1]:4172',
-    'http://1st.harness.internal:4172/',
-    'http://4harness:4172',
-    'http://harness.internal.:4170/',
-    'http://127.0.0.1:0',
-    'http://127.0.0.1:65535',
+  for (const [harnessUrl, waited] of [
+    ['http://127.0.0.1:4172/@acme/harness', '127.0.0.1:4172'],
+    ['http://gateway.example.com/@acme/harness', 'gateway.example.com:80'],
+    // An escape, an IPv6 address, one that ends in an IPv4 address, a
+    // label that starts with a digit before the last one, and the final dot
+    // of a fully qualified name, all of which java.net.URI reads as a host.
+    ['http://127.0.0.1:4172/a%20b', '127.0.0.1:4172'],
+    ['http://[::1]:4172', '::1:4172'],
+    ['http://[::ffff:127.0.0.1]:4172', '::ffff:7f00:1:4172'],
+    ['http://1st.harness.internal:4172/', '1st.harness.internal:4172'],
+    ['http://harness.internal.:4170/', 'harness.internal.:4170'],
+    // One label that starts with a digit, as a container's name may, with
+    // or without the final dot, and an empty port, which is the scheme's:
+    // fetch reads each as java.net.URI does.
+    ['http://4harness:4172', '4harness:4172'],
+    ['http://4harness.:4172', '4harness.:4172'],
+    ['http://harness.internal:/', 'harness.internal:80'],
+    // The top port, and port 0, on which no Harness listens: the
+    // preflight fails that one.
+    ['http://127.0.0.1:65535', '127.0.0.1:65535'],
+    ['http://127.0.0.1:0'],
   ]) {
     await writeFile(
       env,
       `${base}QWEN_MANAGED_AGENT_HARNESS_BASE_URL=${harnessUrl}\n`,
     );
+    host.connections = [];
     assert.equal(await host.upgrade('start'), 1, harnessUrl);
     assert.ok(host.output.includes(`Starting ${HARNESS}`), harnessUrl);
+    if (waited) {
+      assert.deepEqual([...new Set(host.connections)], [waited], harnessUrl);
+    }
     assert.equal(
       host.output.at(-1),
       `start refused: The preflight failed, so ${SERVER} stays stopped; fix its FAIL rows and run start again.`,
@@ -2893,11 +2927,13 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     // A space java.net.URI refuses in a path, and a malformed escape.
     'http://127.0.0.1:4170/a b',
     'http://127.0.0.1:4170/a%zz',
-    // Plain-URL refusals: an empty label, a label that ends in a hyphen,
-    // and a non-IPv4 name whose last label is purely numeric.
+    // Hosts java.net.URI reads no host in: an empty label, a label that
+    // ends in a hyphen, and a last label that starts with a digit, of a name
+    // of more than one.
     'http://harness..internal:4170',
     'http://harness-.internal:4170',
     'http://1.2.3:4170',
+    'http://harness.1b:4170',
     // Fetch reads these as 0.0.4.210 and 8.0.0.1 respectively.
     'http://1234:4170',
     'http://010.0.0.1:4170',
@@ -2910,7 +2946,7 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     );
     assert.match(
       host.output.at(-1),
-      /, which is not a plain http or https URL, a host and port with a path, which is all start takes while the configuration does not resolve; correct qwen\.managed-agent\.harness\.base-url\.$/,
+      /, which is not a plain http or https URL, a host java.net.URI and fetch read alike with a port of up to five digits and a path of URI characters, which is all start takes while the configuration does not resolve; correct qwen\.managed-agent\.harness\.base-url\.$/,
     );
     assert.ok(!host.output.includes(`Starting ${HARNESS}`));
   }
@@ -3423,6 +3459,8 @@ test('check judges the --server-url its plan repeats', async (t) => {
     // What --server-url "https://$HOST" leaves with HOST unset, which the
     // option parser strips to https:, though https:/actuator/health parses.
     ['https://', 'https:', 'is not a URL'],
+    // And --server-url "$CONTROL_PLANE", which start and verify would
+    // otherwise drop for the configured URL.
     ['', '', 'is not a URL'],
   ]) {
     assert.equal(await host.check('--server-url', serverUrl), 1);
@@ -3442,8 +3480,9 @@ test('check judges the --server-url its plan repeats', async (t) => {
     plan,
   );
   // A control character in a value the plan repeats reaches the terminal as
-  // an escape, which bash reads back as the value.
-  const releases = `${host.root}/rel\u001b[2K'\u009b\\x`;
+  // an escape, which the shell reads back as the value, a digit after it
+  // included, which ksh would read on with a \x escape.
+  const releases = `${host.root}/rel\u001b[2K'\u009b\\x\t9b\u001b1`;
   assert.equal(await host.check('--releases', releases), 0);
   const printed = host.output.slice(host.output.indexOf('Plan:')).join('\n');
   assert.ok(
@@ -3452,11 +3491,20 @@ test('check judges the --server-url its plan repeats', async (t) => {
     printed,
   );
   const word = printed.match(/ stop --releases (\S+)/)[1];
-  assert.equal(word, `$'${host.root}/rel\\x1b[2K\\'\\xc2\\x9b\\\\x'`);
-  const echoed = spawnSync('bash', ['-c', `printf %s ${word}`], {
-    encoding: 'utf8',
-  });
-  assert.equal(echoed.stdout, releases);
+  assert.equal(
+    word,
+    `$'${host.root}/rel\\033[2K\\'\\302\\233\\\\x\\0119b\\0331'`,
+  );
+  // As each of the shells that read $'...' and are here reads it back.
+  for (const shell of ['bash', 'zsh', 'ksh']) {
+    const echoed = spawnSync(shell, ['-c', `printf %s ${word}`], {
+      encoding: 'utf8',
+    });
+    if (echoed.error?.code === 'ENOENT' && shell !== 'bash') {
+      continue;
+    }
+    assert.equal(echoed.stdout, releases, shell);
+  }
 });
 
 test('check layout rows neutralize control bytes without shortening paths', async (t) => {
