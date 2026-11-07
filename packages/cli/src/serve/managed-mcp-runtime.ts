@@ -937,15 +937,14 @@ export class ManagedMcpRuntime {
             {
               sessionKey: control.sessionKey,
               serverId: definition.serverId,
-              configRevision: control.configRevision,
+              configRevision: definition.oauth.configRevision,
               oauth: definition.oauth,
             },
             () =>
               !!authorizedConnection &&
               !authorizedConnection.closed &&
               !authorizedConnection.retiring &&
-              !this.closing &&
-              definition.oauth?.configRevision === control.configRevision,
+              !this.closing,
             this.accessToken,
           )
         : undefined;

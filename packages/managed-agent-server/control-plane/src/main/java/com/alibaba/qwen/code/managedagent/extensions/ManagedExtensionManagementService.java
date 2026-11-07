@@ -181,13 +181,17 @@ public class ManagedExtensionManagementService {
         JsonNode requestedBundle = requestedRef.isObject() ? read(tenant, sessionId, requestedRef) : null;
         if (body.path("command").path("selectionVersion").asInt() == 2 || requestedBundle != null && requestedBundle.path("formatVersion").asInt() == 2) {
             result.put("selectionVersion", 2);
-            result.set("mcpAuthBindings", requestedBundle != null && requestedBundle.has("mcpAuthBindings")
-                    ? requestedBundle.get("mcpAuthBindings") : body.path("command").path("mcpAuthBindings"));
+            result.putArray("mcpAuthBindings");
         }
         JsonNode active = body;
         for (int step = 0; step < 4096; step++) {
             if ("active".equals(active.path("phase").asText())) {
-                result.set("extensions", bundlePins(tenant, sessionId, active.get("bundleRef")));
+                JsonNode activeBundle = read(tenant, sessionId, active.get("bundleRef"));
+                result.set("extensions", bundlePins(activeBundle));
+                if (activeBundle.path("formatVersion").asInt() == 2) {
+                    result.put("selectionVersion", 2);
+                    result.set("mcpAuthBindings", activeBundle.get("mcpAuthBindings"));
+                }
                 break;
             }
             if (active.path("previousRecordRef").isNull()) {
@@ -208,6 +212,10 @@ public class ManagedExtensionManagementService {
 
     private ArrayNode bundlePins(String tenant, String sessionId, JsonNode ref) {
         JsonNode bundle = read(tenant, sessionId, ref);
+        return bundlePins(bundle);
+    }
+
+    private ArrayNode bundlePins(JsonNode bundle) {
         if (!"managed-extension-config-bundle".equals(bundle.path("kind").asText()) || !bundle.path("packages").isArray()) {
             throw corrupt();
         }

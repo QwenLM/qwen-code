@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ManagedAgentProvider } from './managed-agent-provider';
 import type {
   ManagedExtensionPackageOperation,
+  ManagedExtensionSelection,
   ManagedExtensionSnapshot,
 } from './managed-extension-types';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
@@ -62,7 +63,9 @@ function api() {
       kind: 'settings',
       revision: 3,
     })),
-    apply: vi.fn(async () => active),
+    apply: vi.fn(
+      async (_session: string, _selection: ManagedExtensionSelection) => active,
+    ),
     resume: vi.fn(async () => active),
   };
 }
@@ -265,6 +268,67 @@ describe('Managed installation receipts', () => {
       mcpAuthBindings: bindings,
     });
   });
+
+  it.each([false, true])(
+    'reuses a replaced pin personal binding only after explicit validation (validated=%s)',
+    async (validated) => {
+      const input = await command();
+      const oldPin = {
+        ...pin,
+        packageRevision: 1,
+        packageDigest: 'b'.repeat(64),
+      };
+      const binding = {
+        serverId: `${pin.extensionId}:tools`,
+        credentialId: 'credential',
+        credentialGeneration: 2,
+      };
+      const value = createManagedExtensionInstall(
+        {
+          workspaceId: 'workspace',
+          sessionId: 'session',
+          metadata: input.value.metadata,
+          expectedSettingsRevision: 0,
+          settingsKeys: [],
+        },
+        {
+          ...snapshot,
+          extensions: [other, oldPin],
+          selectionVersion: 2,
+          mcpAuthBindings: [binding],
+        },
+      );
+      value.pin = pin;
+      value.stage = 'apply';
+      value.applySubmitted = false;
+      const client = api();
+      client.apply.mockImplementation(async (_session, selection) => ({
+        ...active,
+        ...selection,
+      }));
+      const journal: (typeof value)[] = [];
+      const authorize = vi.fn(async (command: typeof value) => command);
+      const result = await continueManagedExtensionInstall(
+        asManagement(client),
+        value,
+        undefined,
+        undefined,
+        { clientId: 'client' },
+        (entry) => journal.push(entry),
+        validated ? authorize : undefined,
+      );
+      expect(client.apply.mock.calls[0]?.[1]).toEqual({
+        selectionVersion: 2,
+        expectedConfigRevision: 7,
+        extensions: [other, pin],
+        mcpAuthBindings: validated ? [binding] : [],
+      });
+      if (validated) expect(authorize).toHaveBeenCalledOnce();
+      expect(isManagedExtensionInstallActive(journal.at(-1)!, result)).toBe(
+        true,
+      );
+    },
+  );
 
   it('accepts only scoped, public journal fields', async () => {
     const input = await command(['TOKEN']);

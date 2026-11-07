@@ -182,11 +182,7 @@ export class HostedExtensionSession {
       active?.formatVersion === 2
         ? {
             selectionVersion: 2 as const,
-            mcpAuthBindings:
-              requested?.mcpAuthBindings ??
-              latest?.command.mcpAuthBindings ??
-              active?.mcpAuthBindings ??
-              [],
+            mcpAuthBindings: active?.mcpAuthBindings ?? [],
           }
         : {}),
       requestedExtensions:
@@ -613,7 +609,7 @@ export class HostedExtensionSession {
         ? record.command
         : {
             operationId: record.phaseOperationId,
-            actorKey: record.command.actorKey,
+            actorKey: baseline.executionActorKey ?? record.command.actorKey,
             expectedRevision: record.previousConfigRevision,
             extensions: baseline.packages.map((entry) => entry.pin),
             ...(baseline.formatVersion === 2
@@ -690,7 +686,9 @@ export class HostedExtensionSession {
               ? record.command.mcpAuthBindings!
               : (baseline.mcpAuthBindings ?? [])
             ).length
-              ? record.command.actorKey
+              ? record.mode === 'apply'
+                ? record.command.actorKey
+                : baseline.executionActorKey
               : null,
           }
         : {}),

@@ -16,6 +16,7 @@ import { pipeline } from 'node:stream/promises';
 import { parseManagedMcpRecipe } from './managed-mcp-recipe.js';
 import {
   prepareManagedPackageImport,
+  inspectManagedPackageArchive,
   parseManagedPackageImportMetadata,
 } from './managed-package-import.js';
 
@@ -141,7 +142,7 @@ describe('Managed package import', () => {
           httpUrl: '${MCP_URL}',
           headers: {
             Authorization: 'Bearer ${TOKEN}',
-            'X-Literal': 'private-value',
+            'X-Auth-Token': '${TOKEN}',
           },
         },
         settings: [
@@ -166,12 +167,12 @@ describe('Managed package import', () => {
     expect(first.inspection.mcpServers).toEqual([
       {
         name: 'tools',
-        redacted: true,
+        redacted: false,
         recipe: {
           httpUrl: '${MCP_URL}',
           headers: {
             Authorization: 'Bearer ${TOKEN}',
-            'X-Literal': '[redacted]',
+            'X-Auth-Token': '${TOKEN}',
           },
         },
       },
@@ -181,8 +182,67 @@ describe('Managed package import', () => {
       envVar: 'TOKEN',
       sensitive: true,
     });
-    expect(JSON.stringify(first.inspection)).not.toContain('private-value');
+    const expanded = path.join(temporary, 'expanded-mcp');
+    await fs.mkdir(expanded);
+    await tar.x({ file: first.archivePath, cwd: expanded });
+    const authored = await fs.readFile(
+      path.join(expanded, 'qwen-extension.json'),
+      'utf8',
+    );
+    expect(authored).toContain('${TOKEN}');
+    expect(authored).not.toContain('fixture-private-token');
   });
+
+  it.each([
+    {
+      recipe: {
+        httpUrl: 'https://mcp.example.test',
+        headers: { 'X-Auth-Token': 'fixture-private-token' },
+      },
+      settings: [],
+    },
+    {
+      recipe: {
+        httpUrl: 'https://mcp.example.test',
+        headers: { 'X-Auth-Token': 'fixture-private-token' },
+      },
+      settings: [{ name: 'TOKEN', envVar: 'TOKEN', sensitive: true }],
+    },
+    {
+      recipe: {
+        command: 'node',
+        env: { CUSTOM_TOKEN: 'fixture-private-token' },
+      },
+      settings: [],
+    },
+    {
+      recipe: {
+        httpUrl: 'https://mcp.example.test',
+        headers: { 'X-Auth-Token': '${UNDECLARED}' },
+      },
+      settings: [],
+    },
+  ])(
+    'refuses literal or undeclared MCP env/header values before publication: $recipe',
+    async ({ recipe, settings }) => {
+      const source = await input(
+        JSON.stringify({
+          name: 'example',
+          serverName: 'tools',
+          recipe,
+          settings,
+        }),
+        'mcp',
+      );
+      const destination = path.join(temporary, 'rejected-output');
+      await expect(
+        prepareManagedPackageImport(source.file, source.metadata, {
+          destination,
+        }),
+      ).rejects.toThrow('declared settings placeholders');
+      await expect(fs.stat(destination)).rejects.toThrow();
+    },
+  );
 
   it.each([false, true])(
     'preserves a standalone Skill directory and its executable assets (wrapped=%s)',
@@ -295,4 +355,54 @@ describe('Managed MCP recipe validation', () => {
       'Invalid Managed MCP recipe',
     );
   });
+});
+
+it('refuses static Authorization even when it is a declared placeholder on an OAuth recipe', () => {
+  expect(() =>
+    parseManagedMcpRecipe(
+      {
+        httpUrl: 'https://mcp.example/mcp',
+        headers: { Authorization: 'Bearer ${TOKEN}' },
+        auth: {
+          type: 'oauth',
+          providerId: 'fixture',
+          resourceUri: 'https://mcp.example/mcp',
+          scopes: ['read'],
+        },
+      },
+      { allowPlaceholders: true },
+    ),
+  ).toThrow();
+});
+
+it('redacts literal env/header values when inspecting an existing archive', async () => {
+  const root = path.join(temporary, 'legacy');
+  await fs.mkdir(root);
+  await fs.writeFile(
+    path.join(root, 'qwen-extension.json'),
+    JSON.stringify({
+      name: 'legacy',
+      version: '1',
+      mcpServers: {
+        tools: {
+          httpUrl: 'https://mcp.example/mcp',
+          headers: { 'X-Auth-Token': 'fixture-private-token' },
+        },
+      },
+    }),
+  );
+  const archive = path.join(temporary, 'legacy.tar.gz');
+  await tar.c({ gzip: true, cwd: root, file: archive }, [
+    'qwen-extension.json',
+  ]);
+  const source = await input(await fs.readFile(archive), 'extension');
+  const inspection = await inspectManagedPackageArchive(
+    source.file,
+    source.metadata,
+  );
+  expect(inspection.mcpServers[0]).toMatchObject({
+    redacted: true,
+    recipe: { headers: { 'X-Auth-Token': '[redacted]' } },
+  });
+  expect(JSON.stringify(inspection)).not.toContain('fixture-private-token');
 });

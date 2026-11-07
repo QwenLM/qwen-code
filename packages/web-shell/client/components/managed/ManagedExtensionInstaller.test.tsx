@@ -128,6 +128,7 @@ async function render(
   client: ReturnType<typeof api>,
   key = 'initial',
   kind: 'skill' | 'mcp' = 'mcp',
+  onInstalled = vi.fn(),
 ) {
   await act(async () =>
     root.render(
@@ -146,6 +147,7 @@ async function render(
           snapshot={snapshot}
           initialKind={kind}
           onChanged={vi.fn()}
+          onInstalled={onInstalled}
         />
       </I18nProvider>,
     ),
@@ -170,7 +172,8 @@ const button = (name: string) =>
 
 it('reviews actual package contents without publication, then installs once while keeping secrets out of the source and journal', async () => {
   const client = api();
-  await render(client);
+  const onInstalled = vi.fn();
+  await render(client, 'initial', 'mcp', onInstalled);
   await edit('Name (optional for archives)', 'docs');
   await edit('Executable command', 'node');
   await edit('Secret setting names, separated by commas', 'TOKEN');
@@ -184,6 +187,7 @@ it('reviews actual package contents without publication, then installs once whil
   });
   expect(client.previewPackage).toHaveBeenCalledOnce();
   expect(client.importPackage).not.toHaveBeenCalled();
+  expect(onInstalled).not.toHaveBeenCalled();
   expect(
     container.querySelector('[data-managed-package-preview]')?.textContent,
   ).toContain('qwen-extension.json');
@@ -209,6 +213,7 @@ it('reviews actual package contents without publication, then installs once whil
     expect.any(Object),
   );
   expect(container.textContent).toContain('Installed in the selected session');
+  expect(onInstalled).toHaveBeenCalledOnce();
   expect(
     sessionStorage.getItem('managed-extension-install:scope:workspace:session'),
   ).toBeNull();
@@ -216,6 +221,39 @@ it('reviews actual package contents without publication, then installs once whil
   expect(new TextDecoder().decode(await source.arrayBuffer())).not.toContain(
     'private-token',
   );
+});
+
+it('keeps editing when apply has not become active', async () => {
+  const client = api();
+  client.previewPackage.mockResolvedValue({ ...inspection, settings: [] });
+  client.apply.mockImplementation(async (_session, selection) => ({
+    ...snapshot,
+    requestedExtensions: selection.extensions,
+    operation: {
+      operationId: '00000000-0000-4000-8000-000000000002',
+      state: 'recovery_required',
+      mode: 'apply',
+      revision: 5,
+    },
+  }));
+  const onInstalled = vi.fn();
+  await render(client, 'initial', 'mcp', onInstalled);
+  await edit('Name (optional for archives)', 'docs');
+  await edit('Executable command', 'node');
+  await act(async () => {
+    button('Review package').click();
+    await vi.waitFor(() =>
+      expect(client.previewPackage).toHaveBeenCalledOnce(),
+    );
+  });
+  await act(async () => {
+    button('Install into current session').click();
+    await vi.waitFor(() => expect(client.apply).toHaveBeenCalledOnce());
+  });
+  expect(onInstalled).not.toHaveBeenCalled();
+  expect(
+    sessionStorage.getItem('managed-extension-install:scope:workspace:session'),
+  ).toContain('apply');
 });
 
 it('restores a publication receipt after reload without repeating the upload or requiring the lost source', async () => {
@@ -360,4 +398,57 @@ it('installs a reviewed Skill archive without requiring personal authorization f
     expect.any(Object),
   );
   expect(container.textContent).toContain('Installed in the selected session');
+});
+
+it.each(['X-Auth-Token', 'X-Custom-Credential'])(
+  'requires a declared placeholder for credential headers regardless of name (%s)',
+  (header) => {
+    const input = {
+      name: 'docs',
+      serverName: 'docs',
+      transport: 'streamable-http',
+      command: '',
+      args: '[]',
+      url: 'https://mcp.example/mcp',
+      environment: '{}',
+      headers: JSON.stringify({ [header]: 'fixture-private-token' }),
+      secretKeys: ['TOKEN'],
+    };
+    expect(() => buildManagedMcpInput(input)).toThrow('Credential headers');
+    expect(() =>
+      buildManagedMcpInput({
+        ...input,
+        headers: JSON.stringify({ [header]: '${TOKEN}' }),
+      }),
+    ).not.toThrow();
+    expect(() =>
+      buildManagedMcpInput({
+        ...input,
+        headers: '{}',
+        environment: JSON.stringify({ CUSTOM_TOKEN: 'fixture-private-token' }),
+      }),
+    ).toThrow('settings placeholders');
+  },
+);
+
+it('refuses a static Authorization placeholder alongside personal OAuth', () => {
+  expect(() =>
+    buildManagedMcpInput({
+      name: 'docs',
+      serverName: 'docs',
+      transport: 'streamable-http',
+      command: '',
+      args: '[]',
+      url: 'https://mcp.example/mcp',
+      environment: '{}',
+      headers: JSON.stringify({ Authorization: 'Bearer ${TOKEN}' }),
+      secretKeys: ['TOKEN'],
+      auth: {
+        type: 'oauth',
+        providerId: 'fixture',
+        resourceUri: 'https://mcp.example/mcp',
+        scopes: ['read'],
+      },
+    }),
+  ).toThrow('no static Authorization header');
 });

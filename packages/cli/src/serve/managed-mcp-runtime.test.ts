@@ -1854,14 +1854,19 @@ describe('Managed MCP Runtime', () => {
                     resourceUri: `http://127.0.0.1:${address.port}/mcp`,
                     credentialId: 'credential',
                     credentialGeneration: 1,
-                    configRevision: 1,
+                    configRevision: 2,
                     executionActorKey: 'a'.repeat(64),
                   },
                 }
               : { headers: { Authorization: 'Bearer scoped-test-secret' } }),
           },
         ],
-        personal ? async () => `current-access-${++issued}` : undefined,
+        personal
+          ? async (context) => {
+              expect(context.configRevision).toBe(2);
+              return `current-access-${++issued}`;
+            }
+          : undefined,
       );
       const configured = await settled(instance, configure());
       if (transport === 'sse') expect(accepts).toEqual(['text/event-stream']);

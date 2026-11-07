@@ -620,7 +620,8 @@ export async function compileManagedExtensionPackage(
   }
   if (
     contributions.skills.length > 256 ||
-    Object.keys(contributions.mcpServers).length > 16
+    Object.keys(contributions.mcpServers).length > 16 ||
+    contributions.settings.length > 128
   )
     throw new ManagedPackageCompatibilityError([
       'component catalog limit exceeded',

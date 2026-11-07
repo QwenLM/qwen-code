@@ -295,6 +295,7 @@ describe('Hosted extension Session configuration', () => {
     context.failActivation();
     const failed = {
       ...context.command(1),
+      actorKey: 'b'.repeat(64),
       selectionVersion: 2,
       mcpAuthBindings: [],
     };
@@ -308,7 +309,7 @@ describe('Hosted extension Session configuration', () => {
     });
     expect(await reloaded.snapshot()).toMatchObject({
       selectionVersion: 2,
-      mcpAuthBindings: [],
+      mcpAuthBindings: [personalBinding],
       revision: 2,
       operation: { state: 'recovery_required' },
     });

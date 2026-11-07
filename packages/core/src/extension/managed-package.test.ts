@@ -39,6 +39,33 @@ afterEach(async () => {
 });
 
 describe('Managed raw package compiler', () => {
+  it.each([128, 129])(
+    'bounds the declared settings catalog at 128 (%s declarations)',
+    async (count) => {
+      await file(
+        'qwen-extension.json',
+        JSON.stringify({
+          name: 'fixture',
+          version: '1.0.0',
+          settings: Array.from({ length: count }, (_, index) => ({
+            name: `Setting ${index}`,
+            envVar: `SETTING_${index}`,
+          })),
+        }),
+      );
+      const compiled = compileManagedExtensionPackage(root, {
+        target,
+        resolveRecipes: false,
+      });
+      if (count === 128)
+        expect((await compiled).contributions.settings).toHaveLength(128);
+      else
+        await expect(compiled).rejects.toThrow(
+          'component catalog limit exceeded',
+        );
+    },
+  );
+
   it.each([
     { recipe: undefined, version: 1 },
     { recipe: { command: 'node', args: ['server.js'] }, version: 1 },

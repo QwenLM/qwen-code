@@ -378,7 +378,7 @@ export class ManagedRuntimeSkillSources {
       if (existing[1].identity !== identity) failed('skill_snapshot_conflict');
       return this.descriptor(op.operationId, existing[0], existing[1]);
     }
-    if (this.preparing >= 2 || this.snapshots.size + this.preparing >= 8)
+    if (this.preparing >= 2 || this.snapshots.size + this.preparing >= 256)
       failed('skill_snapshot_capacity');
     const key = `${sessionId}\0${op.operationId}`;
     if (this.pending.has(key)) failed('skill_snapshot_pending');
