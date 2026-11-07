@@ -51,6 +51,8 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 public class QwenHostedHarnessConnector implements HarnessConnector {
+    private static final com.fasterxml.jackson.databind.ObjectMapper LIFECYCLE_JSON =
+            new com.fasterxml.jackson.databind.ObjectMapper();
     private final ManagedAgentSettings settings;
     private final ManagedAgentSettings.Harness properties;
     private final ManagedAgentSettings.SessionStore sessionStore;
@@ -359,7 +361,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             request.put("toolProfile", session.toolProfile());
         }
         try {
-            return new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(client().settleLifecycle(ref, request));
+            return LIFECYCLE_JSON.valueToTree(client().settleLifecycle(ref, request));
         } catch (DaemonHttpException error) {
             // A lost detach ACK can leave this reference cached after the
             // Harness sealed and removed it. Retry through a current-claim

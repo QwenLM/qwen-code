@@ -13,7 +13,16 @@ import {
   oweHostedTurnCleanup,
   reconcileHostedTurnCleanup,
   confirmReplacedHostedTurnOwner,
+  type HostedCleanupResult,
 } from './hosted-turn-cleanup.js';
+import {
+  acquireHostedQuestionRuntime,
+  BLOCK_MOUNT_RETRY_GAPS_MS,
+  RELEASE_MOUNT_VERDICT_BOUND_MS,
+  retryableMountHandback,
+  questionWaitDefinitionAdmitted,
+  waitForHostedQuestion,
+} from './hosted-question-wait.js';
 import { probeNeverStarted } from './hosted-never-started-reconcile.js';
 import { RESIDENT_WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
@@ -31,6 +40,7 @@ import {
 } from './hosted-file-history.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { PDF_MAX_PAGES_PER_READ } from '@qwen-code/qwen-code-core/utils/pdf.js';
 import {
   checkHostedGlobPattern,
   HOSTED_GLOB_TOO_COMPLEX,
@@ -280,28 +290,6 @@ export {
 };
 
 const ACQUIRE_BUSY_POLL_MS = 250;
-// The owed handback's cadence: a quick backoff for the common late settle,
-// then a steady one-minute tail — the chain stays owed until the handback
-// lands, every timer unref'd so a blocked Session never holds the daemon's
-// event loop open, and every attempt re-reads the Broker's gate, never
-// bypasses it.
-const BLOCK_MOUNT_RETRY_GAPS_MS = [1000, 3000, 5000, 10000, 30000, 60000];
-// The block verdict never waits out a slow Broker round-trip: it proceeds
-// once the first handback attempt settles or this bound passes, whichever
-// is first — the attempt itself keeps running inside the retry chain.
-const RELEASE_MOUNT_VERDICT_BOUND_MS = 2000;
-// A reply that decided nothing earns a re-send — the holder-conditioned
-// clear is idempotent — and so do the busy refusal, whose executions settle
-// on their own clock, and the Broker's internal error. Every other refusal
-// is final: a superseded claim, a lifecycle drain, a writer that never
-// proved it stopped, a Session the Broker no longer holds.
-function retryableMountHandback(cause: unknown): boolean {
-  if (!(cause instanceof HostedWorkspaceBrokerRejection)) return true;
-  return (
-    (cause.status === 409 && cause.code === 'runtime_session_busy') ||
-    (cause.status === 500 && cause.code === 'runtime_broker_internal_error')
-  );
-}
 export function isRetryableWorkspaceAcquisition(
   cause: unknown,
 ): cause is HostedWorkspaceBrokerRejection & {
@@ -597,22 +585,37 @@ const pathProperty = {
   description:
     'Path relative to the saved Session working directory in its remote Workspace. Never use the Harness host path.',
 };
-export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
-  {
-    name: 'read_file',
-    description:
-      'Read a file in the remote Workspace. Read before editing an existing file.',
-    parametersJsonSchema: {
-      type: 'object',
-      properties: {
-        file_path: pathProperty,
-        offset: { type: 'integer', minimum: 0 },
-        limit: { type: 'integer', minimum: 1 },
+const HOSTED_READ_FILE_TOOL = {
+  name: 'read_file',
+  description:
+    'Read a file in the remote Workspace. Read before editing an existing file.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      file_path: pathProperty,
+      offset: { type: 'integer', minimum: 0 },
+      limit: { type: 'integer', minimum: 1 },
+    },
+    required: ['file_path'],
+    additionalProperties: false,
+  },
+};
+const HOSTED_PAGED_READ_FILE_TOOL: FunctionDeclaration = {
+  ...HOSTED_READ_FILE_TOOL,
+  parametersJsonSchema: {
+    ...HOSTED_READ_FILE_TOOL.parametersJsonSchema,
+    properties: {
+      ...HOSTED_READ_FILE_TOOL.parametersJsonSchema.properties,
+      pages: {
+        type: ['string', 'null'],
+        description: `Optional PDF page range to extract as text, such as '3' or '1-5'. Pages start at 1; at most ${PDF_MAX_PAGES_PER_READ} pages per request. Open-ended ranges are unsupported. Omit or set to null for other files.`,
       },
-      required: ['file_path'],
-      additionalProperties: false,
     },
   },
+};
+// Resident/CSI keeps this restricted schema; ordinary reads use the paged one.
+export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
+  HOSTED_READ_FILE_TOOL,
   {
     name: 'write_file',
     description:
@@ -716,7 +719,7 @@ const HOSTED_GLOB_TOOL: FunctionDeclaration = {
     additionalProperties: false,
   },
 };
-// #15076: `todo_write`, declared only on `files/3`. The Harness persists
+// `todo_write` is declared on `files/3` and `shell/1`. The Harness persists
 // the Session list without writing a Workspace file. `web_fetch` is not part
 // of this declaration: `main` adds it to the same files lane under its own argument
 // and destination checks, so this array appends only the todo tool.
@@ -765,16 +768,10 @@ export const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
 };
 // #13753 I3: the read profile of a snapshot child, which reads a frozen copy
 // of its parent's Workspace. Nothing here writes, and the turn refuses any
-// call it does not declare. A missing read_file stops the module loading:
-// spreading a failed lookup would silently declare a tool with no name.
-const HOSTED_READ_FILE_TOOL = HOSTED_WORKSPACE_FILE_TOOLS.find(
-  (tool) => tool.name === 'read_file',
-);
-if (HOSTED_READ_FILE_TOOL === undefined)
-  throw new Error('Hosted Workspace file tools no longer declare read_file.');
+// call it does not declare.
 export const HOSTED_WORKSPACE_READ_TOOLS: FunctionDeclaration[] = [
   {
-    ...HOSTED_READ_FILE_TOOL,
+    ...HOSTED_PAGED_READ_FILE_TOOL,
     description:
       "Read a file in this read-only snapshot of the parent's Workspace, taken when this child started. Files cannot be changed and commands cannot run here.",
   },
@@ -1845,6 +1842,8 @@ export class HostedWorkspaceToolTurn {
   }
 
   private readonly publicPlanMode: boolean;
+  private questionDefinition?: Promise<boolean>;
+  private questionChild = false;
   private planning: boolean;
   private residentWorkspace = false;
   private logicalRound = 0;
@@ -1857,6 +1856,7 @@ export class HostedWorkspaceToolTurn {
     inputRefs: Map<number, ManagedSessionDurableRef>;
     definitionRefs: Map<number, ManagedSessionDurableRef>;
     actionIds: Map<number, string>;
+    releaseQuestionMount: boolean;
     uncaptured?: boolean;
   };
   hookStopReason?: string;
@@ -2017,6 +2017,7 @@ export class HostedWorkspaceToolTurn {
        */
       memberPlanMode?: boolean;
       publicPlanMode?: boolean;
+      recoveryBroker?: HostedWorkspaceBroker;
     },
   ) {
     if (
@@ -2100,6 +2101,7 @@ export class HostedWorkspaceToolTurn {
         ? publicationOrShell
         : shell;
     this.broker =
+      extras?.recoveryBroker ??
       this.mcp?.broker ??
       this.hooks?.broker ??
       new HostedWorkspaceBroker(
@@ -2107,7 +2109,20 @@ export class HostedWorkspaceToolTurn {
         session.authority.sessionHeader.sessionKey,
         hostedRuntimeSessionId(promptId),
       );
-    this.warmed = this.mcp ? this.mcp.ensureReady() : this.broker.warm();
+    if (
+      extras?.recoveryBroker &&
+      (this.mcp ||
+        this.hooks ||
+        this.broker.harnessSessionId !==
+          session.authority.sessionHeader.sessionKey.sessionId ||
+        this.broker.runtimeSessionId !== hostedRuntimeSessionId(promptId))
+    )
+      throw new Error('Invalid question recovery Broker.');
+    this.warmed = extras?.recoveryBroker
+      ? Promise.resolve()
+      : this.mcp
+        ? this.mcp.ensureReady()
+        : this.broker.warm();
     // Warmup runs alongside inference; a text-only answer need not wait for it.
     void this.warmed.catch(() => undefined);
   }
@@ -2121,13 +2136,11 @@ export class HostedWorkspaceToolTurn {
     return !this.mcp || this.profile === 'hosted-workspace-shell/1';
   }
 
-  /**
-   * #15076: whether this Session's profile declares `todo_write`. Only the
-   * `/3` profiles do; every earlier profile keeps its exact vocabulary, so
-   * the turn refuses the name there.
-   */
   private declaresTodoTool(): boolean {
-    return this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3;
+    return (
+      this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE
+    );
   }
 
   private questionsAdmitted(): boolean {
@@ -2137,7 +2150,10 @@ export class HostedWorkspaceToolTurn {
       !this.mcp &&
       !this.foregroundOnly &&
       !this.residentWorkspace &&
-      this.childDepth === 0 &&
+      (this.childDepth === 0 ||
+        (this.childDepth === 1 &&
+          this.questionChild &&
+          this.broker.provisionerKind === 'local-process')) &&
       !this.memberPlanMode &&
       [
         HOSTED_WORKSPACE_FILE_PROFILE,
@@ -2146,6 +2162,18 @@ export class HostedWorkspaceToolTurn {
         HOSTED_WORKSPACE_SHELL_PROFILE,
       ].includes(this.profile ?? HOSTED_WORKSPACE_FILE_PROFILE)
     );
+  }
+
+  private async questionWaitAdmitted(): Promise<boolean> {
+    this.questionDefinition ??= this.session.resources
+      .read(this.session.authority.sessionHeader.definitionRef)
+      .then((bytes) =>
+        questionWaitDefinitionAdmitted(
+          JSON.parse(bytes.toString('utf8')) as Record<string, unknown>,
+          this.childDepth,
+        ),
+      );
+    return await this.questionDefinition;
   }
 
   /**
@@ -2206,6 +2234,10 @@ export class HostedWorkspaceToolTurn {
 
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
+    if (this.childDepth === 1) {
+      this.questionChild = await this.questionWaitAdmitted();
+      if (this.questionChild) await waitForTurn(this.warmed, signal);
+    }
     if (this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE) {
       this.advertised = hostedWorkspaceDeclarations(
         [...HOSTED_WORKSPACE_FILE_TOOLS, HOSTED_GLOB_TOOL],
@@ -2263,8 +2295,6 @@ export class HostedWorkspaceToolTurn {
     // board commands — resolved once, both declarations follow it.
     const memberCommands = await this.memberCommandsDeclared();
     const skill = this.skills?.declaration();
-    // #15076: only a `/3` profile declares `todo_write`, so every earlier
-    // profile keeps the exact array it has always declared.
     const todoTool = this.declaresTodoTool();
     this.advertised = [
       ...[
@@ -2276,7 +2306,10 @@ export class HostedWorkspaceToolTurn {
       ]
         .filter((tool) => tool.name !== 'monitor' || this.monitorsAdmitted())
         .map((declaration) => {
-          let tool = declaration;
+          let tool =
+            declaration.name === 'read_file'
+              ? HOSTED_PAGED_READ_FILE_TOOL
+              : declaration;
           if (
             tool.name === 'run_shell_command' &&
             !this.backgroundShellAdmitted()
@@ -3606,7 +3639,8 @@ export class HostedWorkspaceToolTurn {
       );
     this.uncertain = true;
     try {
-      await waitForTurn(this.warmed, signal);
+      if (plan.runtime.provisionerKind) await this.warmed;
+      else await waitForTurn(this.warmed, signal);
       this.broker.runtime = {
         bindingId: plan.runtime.bindingId,
         generation: plan.runtime.generation,
@@ -3620,10 +3654,37 @@ export class HostedWorkspaceToolTurn {
           await oweHostedTurnCleanup(this.session, this.promptId, this.broker);
           this.cleanupOwed = true;
         }
-        await this.broker.acquire({
-          runtimeBindingId: plan.runtime.bindingId,
-          generation: plan.runtime.generation,
-        });
+        if (plan.runtime.provisionerKind) {
+          if (
+            this.foregroundOnly ||
+            this.memberPlanMode ||
+            !(await this.questionWaitAdmitted())
+          )
+            throw new Error('Original question Session is not qualified.');
+          if (
+            !(await acquireHostedQuestionRuntime(
+              this.broker,
+              plan.runtime,
+              signal,
+            ))
+          )
+            return this.refuseBatch(
+              plan.calls.map((item) => item.call),
+              plan.calls.map(() => APPROVAL_REFUSALS.cancelled),
+              undefined,
+              plan.model,
+              undefined,
+            );
+          if (this.childDepth === 1) this.questionChild = true;
+          if (!this.questionsAdmitted())
+            throw new Error('Original question Session is not qualified.');
+          this.context?.invalidate();
+        } else {
+          await this.broker.acquire({
+            runtimeBindingId: plan.runtime.bindingId,
+            generation: plan.runtime.generation,
+          });
+        }
         this.acquired = true;
         if (
           !this.broker.runtime ||
@@ -3703,6 +3764,20 @@ export class HostedWorkspaceToolTurn {
         { saved, requests, nextApprovalOrdinal },
       );
     } catch (cause) {
+      if (
+        plan.runtime.provisionerKind &&
+        this.acquired &&
+        !this.nativeBatch &&
+        signal.aborted &&
+        cause === signal.reason
+      )
+        return this.refuseBatch(
+          plan.calls.map((item) => item.call),
+          plan.calls.map(() => APPROVAL_REFUSALS.cancelled),
+          undefined,
+          plan.model,
+          undefined,
+        );
       throw new HostedToolRecoveryRequiredError(cause);
     }
   }
@@ -3824,7 +3899,15 @@ export class HostedWorkspaceToolTurn {
       definitionRef: header.definitionRef,
       rootSnapshotRef: header.rootSnapshotRef,
       sourceActivation: this.session.activation,
-      runtime: { runtimeSessionId: this.broker.runtimeSessionId, ...runtime },
+      runtime: {
+        runtimeSessionId: this.broker.runtimeSessionId,
+        bindingId: runtime.bindingId,
+        generation: runtime.generation,
+        workspaceGeneration: runtime.workspaceGeneration,
+        ...(singleQuestion && batch.releaseQuestionMount
+          ? { provisionerKind: 'local-process' as const }
+          : {}),
+      },
       batchId: batch.messageId,
       assistantRef: assistant.payload[
         'contentRef'
@@ -3986,7 +4069,7 @@ export class HostedWorkspaceToolTurn {
             hostedQuestions(input);
             if (source.length !== 1 || !this.questionsAdmitted())
               validationError =
-                'ask_user_question must be the only call in a supported root Session batch.';
+                'ask_user_question must be the only call in a supported Session batch.';
           } catch (cause) {
             if (!(cause instanceof HostedQuestionInputError)) throw cause;
             validationError = cause.message;
@@ -4786,10 +4869,10 @@ export class HostedWorkspaceToolTurn {
     )
       await waitForTurn(this.warmed, signal);
     // H4b: an agent-only batch runs entirely inside its own Sessions and
-    // needs no Runtime at all — holding the parent's mount across the
-    // child's wait is exactly the deadlock a shared Workspace creates
-    // (parent turn held, child tool call queued behind it forever). v1
-    // therefore takes the mount only for a batch with at least one
+    // needs no Runtime at all. A shared local Workspace admits multiple
+    // execution members; providers with exclusive mounts would block the
+    // child if the parent kept its mount while waiting. Take a mount only
+    // for a batch with at least one
     // non-agent tool; a workflow launch is a child launch of the same
     // shape (#13803). A session message (H4d-b) commits a record and
     // touches no Runtime either, and H4e-b1's team tools touch only
@@ -4915,6 +4998,13 @@ export class HostedWorkspaceToolTurn {
             item.actionId ? [[index, item.actionId] as const] : [],
           ),
         ),
+        releaseQuestionMount: restored
+          ? restored.saved.plan.runtime.provisionerKind === 'local-process'
+          : requests.length === 1 &&
+            requests[0].question === true &&
+            this.questionsAdmitted() &&
+            this.broker.provisionerKind === 'local-process' &&
+            (await this.questionWaitAdmitted()),
       };
       const asks = new Set<number>();
       if (this.hooks) {
@@ -5823,7 +5913,7 @@ export class HostedWorkspaceToolTurn {
                   error:
                     `Tool execution settled as ${result.executionStatus}, but its output exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte durable Session limit and was omitted.` +
                     (request.call.name === 'read_file'
-                      ? ' Request a smaller offset/limit range.'
+                      ? hostedReadRangeGuidance(this.residentWorkspace)
                       : ''),
                   executionStatus: result.executionStatus,
                   outputOmitted: true,
@@ -9001,6 +9091,26 @@ export class HostedWorkspaceToolTurn {
     requiresHumanDecision = false,
   ): Promise<string | undefined> {
     const authority = this.session.authority;
+    const question = call.name === 'ask_user_question';
+    const releaseWhileWaiting =
+      question && this.nativeBatch?.releaseQuestionMount === true;
+    const originalRuntime =
+      releaseWhileWaiting && this.broker.runtime
+        ? {
+            ...this.broker.runtime,
+            runtimeSessionId: this.broker.runtimeSessionId,
+            provisionerKind: 'local-process' as const,
+          }
+        : undefined;
+    if (releaseWhileWaiting) {
+      const history = await readHostedFileHistory(this.session);
+      if (!originalRuntime || history?.pendingTurn || history?.pendingUndo)
+        throw new HostedToolRecoveryRequiredError(
+          'Question Runtime is not settled.',
+        );
+      await oweHostedTurnCleanup(this.session, this.promptId, this.broker);
+      this.cleanupOwed = true;
+    }
     const requestId = `tool_approval_${randomBytes(16).toString('hex')}`;
     const createdAt = Date.now();
     const ordinal =
@@ -9013,7 +9123,6 @@ export class HostedWorkspaceToolTurn {
         ? undefined
         : await this.captureNativeBatch('approval', requestId, ordinal);
     if (ordinal >= 0 && !continuationRef) this.nativeBatch!.uncaptured = true;
-    const question = call.name === 'ask_user_question';
     if (question && !continuationRef)
       throw new HostedToolRecoveryRequiredError(
         'Question continuation is unavailable.',
@@ -9092,25 +9201,43 @@ export class HostedWorkspaceToolTurn {
         else signal.addEventListener('abort', release, { once: true });
       });
     }
-    await approval.waiters.wait(
-      requestId,
-      options.expiresAt,
-      signal,
-      () =>
-        authority.action(requestId)?.state !== 'requested' ||
-        authority.writesStopped,
-      liveApproval && approval.readSettings
-        ? hostedLiveApprovalPoll(
-            this.session,
-            approval.waiters,
-            options,
-            () => this.readApprovalSettings(),
-            signal,
-            this.globProfile,
-            approval.isBlocked,
-          )
-        : undefined,
-    );
+    if (originalRuntime) {
+      try {
+        await waitForHostedQuestion({
+          session: this.session,
+          broker: this.broker,
+          brokerOptions: this.options,
+          waiters: approval.waiters,
+          requestId,
+          expiresAt: options.expiresAt,
+          signal,
+          released: () => {
+            this.acquired = false;
+          },
+        });
+      } catch (cause) {
+        throw new HostedToolRecoveryRequiredError(cause);
+      }
+    } else
+      await approval.waiters.wait(
+        requestId,
+        options.expiresAt,
+        signal,
+        () =>
+          authority.action(requestId)?.state !== 'requested' ||
+          authority.writesStopped,
+        liveApproval && approval.readSettings
+          ? hostedLiveApprovalPoll(
+              this.session,
+              approval.waiters,
+              options,
+              () => this.readApprovalSettings(),
+              signal,
+              this.globProfile,
+              approval.isBlocked,
+            )
+          : undefined,
+      );
     if (authority.action(requestId)?.state === 'requested')
       await endHostedAction(
         this.session,
@@ -9121,6 +9248,21 @@ export class HostedWorkspaceToolTurn {
     const action = authority.action(requestId)!;
     if (action.state === 'decided' && options.v === 4) {
       await readHostedQuestionDecision(this.session, action, options);
+      if (originalRuntime && !signal.aborted) {
+        try {
+          const acquired = await acquireHostedQuestionRuntime(
+            this.broker,
+            originalRuntime,
+            signal,
+          );
+          if (!acquired) return APPROVAL_REFUSALS.cancelled;
+          this.acquired = true;
+          this.context?.invalidate();
+          await this.fetchWorkspaceContext(signal);
+        } catch (cause) {
+          throw new HostedToolRecoveryRequiredError(cause);
+        }
+      }
       return undefined;
     }
     if (action.state === 'decided')
@@ -9207,7 +9349,8 @@ export class HostedWorkspaceToolTurn {
   async finish(): Promise<void> {
     if (this.uncertain)
       throw new HostedToolRecoveryRequiredError('Tool outcome is unknown.');
-    if (!this.acquired && !this.retiredOwnerResults) return;
+    if (!this.acquired && !this.retiredOwnerResults && !this.cleanupOwed)
+      return;
     try {
       if (this.hookStopReason)
         await this.harness.settleHookStoppedRuntimeContinuation();
@@ -9327,17 +9470,22 @@ export class HostedWorkspaceToolTurn {
   // deliberately does not touch it: the Session's ordered close (H3's
   // fifth slice) drains the stores, and background traffic keeps its
   // endpoint until then.
-  async cleanup(): Promise<void> {
+  async cleanup(): Promise<HostedCleanupResult | undefined> {
     if (this.hooks || this.mcp) return;
-    if (this.cleanupOwed)
-      await reconcileHostedTurnCleanup(
+    let result: HostedCleanupResult | undefined;
+    if (this.cleanupOwed) {
+      result = await reconcileHostedTurnCleanup(
         this.session,
         this.options,
         this.promptId,
       );
-    else if (this.acquired) await this.broker.release();
+      if (result.held.has(this.promptId)) this.held = true;
+      else if (result.states.get(this.promptId) === 'owed')
+        throw new Error('Original Runtime cleanup is still owed.');
+    } else if (this.acquired) await this.broker.release();
     this.acquired = false;
     this.cleanedUp = true;
+    return result;
   }
 
   /**
@@ -9350,6 +9498,12 @@ export class HostedWorkspaceToolTurn {
   }
 
   async close(): Promise<void> {}
+}
+
+export function hostedReadRangeGuidance(resident: boolean): string {
+  return resident
+    ? ' Request a smaller offset/limit range.'
+    : ' Request a smaller offset/limit range for text, or a smaller pages range for PDFs.';
 }
 
 const HOSTED_GLOB_TRUNCATION_HINT =
