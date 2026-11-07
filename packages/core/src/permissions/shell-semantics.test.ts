@@ -997,3 +997,93 @@ describe('ANSI-C words ending in a literal trailing \\c', () => {
     );
   });
 });
+
+// R13-2 (#16075): a multi-unit ANSI-C escape appends one `bare` entry per UTF-16
+// unit of its decoded text, so positional syntax trimming stays aligned and the
+// unquoted `)` after an astral filename is dropped, not kept in the path.
+describe('ANSI-C astral escape keeps bare aligned with current', () => {
+  it('trims the closing paren after a multi-unit escape', () => {
+    expect(
+      extractShellOperationsAcrossCommand("(cat > $'\\U0001F600')", '/repo'),
+    ).toEqual([write('/repo/😀')]);
+  });
+
+  it('still trims after a single-unit escape', () => {
+    expect(
+      extractShellOperationsAcrossCommand("(cat > $'\\x41')", '/repo'),
+    ).toEqual([write('/repo/A')]);
+  });
+});
+
+// R13-1 (#16075): a fully quoted -c payload that carries an expansion is still
+// unwrapped for op extraction, so a write inside it is reported (the monitor /
+// cron consumers keep the unresolved signal separately).
+describe('fully quoted wrapper payload stays visible to op extraction', () => {
+  it('reports a write inside a double-quoted payload with a substitution', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        'bash -c "echo hi; $(echo x > /etc/passwd)"',
+        '/repo',
+      ),
+    ).toEqual([write('/etc/passwd')]);
+  });
+});
+
+// R12-1 (#16075): an expanded program word is an amend only when its assigned
+// value can yield `git commit --amend` (or is genuinely unresolvable), not for
+// every assigned name.
+describe('expanded program word resolves the assigned value', () => {
+  it.each([
+    'X="git status"; $X',
+    'PY=python; $PY --version',
+    'X="echo hi"; $X',
+    '$UNSET_VAR --version',
+  ])('allows a non-amend expansion: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(false);
+  });
+
+  it.each([
+    "X='git commit --amend --no-edit'; $X",
+    'X=git; $X commit --amend',
+    'X=git; X+=; $X commit --amend',
+    "X+=$'git\\x20commit\\x20--amend'; $X",
+    'git commit${IFS}--amend',
+  ])('denies an expansion that can amend: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+});
+
+// R1-1 (#16075): the recognizer must not answer "not an amend" for constructs
+// its model does not model; each row really amends HEAD under real bash.
+describe('recognizer closes the unmodelled amend spellings', () => {
+  it.each([
+    "timeout .5s bash -c $'git\\x20commit\\x20--amend'",
+    "exec -a foo bash -c $'git\\x20commit\\x20--amend'",
+    "env -S 'git' commit --amend",
+    "script -I /dev/null -c $'git\\x20commit\\x20--amend'",
+    "X+=$'git\\x20commit\\x20--amend'; $X",
+    'git commit -m x\\ #y --amend',
+    "bash<<'EOF'\ngit commit --amend\nEOF",
+    'bash<<<"git commit \'--amend\'"',
+    'echo "git commit $\'--amend\'" | cat | bash',
+    "printf 'git\\x20commit\\x20--amend' | bash",
+    "find . -exec bash +o posix -c 'git commit --am'end \\;",
+    "bash -c -x 'git commit --amend'",
+  ])('denies an amend the model used to miss: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+
+  it.each([
+    "bash -c $'echo hi'",
+    "timeout 5 bash -c $'echo hi'",
+    "env -S 'echo hi'",
+    "exec -a foo bash -c 'echo hi'",
+    'git status # git commit --amend',
+    "cat <<'EOF'\ngit commit --amend\nEOF",
+    "echo 'git commit --amend'",
+    "printf 'echo hi' | bash",
+    'git commit -m "x #y" --no-edit',
+  ])('keeps the inert twin allowed: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(false);
+  });
+});

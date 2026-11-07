@@ -183,10 +183,19 @@ function resolveAmendTarget(cwd: string, command: string): AmendTarget | null {
     // fails closed rather than guess (#16075 review, R7-2).
     return null;
   } else {
-    const perSegment = analysis.segments.map(({ segment, cwd: segCwd }) => ({
-      relocations: amendSegmentRelocations(segment),
-      cwd: segCwd,
-    }));
+    const perSegment = analysis.segments.map(
+      ({ segment, cwd: segCwd, inherited }) => ({
+        // A carrier's prefix relocation (`GIT_DIR=B/.git bash -c '…'`) applies
+        // to the inner amend exactly as if it were spelled there; merge it with
+        // the segment's own relocations before the exactly-one rule (#16075
+        // review, R7-2).
+        relocations: [
+          ...(inherited ?? []),
+          ...amendSegmentRelocations(segment),
+        ],
+        cwd: segCwd,
+      }),
+    );
     const relocated = perSegment.filter((s) => s.relocations.length > 0);
     if (relocated.length === 0) {
       // Plain amends: every one must run under the same cwd.

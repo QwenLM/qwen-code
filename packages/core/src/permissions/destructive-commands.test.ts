@@ -1029,6 +1029,72 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
       ),
     ).not.toBeNull();
   });
+
+  // R7-2: the walk's cwd/relocation model must not exempt an amend of a repo
+  // the command does not target. Each row amends B (or an ambiguous cwd) while
+  // repo A's HEAD is registered; every one was auto-approved before the fix.
+  it.each([
+    // unset of one exported name must not forget the other.
+    `export GIT_DIR=${'%B%'}/.git; unset GIT_WORK_TREE; git commit --amend --no-edit`,
+    // A poisoned cwd must reach into the wrapper payload, not reset there.
+    `cd "$TARGET" && bash -c 'git commit --amend --no-edit'`,
+    // The carrier's GIT_DIR= prefix relocates the inner amend.
+    `GIT_DIR=${'%B%'}/.git bash -c 'git commit --amend --no-edit'`,
+    // `command -- cd` still runs the cd builtin.
+    `command -- cd ${'%B%'} && git commit --amend --no-edit`,
+    // eval may amend a second, unrecorded repository: terminal poison.
+    `git commit --amend --no-edit && eval 'git -C ${'%B%'} commit --amend --no-edit'`,
+  ])(
+    'refuses the exemption when the walk cannot attribute the target: %s',
+    (template) => {
+      const command = template.replaceAll('%B%', repoB.dir);
+      const result = amendAt(command, repoA.dir);
+      expect(result).not.toBeNull();
+      expect(result!.blocked).toBe(true);
+    },
+  );
+
+  it('refuses the exemption for a cd bash never reaches', () => {
+    // cwd=B; `false && cd A` never moves the cwd, so the amend targets B, not
+    // the registered A the conditional cd names.
+    const result = amendAt(
+      `false && cd ${repoA.dir}; git commit --amend --no-edit`,
+      repoB.dir,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.blocked).toBe(true);
+  });
+
+  it('carries a carrier prefix GIT_DIR to the registered repo', () => {
+    // cwd=B (unregistered); the prefix hands GIT_DIR=A to the inner amend and
+    // A's HEAD is registered: the exemption follows the resolved target.
+    expect(
+      amendAt(
+        `GIT_DIR=${repoA.dir}/.git bash -c 'git commit --amend --no-edit'`,
+        repoB.dir,
+      ),
+    ).toBeNull();
+  });
+
+  it('tracks a command -- cd to the registered repo', () => {
+    expect(
+      amendAt(
+        `command -- cd ${repoA.dir} && git commit --amend --no-edit`,
+        repoB.dir,
+      ),
+    ).toBeNull();
+  });
+
+  it('clears only the unset exported name, keeping the other relocation', () => {
+    // Unsetting GIT_DIR itself removes the relocation: the amend targets the
+    // registered cwd A again (contrast the unset-GIT_WORK_TREE block row).
+    expect(
+      amendAt(
+        `export GIT_DIR=${repoB.dir}/.git; unset GIT_DIR; git commit --amend --no-edit`,
+        repoA.dir,
+      ),
+    ).toBeNull();
+  });
 });
 
 describe('session commit tracking', () => {

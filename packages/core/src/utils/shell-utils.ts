@@ -659,6 +659,11 @@ export function decodeAnsiCWord(body: string): string {
       out += body[index]!;
       continue;
     }
+    // A NUL ends the word bash builds: `$'--\0x'` is the word `--`, so the
+    // rest of THIS ANSI-C segment is dropped. The truncation stays inside the
+    // segment — bash appends any following concatenation segment (`f $'a\0b'c`
+    // is `ac`), and the caller decodes each segment separately (#16075 R11-2).
+    if (escape.text === '\0') break;
     out += escape.text;
     index += escape.length - 1;
   }
@@ -680,9 +685,33 @@ export function decodeAnsiCWord(body: string): string {
  * 'echo ok'` runs a program named `x2dx2d`, not the payload), so it is
  * treated like a double-quoted word.
  */
-function shellWordAfterQuoteRemoval(token: string): string | null {
+interface QuoteRemovedWord {
+  /** The word with quoting removed; expansion syntax is kept as literal text. */
+  text: string;
+  /** The word carries an expansion (`$…`, backtick) somewhere. */
+  hasExpansion: boolean;
+  /**
+   * Every expansion introducer sits inside a quoted span, so the word is a
+   * single fully quoted word (possibly a concatenation of quoted segments).
+   * Such a word is still the `-c` payload even though its value is not static;
+   * only an UNQUOTED expansion leaves the terminator position truly ambiguous
+   * (#16075 review, R13-1).
+   */
+  fullyQuoted: boolean;
+}
+
+/**
+ * Quote removal that keeps expansion syntax as text and reports whether the
+ * word is fully quoted. Returns null only on an unterminated quote/escape. The
+ * option-terminator test reads the fail-closed projection (a word with any
+ * expansion is not a resolved terminator); the wrapper unwrap also needs the
+ * quoted-but-dynamic payload text so op extraction and the self-kill gate keep
+ * seeing the script the shell runs (#16075 review, R13-1).
+ */
+function shellWordQuoteRemoval(token: string): QuoteRemovedWord | null {
   let out = '';
   let hasExpansion = false;
+  let unquotedExpansion = false;
   let i = 0;
   const n = token.length;
   while (i < n) {
@@ -770,12 +799,14 @@ function shellWordAfterQuoteRemoval(token: string): string | null {
       }
       // Parameter / command / arithmetic expansion: not statically resolvable.
       hasExpansion = true;
+      unquotedExpansion = true;
       out += ch;
       i++;
       continue;
     }
     if (ch === '`') {
       hasExpansion = true;
+      unquotedExpansion = true;
       out += ch;
       i++;
       continue;
@@ -783,7 +814,7 @@ function shellWordAfterQuoteRemoval(token: string): string | null {
     out += ch;
     i++;
   }
-  return hasExpansion ? null : out;
+  return { text: out, hasExpansion, fullyQuoted: !unquotedExpansion };
 }
 
 export function stripShellWrapper(command: string): string {
@@ -819,17 +850,29 @@ export function stripShellWrapper(command: string): string {
       // R6-1 / R11-2).
       let markerRest = token.rest;
       const terminator = takeLeadingToken(markerRest);
-      const terminatorWord = terminator
-        ? shellWordAfterQuoteRemoval(terminator.token)
+      const terminatorQuote = terminator
+        ? shellWordQuoteRemoval(terminator.token)
         : null;
+      const terminatorWord =
+        terminatorQuote && !terminatorQuote.hasExpansion
+          ? terminatorQuote.text
+          : null;
       if (terminator && terminatorWord === '--') {
         markerRest = terminator.rest;
       } else if (terminator && terminatorWord === null) {
         // The word carries an expansion we cannot resolve (`sh -c $X 'cmd'`):
-        // it may be the terminator (then 'cmd' is the payload) or a program
-        // word itself (then 'cmd' is only $0). Neither reading is provable,
-        // so hand back the whole command for the monitor to scan rather than
-        // pick one (#16075 review, R11-2).
+        // it may be the terminator (then 'cmd' is the payload) or the payload
+        // itself (then 'cmd' is only $0). A single FULLY QUOTED word is still
+        // the script the shell runs, so unwrap its quote-removed text — handing
+        // back the whole command made every `stripShellWrapper(x) !== x`
+        // consumer read the wrapper as wrapper-free and drop the payload's
+        // writes / self-kill pattern (#16075 review, R13-1). An UNQUOTED
+        // expansion (`sh -c $TERM 'ls -l'`) keeps handing back the whole
+        // command; the monitor still scans it and the cron gate refuses it via
+        // wrapperPayloadUnresolved.
+        if (terminatorQuote?.fullyQuoted) {
+          return terminatorQuote.text || trimmed;
+        }
         return trimmed;
       }
       const commandToken = takeLeadingToken(markerRest);
@@ -1512,6 +1555,14 @@ interface ParsedMonitorShellWrapper {
    * must not: the shell runs the glued script while the rules read raw text.
    */
   wrapperPayloadUnresolved?: boolean;
+  /**
+   * Spawn this exact text instead of reconstructing it from the wrapper tokens
+   * and the quote-removed payload. Set when the payload word is a fully quoted
+   * word with a dynamic value: the analysis reads the quote-removed script, but
+   * re-quoting a mixed concatenation faithfully is not possible, so the monitor
+   * spawns the command exactly as written (#16075 review, R13-1).
+   */
+  spawnOverride?: string;
 }
 
 export interface NormalizedMonitorCommand {
@@ -1785,10 +1836,29 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
       // provable, so hand back the whole command rather than pick one.
       let markerRest = token.rest;
       const terminator = takeLeadingToken(markerRest);
-      const terminatorWord = terminator
-        ? shellWordAfterQuoteRemoval(terminator.token)
+      const terminatorQuote = terminator
+        ? shellWordQuoteRemoval(terminator.token)
         : null;
+      const terminatorWord =
+        terminatorQuote && !terminatorQuote.hasExpansion
+          ? terminatorQuote.text
+          : null;
       if (terminator && terminatorWord === null) {
+        // A fully quoted word with a dynamic value is still the script: expose
+        // its quote-removed text for the safety scan and the monitor predicates
+        // while keeping the unresolved flag so the cron gate refuses it, and
+        // spawn the command exactly as written (#16075 review, R13-1). An
+        // unquoted expansion keeps handing back the whole command.
+        if (terminatorQuote?.fullyQuoted) {
+          return {
+            wrapperTokens,
+            innerCommand: terminatorQuote.text,
+            innerQuote: '',
+            innerArgsSuffix: terminator.rest.replace(/^[ \t]+/, ''),
+            wrapperPayloadUnresolved: true,
+            spawnOverride: trimmed,
+          };
+        }
         return {
           innerCommand: trimmed,
           innerQuote: '',
@@ -1852,6 +1922,7 @@ export function normalizeMonitorCommand(
     innerQuote,
     innerArgsSuffix,
     wrapperPayloadUnresolved,
+    spawnOverride,
   } = parseMonitorShellWrapper(command);
   const leadingEnvTokens =
     wrapperTokens?.filter((token) => isEnvAssignmentToken(token)) ?? [];
@@ -1875,17 +1946,19 @@ export function normalizeMonitorCommand(
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
     normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
-  const spawnCommand = wrapperTokens
-    ? [
-        wrapperTokens.join(' '),
-        innerQuote
-          ? `${innerQuote}${analysisCommand}${innerQuote}`
-          : analysisCommand,
-        normalizedInnerArgsSuffix,
-      ]
-        .filter(Boolean)
-        .join(' ')
-    : analysisCommand;
+  const spawnCommand =
+    spawnOverride ??
+    (wrapperTokens
+      ? [
+          wrapperTokens.join(' '),
+          innerQuote
+            ? `${innerQuote}${analysisCommand}${innerQuote}`
+            : analysisCommand,
+          normalizedInnerArgsSuffix,
+        ]
+          .filter(Boolean)
+          .join(' ')
+      : analysisCommand);
 
   return {
     analysisCommand,
