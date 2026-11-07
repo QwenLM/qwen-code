@@ -143,6 +143,9 @@ output files are deleted.
   overrides) with owner-only permissions, since they hold full copies of your
   sources and outputs. Plan files under the project's `.qwen/batch/` get a
   `.gitignore`.
+- `list` and `clean` load the same `.env` and `settings.env` configuration as
+  the other Batch commands, including `QWEN_BATCH_HOME`. They remain local-only
+  and do not require a model or API credentials.
 - A task is tied to the endpoint and API key it was submitted with (only a
   short hash of the key is stored); after switching accounts or regions,
   commands refuse until you switch back.
