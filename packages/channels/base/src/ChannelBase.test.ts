@@ -16751,6 +16751,11 @@ describe('ChannelBase', () => {
         expect(stderr).toHaveBeenCalledWith(
           expect.stringContaining('turn notice delivery failed'),
         );
+        // The notice was sliced out of the answer, so the log must still carry
+        // what the user never received.
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining('dropped notice: Overflow notice'),
+        );
       } finally {
         stderr.mockRestore();
       }

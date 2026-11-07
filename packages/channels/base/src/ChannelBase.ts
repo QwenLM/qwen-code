@@ -7685,8 +7685,10 @@ export abstract class ChannelBase {
               // The answer is already delivered, so the turn's outcome is fixed
               // (see the deliveryStarted invariant below): log the failed
               // notice instead of letting it rewrite completed into failed.
+              // The notice was sliced out of the answer above, so this line is
+              // the only remaining record of what the user never received.
               process.stderr.write(
-                `[${this.name}] turn notice delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)}\n`,
+                `[${this.name}] turn notice delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)} (dropped notice: ${sanitizeLogText(turnNotice, 200)})\n`,
               );
             }
           }
