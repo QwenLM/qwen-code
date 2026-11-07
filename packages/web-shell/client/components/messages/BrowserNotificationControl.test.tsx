@@ -24,6 +24,8 @@ const settings = {
 };
 let root: Root;
 let container: HTMLDivElement;
+let installedTouchPoints: PropertyDescriptor | undefined;
+let touchPointsInstalled = false;
 const selector = '[aria-label="Task notifications"]';
 const popup = '[data-web-shell-notification-help]';
 function render(node: ReactNode = <BrowserNotificationControl />) {
@@ -80,6 +82,22 @@ afterEach(() => {
   container.remove();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  // The platform helper installs an own `maxTouchPoints` accessor on the jsdom
+  // navigator, where the property does not exist at all, so there is no
+  // descriptor to restore: delete it or it leaks into the next test.
+  if (touchPointsInstalled) {
+    if (installedTouchPoints === undefined) {
+      Reflect.deleteProperty(window.navigator, 'maxTouchPoints');
+    } else {
+      Object.defineProperty(
+        window.navigator,
+        'maxTouchPoints',
+        installedTouchPoints,
+      );
+    }
+    installedTouchPoints = undefined;
+    touchPointsInstalled = false;
+  }
 });
 
 it('describes a help popup rather than a settings toggle', () => {
@@ -225,6 +243,98 @@ it('preserves global shortcuts from the trigger with help open and closed', () =
   } finally {
     window.removeEventListener('keydown', listener);
   }
+});
+
+function operatingSystemGuides(
+  platform: string,
+  maxTouchPoints = 0,
+): Array<{ heading: string; body: string }> {
+  vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue(platform);
+  // jsdom's navigator has no maxTouchPoints, so it cannot be spied on. Capture
+  // the descriptor once, before the first install, to know whether it existed.
+  if (!touchPointsInstalled) {
+    installedTouchPoints = Object.getOwnPropertyDescriptor(
+      window.navigator,
+      'maxTouchPoints',
+    );
+    touchPointsInstalled = true;
+  }
+  Object.defineProperty(window.navigator, 'maxTouchPoints', {
+    configurable: true,
+    get: () => maxTouchPoints,
+  });
+  render();
+  hover();
+  // The summary is a literal string, so pairing each heading with its body is
+  // what keeps the two guides from being swapped without a failing test.
+  return Array.from(
+    document.querySelector(popup)!.querySelectorAll('details'),
+  ).map((details) => ({
+    heading: details.querySelector('summary')!.textContent!.trim(),
+    body: details.querySelector('p')!.textContent!.trim(),
+  }));
+}
+
+it.each([
+  ['Win32', 0, ['Windows']],
+  ['MacIntel', 0, ['macOS']],
+  ['iPhone', 5, []],
+  // An Apple device name says mobile even when the touch count does not: a
+  // device reporting `iPhone` with no touch points was still a phone, and the
+  // name fallback is what keeps the guides off it. Each name needs its own
+  // row; one row only pins the name it spells.
+  ['iPhone', 0, []],
+  ['iPad', 0, []],
+  ['iPod', 0, []],
+  // An iPad in desktop mode reports `MacIntel` but has a touch screen, and
+  // the macOS steps do not apply to it.
+  ['MacIntel', 5, []],
+  // A single reported touch point is still a touch device. The platforms that
+  // report touch at all are mobile ones; a desktop reports none.
+  ['Linux armv8l', 1, []],
+  ['MacIntel', 1, []],
+  // Android reports a Linux platform with touch points; the desktop guides
+  // name settings screens a phone does not have.
+  ['Linux armv8l', 5, []],
+  ['Linux x86_64', 0, ['macOS', 'Windows']],
+  ['', 0, ['macOS', 'Windows']],
+])(
+  'lists only the guides for %s (touch points %i)',
+  (platform, touch, guides) => {
+    expect(
+      operatingSystemGuides(platform, touch).map((g) => g.heading),
+    ).toEqual(guides);
+  },
+);
+
+it.each(['iPhone', 'Linux armv8l'])(
+  'does not point at steps it does not render on %s',
+  (platform) => {
+    operatingSystemGuides(platform, 5);
+    expect(document.querySelector(popup)!.textContent).not.toMatch(
+      /follow the steps below/i,
+    );
+  },
+);
+
+it('does not point at steps it does not render when only the name says mobile', () => {
+  operatingSystemGuides('iPhone', 0);
+  expect(document.querySelector(popup)!.textContent).not.toMatch(
+    /follow the steps below/i,
+  );
+});
+
+it("pairs each guide heading with that system's steps", () => {
+  const guides = operatingSystemGuides('Linux x86_64');
+  const byHeading = Object.fromEntries(
+    guides.map((guide) => [guide.heading, guide.body]),
+  );
+  expect(byHeading['macOS']).toBeTruthy();
+  expect(byHeading['Windows']).toBeTruthy();
+  expect(byHeading['macOS']).not.toBe(byHeading['Windows']);
+  // The Windows steps name the Windows-only control; if the bodies were
+  // swapped, the macOS entry would carry this text instead.
+  expect(byHeading['Windows']).toMatch(/Windows/);
 });
 
 it('keeps unrelated input focus when Escape closes hover-opened help', () => {

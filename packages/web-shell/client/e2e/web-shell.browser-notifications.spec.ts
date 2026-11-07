@@ -14,6 +14,16 @@ interface CapturedNotification {
   close(): void;
 }
 
+/**
+ * The guide headings `BrowserNotificationControl` may render. The e2e suite
+ * runs on desktop Chromium only, so `navigator.platform` is unrecognized here
+ * and the component keeps both guides. Enumerating the headings that may
+ * appear keeps this spec from re-deriving the component's platform rule as a
+ * second copy that would drift silently; which guide applies to which
+ * platform is pinned by the component test.
+ */
+const KNOWN_GUIDES = ['macOS', 'Windows'];
+
 declare global {
   interface Window {
     __taskNotifications: CapturedNotification[];
@@ -348,9 +358,24 @@ for (const kind of ['approval', 'question'] as const) {
         }),
       )
       .toBe(true);
-    await expect(help).toContainText(/macOS/);
-    await expect(help).toContainText(/Windows/);
-    for (const system of ['macOS', 'Windows']) {
+    // Every rendered guide must be one this spec knows how to drive, and there
+    // is at least one: a platform the component cannot identify keeps both,
+    // which is what CI's Linux Chromium reports. Which single guide a named
+    // platform gets is pinned by the component table test, not here.
+    const rendered = await help.locator('details').count();
+    expect(rendered).toBeGreaterThan(0);
+    expect(rendered).toBeLessThanOrEqual(KNOWN_GUIDES.length);
+    const present = [];
+    for (const system of KNOWN_GUIDES) {
+      if (
+        (await help.locator('details').filter({ hasText: system }).count()) > 0
+      )
+        present.push(system);
+    }
+    // Every rendered guide is one this spec knows how to drive; an unrecognized
+    // heading would otherwise be counted and then silently skipped below.
+    expect(present).toHaveLength(rendered);
+    for (const system of present) {
       const guide = help.locator('details').filter({ hasText: system });
       const summary = guide.locator('summary');
       await expect(guide).not.toHaveAttribute('open');
