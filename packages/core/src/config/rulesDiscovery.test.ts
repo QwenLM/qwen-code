@@ -415,6 +415,33 @@ Also visible.
       expect(await reg.matchAndConsume('/project/src/B.tsx')).toBeUndefined();
     });
 
+    it('re-injects a rule once its reminder has been evicted', async () => {
+      const reg = projectReg(rule('/r/fe.md', ['src/**/*.tsx'], 'Use hooks.'));
+      expect(await reg.matchAndConsume('/project/src/A.tsx')).toBeDefined();
+      expect(await reg.matchAndConsume('/project/src/B.tsx')).toBeUndefined();
+
+      // Compaction / microcompaction evicted the tool result that carried the
+      // reminder: the marker must not outlive the text it stands for.
+      reg.resetInjected();
+
+      expect(await reg.matchAndConsume('/project/src/B.tsx')).toBeDefined();
+    });
+
+    it('resetInjected clears the consumed markers but keeps the rules', async () => {
+      const reg = projectReg(
+        rule('/r/fe.md', ['src/**/*.tsx'], 'Use hooks.'),
+        rule('/r/be.md', ['src/**/*.ts'], 'Strict.'),
+      );
+      await reg.matchAndConsume('/project/src/App.tsx');
+      await reg.matchAndConsume('/project/src/a.ts');
+      expect(reg.injectedCount).toBe(2);
+
+      reg.resetInjected();
+
+      expect(reg.injectedCount).toBe(0);
+      expect(reg.totalCount).toBe(2);
+    });
+
     it('matches multiple rules for one file', async () => {
       const reg = projectReg(
         rule('/r/ts.md', ['**/*.tsx'], 'Strict.'),
