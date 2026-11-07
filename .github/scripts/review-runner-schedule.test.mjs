@@ -15,17 +15,17 @@ import { planLabels } from './review-runner-schedule.mjs';
 
 const runner = (id, labels, extra = {}) => ({
   id,
-  name: `ecs-qwen-hk2-${id}`,
+  name: `ecs-qwen-hz2-${id}`,
   labels: labels.map((name) => ({ name })),
   status: 'online',
   ...extra,
 });
 
 describe('review runner schedule', () => {
-  it('switches online hk1 and hk2 runners, including busy runners', () => {
+  it('switches online hz1-hz6 runners, including busy runners', () => {
     const runners = Array.from({ length: 32 }, (_, i) =>
       runner(i + 1, ['ecs-qwen', 'ecs-autofix', 'diagnostic'], {
-        name: `ecs-qwen-hk${(i % 2) + 1}-${i + 1}`,
+        name: `ecs-qwen-hz${(i % 6) + 1}-${i + 1}`,
         busy: i % 2 === 0,
         status: i < 2 ? 'offline' : 'online',
       }),
@@ -52,23 +52,23 @@ describe('review runner schedule', () => {
       planLabels(
         [
           runner(1, ['ecs-review', 'diagnostic']),
-          runner(2, ['ecs-autofix'], { name: 'ecs-qwen-hk1-2' }),
-          runner(3, ['ecs-review'], { name: 'ecs-qwen-hk2-3-extra' }),
+          runner(2, ['ecs-autofix'], { name: 'ecs-qwen-hz1-2' }),
+          runner(3, ['ecs-review'], { name: 'ecs-qwen-hz2-3-extra' }),
           runner(4, ['ecs-review'], { status: 'offline' }),
-          runner(5, ['ecs-review'], { name: 'ecs-qwen-hk3-5' }),
+          runner(5, ['ecs-review'], { name: 'ecs-qwen-hk1-5' }),
         ],
         'ci',
       ),
       [
         {
           id: 1,
-          name: 'ecs-qwen-hk2-1',
+          name: 'ecs-qwen-hz2-1',
           add: ['ecs-qwen'],
           remove: ['ecs-review'],
         },
         {
           id: 2,
-          name: 'ecs-qwen-hk1-2',
+          name: 'ecs-qwen-hz1-2',
           add: ['ecs-qwen'],
           remove: [],
         },
@@ -88,71 +88,117 @@ describe('review runner schedule', () => {
     );
   });
 
-  it('keeps the named runners on review and returns the rest to CI in day mode', () => {
+  it('keeps the first N runners on review and returns the rest to CI in day mode', () => {
     assert.deepEqual(
       planLabels(
         [
-          runner(1, ['ecs-qwen', 'ecs-autofix'], { name: 'ecs-qwen-hk2-1' }),
-          runner(2, ['ecs-qwen'], { name: 'ecs-qwen-hk2-2' }),
-          runner(3, ['ecs-review'], { name: 'ecs-qwen-hk1-7' }),
-          runner(4, ['ecs-qwen'], { name: 'ecs-qwen-hk1-8' }),
-          runner(5, ['ecs-qwen'], { name: 'ecs-qwen-hk3-9' }),
+          runner(1, ['ecs-qwen', 'ecs-autofix'], { name: 'ecs-qwen-hz2-1' }),
+          runner(2, ['ecs-qwen'], { name: 'ecs-qwen-hz2-2' }),
+          runner(3, ['ecs-review'], { name: 'ecs-qwen-hz1-7' }),
+          runner(4, ['ecs-qwen'], { name: 'ecs-qwen-hz1-8' }),
+          runner(5, ['ecs-qwen'], { name: 'ecs-qwen-hk1-9' }),
         ],
         'day',
-        ['ecs-qwen-hk2-1'],
+        3,
       ),
       [
+        // Sorted by name (numeric), the day pool is hz1-7, hz1-8, hz2-1 —
+        // hz2-2 is the first runner past the cut and returns to CI. hk1-9
+        // is outside the fleet and untouched. hz2-2 already carries the CI
+        // label, and hz1-7 already carries review, so neither appears in
+        // the action list. Actions are emitted in the order runners were
+        // passed in, not the sorted pick order.
         {
           id: 1,
-          name: 'ecs-qwen-hk2-1',
+          name: 'ecs-qwen-hz2-1',
           add: ['ecs-review'],
           remove: ['ecs-qwen'],
         },
         {
-          id: 3,
-          name: 'ecs-qwen-hk1-7',
-          add: ['ecs-qwen'],
-          remove: ['ecs-review'],
+          id: 4,
+          name: 'ecs-qwen-hz1-8',
+          add: ['ecs-review'],
+          remove: ['ecs-qwen'],
         },
       ],
     );
   });
 
-  it('is idempotent for day mode and rejects a review-day name the fleet lacks', () => {
+  it('sorts numerically so hz1-2 stays ahead of hz1-10', () => {
+    const runners = [
+      runner(10, ['ecs-qwen'], { name: 'ecs-qwen-hz1-10' }),
+      runner(2, ['ecs-qwen'], { name: 'ecs-qwen-hz1-2' }),
+      runner(1, ['ecs-qwen'], { name: 'ecs-qwen-hz1-1' }),
+    ];
+    const actions = planLabels(runners, 'day', 2);
+    // Numeric sort puts hz1-1, hz1-2 in the keep set; hz1-10 falls outside
+    // and would go to CI — but it already has the CI label, so no action.
+    assert.deepEqual(actions, [
+      {
+        id: 2,
+        name: 'ecs-qwen-hz1-2',
+        add: ['ecs-review'],
+        remove: ['ecs-qwen'],
+      },
+      {
+        id: 1,
+        name: 'ecs-qwen-hz1-1',
+        add: ['ecs-review'],
+        remove: ['ecs-qwen'],
+      },
+    ]);
+  });
+
+  it('is idempotent for day mode and rejects a count above the online fleet', () => {
     assert.deepEqual(
       planLabels(
-        [runner(1, ['ecs-review'], { name: 'ecs-qwen-hk2-1' })],
+        [runner(1, ['ecs-review'], { name: 'ecs-qwen-hz2-1' })],
         'day',
-        ['ecs-qwen-hk2-1'],
+        1,
       ),
       [],
     );
-    // A typo would otherwise shrink the daytime pool on every morning tick
-    // while the run stays green.
+    // A stale var would otherwise silently shrink the daytime pool on every
+    // morning tick while the run stays green.
     assert.throws(
-      () => planLabels([runner(1, ['ecs-qwen'])], 'day', ['ecs-qwen-hk9-1']),
-      /match no registered hk1\/hk2 runner/,
+      () => planLabels([runner(1, ['ecs-qwen'])], 'day', 5),
+      /exceeds online fleet of 1/,
     );
     assert.throws(
-      () => planLabels([], 'day', []),
-      /needs at least one review-day runner name/,
+      () => planLabels([runner(1, ['ecs-qwen'])], 'day', 0),
+      /needs a positive integer review-day runner count/,
+    );
+    assert.throws(
+      () => planLabels([runner(1, ['ecs-qwen'])], 'day', Number.NaN),
+      /needs a positive integer review-day runner count/,
     );
   });
 
-  it('leaves an offline review-day runner untouched', () => {
+  it('skips offline runners when picking the day pool', () => {
     assert.deepEqual(
       planLabels(
         [
           runner(1, ['ecs-review'], {
-            name: 'ecs-qwen-hk2-1',
+            name: 'ecs-qwen-hz1-1',
             status: 'offline',
           }),
-          runner(2, ['ecs-qwen'], { name: 'ecs-qwen-hk2-2' }),
+          runner(2, ['ecs-qwen'], { name: 'ecs-qwen-hz1-2' }),
+          runner(3, ['ecs-qwen'], { name: 'ecs-qwen-hz1-3' }),
         ],
         'day',
-        ['ecs-qwen-hk2-1'],
+        1,
       ),
-      [],
+      [
+        // hz1-1 is offline so the pick falls through to hz1-2 (the first
+        // online runner). hz1-3 was not picked and was not on review, so no
+        // label change is needed.
+        {
+          id: 2,
+          name: 'ecs-qwen-hz1-2',
+          add: ['ecs-review'],
+          remove: ['ecs-qwen'],
+        },
+      ],
     );
   });
 
@@ -177,15 +223,16 @@ describe('review runner schedule', () => {
     );
     assert.ok(schedule.includes('"$GITHUB_REPOSITORY" "$POOL"'));
     assert.ok(schedule.includes('secrets.RUNNER_ADMIN_PAT'));
-    // The daytime pool. Four names stay on review after the 05:00 switch; an
-    // unset override falls back to them, and a name the fleet does not have
-    // fails the tick instead of shrinking the pool silently.
+    // The daytime pool. A configured count of runners stay on review after
+    // the 05:00 switch; an unset override falls back to 40, and a count that
+    // exceeds the online fleet fails the tick instead of shrinking the pool
+    // silently.
     assert.ok(schedule.includes("- 'day'"));
     assert.match(
       schedule,
-      /REVIEW_DAY_HOSTS: .*'ecs-qwen-hk2-1 ecs-qwen-hk2-2 ecs-qwen-hk2-3 ecs-qwen-hk2-4'/,
+      /REVIEW_DAY_RUNNER_COUNT: .*\$\{\{ vars\.QWEN_REVIEW_DAY_RUNNER_COUNT \|\| '40' \}\}/,
     );
-    assert.ok(schedule.includes('"${day_hosts[@]}"'));
+    assert.ok(schedule.includes('"$REVIEW_DAY_RUNNER_COUNT"'));
     // The in-repo half of the fence on the admin PAT. Losing it is silent:
     // a dispatch from any other branch still runs, now executing that
     // branch's copy of the planner with the token in its environment. The
@@ -272,7 +319,7 @@ it(
 );
 
 it(
-  'fails loudly when no hk1 or hk2 runner exists instead of switching nothing',
+  'fails loudly when no hz runner exists instead of switching nothing',
   { skip: process.platform === 'win32' },
   () => {
     // Without the guard a renamed or empty fleet exits 0 after reporting
@@ -286,15 +333,16 @@ it(
       writeFakeGh(dir);
       for (const runners of [
         [],
-        [runner(1, ['ecs-qwen'], { name: 'ecs-qwen-hk3-1' })],
-        [runner(1, ['ecs-qwen'], { name: 'ecs-qwen-hk1-1-extra' })],
+        [runner(1, ['ecs-qwen'], { name: 'ecs-qwen-hk1-1' })],
+        [runner(1, ['ecs-qwen'], { name: 'ecs-qwen-hz7-1' })],
+        [runner(1, ['ecs-qwen'], { name: 'ecs-qwen-hz1-1-extra' })],
       ]) {
         writeFileSync(log, '');
         const result = spawnPlanner(dir, runners);
         assert.equal(result.status, 1, result.stderr);
         assert.match(
           result.stderr,
-          /::error::no ecs-qwen-hk1-<n> or ecs-qwen-hk2-<n> runner found/,
+          /::error::no ecs-qwen-hz\[1-6\]-<n> runner found/,
         );
         assert.equal(readFileSync(log, 'utf8'), '');
       }

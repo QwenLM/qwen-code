@@ -5,8 +5,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Switch all online hk1/hk2 runners between review and CI, twice a day.
-// `day` keeps a named handful on `ecs-review` so reviews start during the
+// Switch all online hz1-hz6 runners between review and CI, twice a day.
+// `day` keeps a configured count on `ecs-review` so reviews start during the
 // daytime too, and returns the rest of the fleet to CI.
 // Offline runners are skipped; their labels stay unchanged.
 // Running jobs finish normally; labels only control which job starts next.
@@ -20,35 +20,50 @@ const MANAGED_LABELS = ['ecs-review', 'ecs-qwen'];
 // One literal for both the switch filter and the fleet guard below: the
 // guard's whole job is to prove the filter will match something, so two
 // copies that can drift would reintroduce the silent no-op it prevents.
-const FLEET_NAME = /^ecs-qwen-hk[12]-\d+$/;
+const FLEET_NAME = /^ecs-qwen-hz[1-6]-\d+$/;
 
 const MODES = ['review', 'day', 'ci'];
 
-// `dayKeep` is the runner-name list that stays on `ecs-review` in `day` mode.
-// Every other managed runner then serves CI, so the daytime review capacity is
-// exactly those runners and never the whole fleet.
-export function planLabels(runners, mode, dayKeep = []) {
+// `dayCount` is how many runners stay on `ecs-review` in `day` mode. The
+// fleet is sorted by name and the first `dayCount` online runners keep the
+// label; every other managed runner then serves CI, so the daytime review
+// capacity is exactly that count and never the whole fleet. Numeric sort
+// (hz1-2 before hz1-10) keeps the pick deterministic across runs and across
+// changes in runner count.
+export function planLabels(runners, mode, dayCount = 0) {
   if (!MODES.includes(mode)) {
     throw new Error('mode must be review, day or ci');
   }
   if (mode === 'day') {
-    if (!dayKeep.length) {
-      throw new Error('mode day needs at least one review-day runner name');
+    if (!Number.isInteger(dayCount) || dayCount < 1) {
+      throw new Error('mode day needs a positive integer review-day runner count');
     }
-    // Typo defence: a name that matches no registered hk1/hk2 runner would
-    // silently shrink the daytime pool every morning. Offline runners stay
-    // allowed — they keep their labels and rejoin when they come back.
-    const registered = new Set(
-      runners.filter((r) => FLEET_NAME.test(r.name)).map((r) => r.name),
+    const online = runners.filter(
+      (r) => r.status === 'online' && FLEET_NAME.test(r.name),
     );
-    const unknown = dayKeep.filter((name) => !registered.has(name));
-    if (unknown.length) {
+    // Loud cap: a count larger than the online fleet would silently shrink
+    // the daytime pool every morning. Better to fail the schedule and let
+    // the operator lower the var than to drift to whatever happens to be
+    // online.
+    if (dayCount > online.length) {
       throw new Error(
-        `review-day runner names match no registered hk1/hk2 runner: ${unknown.join(', ')}`,
+        `review-day runner count ${dayCount} exceeds online fleet of ${online.length}`,
       );
     }
   }
-  const keep = new Set(mode === 'day' ? dayKeep : []);
+  const sorted = runners
+    .filter((r) => FLEET_NAME.test(r.name))
+    .sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { numeric: true }),
+    );
+  const keep = new Set(
+    mode === 'day'
+      ? sorted
+          .filter((r) => r.status === 'online')
+          .slice(0, dayCount)
+          .map((r) => r.name)
+      : [],
+  );
   return runners
     .filter((r) => r.status === 'online' && FLEET_NAME.test(r.name))
     .flatMap((r) => {
@@ -77,17 +92,18 @@ async function main() {
   const [repo, mode, ...rest] = process.argv.slice(2);
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? '')) {
     throw new Error(
-      'usage: review-runner-schedule.mjs <owner/repo> <review|day|ci> [review-day runner names]',
+      'usage: review-runner-schedule.mjs <owner/repo> <review|day|ci> [review-day runner count]',
     );
   }
-  const dayKeep = rest.join(' ').split(/\s+/).filter(Boolean);
-  // Validate the mode (and the day list shape) before spending an
+  const dayCount =
+    rest.length === 0 ? 0 : Number.parseInt(rest.join(' '), 10);
+  // Validate the mode (and the day count shape) before spending an
   // authenticated call on it.
   if (!MODES.includes(mode)) {
     throw new Error('mode must be review, day or ci');
   }
-  if (mode === 'day' && !dayKeep.length) {
-    throw new Error('mode day needs at least one review-day runner name');
+  if (mode === 'day' && (!Number.isInteger(dayCount) || dayCount < 1)) {
+    throw new Error('mode day needs a positive integer review-day runner count');
   }
   if (!process.env.RUNNER_ADMIN_TOKEN) {
     throw new Error(
@@ -104,9 +120,9 @@ async function main() {
   );
   const runners = pages.flatMap((page) => page.runners);
   if (!runners.some((r) => FLEET_NAME.test(r.name))) {
-    throw new Error('no ecs-qwen-hk1-<n> or ecs-qwen-hk2-<n> runner found');
+    throw new Error('no ecs-qwen-hz[1-6]-<n> runner found');
   }
-  const actions = planLabels(runners, mode, dayKeep);
+  const actions = planLabels(runners, mode, dayCount);
   const results = await Promise.all(
     actions.map(async ({ id, name, add, remove }) => {
       try {
@@ -144,8 +160,8 @@ async function main() {
     }),
   );
   const summary = [
-    `### hk1/hk2 runner pool: ${mode}`,
-    ...(mode === 'day' ? [`- keeping on review: ${dayKeep.join(', ')}`] : []),
+    `### hz runner pool: ${mode}`,
+    ...(mode === 'day' ? [`- keeping on review: first ${dayCount} runners`] : []),
     `- ${actions.length} runners to switch`,
     ...results.map((r) => r.message),
   ].join('\n');
