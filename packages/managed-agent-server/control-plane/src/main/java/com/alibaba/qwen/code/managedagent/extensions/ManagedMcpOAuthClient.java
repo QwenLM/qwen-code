@@ -240,23 +240,36 @@ public class ManagedMcpOAuthClient {
                 throw unavailable();
             }
             if (!provider.isAllowPrivateNetwork()
-                    && addresses.stream()
-                            .anyMatch(
-                                    address ->
-                                            address.isAnyLocalAddress()
-                                                    || address.isLoopbackAddress()
-                                                    || address.isLinkLocalAddress()
-                                                    || address.isSiteLocalAddress()
-                                                    || address.isMulticastAddress()
-                                                    || (address.getAddress().length == 16
-                                                            && (address.getAddress()[0] & 0xfe)
-                                                                    == 0xfc))) {
+                    && addresses.stream().anyMatch(address -> !isPublicAddress(address))) {
                 throw unavailable();
             }
             return uri;
         } catch (IOException | IllegalArgumentException failure) {
             throw unavailable();
         }
+    }
+
+    static boolean isPublicAddress(InetAddress address) {
+        // Keep these ranges aligned with Core's public network-policy.ts policy.
+        byte[] bytes = address.getAddress();
+        int first = Byte.toUnsignedInt(bytes[0]);
+        int second = Byte.toUnsignedInt(bytes[1]);
+        int third = Byte.toUnsignedInt(bytes[2]);
+        if (bytes.length == 4) {
+            return first != 0 && first != 10 && first != 127 && first < 224
+                    && !(first == 100 && (second & 0xc0) == 64)
+                    && !(first == 169 && second == 254)
+                    && !(first == 172 && (second & 0xf0) == 16)
+                    && !(first == 192 && (second == 0 && (third == 0 || third == 2)
+                            || second == 88 && third == 99 || second == 168))
+                    && !(first == 198 && ((second & 0xfe) == 18 || second == 51 && third == 100))
+                    && !(first == 203 && second == 0 && third == 113);
+        }
+        return bytes.length == 16 && (first & 0xe0) == 0x20
+                && !(first == 0x20 && second == 1 && ((third & 0xfe) == 0
+                        || third == 0x0d && Byte.toUnsignedInt(bytes[3]) == 0xb8))
+                && !(first == 0x20 && second == 2)
+                && !(first == 0x3f && second == 0xff && (third & 0xf0) == 0);
     }
 
     private static Map<String, String> clientForm(Provider provider) {

@@ -208,6 +208,8 @@ Session 快照从同一个 active bundle 投影生效 pins 和个人绑定。更
 
 Runtime 导入只扫描项目 `.qwen/skills` 和 `.agents/skills`，保留优先级并显示重复项。候选与快照请求属于 Session owner 作用域，携带观察到的 generation 和摘要。使用 Broker 文件边界；owner 过期/未 ready 时失败，不 provisioning、不回退。在服务端生成的非执行包元数据中记录源相对路径。快照变化返回 `source_changed`。
 
+Runtime Skill 的预期拒绝通过 Broker transport、Hosted 路由和 Java 服务保留有界的 worker 错误码。Java 侧无合法 4xx 错误码的传输失败转为 `503 runtime_skill_import_unavailable`，不泄露上游细节、不重放请求。控制面下载器只在输出流成功关闭后，才把临时文件和并发许可交给预览/发布调用方。下载失败时，包括关闭失败，尝试删除文件并确保归还许可；成功调用方在消费完成后只归还一次。
+
 候选名称最多 256 个字符，描述最多 4096 个字符且不含 NUL，与对端协议一致。无效清单显示为不兼容候选，不使整批发现响应失效。Hosted 准备服务在两种生命周期归属下都会执行清理。检测到 Harness boot 变化后，淘汰缓存客户端和过期附件，不重放发现变化的调用；Runtime Skill 访问仍需显式恢复原 Session，不自动附着到替换的 Runtime。
 
 OAuth recipe 在 URL 规范化后比较资源与传输 URL。能够证明发生在 MCP 请求发送前的 OAuth 拒绝直接结算并释放在途项。HTTP 请求发出后收到的授权拒绝继续按结果未知处理；该区别绝不能允许自动重放工具调用。
@@ -217,6 +219,8 @@ OAuth recipe 在 URL 规范化后比较资源与传输 URL。能够证明发生�
 OAuth 在共享 V1 schema 基线中增加加密的 `ma_mcp_credential` 和过期、单次使用的 `ma_mcp_oauth_attempt`。固定 callback 校验 state/issuer 并临时加密保存 code；经过认证的 complete 请求校验发起 actor/浏览器 nonce 后才交换 code。个人引用进入版本化 Session 配置，并有明确 Runtime 能力；旧 apply 客户端不能静默移除绑定。使用已提交的执行 actor 检查命令准入、排队命令分发、审批/恢复及 token 发放。历史/结果仍按 Workspace 阅读权限开放，并在授权时明确提示。缺少身份委托协议的 child/channel/automation/无人值守路径拒绝个人绑定。
 
 Runtime HTTP 请求为精确 Session/server/配置/凭据 generation/owner 获取当前 access token。刷新使用 lease 与 compare-and-set，不持有长 SQL 事务；轮换交换结果未知时重新授权。撤销阻止后续发放及迟到刷新提交。认证恢复不重放结果未知的 MCP 工具副作用。未证明跨 actor 进程/通道隔离的执行 profile 保持个人 OAuth 关闭。
+
+当 `allowPrivateNetwork` 为 false 时，OAuth provider URL 预检沿用 Core 的公网地址范围规则，包括共享/metadata 与特殊用途 IPv4 网段，以及非公网/过渡 IPv6 目标。映射的 IPv4 地址按 IPv4 策略处理，重定向继续禁用。这项预检不等于连接时固定 DNS 解析结果：部署网络约束和 DNS rebinding 验收仍是独立要求，本次增量不宣称已完成该验收。
 
 全部 schema 消费者包含新增 OAuth 存储及 Session 投影字段。仅文件 CSI retirement 要求个人执行 actor 为空、revision 为零。其他 Session 的 Workspace OAuth 记录保持不可变 context，不作为被退休 Session 的内容恢复。固定 OAuth callback 显式登记为无需身份请求头的浏览器入口，由 state 和经过认证的 complete 保护；它继续处于普通 API 使用的 tenant/signature 请求头谓词之外。
 

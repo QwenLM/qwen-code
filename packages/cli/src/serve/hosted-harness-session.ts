@@ -9573,7 +9573,16 @@ export function registerHostedHarnessSessionRoutes(
         },
         candidates: result['candidates'],
       });
-    })().catch(() => error(res, 409, 'hosted_skill_source_unavailable'));
+    })().catch((cause) =>
+      error(
+        res,
+        409,
+        cause instanceof HostedWorkspaceBrokerRejection &&
+          typeof cause.code === 'string'
+          ? cause.code
+          : 'hosted_skill_source_unavailable',
+      ),
+    );
   });
 
   app.post('/session/:id/extensions/skills/snapshot', (req, res) => {
@@ -9666,7 +9675,16 @@ export function registerHostedHarnessSessionRoutes(
           owner,
           ...result,
         });
-      })().catch(() => error(res, 409, 'hosted_skill_snapshot_unavailable'));
+      })().catch((cause) =>
+        error(
+          res,
+          409,
+          cause instanceof HostedWorkspaceBrokerRejection &&
+            typeof cause.code === 'string'
+            ? cause.code
+            : 'hosted_skill_snapshot_unavailable',
+        ),
+      );
     },
   );
 

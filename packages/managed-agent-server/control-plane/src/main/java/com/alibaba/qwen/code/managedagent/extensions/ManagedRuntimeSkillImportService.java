@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedRuntimeSki
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionPolicyStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -20,6 +22,7 @@ import java.util.Base64;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 @Service
 public class ManagedRuntimeSkillImportService {
@@ -39,7 +42,7 @@ public class ManagedRuntimeSkillImportService {
 
     public JsonNode candidates(String tenant, String actor, String sessionId) {
         requireSession(tenant, actor, sessionId);
-        return verified(tenant, actor, sessionId, harness.runtimeSkillCandidates(tenant, sessionId), null);
+        return verified(tenant, actor, sessionId, runtimeCall(() -> harness.runtimeSkillCandidates(tenant, sessionId)), null);
     }
 
     public JsonNode snapshot(String tenant, String actor, String sessionId, ManagedRuntimeSkills.SnapshotRequest request) throws IOException {
@@ -57,8 +60,8 @@ public class ManagedRuntimeSkillImportService {
             throw invalid();
         }
         String operationId = UUID.randomUUID().toString();
-        JsonNode descriptor = verified(tenant, actor, sessionId, harness.runtimeSkillSnapshot(tenant, sessionId,
-                Map.of("operationId", operationId, "owner", ownerMap(request.owner()), "path", request.path(), "digest", request.digest())), request.owner());
+        JsonNode descriptor = verified(tenant, actor, sessionId, runtimeCall(() -> harness.runtimeSkillSnapshot(tenant, sessionId,
+                Map.of("operationId", operationId, "owner", ownerMap(request.owner()), "path", request.path(), "digest", request.digest()))), request.owner());
         if (!operationId.equals(descriptor.path("operationId").asText())) {
             throw changed();
         }
@@ -153,6 +156,22 @@ public class ManagedRuntimeSkillImportService {
             throw error;
         }
         boolean complete = false;
+        try {
+            download(tenant, actor, sessionId, request, file);
+            complete = true;
+            return file;
+        } finally {
+            if (!complete) {
+                try {
+                    Files.deleteIfExists(file);
+                } finally {
+                    downloads.release();
+                }
+            }
+        }
+    }
+
+    private void download(String tenant, String actor, String sessionId, ManagedRuntimeSkills.ImportRequest request, Path file) throws IOException {
         try (var output = Files.newOutputStream(file)) {
             var digest = DigestUtils.getSha256Digest();
             long offset = 0;
@@ -161,9 +180,10 @@ public class ManagedRuntimeSkillImportService {
                 if (System.nanoTime() > deadline || Thread.currentThread().isInterrupted()) {
                     throw new IOException("Runtime Skill download expired");
                 }
-                JsonNode chunk = verified(tenant, actor, sessionId, harness.runtimeSkillArchive(tenant, sessionId,
+                long chunkOffset = offset;
+                JsonNode chunk = verified(tenant, actor, sessionId, runtimeCall(() -> harness.runtimeSkillArchive(tenant, sessionId,
                         Map.of("operationId", request.operationId(), "preparationId", request.preparationId(),
-                                "owner", ownerMap(request.owner()), "offset", offset)), request.owner());
+                                "owner", ownerMap(request.owner()), "offset", chunkOffset))), request.owner());
                 if (!request.preparationId().equals(chunk.path("preparationId").asText())
                         || chunk.path("offset").asLong(-1) != offset || chunk.path("totalBytes").asLong(-1) != request.byteLength()
                         || !chunk.path("base64").isTextual() || chunk.path("base64").asText().length() > 349528) {
@@ -185,16 +205,21 @@ public class ManagedRuntimeSkillImportService {
             if (!request.sourceDigest().equals(org.apache.commons.codec.binary.Hex.encodeHexString(digest.digest()))) {
                 throw changed();
             }
-            complete = true;
-            return file;
-        } finally {
-            if (!complete) {
-                try {
-                    Files.deleteIfExists(file);
-                } finally {
-                    downloads.release();
-                }
+        }
+    }
+
+    private <T> T runtimeCall(Supplier<T> call) {
+        try {
+            return call.get();
+        } catch (HarnessHttpFailure error) {
+            int status = error.getStatusCode();
+            String code = error.getErrorCode();
+            if (status >= 400 && status < 500 && code != null && code.matches("[a-z][a-z0-9_]{0,127}")) {
+                throw new ManagedAgentException(status, code, "Runtime Skill import was refused.");
             }
+            throw unavailable();
+        } catch (HarnessFailure error) {
+            throw unavailable();
         }
     }
 
@@ -240,4 +265,5 @@ public class ManagedRuntimeSkillImportService {
 
     private static ManagedAgentException invalid() { return new ManagedAgentException(400, "invalid_request", "Invalid Runtime Skill import."); }
     private static ManagedAgentException changed() { return new ManagedAgentException(409, "source_changed", "The Runtime Skill source or owner changed."); }
+    private static ManagedAgentException unavailable() { return new ManagedAgentException(503, "runtime_skill_import_unavailable", "Runtime Skill import is unavailable."); }
 }

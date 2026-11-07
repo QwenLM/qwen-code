@@ -24854,6 +24854,59 @@ describe('Hosted Harness tool approvals', () => {
     },
   );
 
+  it.each([
+    ['candidates', 'skill_source_busy', 'hosted_skill_source_unavailable'],
+    ['snapshot', 'source_changed', 'hosted_skill_source_unavailable'],
+    [
+      'archive',
+      'skill_snapshot_unavailable',
+      'hosted_skill_snapshot_unavailable',
+    ],
+  ])(
+    'preserves Runtime Skill refusals on the %s route without replay',
+    async (route, code, fallback) => {
+      const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'skillControl');
+      const warm = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'warm')
+        .mockResolvedValue();
+      const { server, authorize } = await mcpApp();
+      const warmCalls = warm.mock.calls.length;
+      const operationId = randomUUID();
+      const send = () => {
+        const base = `/session/${SESSION_ID}/extensions/skills`;
+        const request =
+          route === 'snapshot'
+            ? supertest(server)
+                .post(`${base}/snapshot`)
+                .send({
+                  operationId,
+                  owner: { bindingId: 'binding', generation: '1' },
+                  path: '.qwen/skills/check',
+                  digest: 'a'.repeat(64),
+                })
+            : supertest(server).get(
+                route === 'candidates'
+                  ? `${base}/candidates`
+                  : `${base}/archives/${randomUUID()}?operationId=${operationId}&bindingId=binding&generation=1&offset=0`,
+              );
+        return authorize(request);
+      };
+      control.mockRejectedValueOnce(
+        new HostedWorkspaceBrokerRejection(409, code),
+      );
+      expect((await send().expect(409)).body).toMatchObject({ code });
+      expect(control).toHaveBeenCalledOnce();
+      control.mockRejectedValueOnce(new Error('private transport detail'));
+      expect((await send().expect(409)).body).toMatchObject({ code: fallback });
+      expect(control).toHaveBeenCalledTimes(2);
+      expect(warm).toHaveBeenCalledTimes(warmCalls);
+      expect(state.model).not.toHaveBeenCalled();
+      await authorize(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      ).expect(204);
+    },
+  );
+
   it('loads a failed initial extension selection for management while keeping the first Prompt blocked', async () => {
     vi.spyOn(
       HostedWorkspaceBroker.prototype,
