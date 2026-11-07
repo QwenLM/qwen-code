@@ -356,6 +356,11 @@ function bumpPastPublishedLatest(baseVersion, label, target, refBase) {
     return baseVersion;
   }
   const bumped = semver.inc(latestStable, 'patch');
+  if (refBase && semver.lt(bumped, refBase)) {
+    throw new Error(
+      `Bumping to ${bumped} would publish the checked-out ${refBase} content on an older release line. Refusing a cross-line stable release.`,
+    );
+  }
   console.error(
     `${label} ${baseVersion} is at or below published latest ${latestStable}; bumping ${target} ${bumped}.`,
   );
@@ -383,6 +388,12 @@ function getStableVersion(args) {
     const packageJson = readJson('package.json');
     releaseVersion = packageJson.version.split('-')[0];
     validateVersion(releaseVersion, 'X.Y.Z', 'package.json version');
+    releaseVersion = bumpPastPublishedLatest(
+      releaseVersion,
+      'Package version',
+      'the stable base to at least',
+      releaseVersion,
+    );
   }
 
   return {
