@@ -18,7 +18,11 @@
   显式指定 `sourceId` 时，会在所选目录内进一步按标识符精确过滤。
 - Sidebar 将定时任务运行会话（`sourceType: 'default'` 且 `sourceId` 以
   `scheduled_task_run:` 开头）放入专用分组。绑定的控制会话使用
-  `sourceType: 'scheduled_task'`，不属于默认目录。
+  `sourceType: 'scheduled_task'`，不属于默认目录。Sidebar 的 Session source
+  切换中的 opt-in `scheduled_task` 选项按精确来源过滤列出这些绑定的控制会话；
+  默认的 `Tasks` 选项在具备 session source metadata 的 daemon 上保持不变。
+  在没有该 metadata 的 daemon 上，绑定的控制会话仍列在默认 `Tasks` 选项中，
+  但现在归入所属任务的分组，而不是独立成行。
 - 在支持组织结构的会话视图中提供来源过滤，避免过滤使分组、置顶或归档会话行为失效。
 - 将组织视图的分页游标绑定到生成该游标时使用的来源过滤器。
 

@@ -529,7 +529,7 @@ async function openArchiveSettings(): Promise<void> {
 }
 
 async function switchSessionSource(
-  label: 'Tasks' | 'Channels',
+  label: 'Tasks' | 'Channels' | 'Scheduled tasks',
 ): Promise<HTMLButtonElement> {
   const tab = Array.from(
     container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
@@ -5074,6 +5074,55 @@ describe('WebShellSidebar session source switch', () => {
     expect(
       listWorkspaceSessions.mock.calls.every(
         ([options]) => options?.sourceType === 'default',
+      ),
+    ).toBe(true);
+  });
+
+  it('lists bound scheduled-task sessions under the Scheduled tasks tab', async () => {
+    const taskSession: DaemonSessionSummary = {
+      sessionId: 'task-session',
+      displayName: 'Task session',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+    };
+    const boundSession: DaemonSessionSummary = {
+      sessionId: 'bound-session',
+      displayName: 'Hourly review',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'scheduled_task',
+      sourceId: 'task-1',
+    };
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') return archived;
+        return options?.sourceType === 'scheduled_task'
+          ? { ...active, sessions: [boundSession] }
+          : { ...active, sessions: [taskSession] };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    // The default Tasks tab stays unchanged: the bound controller session
+    // stays outside the default catalog (#12576).
+    expect(container.textContent).toContain('Task session');
+    expect(container.textContent).not.toContain('Hourly review');
+
+    const scheduledTab = await switchSessionSource('Scheduled tasks');
+    expect(scheduledTab?.getAttribute('data-state')).toBe('active');
+    expect(container.textContent).toContain('Hourly review');
+    expect(container.textContent).not.toContain('Task session');
+    // The row carries the scheduled-task marker.
+    expect(
+      container.querySelector('[data-web-shell-scheduled-task-session]'),
+    ).not.toBeNull();
+    // The catalog query is scoped to the exact source.
+    expect(
+      useSessions.mock.calls.some(
+        ([options]) =>
+          options?.archiveState !== 'archived' &&
+          options?.sourceType === 'scheduled_task',
       ),
     ).toBe(true);
   });
