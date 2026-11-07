@@ -1054,13 +1054,20 @@ async function operatorConfigFiles(root) {
 
 const row = (name, status, detail, fix) => ({ name, status, detail, fix });
 
+// Row text is display text: each control byte shows as U+FFFD, without the
+// length bound printable() also applies, which a long path must not hit.
+function rowText(text) {
+  // eslint-disable-next-line no-control-regex -- matching control bytes is the point
+  return text.replace(/[\x00-\x1F\x7F-\x9F]/g, '\uFFFD');
+}
+
 function printRows(system, title, rows) {
   system.out(title);
   system.out(`${'STATUS'.padEnd(6)} ${'CHECK'.padEnd(14)} DETAIL`);
   for (const { name, status, detail, fix } of rows) {
-    system.out(`${status.padEnd(6)} ${name.padEnd(14)} ${detail}`);
+    system.out(`${status.padEnd(6)} ${name.padEnd(14)} ${rowText(detail)}`);
     if (fix) {
-      system.out(`${''.padEnd(6)} ${''.padEnd(14)} fix: ${fix}`);
+      system.out(`${''.padEnd(6)} ${''.padEnd(14)} fix: ${rowText(fix)}`);
     }
   }
   const count = (status) =>
@@ -2955,6 +2962,7 @@ async function phaseStart(system, deployment, options) {
           ? (reason ??
             'the server does not take as an http or https base URL, reading it untrimmed as java.net.URI does')
           : (reason ??
+            fetchRefusal(urls.harness) ??
             (PLAIN_HTTP_URL.test(urls.harness)
               ? undefined
               : 'is not a plain http or https URL, a host and port with a path, which is all start takes while the configuration does not resolve'));

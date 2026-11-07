@@ -2680,6 +2680,16 @@ test('start and verify use server.env when the configuration does not resolve', 
     assert.ok(!host.output.join('\n').includes('s3cret'), harnessUrl);
     assert.ok(!host.output.includes(`Starting ${HARNESS}`), harnessUrl);
   }
+  await writeFile(
+    env,
+    `${base}QWEN_MANAGED_AGENT_HARNESS_BASE_URL=http://127.0.0.1:6000\n`,
+  );
+  assert.equal(await host.upgrade('start'), 1);
+  assert.equal(
+    host.output.at(-1),
+    'start refused: The control plane reaches qwen-hosted-harness at "http://127.0.0.1:6000", which is on port 6000, so fetch refuses to dial it; correct qwen.managed-agent.harness.base-url.',
+  );
+  assert.ok(!host.output.includes(`Starting ${HARNESS}`));
   // The rest goes to the preflight, such as a plain URL with an @ in its
   // path, which java.net.URI reads as the path.
   host.preflightStatus = 1;
@@ -2695,6 +2705,8 @@ test('start and verify use server.env when the configuration does not resolve', 
     'http://1st.harness.internal:4172/',
     'http://4harness:4172',
     'http://harness.internal.:4170/',
+    'http://127.0.0.1:0',
+    'http://127.0.0.1:65535',
   ]) {
     await writeFile(
       env,
@@ -3445,6 +3457,40 @@ test('check judges the --server-url its plan repeats', async (t) => {
     encoding: 'utf8',
   });
   assert.equal(echoed.stdout, releases);
+});
+
+test('check layout rows neutralize control bytes without shortening paths', async (t) => {
+  const host = await rig(t);
+  // eslint-disable-next-line no-control-regex -- detecting surviving control bytes is the assertion
+  const control = /[\u0000-\u001F\u007F-\u009F]/;
+  const releases = `${host.root}/${'release-'.repeat(30)}\u001b[2K\u009b`;
+  assert.ok(releases.length > 200);
+  assert.equal(await host.check('--releases', releases), 0);
+  assert.ok(
+    !host.output.some((line) => control.test(line)),
+    JSON.stringify(host.output),
+  );
+  const shownReleases = releases.split(control).join('\uFFFD');
+  assert.equal(
+    rowsOf(host.output).layout,
+    `PASS install moves ${host.current} to ${path.join(shownReleases, '0.1.0')} and links it to ${path.join(shownReleases, '0.2.0')}`,
+  );
+});
+
+test('check runtime-state rows neutralize control bytes', async (t) => {
+  const host = await rig(t);
+  // eslint-disable-next-line no-control-regex -- detecting surviving control bytes is the assertion
+  const control = /[\u0000-\u001F\u007F-\u009F]/;
+  const runtimeState = `${host.root}/${'state-'.repeat(40)}\u001b[2K\u009b`;
+  assert.equal(await host.check('--runtime-state', runtimeState), 1);
+  assert.ok(
+    !host.output.some((line) => control.test(line)),
+    JSON.stringify(host.output),
+  );
+  assert.equal(
+    rowsOf(host.output)['runtime-state'],
+    `FAIL ${runtimeState.split(control).join('\uFFFD')} is not a directory`,
+  );
 });
 
 test('verify sanitizes a malicious health body over a real socket', async (t) => {
