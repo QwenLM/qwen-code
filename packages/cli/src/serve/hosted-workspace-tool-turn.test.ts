@@ -1886,7 +1886,6 @@ it('offers glob under the unified Shell, file-search and read profiles', async (
   ]);
 });
 
-
 it('refuses an external files Skill lane before warming the Broker', () => {
   broker.warm.mockClear();
   expect(
