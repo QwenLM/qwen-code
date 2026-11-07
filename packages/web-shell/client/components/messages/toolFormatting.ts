@@ -206,6 +206,107 @@ export function truncateText(text: string, max: number): string {
   return text.slice(0, max) + '...';
 }
 
+/** Longest payload stretch a transcript card renders before "Show more". */
+export const MAX_TOOL_PAYLOAD_LENGTH = 4000;
+
+/** Ceiling after "Show more", matching the trajectory inspector. */
+export const EXPANDED_TOOL_PAYLOAD_LENGTH = 40_000;
+
+export function stringifyValue(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  const text = typeof value === 'string' ? value : safeJson(value);
+  return text.trim();
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Re-indents a canonical JSON object or array for display. The input must be
+ * exactly its compact JSON form or its two-space form; anything else — plain
+ * text, a primitive, a truncated document, JSON Lines, a mixed JSON/text log
+ * or non-canonical JSON — is returned as recorded so the caller can fall back
+ * to plain text. Formatting therefore never rewrites literals, duplicate
+ * keys, key order or string escapes.
+ *
+ * These rules are scoped to the transcript tool card. The sibling
+ * ToolCallDetail used by the turn-calls / trajectory panes still fences via a
+ * bare JSON.parse, so identical bytes can render differently per surface;
+ * lifting one shared Arguments/Result renderer is tracked as a follow-up
+ * rather than widened into this change.
+ */
+export function formatJsonPayload(
+  text: string,
+  maxFormattedLength = EXPANDED_TOOL_PAYLOAD_LENGTH,
+  maxInputLength = EXPANDED_TOOL_PAYLOAD_LENGTH,
+): {
+  text: string;
+  json: boolean;
+} {
+  // Pretty-printing can expand a compact payload well past the render cap, and
+  // parsing a multi-megabyte string is not worth it for output the card will
+  // never show in full.
+  if (text.length > maxInputLength) {
+    return { text, json: false };
+  }
+  const trimmed = text.trim();
+  if (!trimmed) return { text, json: false };
+
+  const document = formatJsonDocument(trimmed, maxFormattedLength);
+  if (document !== undefined) return { text: document, json: true };
+
+  return { text, json: false };
+}
+
+const MAX_JSON_FORMAT_DEPTH = 32;
+
+function formatJsonDocument(
+  text: string,
+  maxFormattedLength: number,
+): string | undefined {
+  if (!/^[[{]/.test(text)) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (value === null || typeof value !== 'object') return undefined;
+  if (exceedsJsonDepth(value, MAX_JSON_FORMAT_DEPTH)) return undefined;
+
+  // Compare against both canonical forms; only an exact match is safe to
+  // reformat, because anything else would rewrite recorded literals or keys.
+  const pretty = JSON.stringify(value, null, 2);
+  if (text === pretty) return text;
+
+  const compact = JSON.stringify(value);
+  if (text !== compact || pretty.length > maxFormattedLength) return undefined;
+  return pretty;
+}
+
+function exceedsJsonDepth(root: unknown, maxDepth: number): boolean {
+  const stack: Array<[unknown, number]> = [[root, 1]];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) break;
+    const [value, depth] = current;
+    if (depth > maxDepth) return true;
+    if (Array.isArray(value)) {
+      for (const entry of value) stack.push([entry, depth + 1]);
+    } else if (value !== null && typeof value === 'object') {
+      for (const entry of Object.values(value)) {
+        stack.push([entry, depth + 1]);
+      }
+    }
+  }
+  return false;
+}
+
 // The tool-header description is shown single-line (CSS-ellipsised) when the
 // row is collapsed and fully wrapped when it is expanded, so we keep the whole
 // string rather than hard-capping it at a line's worth of characters. A
