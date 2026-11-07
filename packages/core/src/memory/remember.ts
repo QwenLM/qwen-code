@@ -12,6 +12,7 @@ import {
   runForkedAgent,
   type ForkedAgentResult,
 } from '../agents/forkedAgent.js';
+import { describeTerminateReason } from '../agents/runtime/terminate-mode-message.js';
 import { getAutoMemoryRoot, getUserAutoMemoryRoot } from './paths.js';
 import { buildManagedAutoMemoryPrompt } from './prompt.js';
 import {
@@ -372,10 +373,12 @@ export async function runManagedRememberByAgent(params: {
       debugLogger.error('Memory index rebuild failed:', err);
     });
     throw new Error(
-      result.terminateReason ||
-        (result.status === 'failed'
+      describeTerminateReason(
+        result.terminateReason,
+        result.status === 'failed'
           ? 'Remember agent failed'
-          : 'Remember agent cancelled'),
+          : 'Remember agent cancelled',
+      ),
     );
   }
   if (entryFilesWritten.length === 0) {

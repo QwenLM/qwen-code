@@ -7,6 +7,7 @@
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
+import { describeTerminateReason } from '../agents/runtime/terminate-mode-message.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import type { Content } from '@google/genai';
 import {
@@ -455,8 +456,10 @@ export async function runAutoMemoryExtractionByAgent(
 
   if (result.status !== 'completed') {
     throw new Error(
-      result.terminateReason ||
+      describeTerminateReason(
+        result.terminateReason,
         'Extraction agent did not complete successfully',
+      ),
     );
   }
 
