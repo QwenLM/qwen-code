@@ -1333,8 +1333,7 @@ export class ChatRecordingService {
   private currentSessionWorkflowMode: boolean | undefined;
   /** Last-wins daemon session approval state, used to skip duplicate writes. */
   private currentSessionApprovalMode:
-    | SessionApprovalModeRecordPayload
-    | undefined;
+    SessionApprovalModeRecordPayload | undefined;
   private readonly userDisplayTextsForTitle: Array<string | null | undefined> =
     [];
   /**
