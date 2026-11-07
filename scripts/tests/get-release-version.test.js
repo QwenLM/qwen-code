@@ -751,6 +751,7 @@ describe('assertVersionUnreleased', () => {
       '@qwen-code/channel-dws',
       '@qwen-code/channel-feishu',
       '@qwen-code/channel-github',
+      '@qwen-code/channel-msteams',
       '@qwen-code/channel-qqbot',
       '@qwen-code/channel-telegram',
       '@qwen-code/channel-wecom',

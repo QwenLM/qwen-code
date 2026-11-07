@@ -1,0 +1,10 @@
+{
+  "name": "qwen-channel-msteams",
+  "version": "0.26.2",
+  "channels": {
+    "msteams": {
+      "entry": "dist/index.js",
+      "displayName": "Microsoft Teams"
+    }
+  }
+}
