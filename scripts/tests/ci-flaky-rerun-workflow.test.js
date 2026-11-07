@@ -212,11 +212,17 @@ describe('ci failure patrol workflow', () => {
     // Observed 2026-11-06 on ubuntu-latest: one round waited 2h09m for a
     // runner, and 17 of 20 recent ticks were cancelled with zero jobs — they
     // never received one. The ECS pool had 199 idle hosts at the same time.
+    // Substring pins left an inverted kill switch green: `== 'true'` still
+    // contains every term asserted here. Pin the whole expression against the
+    // repository's canonical pool routing, which
+    // `.github/scripts/ci-runner-routing.test.mjs` evaluates for the switch on,
+    // the switch off and a foreign repository — so the semantics are pinned
+    // where the evaluator lives rather than duplicated as a second one here.
+    const reference = parse(
+      readFileSync('.github/workflows/repo-hygiene.yml', 'utf8'),
+    ).jobs.dedup['runs-on'];
     for (const job of [yml.jobs.classify, yml.jobs.act]) {
-      const runsOn = job['runs-on'];
-      expect(runsOn).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
-      expect(runsOn).toContain('"ecs-qwen"');
-      expect(runsOn).toContain('"ubuntu-latest"');
+      expect(job['runs-on']).toBe(reference);
     }
   });
 
@@ -230,7 +236,7 @@ describe('ci failure patrol workflow', () => {
       expect(JSON.stringify(guard)).not.toContain('secrets.');
     }
     // classify additionally preflights docker: without a daemon the sandboxed
-    // classifier would otherwise burn its whole 5-minute budget before failing.
+    // classifier would otherwise burn its whole 10-minute budget before failing.
     expect(yml.jobs.classify.steps[0].run).toContain(
       '"${timeout}" 10 "${docker}" info',
     );
@@ -413,7 +419,7 @@ describe('ci failure patrol workflow', () => {
     // An unpinned probe answers for the pool-shared currentContext, which is
     // not the context the classifier is pinned to: it can reject a host whose
     // default daemon is healthy, or pass on one whose default daemon is dead
-    // and let the classifier burn its five-minute budget. The binary has the
+    // and let the classifier burn its ten-minute budget. The binary has the
     // same shape — a PATH docker that is not the resolver's absolute path
     // makes the preflight green while the resolve step fails immediately.
     const classify = yml.jobs.classify;
@@ -563,6 +569,19 @@ describe('ci failure patrol workflow', () => {
     expect(resolve.run).toContain('SECONDS');
     expect(resolve.run).toContain('|| status=$?');
     expect(resolve.run).toContain('exit "${status}"');
+    // The resolver's two-pull worst case outlasts the step cap, and a runner
+    // kill takes the notice with it. Bound it inside the step instead, through
+    // the guard's verified timeout, with room left under the cap to report.
+    expect(resolve.env.TIMEOUT_BIN).toBe('${{ steps.guard.outputs.timeout }}');
+    const inner = resolve.run.match(/"\$\{TIMEOUT_BIN:\?\}" (\d+) /);
+    expect(inner).not.toBeNull();
+    expect(Number(inner[1])).toBeLessThan(resolve['timeout-minutes'] * 60);
+    expect(
+      resolve['timeout-minutes'] * 60 - Number(inner[1]),
+    ).toBeGreaterThanOrEqual(30);
+    expect(resolve.run.indexOf('"${TIMEOUT_BIN:?}"')).toBeLessThan(
+      resolve.run.indexOf('::notice::Sandbox image resolve took'),
+    );
 
     // Bind the digest-pinned step output, not the appendable $GITHUB_ENV copy,
     // and pin the daemon endpoint the sandbox will spawn against.
@@ -614,11 +633,23 @@ describe('ci failure patrol workflow', () => {
     const resolve = yml.jobs.classify.steps.find(
       (step) => step.name === 'Resolve sandbox image',
     );
-    const runResolve = (exitCode) => {
+    const runResolve = (exitCode, { timeoutKills = false } = {}) => {
       const dir = mkdtempSync(join(tmpdir(), 'patrol-resolve-'));
       const stub = join(dir, 'node');
       writeFileSync(stub, `#!/bin/sh\nexit ${exitCode}\n`);
       chmodSync(stub, 0o755);
+      // The step bounds the resolver with the guard's verified timeout. A
+      // pass-through stub exercises the wiring; the killing stub reproduces
+      // the two-pull worst case, where the runner used to kill the step and
+      // the notice was lost with it.
+      const timeoutStub = join(dir, 'timeout');
+      writeFileSync(
+        timeoutStub,
+        timeoutKills
+          ? '#!/bin/sh\nexit 124\n'
+          : '#!/bin/sh\nshift\nexec "$@"\n',
+      );
+      chmodSync(timeoutStub, 0o755);
       let status = 0;
       let stdout = '';
       try {
@@ -627,6 +658,7 @@ describe('ci failure patrol workflow', () => {
             ...process.env,
             PATH: `${dir}:${process.env.PATH}`,
             NODE_BIN: stub,
+            TIMEOUT_BIN: timeoutStub,
           },
           encoding: 'utf8',
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -650,6 +682,14 @@ describe('ci failure patrol workflow', () => {
     expect(failed.status).toBe(7);
     expect(failed.stdout).toContain('::notice::Sandbox image resolve took');
     expect(failed.stdout).toContain('(exit 7)');
+
+    // The case the inner bound exists for: the resolver outlives its budget.
+    // The shell must still report the elapsed time and fail the round, rather
+    // than letting the runner kill the step and lose the measurement.
+    const killed = runResolve(0, { timeoutKills: true });
+    expect(killed.status).toBe(124);
+    expect(killed.stdout).toContain('::notice::Sandbox image resolve took');
+    expect(killed.stdout).toContain('(exit 124)');
   });
 
   it('reuses the pool CLI rather than a hard-coded version the pool does not keep warm', () => {

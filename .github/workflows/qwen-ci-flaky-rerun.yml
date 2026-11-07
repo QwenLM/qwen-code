@@ -377,25 +377,35 @@ jobs:
         # Below the job cap, like the classifier. The resolver's own pull timer
         # is 10 minutes and it can fall back to a second pull, so without a step
         # cap a cold host could consume the whole job and leave nothing for the
-        # model. 12 covers one full pull plus the digest inspect.
+        # model. 12 covers one full pull plus the digest inspect; the inner
+        # bound below is what keeps the two-pull worst case from being killed
+        # by the runner instead of by this shell.
         timeout-minutes: 12
         env:
           NODE_BIN: '${{ steps.guard.outputs.node }}'
+          TIMEOUT_BIN: '${{ steps.guard.outputs.timeout }}'
           # Absolute path so a planted '${RUNNER_TEMP}/qwen-bin' or $GITHUB_PATH
           # entry cannot shadow the binary the resolver spawns. The guard
           # verified this exact path is not writable by the job uid.
           SANDBOX_COMMAND: '/usr/bin/docker'
         run: |-
-          # Pull the sandbox image HERE, outside the classifier's 5-minute
+          # Pull the sandbox image HERE, outside the classifier's 10-minute
           # budget, and report how long it takes. Measured on the pool: the
           # first dispatch spent 601s in this step and never reached the model,
-          # against a 300s classifier budget — so under the previous shape no
-          # round could have produced a decision however fast the model was.
-          # Reported on failure too, because a slow pull is exactly the case
-          # worth measuring.
+          # against the 300s classifier budget of the time — so under that
+          # shape no round could have produced a decision however fast the
+          # model was. Reported on failure too, because a slow pull is exactly
+          # the case worth measuring.
+          # The resolver's worst case is TWO 10-minute pulls plus the tag
+          # fetch, which outlasts this step's cap. A runner kill would take the
+          # notice with it — losing the measurement in precisely the slow case
+          # it exists for — so bound the resolver inside the step instead:
+          # coreutils timeout signals the child's process group (the docker
+          # pull included) and returns 124 to this shell, which still reports.
+          # 660 leaves a minute of the 12 for the notice and the node startup.
           start="${SECONDS}"
           status=0
-          "${NODE_BIN:?}" .github/scripts/resolve-sandbox-image.mjs \
+          "${TIMEOUT_BIN:?}" 660 "${NODE_BIN:?}" .github/scripts/resolve-sandbox-image.mjs \
             "$("${NODE_BIN:?}" -p "require('./package.json').config.sandboxImageUri")" || status=$?
           echo "::notice::Sandbox image resolve took $((SECONDS - start))s (exit ${status})."
           exit "${status}"
