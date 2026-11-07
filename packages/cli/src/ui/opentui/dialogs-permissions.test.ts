@@ -23,12 +23,15 @@ vi.mock('@opentui/core', () => ({
 
 import {
   describePermissionRule,
+  formatScopeRow,
   getPermissionsTabs,
-  getPermissionScopeItems,
   permissionScopeLabel,
   validateWorkspaceDirectory,
 } from './dialogs-permissions.js';
+import { permissionScopeItems } from '../utils/permission-scope-row.js';
 import { SettingScope } from '../../config/settings.js';
+import { setLanguageAsync } from '../../i18n/index.js';
+import { getCachedStringWidth } from '../utils/textUtils.js';
 
 describe('getPermissionsTabs', () => {
   it('keeps the original four tabs, order, and copy', () => {
@@ -77,9 +80,26 @@ describe('permissionScopeLabel', () => {
   });
 });
 
-describe('getPermissionScopeItems', () => {
+describe('permissionScopeItems', () => {
+  const originalQwenHome = process.env['QWEN_HOME'];
+  // Anchored at the filesystem root so the fixture can never sit under the
+  // home directory, where tildeifyPath would rewrite it to `~/...`.
+  const qwenHome = nodePath.join(
+    nodePath.parse(os.tmpdir()).root,
+    'qwen-home-scope-items',
+  );
+
+  afterEach(() => {
+    if (originalQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = originalQwenHome;
+    }
+  });
+
   it('lists project first, then user, with the save locations', () => {
-    const items = getPermissionScopeItems();
+    delete process.env['QWEN_HOME'];
+    const items = permissionScopeItems(67);
     expect(items).toHaveLength(2);
     expect(items[0]).toEqual({
       label: 'Project settings',
@@ -89,10 +109,140 @@ describe('getPermissionScopeItems', () => {
     });
     expect(items[1]).toEqual({
       label: 'User settings',
-      description: 'Saved in at ~/.qwen/settings.json',
+      description: `Saved in ~${nodePath.sep}.qwen${nodePath.sep}settings.json`,
       value: SettingScope.User,
       key: 'user',
     });
+  });
+
+  it('names the resolved global directory when QWEN_HOME is set', () => {
+    process.env['QWEN_HOME'] = qwenHome;
+    expect(permissionScopeItems(67)[1]?.description).toBe(
+      `Saved in ${qwenHome}${nodePath.sep}settings.json`,
+    );
+  });
+
+  it('keeps the settings file name when the global directory is deep', () => {
+    process.env['QWEN_HOME'] = nodePath.join(
+      qwenHome,
+      'srv',
+      'qwen-runtime',
+      'shared',
+      'fixtures',
+    );
+    const description = permissionScopeItems(67)[1]?.description ?? '';
+    expect(description.endsWith(`${nodePath.sep}settings.json`)).toBe(true);
+    // 50 is the description column this row gets at an 80-column terminal.
+    expect(description.length).toBeLessThanOrEqual(50);
+  });
+});
+
+describe('permissionScopeItems row width', () => {
+  const originalQwenHome = process.env['QWEN_HOME'];
+  const deepQwenHome = nodePath.join(
+    nodePath.parse(os.tmpdir()).root,
+    'qwen-home-scope-intl',
+    'srv',
+    'qwen-runtime',
+    'shared',
+    'fixtures',
+  );
+  // label + 4-space gap + description, the row budget at an 80-column terminal.
+  const ROW_COLUMNS = 67;
+
+  // Five wide segments: 34 code units but 49 display columns. A budget that
+  // counts code units lets this path through unshortened, and the row's clip
+  // then eats the file name.
+  const wideQwenHome = nodePath.join(
+    nodePath.parse(os.tmpdir()).root,
+    'tmp',
+    '工作区'.repeat(5),
+  );
+
+  afterEach(async () => {
+    await setLanguageAsync('en');
+    if (originalQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = originalQwenHome;
+    }
+  });
+
+  it.each(['ca', 'de', 'fr', 'ja', 'pt', 'ru', 'zh', 'zh-TW'])(
+    'keeps the settings file name inside the row budget in %s',
+    async (language) => {
+      process.env['QWEN_HOME'] = deepQwenHome;
+      await setLanguageAsync(language);
+      const item = permissionScopeItems(ROW_COLUMNS)[1]!;
+
+      expect(item.description).toContain('settings.json');
+      expect(
+        getCachedStringWidth(item.label) +
+          4 +
+          getCachedStringWidth(item.description),
+      ).toBeLessThanOrEqual(ROW_COLUMNS);
+    },
+  );
+
+  it.each(['ca', 'de', 'en', 'fr', 'ja', 'pt', 'ru', 'zh', 'zh-TW'])(
+    'charges wide characters against the row budget in %s',
+    async (language) => {
+      process.env['QWEN_HOME'] = wideQwenHome;
+      await setLanguageAsync(language);
+      const item = permissionScopeItems(ROW_COLUMNS)[1]!;
+
+      expect(item.description).toContain('settings.json');
+      expect(
+        getCachedStringWidth(item.label) +
+          4 +
+          getCachedStringWidth(item.description),
+      ).toBeLessThanOrEqual(ROW_COLUMNS);
+    },
+  );
+
+  it('budgets from the row it is given, not from an 80-column terminal', () => {
+    process.env['QWEN_HOME'] = '/opt/qwen-runtimes/shared/tenant-42/config';
+    const row = formatScopeRow(permissionScopeItems(57)[1]!, 57);
+
+    expect(row).toContain('settings.json');
+    expect(getCachedStringWidth(row)).toBeLessThanOrEqual(57);
+  });
+
+  it.each([43, 34, 31])(
+    'keeps a %i-column row inside its budget',
+    (rowColumns) => {
+      process.env['QWEN_HOME'] = '/opt/qwen-runtimes/shared/tenant-42/config';
+      const row = formatScopeRow(
+        permissionScopeItems(rowColumns)[1]!,
+        rowColumns,
+      );
+
+      expect(getCachedStringWidth(row)).toBeLessThanOrEqual(rowColumns);
+    },
+  );
+});
+
+describe('formatScopeRow', () => {
+  it('keeps a row that fits untouched', () => {
+    expect(
+      formatScopeRow(
+        {
+          label: 'User settings',
+          description: 'Saved in ~/.qwen/settings.json',
+        },
+        67,
+      ),
+    ).toBe('User settings    Saved in ~/.qwen/settings.json');
+  });
+
+  it('clips an overlong row with an ellipsis, not a silent cut', () => {
+    const row = formatScopeRow(
+      { label: 'User settings', description: 'x'.repeat(120) },
+      40,
+    );
+
+    expect(getCachedStringWidth(row)).toBeLessThanOrEqual(40);
+    expect(row.endsWith('…')).toBe(true);
   });
 });
 
