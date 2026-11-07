@@ -273,7 +273,13 @@ function settleShellStatusFile(
     );
     return { settled: false };
   } finally {
-    if (fd !== undefined) fs.closeSync(fd);
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* best effort */
+      }
+    }
   }
   if (
     typeof payload !== 'object' ||
@@ -335,7 +341,17 @@ export function settleOrphanedShellStatusFiles(
   for (const name of names) {
     if (!name.endsWith('.status')) continue;
     const statusPath = path.join(dir, name);
-    const result = settleShellStatusFile(statusPath, isAlive);
+    let result: ReturnType<typeof settleShellStatusFile>;
+    try {
+      result = settleShellStatusFile(statusPath, isAlive);
+    } catch (error) {
+      debugLogger.warn(
+        `could not settle orphaned status sidecar ${statusPath}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      continue;
+    }
     if (result.settled) settled++;
     if (result.alivePid !== undefined) {
       alive.push({ statusPath, pid: result.alivePid });

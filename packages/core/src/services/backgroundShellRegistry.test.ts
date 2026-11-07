@@ -1121,6 +1121,21 @@ describe('settleOrphanedShellStatusFiles', () => {
     expect(read('shell-nopid.status')['status']).toBe('running');
   });
 
+  it('keeps settling the other sidecars when one of them fails', () => {
+    write('shell-a.status', { ...running, pid: 1 });
+    write('shell-b.status', { ...running, id: 'bg_2', pid: 4343 });
+    const isAlive = (pid: number) => {
+      if (pid === 1) throw new Error('liveness check failed');
+      return false;
+    };
+    expect(settleOrphanedShellStatusFiles(dir, isAlive)).toEqual({
+      settled: 1,
+      alive: [],
+    });
+    expect(read('shell-a.status')['status']).toBe('running');
+    expect(read('shell-b.status')['status']).toBe('unknown');
+  });
+
   it('returns nothing for a session without a sidecar directory', () => {
     expect(settleOrphanedShellStatusFiles(join(dir, 'missing'))).toEqual({
       settled: 0,
