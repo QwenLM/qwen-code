@@ -659,7 +659,10 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     }>();
     expectTypeOf<DaemonSessionCatalogRequest>().toEqualTypeOf<{
       workspaces: 'all' | DaemonSessionCatalogWorkspace[];
-      options?: Omit<Public.DaemonSessionListPageOptions, 'cursor'>;
+      options?: Omit<
+        Public.DaemonSessionListPageOptions,
+        'cursor' | 'liveOnly'
+      >;
       includeGroups?: boolean;
     }>();
     expectTypeOf<DaemonSessionCatalogPage>().toEqualTypeOf<{
