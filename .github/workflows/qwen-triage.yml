@@ -385,8 +385,10 @@ jobs:
       # The verify job needs a scarce self-hosted runner; when the pool is
       # saturated (or disabled) the job sits queued with no visible feedback.
       # Acknowledge the authorized request from this gate job so a /verify
-      # commenter gets a receipt even when the sandbox lane is backed up. The
-      # verify job itself no longer reacts.
+      # commenter gets a receipt ahead of the sandbox lane. The gate itself
+      # now routes comment triggers to the pool, so the receipt queues with
+      # the pool when it is saturated — earlier than the verify run, not
+      # guaranteed instant. The verify job itself no longer reacts.
       # `github.event.issue.pull_request` is required here as well as on the
       # verify job: /verify on a plain issue would otherwise be acknowledged
       # with 👀 while the verify job's own PR guard skips it and

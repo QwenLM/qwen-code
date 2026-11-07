@@ -777,15 +777,24 @@ describe('qwen-triage: runner routing under token isolation', () => {
     // github.event.pull_request payload, so the same-repo guard alone fell
     // through to ubuntu-latest for every command. Route them to the pool,
     // keeping the hosted fallback and the kill switch.
-    assert.match(authorizeRunsOn, /github\.event_name == 'issue_comment'/);
-    assert.match(authorizeRunsOn, /github\.event_name == 'workflow_dispatch'/);
-    assert.match(authorizeRunsOn, /fromJSON\('\["ubuntu-latest"\]'\)/);
-    assert.match(
+    // Exact pin, not substrings: a regrouping that defeats the repo guard or
+    // the kill switch must red this, like the review-workflow gate pin.
+    assert.equal(
       authorizeRunsOn,
-      /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
+      "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch')) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}",
     );
     // The gate stays checkout-free and splices no event value into a shell
-    // (everything arrives through env:).
+    // (everything arrives through env:). Pin the step inventory too, so a new
+    // step cannot be added unnoticed.
+    assert.deepEqual(
+      authorizeJob.steps.map((s) => s.name),
+      [
+        'Sanitize the triage budget',
+        'Check principal write permission',
+        'Acknowledge verify request',
+        'Report disabled verify lane',
+      ],
+    );
     assert.ok(authorizeJob.steps.every((s) => s.uses === undefined));
     for (const s of authorizeJob.steps) {
       assert.ok(
@@ -796,10 +805,11 @@ describe('qwen-triage: runner routing under token isolation', () => {
     // Every step that spends CI_BOT_PAT on gh pins gh's config resolution
     // (GH_HOST + a private, guarded GH_CONFIG_DIR), like the sibling pool
     // jobs; a planted shared ~/.config/gh must not receive the PAT.
-    const ghSteps = authorizeJob.steps.filter((s) =>
-      /gh (api|pr) /.test(String(s.run ?? '')),
-    );
-    assert.ok(ghSteps.length >= 1, 'expected at least one gh-calling step');
+    // Identify PAT-spending steps by the credential in their env, not by the
+    // spelling of a gh subcommand, so a differently-spelled gh call cannot
+    // slip past the hardening check.
+    const ghSteps = authorizeJob.steps.filter((s) => s.env && s.env.GH_TOKEN);
+    assert.ok(ghSteps.length >= 1, 'expected at least one PAT-bearing step');
     const guard =
       'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/triage-authorize-gh-config.XXXXXX")"; then';
     for (const s of ghSteps) {
@@ -818,10 +828,10 @@ describe('qwen-triage: runner routing under token isolation', () => {
       assert.ok(firstGh > -1, s.name);
       assert.ok(live.indexOf('export GH_HOST=github.com') < firstGh, s.name);
       assert.ok(live.indexOf(guard) < firstGh, s.name);
-      assert.doesNotMatch(live, /(^|[\s;&|(`])(\.{1,2}\/)/m, s.name);
+      assert.doesNotMatch(live, /(^|[\s;&|(`'"])(\.{1,2}\/)/m, s.name);
       assert.doesNotMatch(
         live,
-        /(^|[\s;&|(`])(source|bash|sh|node|python3?|npx|npm|pnpm|yarn)\s+[^\s-]/m,
+        /(^|[\s;&|(`])(source|bash|sh|node|python3?|npx|npm|pnpm|yarn)(\s|$)/m,
         s.name,
       );
     }

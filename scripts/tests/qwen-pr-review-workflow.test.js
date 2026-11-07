@@ -203,9 +203,9 @@ describe('qwen pr review runner routing', () => {
     // reused $GITHUB_WORKSPACE, which other lanes fill with contributor
     // files, so a relative-path or interpreter invocation here would run a
     // planted file with CI_BOT_PAT in the environment.
-    expect(live).not.toMatch(/(^|[\s;&|(`])(\.{1,2}\/)/m);
+    expect(live).not.toMatch(/(^|[\s;&|(`'"])(\.{1,2}\/)/m);
     expect(live).not.toMatch(
-      /(^|[\s;&|(`])(source|bash|sh|node|python3?|npx|npm|pnpm|yarn)\s+[^\s-]/m,
+      /(^|[\s;&|(`])(source|bash|sh|node|python3?|npx|npm|pnpm|yarn)(\s|$)/m,
     );
   });
 });
