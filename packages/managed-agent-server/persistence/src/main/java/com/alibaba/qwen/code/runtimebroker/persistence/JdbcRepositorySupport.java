@@ -53,6 +53,13 @@ public final class JdbcRepositorySupport {
         return normalized;
     }
 
+    /** Prepares a statement bounded by the default 10 second query timeout. */
+    static PreparedStatement statement(Connection connection, String sql) throws SQLException {
+        PreparedStatement statement = connection.prepareStatement(sql);
+        statement.setQueryTimeout(10);
+        return statement;
+    }
+
     static Instant databaseNow(Connection connection) throws SQLException {
         return databaseNowPrecise(connection).truncatedTo(
                 ChronoUnit.SECONDS);

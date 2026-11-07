@@ -59,7 +59,7 @@ import {
   type ManagedRecoveryHandoff,
 } from './managed-recovery-handoff';
 import { useManagedSessionRename } from './use-managed-session-rename';
-import { useManagedActions } from './use-managed-actions';
+import { managedActionKey, useManagedActions } from './use-managed-actions';
 import { ManagedQuestionForm } from './ManagedQuestionForm';
 import { useManagedContextCompression } from './use-managed-context-compression';
 import { useManagedModelChange } from './use-managed-model-change';
@@ -2129,27 +2129,87 @@ function ManagedSessionsContent({
               className={home ? shellStyles.footer : 'shrink-0'}
               data-testid="managed-approval"
             >
+              <section
+                aria-label={t('managed.actions.title')}
+                className="mb-3 space-y-2"
+              >
+                <p className="text-sm font-medium">
+                  {t('managed.actions.title')} ({approvals.actions.length})
+                </p>
+                <div className="flex max-h-48 flex-wrap gap-2 overflow-y-auto">
+                  {approvals.actions.map((action) => {
+                    const selected =
+                      approvals.action !== undefined &&
+                      managedActionKey(action) ===
+                        managedActionKey(approvals.action);
+                    return (
+                      <Button
+                        key={managedActionKey(action)}
+                        type="button"
+                        variant={selected ? 'secondary' : 'outline'}
+                        aria-pressed={selected}
+                        className="h-auto max-w-full flex-col items-start whitespace-normal text-left"
+                        onClick={() => approvals.select(action)}
+                      >
+                        <span className="text-xs text-muted-foreground">
+                          {action.sessionId === sessionId
+                            ? t('managed.actions.root')
+                            : t('managed.actions.child', {
+                                session: action.sessionId,
+                              })}{' '}
+                          ·{' '}
+                          {t(
+                            action.kind === 'question'
+                              ? 'managed.actions.question'
+                              : 'managed.actions.permission',
+                          )}
+                        </span>
+                        <span>
+                          {action.kind === 'question'
+                            ? action.questions[0]?.prompt
+                            : action.toolName}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {Date.now() >= action.expiresAt
+                            ? t('managed.actions.expired')
+                            : t('managed.actions.expires', {
+                                time: new Date(
+                                  action.expiresAt,
+                                ).toLocaleString(),
+                              })}
+                        </span>
+                      </Button>
+                    );
+                  })}
+                </div>
+              </section>
               {approvals.action?.sessionId !== sessionId && (
                 <p className="mb-2 text-sm font-medium">
-                  {t('managed.tasks.childApproval')} ·{' '}
+                  {t('managed.actions.childSource')} ·{' '}
                   {approvals.action?.sessionId}
                 </p>
               )}
               {approvals.action?.kind === 'question' ? (
                 <ManagedQuestionForm
-                  key={`${provider.storageKey}:${approvals.action.sessionId}:${approvals.action.actionId}:${approvals.action.inputRevision}:${approvals.action.policyRevision}`}
+                  key={managedActionKey(approvals.action)}
                   action={approvals.action}
+                  draft={approvals.questionDraft}
+                  onDraftChange={(draft) =>
+                    approvals.setQuestionDraft(approvals.action!, draft)
+                  }
+                  submitting={approvals.submitting}
                   disabled={approvals.respondForbidden || compression.blocked}
                   onSubmit={(response) => {
                     if (compression.isBlocked())
                       return Promise.reject(
                         new Error('Context compression is pending'),
                       );
-                    return approvals.respond(pendingApproval.id, response);
+                    return approvals.respond(approvals.action!, response);
                   }}
                 />
               ) : (
                 <ToolApproval
+                  key={approvals.action && managedActionKey(approvals.action)}
                   request={pendingApproval}
                   planExecutionMode={
                     approvals.action?.sessionId === sessionId &&
@@ -2165,7 +2225,11 @@ function ManagedSessionsContent({
                   // holds for every approval this Session raises — until an
                   // explicit retry re-probes, so the latch is scoped to the
                   // Session rather than the Action.
-                  disabled={approvals.respondForbidden || compression.blocked}
+                  disabled={
+                    approvals.respondForbidden ||
+                    approvals.submitting ||
+                    compression.blocked
+                  }
                   extraDescriptionId={
                     [
                       pendingApproval.rawInput === undefined
@@ -2177,8 +2241,11 @@ function ManagedSessionsContent({
                       .join(' ') || undefined
                   }
                   onConfirm={(actionId, optionId) => {
-                    if (!compression.isBlocked())
-                      return approvals.respond(actionId, optionId);
+                    if (
+                      !compression.isBlocked() &&
+                      approvals.action?.actionId === actionId
+                    )
+                      return approvals.respond(approvals.action, optionId);
                     return Promise.resolve();
                   }}
                 />

@@ -87,6 +87,7 @@ public final class ManagedAgentPreflight {
     static final String CONFIG_LOCATION_ENV =
             "SPRING_CONFIG_ADDITIONAL_LOCATION";
     static final String ONLINE_ARG = "--online";
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final String WORKER_ARG = "managed-runtime-worker";
     // The kernel appends this to /proc/<pid>/cwd once the directory is removed.
     private static final String DELETED_SUFFIX = " (deleted)";
@@ -769,7 +770,7 @@ public final class ManagedAgentPreflight {
     // A Harness string reaches a root-run report, so only a version's shape.
     private static String qwenCodeVersion(String body) {
         try {
-            JsonNode version = new ObjectMapper().readTree(body)
+            JsonNode version = JSON.readTree(body)
                     .path("qwenCodeVersion");
             return version.isTextual()
                     && QWEN_CODE_VERSION.matcher(version.asText()).matches()
@@ -790,7 +791,7 @@ public final class ManagedAgentPreflight {
 
     static String manifestQwenCodeVersion(Path manifest) {
         try {
-            JsonNode version = new ObjectMapper().readTree(manifest.toFile())
+            JsonNode version = JSON.readTree(manifest.toFile())
                     .path("compatibility").path("qwenCodeVersion");
             return version.isTextual() ? version.asText() : null;
         } catch (IOException | RuntimeException error) {
@@ -1637,7 +1638,7 @@ public final class ManagedAgentPreflight {
 
     static String expectedSchemaVersion(Path manifest) {
         try {
-            JsonNode root = new ObjectMapper().readTree(manifest.toFile());
+            JsonNode root = JSON.readTree(manifest.toFile());
             JsonNode value = root.path("compatibility")
                     .path("databaseSchema").path("latestMigrationVersion");
             return value.isTextual() ? value.asText() : null;

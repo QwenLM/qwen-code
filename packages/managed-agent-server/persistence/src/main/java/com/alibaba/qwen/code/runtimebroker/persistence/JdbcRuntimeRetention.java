@@ -13,6 +13,8 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
+import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.statement;
+
 /** Bounded cleanup of unreferenced retired Runtime generations. */
 public final class JdbcRuntimeRetention implements com.alibaba.qwen.code.runtimebroker.RuntimeRetention {
     public interface ReferenceGuard {
@@ -333,12 +335,6 @@ public final class JdbcRuntimeRetention implements com.alibaba.qwen.code.runtime
             }
         }
         return rows;
-    }
-
-    private static PreparedStatement statement(Connection connection, String sql) throws SQLException {
-        PreparedStatement statement = connection.prepareStatement(sql);
-        statement.setQueryTimeout(10);
-        return statement;
     }
 
     private static void delete(Connection connection, String sql, String id, long version) throws SQLException {
