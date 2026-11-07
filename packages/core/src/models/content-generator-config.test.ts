@@ -715,6 +715,14 @@ describe('createRuntimeContentGeneratorView modalities source', () => {
     expect(view.configSources?.['modalities']).toEqual({
       kind: 'computed',
       detail: "auto-detected from 'agent-model'",
+      // Derived through the agent's own provider route, so the refusal advice
+      // stays on `modelProviders` rather than naming the settings key.
+      via: {
+        kind: 'modelProviders',
+        authType: 'openai',
+        modelId: 'agent-model',
+        detail: 'generationConfig',
+      },
     });
   });
 

@@ -1109,9 +1109,12 @@ describe('BaseLlmClient', () => {
       // entry rather than the session's `settings` source. `Config` returns
       // this map while the frame is active, which is what keeps `read_file`
       // from naming a setting that describes the primary model.
-      expect(resolved.configSources?.['modalities']).toEqual({
+      expect(resolved.configSources?.['modalities']).toMatchObject({
         kind: 'computed',
         detail: "auto-detected from 'fast-model'",
+        // Derived through this view's provider route, so the refusal advice
+        // must not fall back to the settings key.
+        via: { kind: 'modelProviders' },
       });
       await runWithRuntimeContentGenerator(resolved, async () => {
         expect(getRuntimeContentGenerator()?.configSources).toBe(
@@ -1145,6 +1148,14 @@ describe('BaseLlmClient', () => {
       expect(resolved.configSources?.['modalities']).toEqual({
         kind: 'computed',
         detail: "auto-detected from 'fast-model'",
+        // The value was derived through the provider route, so a refusal must
+        // not offer `model.generationConfig.modalities` to this agent.
+        via: {
+          kind: 'modelProviders',
+          authType: AuthType.USE_ANTHROPIC,
+          modelId: fastModel,
+          detail: 'generationConfig',
+        },
       });
     });
 

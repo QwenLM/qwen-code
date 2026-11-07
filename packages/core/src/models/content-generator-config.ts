@@ -275,7 +275,23 @@ export function resolveAgentModalitiesSource(
   }
   // Everything else was either name-detected by the registry or left as the
   // field's default; neither was read from a setting that names this model.
-  return { ...COMPUTED, detail: `auto-detected from '${model}'` };
+  // `via` still records the provider route the value was derived through, so a
+  // refusal does not offer `model.generationConfig.modalities` to an agent
+  // whose route came from `modelProviders` (QwenLM/qwen-code#16185).
+  return {
+    ...COMPUTED,
+    detail: `auto-detected from '${model}'`,
+    ...(resolvedModel
+      ? {
+          via: {
+            kind: 'modelProviders' as const,
+            authType: resolvedModel.authType,
+            modelId: resolvedModel.id,
+            detail: 'generationConfig',
+          },
+        }
+      : {}),
+  };
 }
 
 const COMPUTED: ContentGeneratorConfigSource = { kind: 'computed' };
