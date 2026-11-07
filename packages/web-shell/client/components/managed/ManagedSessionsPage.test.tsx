@@ -2905,7 +2905,7 @@ describe('ManagedSessionsPage', () => {
         's1',
         expect.objectContaining({ includeChildren: true }),
       );
-      expect(container.textContent).toContain('Child Agent approval');
+      expect(container.textContent).toContain('Child session request');
       const composer = container.querySelector('textarea')!;
       const setter = Object.getOwnPropertyDescriptor(
         HTMLTextAreaElement.prototype,
@@ -3278,6 +3278,63 @@ describe('ManagedSessionsPage', () => {
     ).toBe('null');
   });
 
+  it('answers both child permissions when their Action IDs are identical', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: {
+          canSend: false,
+          canCancel: true,
+          actions: true,
+          childAgents: true,
+        },
+      }),
+    );
+    const first = { ...pendingAction, sessionId: 'child-a', createdAt: 1 };
+    const second = { ...pendingAction, sessionId: 'child-b', createdAt: 2 };
+    let listed = [first, second];
+    const listPending = vi.fn(async () => listed);
+    const respond = vi.fn(async (action: { sessionId: string }) => {
+      listed = listed.filter((item) => item.sessionId !== action.sessionId);
+    });
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    await act(async () => flush());
+    const allow = () => {
+      const button = [
+        ...container.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="managed-approval"] button',
+        ),
+      ].find((item) => item.textContent?.includes('Yes, allow once'));
+      expect(button).toBeDefined();
+      expect(button!.disabled).toBe(false);
+      return button!;
+    };
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledExactlyOnceWith(first, 'allow', {
+      clientId: expect.any(String),
+      idempotencyKey: 'tool_approval_1:allow',
+    });
+    expect(
+      container.querySelector('[data-testid="managed-approval"]')?.textContent,
+    ).toContain('Child session request · child-b');
+    await act(async () => {
+      allow().click();
+      await flush();
+    });
+    expect(respond).toHaveBeenCalledTimes(2);
+    expect(respond).toHaveBeenLastCalledWith(second, 'allow', {
+      clientId: expect.any(String),
+      idempotencyKey: 'tool_approval_1:allow',
+    });
+    expect(
+      container.querySelector('[data-testid="managed-approval"]'),
+    ).toBeNull();
+  });
+
   it('shows a question without approval buttons and retains its answers until confirmed', async () => {
     vi.stubGlobal('crypto', webcrypto);
     mocks.client.getSession.mockImplementation(async (id: string) =>
@@ -3341,6 +3398,103 @@ describe('ManagedSessionsPage', () => {
     expect(
       container.querySelector('[data-testid="managed-approval"]'),
     ).toBeNull();
+  });
+
+  it('lists root and child requests and preserves each draft while answering any child', async () => {
+    vi.stubGlobal('crypto', webcrypto);
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        phase: 'agent_running',
+        capabilities: {
+          canSend: false,
+          canCancel: true,
+          actions: true,
+          childAgents: true,
+        },
+      }),
+    );
+    const first = {
+      ...pendingQuestion(),
+      sessionId: 'child-a',
+      createdAt: 1,
+    };
+    const second = { ...first, sessionId: 'child-b', createdAt: 2 };
+    const permission = { ...pendingAction, createdAt: 3 };
+    const listPending = vi.fn().mockResolvedValue([permission, second, first]);
+    const respond = vi.fn().mockResolvedValue(undefined);
+    provider = { ...provider, actions: { listPending, respond } };
+    await render('s1');
+    await act(async () => flush());
+    const card = () =>
+      container.querySelector('[data-testid="managed-approval"]')!;
+    const selector = () =>
+      card().querySelector('[aria-label="Pending requests"]')!;
+    const choose = async (text: string) => {
+      await act(async () => {
+        [...selector().querySelectorAll('button')]
+          .find((button) => button.textContent?.includes(text))!
+          .click();
+      });
+    };
+    const fill = async (index: number, text: string) => {
+      await act(async () => {
+        const input = card().querySelectorAll('textarea')[index]!;
+        Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )!.set!.call(input, text);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    };
+    expect(listPending).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ includeChildren: true }),
+    );
+    expect(selector().querySelectorAll('button')).toHaveLength(3);
+    expect(selector().textContent).toContain('This session · Permission');
+    expect(selector().textContent).toContain('Expires');
+    expect(
+      selector().querySelector('[aria-pressed="true"]')?.textContent,
+    ).toContain('child-a');
+    await fill(0, 'Keep child A');
+    await choose('child-b');
+    expect(card().querySelector('textarea')?.value).toBe('');
+    await fill(0, 'Child B answer');
+    await fill(1, 'Child B details');
+    await choose('This session');
+    expect(card().querySelector('[role="alertdialog"]')).not.toBeNull();
+    await choose('child-a');
+    expect(card().querySelector('textarea')?.value).toBe('Keep child A');
+    await choose('child-b');
+    expect(card().querySelector('textarea')?.value).toBe('Child B answer');
+    await act(async () => {
+      card()
+        .querySelector('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+      await flush();
+    });
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+    await act(async () => flush());
+    expect(respond).toHaveBeenCalledWith(
+      second,
+      {
+        kind: 'question',
+        answers: [
+          { questionId: 'q1', text: 'Child B answer' },
+          { questionId: 'q2', text: 'Child B details' },
+        ],
+      },
+      expect.objectContaining({
+        idempotencyKey: expect.stringMatching(/^question:/),
+      }),
+    );
+    expect(selector().querySelectorAll('button')).toHaveLength(2);
+    expect(
+      selector().querySelector('[aria-pressed="true"]')?.textContent,
+    ).toContain('child-a');
+    expect(card().querySelector('textarea')?.value).toBe('Keep child A');
   });
 
   it.each([
