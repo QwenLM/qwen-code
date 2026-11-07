@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { ACPToolCall } from '../../adapters/types';
 import {
+  EXPANDED_TOOL_PAYLOAD_LENGTH,
   extractRawOutputText,
+  formatJsonPayload,
   formatToolDisplayName,
   getAgentCurrentToolHint,
   getSubagentDetailsUnavailableReason,
@@ -606,6 +608,85 @@ describe('toolFormatting', () => {
         'Shell',
       );
     });
+  });
+});
+
+describe('formatJsonPayload', () => {
+  it('pretty-prints a compact object', () => {
+    expect(formatJsonPayload('{"a":1,"b":[2]}')).toEqual({
+      text: '{\n  "a": 1,\n  "b": [\n    2\n  ]\n}',
+      json: true,
+    });
+  });
+
+  it('pretty-prints an array of objects', () => {
+    const formatted = formatJsonPayload('[{"id":1}]');
+    expect(formatted.json).toBe(true);
+    expect(formatted.text).toBe('[\n  {\n    "id": 1\n  }\n]');
+  });
+
+  it('keeps an already indented document as JSON', () => {
+    expect(formatJsonPayload('{\n  "a": 1\n}')).toEqual({
+      text: '{\n  "a": 1\n}',
+      json: true,
+    });
+  });
+
+  it('leaves JSON Lines exactly as recorded', () => {
+    const text = '{"a":1}\n{"b":2}';
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
+  });
+
+  it('leaves a mixed JSON-lines payload untouched', () => {
+    const text = '{"a":1}\nnot json';
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
+  });
+
+  it.each(['hello', '42', '"text"', 'null', '{"a":'])(
+    'leaves %s untouched',
+    (text) => {
+      expect(formatJsonPayload(text)).toEqual({ text, json: false });
+    },
+  );
+
+  it('leaves non-canonical number literals as recorded', () => {
+    const text =
+      '{"n":1.2345678901234567890,"id":12345678901234567890,"neg":-0,"exp":1e3,"amount":1.10,"tiny":1e-400,"huge":1e400}';
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
+  });
+
+  it('leaves duplicate keys and their order as recorded', () => {
+    const text = '{"a":1,"a":2,"500":"server error","200":"ok"}';
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
+  });
+
+  it('preserves escaped string contents', () => {
+    const text = '{"s":"a\\"b}{","n":1}';
+    expect(formatJsonPayload(text)).toEqual({
+      text: '{\n  "s": "a\\"b}{",\n  "n": 1\n}',
+      json: true,
+    });
+  });
+
+  it('leaves deeply nested small JSON unformatted', () => {
+    const text = '{"a":'.repeat(40) + '1' + '}'.repeat(40);
+    expect(JSON.stringify(JSON.parse(text), null, 2).length).toBeLessThan(
+      EXPANDED_TOOL_PAYLOAD_LENGTH,
+    );
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
+  });
+
+  it('falls back when formatted output exceeds the render cap', () => {
+    const text = '{"a":1}';
+    expect(formatJsonPayload(text, 5)).toEqual({ text, json: false });
+  });
+
+  it('leaves an oversized payload alone instead of parsing it', () => {
+    const text = JSON.stringify({
+      value: 'x'.repeat(EXPANDED_TOOL_PAYLOAD_LENGTH),
+    });
+    expect(text.length).toBeGreaterThan(EXPANDED_TOOL_PAYLOAD_LENGTH);
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
   });
 });
 
