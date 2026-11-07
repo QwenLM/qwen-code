@@ -35,6 +35,8 @@ import {
   type GlobDirectoryReply,
   type GlobPath,
 } from './glob-search.js';
+import { selectPathsDeniedByPermissionRules } from '../core/permission-helpers.js';
+import { formatPermissionOmissionNote } from './grepReadTracking.js';
 export type { GlobPath } from './glob-search.js';
 
 const debugLogger = createDebugLogger('GLOB');
@@ -262,6 +264,8 @@ class GlobToolInvocation extends BaseToolInvocation<
       const allFilteredEntries: GlobPath[] = [];
       const seenPaths = new Set<string>();
       let hitCollectionLimit = false;
+      let scannedFileCount = 0;
+      let omittedFileCount = 0;
 
       for (const searchDir of searchDirs) {
         const remainingEntries =
@@ -277,22 +281,54 @@ class GlobToolInvocation extends BaseToolInvocation<
           remainingEntries,
         );
         hitCollectionLimit ||= hitLimit;
+        const unseenEntries: GlobPath[] = [];
         for (const entry of entries) {
           // Deduplicate entries that might appear in overlapping directories
           const normalized = normalizePathForComparison(entry.fullpath());
           if (!seenPaths.has(normalized)) {
             seenPaths.add(normalized);
-            allFilteredEntries.push(entry);
+            unseenEntries.push(entry);
           }
         }
+        scannedFileCount += unseenEntries.length;
+        const deniedPaths = await selectPathsDeniedByPermissionRules(
+          this.config.getPermissionManager?.(),
+          ToolNames.GLOB,
+          this.config.getTargetDir(),
+          unseenEntries.map((entry) => entry.fullpath()),
+        );
+        omittedFileCount += deniedPaths.size;
+        if (deniedPaths.size > 0) {
+          debugLogger.debug('Files omitted by permission rules:', [
+            ...deniedPaths,
+          ]);
+        }
+        allFilteredEntries.push(
+          ...unseenEntries.filter(
+            (entry) => !deniedPaths.has(entry.fullpath()),
+          ),
+        );
       }
 
+      const omittedFilesNote = formatPermissionOmissionNote(omittedFileCount);
       const filteredEntries = allFilteredEntries;
 
       if (!filteredEntries || filteredEntries.length === 0) {
+        const noFilesMsg = hitCollectionLimit
+          ? `No permitted files found among the first ${scannedFileCount} matching files scanned for pattern "${this.params.pattern}" ${searchLocationDescription}. Narrow the pattern or path.`
+          : omittedFileCount > 0
+            ? `No permitted files found matching pattern "${this.params.pattern}" ${searchLocationDescription}`
+            : `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}`;
+        const displayMessage = hitCollectionLimit
+          ? 'No permitted files found (truncated)'
+          : omittedFileCount > 0
+            ? 'No permitted files found'
+            : 'No files found';
         return {
-          llmContent: `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}`,
-          returnDisplay: `No files found`,
+          llmContent:
+            noFilesMsg + (omittedFilesNote ? `\n---\n${omittedFilesNote}` : ''),
+          returnDisplay:
+            displayMessage + (omittedFilesNote ? ` ${omittedFilesNote}` : ''),
         };
       }
 
@@ -331,19 +367,22 @@ class GlobToolInvocation extends BaseToolInvocation<
 
       // Add truncation notice if needed
       if (hitCollectionLimit) {
-        resultMessage += `\n---\n[Results truncated after scanning ${totalFileCount} matching files. Narrow the pattern or path.]`;
+        resultMessage += `\n---\n[Results truncated after scanning ${scannedFileCount} matching files. Narrow the pattern or path.]`;
       } else if (truncated) {
         const omittedFiles = totalFileCount - fileLimit;
         const fileTerm = omittedFiles === 1 ? 'file' : 'files';
         resultMessage += `\n---\n[${omittedFiles} ${fileTerm} truncated] ...`;
       }
+      if (omittedFileCount > 0) {
+        resultMessage += `\n---\n${omittedFilesNote}`;
+      }
 
       return {
         llmContent: resultMessage,
-        returnDisplay: `${hitCollectionLimit ? 'Found at least' : 'Found'} ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}`,
+        returnDisplay: `${hitCollectionLimit ? 'Found at least' : 'Found'} ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}${omittedFilesNote ? ` ${omittedFilesNote}` : ''}`,
         resultFilePaths: sortedAbsolutePaths,
         // The certified count covers the collected set, not the display
-        // slice — containment consumers must check this, never the slice.
+        // slice. Containment consumers must check this, never the slice.
         collectedFilePaths: sortedEntries.map((entry) => entry.fullpath()),
       };
     } catch (error) {

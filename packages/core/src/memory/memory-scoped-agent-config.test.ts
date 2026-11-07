@@ -23,7 +23,8 @@ import {
   getUserAutoMemoryRoot,
 } from './paths.js';
 
-const { EDIT, GREP, LS, READ_FILE, SHELL, WEB_FETCH, WRITE_FILE } = ToolNames;
+const { EDIT, GLOB, GREP, LS, READ_FILE, SHELL, WEB_FETCH, WRITE_FILE } =
+  ToolNames;
 
 function restoreEnv(key: string, value: string | undefined) {
   if (value === undefined) delete process.env[key];
@@ -115,6 +116,7 @@ describe('createMemoryScopedAgentConfig', () => {
 
     const restricted = scopedPm({ restrictReadsToMemoryPaths: true });
     await evalIs(restricted, READ_FILE, transcript, 'deny');
+    await evalIs(restricted, GLOB, transcript, 'deny');
     await evalIs(restricted, GREP, getAutoMemoryRoot(projectRoot), 'allow');
     await evalIs(restricted, LS, getUserAutoMemoryRoot(), 'allow');
   });
@@ -323,6 +325,18 @@ describe('createMemoryScopedAgentConfig', () => {
   });
 
   describe('registration-gate shim delegation (#10075)', () => {
+    it('reports scoped and base deny rules', () => {
+      expect(scopedPm().hasDenyRules()).toBe(false);
+      expect(
+        scopedPm({ restrictReadsToMemoryPaths: true }).hasDenyRules(),
+      ).toBe(true);
+      expect(scopedPm({ protectPinnedMemory: true }).hasDenyRules()).toBe(true);
+
+      const hasDenyRules = vi.fn().mockReturnValue(true);
+      expect(scopedPm(undefined, { hasDenyRules }).hasDenyRules()).toBe(true);
+      expect(hasDenyRules).toHaveBeenCalledOnce();
+    });
+
     it('isToolDisabledByCoreToolsAllowList delegates when present, defaults to false otherwise', () => {
       const gate = vi.fn().mockReturnValue(true);
       const delegated = scopedPm(undefined, {
