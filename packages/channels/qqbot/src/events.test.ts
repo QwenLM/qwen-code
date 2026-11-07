@@ -904,6 +904,26 @@ describe('handleGroup', () => {
     expect(env['senderTag']).toBe('bot');
   });
 
+  it('logs the forwarded notice for a delivered group message', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({ forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> auto reply',
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    const notices = stderr.mock.calls.filter(([line]) =>
+      String(line).includes('forwardBotMessages: bot-authored message'),
+    ).length;
+    expect(notices).toBe(1);
+    stderr.mockRestore();
+  });
+
   it('forwarded bot slash messages in a group reach the model, not the command table', async () => {
     const ch = makeChannel({ forwardBotMessages: true });
     const pvt = ch as unknown as QQChannelRaw;
@@ -1630,6 +1650,33 @@ describe('handleGroupAll', () => {
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env['text']).toContain('[bot] ');
     expect(env['text']).toContain('auto reply');
+  });
+
+  it('does not announce a forwarded bot message that group-all policy drops', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'log', forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: 'auto reply',
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+    // The notice means "dispatched", so a policy-dropped message must not print
+    // it — otherwise the two stderr lines contradict each other.
+    expect(
+      stderr.mock.calls.filter(([line]) =>
+        String(line).includes('forwardBotMessages: bot-authored message'),
+      ),
+    ).toHaveLength(0);
+    expect(
+      stderr.mock.calls.some(([line]) => String(line).includes('log policy')),
+    ).toBe(true);
+    stderr.mockRestore();
   });
 
   it('group-all routed bot messages keep route matching and carry the marker', async () => {

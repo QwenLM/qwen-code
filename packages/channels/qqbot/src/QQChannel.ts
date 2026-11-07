@@ -6169,7 +6169,6 @@ export class QQChannel extends ChannelBase {
     const text = isSlash
       ? sanitizePromptText(safeCleanText)
       : `${head}${body}${suffixFromBotOpenId}`;
-    if (forwardedBot) this.logForwardedBotMessage(chatId);
 
     return {
       isAtBot: effectiveIsAtBot,
@@ -6480,6 +6479,7 @@ export class QQChannel extends ChannelBase {
         ? {}
         : { alreadyPrefixed: true as const }),
     };
+    if (forwardedBot) this.logForwardedBotMessage(chatId);
     this.dispatchInbound(envelope, media).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] Group handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
@@ -6657,6 +6657,7 @@ export class QQChannel extends ChannelBase {
         ? {}
         : { alreadyPrefixed: true as const }),
     };
+    if (forwardedBot) this.logForwardedBotMessage(chatId);
     this.dispatchInbound(envelope, media).catch((e) => {
       process.stderr.write(
         `[QQ:${this.name}] handleGroupAll error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
