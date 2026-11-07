@@ -156,8 +156,13 @@ export function gateCommandError(gate: unknown): string | null {
   // already runs in a shell; the wrapper adds nothing. The error names what
   // the rules would check, as the normalization also misreads a few plain
   // commands (`bash /opt/probe.sh -c x` reads as `x`).
-  const checked = normalizeMonitorCommand(gate).safetyCommand;
-  if (checked !== gate.trim()) {
+  const normalized = normalizeMonitorCommand(gate);
+  const checked = normalized.safetyCommand;
+  // A wrapper whose payload word carries an unresolvable expansion is handed
+  // back whole for the permission scan (#16075 review, R11-2), so an unchanged
+  // `checked` there does not mean "not a wrapper": the shell runs the glued
+  // script while the rules read the raw text. Refuse it like any wrapper.
+  if (normalized.wrapperPayloadUnresolved || checked !== gate.trim()) {
     let shown = checked;
     if (checked.length > 80) {
       // Not between the halves of a surrogate pair.

@@ -957,6 +957,26 @@ describe('normalizeMonitorCommand', () => {
       'FOO=$(cat secret.txt) echo ok',
     );
   });
+
+  // R11-2 consumer regression (#16075): a wrapper whose -c payload word
+  // carries an unresolvable expansion is handed back whole for the monitor to
+  // scan, but that must not read as "not a wrapper" to the cron gate, which
+  // refuses any wrapper whose glued script the rules would read differently.
+  it('flags an unresolvable wrapper payload while keeping the whole command for scanning', () => {
+    const glued = "bash -c 'cat /etc/hostname '$(touch${IFS}/tmp/x)''";
+    expect(normalizeMonitorCommand(glued)).toEqual({
+      analysisCommand: glued,
+      safetyCommand: glued,
+      spawnCommand: glued,
+      strippedTrailingAmp: false,
+      wrapperPayloadUnresolved: true,
+    });
+    const terminator = "sh -c $TERM 'ls -l'";
+    expect(normalizeMonitorCommand(terminator).safetyCommand).toBe(terminator);
+    expect(normalizeMonitorCommand(terminator).wrapperPayloadUnresolved).toBe(
+      true,
+    );
+  });
 });
 
 describe('escapeShellArg', () => {

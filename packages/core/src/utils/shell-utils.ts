@@ -1503,6 +1503,15 @@ interface ParsedMonitorShellWrapper {
   innerCommand: string;
   innerQuote: '"' | "'" | '';
   innerArgsSuffix?: string;
+  /**
+   * A shell wrapper was recognized, but the word after `-c` carries an
+   * expansion that cannot be resolved statically, so the whole command is
+   * handed back for scanning instead of a payload (#16075 review, R11-2).
+   * The monitor still scans everything; a consumer that reads "normalization
+   * left this command unchanged" as "this is not a wrapper" (the cron gate)
+   * must not: the shell runs the glued script while the rules read raw text.
+   */
+  wrapperPayloadUnresolved?: boolean;
 }
 
 export interface NormalizedMonitorCommand {
@@ -1510,6 +1519,8 @@ export interface NormalizedMonitorCommand {
   safetyCommand: string;
   spawnCommand: string;
   strippedTrailingAmp: boolean;
+  /** See {@link ParsedMonitorShellWrapper.wrapperPayloadUnresolved}. */
+  wrapperPayloadUnresolved?: boolean;
 }
 
 function takeLeadingToken(
@@ -1781,6 +1792,7 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
         return {
           innerCommand: trimmed,
           innerQuote: '',
+          wrapperPayloadUnresolved: true,
         };
       }
       if (terminator && terminatorWord === '--') {
@@ -1834,8 +1846,13 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 export function normalizeMonitorCommand(
   command: string,
 ): NormalizedMonitorCommand {
-  const { wrapperTokens, innerCommand, innerQuote, innerArgsSuffix } =
-    parseMonitorShellWrapper(command);
+  const {
+    wrapperTokens,
+    innerCommand,
+    innerQuote,
+    innerArgsSuffix,
+    wrapperPayloadUnresolved,
+  } = parseMonitorShellWrapper(command);
   const leadingEnvTokens =
     wrapperTokens?.filter((token) => isEnvAssignmentToken(token)) ?? [];
   const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
@@ -1875,6 +1892,7 @@ export function normalizeMonitorCommand(
     safetyCommand,
     spawnCommand,
     strippedTrailingAmp,
+    ...(wrapperPayloadUnresolved ? { wrapperPayloadUnresolved: true } : {}),
   };
 }
 
