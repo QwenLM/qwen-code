@@ -500,8 +500,9 @@ jobs:
     # (default: 360); must stay above QWEN_REVIEW_MAX_TIMEOUT_MINUTES so
     # retry plus posting never hit the cap.
     timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'
-    # The schedule switches hk1/hk2 to `ecs-review` at 17:00 Asia/Shanghai
-    # and back to CI at 05:00. Reviews queue while the pool is closed.
+    # The schedule switches the managed fleet to `ecs-review` at 17:00
+    # Asia/Shanghai and back to CI at 05:00. Reviews queue while the pool
+    # is closed.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-review"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
