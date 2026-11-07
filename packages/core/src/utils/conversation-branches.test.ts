@@ -203,6 +203,8 @@ describe('inspectConversationBranches', () => {
       ),
       system('turn-result', 'conversation-leaf', 'turn_result'),
       system('turn-attempt', 'conversation-leaf', 'turn_attempt'),
+      system('admission', 'conversation-leaf', 'tool_result_admission'),
+      system('goal-end', 'conversation-leaf', 'goal_turn_end'),
       system(
         'sources-snapshot',
         'conversation-leaf',
@@ -221,6 +223,8 @@ describe('inspectConversationBranches', () => {
       'session_sources_snapshot',
       'turn_result',
       'turn_attempt',
+      'tool_result_admission',
+      'goal_turn_end',
     ] as const;
 
     for (const subtype of subtypes) {

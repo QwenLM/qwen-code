@@ -2941,14 +2941,13 @@ describe('Gemini Client (client.ts)', () => {
 
     it('carries active todos after tool results and clears them for new work', async () => {
       const reminder = todoReminder('run tests');
+      const toolResult = fnResponse('read_file', { ok: true });
 
       await runTurn(
         SendMessageType.ToolResult,
-        [
-          fnResponse('read_file', { ok: true }),
-          'user changed priority mid-turn',
-        ],
+        [toolResult, 'user changed priority mid-turn'],
         'prompt-tool-result',
+        { toolResultParts: [toolResult] },
       );
 
       const request = lastRequest();
@@ -2963,6 +2962,13 @@ describe('Gemini Client (client.ts)', () => {
       expect(request.indexOf(reminder)).toBeLessThan(
         request.indexOf('user changed priority mid-turn'),
       );
+      const toolResultParts = mockTurnConstructorFn.mock.lastCall?.[9] as
+        | readonly Part[]
+        | undefined;
+      expect(toolResultParts).toEqual([toolResult]);
+      expect(toolResultParts?.[0]).toBe(request[functionResponseIndex]);
+      expect(toolResultParts).not.toContain('user changed priority mid-turn');
+      expect(toolResultParts).not.toContain(reminder);
       expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
         'prompt-tool-result',
       );
@@ -2992,6 +2998,24 @@ describe('Gemini Client (client.ts)', () => {
         'prompt-retry',
         'prompt-userQuery',
       );
+    });
+
+    it('shares normalized string tool companions with default cancellation ownership', async () => {
+      const toolResult = fnResponse('read_file', { ok: true });
+      await runTurn(SendMessageType.ToolResult, [
+        toolResult,
+        'tool companion text',
+      ]);
+
+      const request = lastRequest();
+      const toolResultParts = mockTurnConstructorFn.mock.lastCall?.[9] as
+        | readonly Part[]
+        | undefined;
+      expect(toolResultParts).toHaveLength(2);
+      expect(toolResultParts?.[0]).toBe(toolResult);
+      expect(toolResultParts?.[0]).toBe(request[0]);
+      expect(toolResultParts?.[1]).toEqual({ text: 'tool companion text' });
+      expect(toolResultParts?.[1]).toBe(request[1]);
     });
 
     it('leaves the user message record and work chain to a host that did both', async () => {
@@ -10730,6 +10754,72 @@ Other open files:
 
       expect(mockTurnRunFn.mock.calls[0]![1]).toEqual(expected);
     });
+
+    it.each([false, true])(
+      'keeps a retried date reminder outside tool admission when withheld=%s',
+      async (withheld) => {
+        const { settleToolResultHistory } = await vi.importActual<
+          typeof import('../services/tool-result-history.js')
+        >('../services/tool-result-history.js');
+        dateSession('2026-06-05T12:00:00Z');
+        installChat({
+          getHistory: vi
+            .fn()
+            .mockReturnValue([startupContext('Thursday, June 4, 2026')]),
+          getHistoryLength: vi.fn().mockReturnValue(1),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([
+              dateReminderTurn(CHANGED('Friday, June 5, 2026'), 'Question'),
+            ]),
+        });
+        const output: Part[] = [
+          fnResponse('read_file', { output: 'PRIVATE_RETRY' }),
+          { text: 'same companion and independent input' },
+        ];
+        const input = { text: 'same companion and independent input' };
+        await run([...output, input], 'prompt-date-tool-retry', {
+          type: SendMessageType.Retry,
+          toolResultParts: output,
+        });
+
+        const request = mockTurnRunFn.mock.calls[0][1] as Part[];
+        const owned = mockTurnConstructorFn.mock.calls[0][9] as Part[];
+        expect(owned).toBe(output);
+        expect(request[0]).toEqual(CHANGED('Friday, June 5, 2026'));
+        expect(request[0].partMetadata?.[DATE_REMINDER_METADATA]).toBe(
+          'Friday, June 5, 2026',
+        );
+        output.forEach((part, index) => expect(request[index + 1]).toBe(part));
+        expect(request.at(-1)).toBe(input);
+
+        const admission = vi.fn(async (parts: readonly Part[]) => [
+          {
+            parts,
+            decision: withheld
+              ? { withheld: 'policy refused' }
+              : ('admitted' as const),
+          },
+        ]);
+        const retained = await settleToolResultHistory(
+          { recordToolResultAdmission: admission },
+          { role: 'user', parts: request },
+          owned,
+        );
+        expect(admission).toHaveBeenCalledExactlyOnceWith(output, undefined);
+        expect(retained.parts?.[0]).toBe(request[0]);
+        expect(retained.parts?.at(-1)).toBe(input);
+        if (withheld) {
+          expect(JSON.stringify(retained)).not.toContain('PRIVATE_RETRY');
+          output.forEach((part) => expect(retained.parts).not.toContain(part));
+          expect(
+            retained.parts?.filter((part) => part.text === input.text),
+          ).toEqual([input]);
+        } else {
+          output.forEach((part) => expect(retained.parts).toContain(part));
+        }
+      },
+    );
 
     describe('output style turn reminder', () => {
       const stubOutputStyle = (

@@ -533,6 +533,84 @@ function records(toolCallId = 'finish'): ChatRecord[] {
   ];
 }
 
+describe('model history of completed tools', () => {
+  const [call, result] = records();
+  const held: ChatRecord = { ...result, requiresToolResultAdmission: true };
+  const receipt = (...ids: string[]): ChatRecord => ({
+    ...call,
+    type: 'system',
+    subtype: 'tool_result_admission',
+    uuid: 'admission',
+    message: undefined,
+    systemPayload: { decision: 'admitted', recordUuids: ids },
+  });
+  const project = (...messages: ChatRecord[]) =>
+    buildApiHistoryFromConversation({ messages: [call, ...messages] });
+
+  it('requires a complete, unique receipt in the same round; legacy records retain their history', () => {
+    expect(project(result)).toEqual([call.message, result.message]);
+    for (const invalid of [
+      [],
+      ['other'],
+      [result.uuid, 'other'],
+      [result.uuid, result.uuid],
+    ]) {
+      expect(project(held, receipt(...invalid))).toEqual([call.message]);
+    }
+    expect(project(held, call, receipt(result.uuid))).toEqual([
+      call.message,
+      call.message,
+    ]);
+    expect(project(held, receipt(result.uuid))).toEqual([
+      call.message,
+      result.message,
+    ]);
+  });
+
+  it('restores the same synthetic closure a live host used for an explicit block', () => {
+    const denied: ChatRecord = {
+      ...receipt(),
+      systemPayload: {
+        decision: { withheld: 'hook blocked delivery' },
+        recordUuids: [result.uuid],
+      },
+    };
+    expect(project(held, denied, receipt(result.uuid))).toEqual([
+      call.message,
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'finish',
+              name: 'update_goal',
+              response: { error: 'hook blocked delivery' },
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('keeps queued user input in order whether or not its preceding result was admitted', () => {
+    const input: ChatRecord = {
+      ...call,
+      type: 'user',
+      uuid: 'input',
+      subtype: 'mid_turn_user_message',
+      message: { role: 'user', parts: [{ text: 'user follow-up' }] },
+    };
+    expect(project(held, input)).toEqual([call.message, input.message]);
+    expect(project(held, input, receipt(held.uuid))).toEqual([
+      call.message,
+      {
+        role: 'user',
+        parts: [...held.message!.parts!, ...input.message!.parts!],
+      },
+    ]);
+  });
+});
+
 describe('Goal turn end history metadata', () => {
   it('keeps the boundary outside model history and across a later user prompt', () => {
     const messages = records();

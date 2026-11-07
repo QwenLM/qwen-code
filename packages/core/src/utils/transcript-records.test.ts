@@ -496,6 +496,7 @@ describe('validateTranscriptRecord', () => {
     goal_state: true,
     goal_runtime: true,
     goal_turn_end: true,
+    tool_result_admission: true,
     code_mode_tool_result: true,
     realtime_message: true,
     turn_result: true,

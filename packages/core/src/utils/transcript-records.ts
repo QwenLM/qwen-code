@@ -152,6 +152,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'goal_state',
   'goal_runtime',
   'goal_turn_end',
+  'tool_result_admission',
   'code_mode_tool_result',
   'turn_result',
   'turn_attempt',

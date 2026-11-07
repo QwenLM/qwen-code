@@ -46,6 +46,13 @@ import {
 import { Storage } from '../config/storage.js';
 import type { Config } from '../config/config.js';
 import { CompressionStatus } from '../core/turn.js';
+import {
+  LlmChat,
+  ORPHAN_TOOL_USE_REPAIR_REASON,
+  repairOrphanedToolUseTurns,
+} from '../core/llm-chat.js';
+import { settleToolResultHistory } from './tool-result-history.js';
+import * as jsonl from '../utils/jsonl-utils.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
 import {
   isApiHistoryDirectoryContext,
@@ -846,6 +853,107 @@ describe('SessionTranscriptReader', () => {
     await assertRestore();
   });
 
+  it.each([
+    { rejectWrite: false, intervening: false },
+    { rejectWrite: true, intervening: false },
+    { rejectWrite: false, intervening: true },
+  ])(
+    'keeps late replacement consistent with real persisted admission, reject=$rejectWrite intervening=$intervening',
+    async ({ rejectWrite, intervening }) => {
+      const config = {
+        storage: new Storage(workspaceDir),
+        getSessionId: () => sessionId,
+        getProjectRoot: () => workspaceDir,
+        getCliVersion: () => 'test',
+        getModel: () => 'test',
+        getAuthType: () => undefined,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getResumedSessionData: () => undefined,
+      } as unknown as Config;
+      const recorder = new ChatRecordingService(config, undefined, false);
+      const prompt = userText('read');
+      const call = content('model', fnCall('read_file', {}, 'late'));
+      recorder.recordUserMessage(prompt.parts!);
+      recorder.recordAssistantTurn({ model: 'test', message: call.parts! });
+      const chat = new LlmChat(config, {}, [
+        prompt,
+        call,
+        content(
+          'user',
+          fnResponse(
+            'read_file',
+            { error: ORPHAN_TOOL_USE_REPAIR_REASON },
+            'late',
+          ),
+        ),
+      ]);
+      if (intervening) {
+        const laterModel = modelText('continued with the placeholder');
+        chat.addHistory(laterModel);
+        recorder.recordAssistantTurn({
+          model: 'test',
+          message: laterModel.parts!,
+        });
+      }
+      await recorder.flush();
+      const output = [
+        fnResponse('read_file', { output: 'PRIVATE_LATE' }, 'late'),
+        { text: 'PRIVATE_COMPANION' },
+      ];
+      let restoreWrite: (() => void) | undefined;
+      const prepare = vi.fn(async () => {
+        recorder.recordToolResult(output);
+        await recorder.flush();
+        if (rejectWrite) {
+          const writeSpy = vi
+            .spyOn(jsonl, 'writeLine')
+            .mockRejectedValueOnce(new Error('receipt write failed'));
+          restoreWrite = () => writeSpy.mockRestore();
+        }
+        const settled = await settleToolResultHistory(
+          recorder,
+          { role: 'user', parts: output },
+          output,
+        );
+        return settled.parts ?? [];
+      });
+      const replacing = chat.replaceSynthesizedToolResponseAsync(
+        'late',
+        prepare,
+      );
+      let replaced: boolean | undefined;
+      try {
+        if (rejectWrite)
+          await expect(replacing).rejects.toThrow('receipt write failed');
+        else replaced = await replacing;
+      } finally {
+        restoreWrite?.();
+      }
+      const loaded = await svc().loadSession(sessionId);
+      const cold = buildSessionHistoryFromConversation(loaded!.conversation);
+      repairOrphanedToolUseTurns(cold.apiHistory);
+      chat.repairOrphanedToolUseTurns();
+      if (rejectWrite) {
+        expect(JSON.stringify(chat.getHistory())).not.toContain('PRIVATE_');
+        expect(JSON.stringify(cold)).not.toContain('PRIVATE_');
+      } else {
+        expect(JSON.stringify(cold.apiHistory)).toBe(
+          JSON.stringify(chat.getHistory()),
+        );
+        expect(replaced).toBe(!intervening);
+        if (intervening) {
+          expect(prepare).not.toHaveBeenCalled();
+          expect(
+            loaded!.conversation.messages.some(
+              (record) => record.type === 'tool_result',
+            ),
+          ).toBe(false);
+          expect(JSON.stringify(cold)).not.toContain('PRIVATE_');
+        } else expect(JSON.stringify(cold)).toContain('PRIVATE_COMPANION');
+      }
+    },
+  );
+
   it('round-trips a recorded Goal turn end through selective restore, fork, and rewind', async () => {
     const config = {
       storage: new Storage(workspaceDir),
@@ -866,11 +974,14 @@ describe('SessionTranscriptReader', () => {
         goalContext,
         message: [fnCall('update_goal', undefined, id)],
       });
-      recorder.recordToolResult(
-        [fnResponse('update_goal', { readyForVerification: true }, id)],
-        undefined,
-        { goalContext, provenance: 'goal_runtime' },
-      );
+      const parts = [
+        fnResponse('update_goal', { readyForVerification: true }, id),
+      ];
+      recorder.recordToolResult(parts, undefined, {
+        goalContext,
+        provenance: 'goal_runtime',
+      });
+      await recorder.recordToolResultAdmission(parts);
       await recorder.recordGoalTurnEnd(id, goalContext);
     };
     await goalTurn('complete the Goal', 'turn', 'finish');

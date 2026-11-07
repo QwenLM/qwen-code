@@ -186,12 +186,15 @@ describe('Code Mode Goal evidence', () => {
           { budgetBytes: 256_000 },
         ).evidence.find((entry) => entry.uuid === outer.uuid)?.proofKind,
       ).toBe('execution_output');
-      const history = buildApiHistoryFromConversation({ messages: records });
-      expect(
-        history
+      const modelResultIds = (messages: typeof records) =>
+        buildApiHistoryFromConversation({ messages })
           .flatMap((content) => content.parts ?? [])
           .filter((part) => part.functionResponse)
-          .map((part) => part.functionResponse?.id),
+          .map((part) => part.functionResponse?.id);
+      expect(modelResultIds(records)).toEqual([]);
+      await recorder.recordToolResultAdmission(response.responseParts);
+      expect(
+        modelResultIds(await recorder.readActiveTranscriptChain()),
       ).toEqual([request.callId]);
     },
     15_000,

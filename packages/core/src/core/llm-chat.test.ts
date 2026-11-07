@@ -730,6 +730,438 @@ describe('LlmChat', async () => {
     });
   });
 
+  it('does not expose tool output when durable admission fails', async () => {
+    const failure = new Error('admission write failed');
+    const target = newChat({
+      recorder: {
+        recordToolResultAdmission: vi.fn().mockRejectedValue(failure),
+        recordAssistantTurn: vi.fn(),
+      },
+    });
+    const parts: Part[] = [
+      {
+        functionResponse: {
+          id: 'read',
+          name: 'read_file',
+          response: { output: 'secret' },
+        },
+      },
+    ];
+    await expect(
+      target.sendMessageStream(
+        'test-model',
+        { message: parts },
+        'failed-admission',
+        undefined,
+        { toolResultParts: parts },
+      ),
+    ).rejects.toBe(failure);
+    expect(target.getHistory()).toEqual([]);
+    expect(streamMock()).not.toHaveBeenCalled();
+  });
+
+  it('keeps an earlier withholding decision in a later model send', async () => {
+    const parts: Part[] = [
+      {
+        functionResponse: {
+          id: 'read',
+          name: 'read_file',
+          response: { output: 'secret' },
+        },
+      },
+      { text: 'secret companion' },
+    ];
+    const target = newChat({
+      recorder: {
+        recordToolResultAdmission: vi
+          .fn()
+          .mockResolvedValue([
+            { parts, decision: { withheld: 'original block' } },
+          ]),
+        recordAssistantTurn: vi.fn(),
+      },
+    });
+    target.addHistory({
+      role: 'model',
+      parts: [{ functionCall: { id: 'read', name: 'read_file', args: {} } }],
+    });
+    mockStream(streamOf(stopResponse([{ text: 'done' }])));
+    await drain(
+      await target.sendMessageStream(
+        'test-model',
+        { message: [...parts, { text: 'independent input' }] },
+        'earlier-withholding',
+        undefined,
+        { toolResultParts: parts },
+      ),
+    );
+    const request = JSON.stringify(requestAt(0).contents);
+    expect(request).not.toContain('secret');
+    expect(request).toContain('original block');
+    expect(request).toContain('independent input');
+  });
+
+  it.each(['compression', 'history setup'])(
+    'keeps confirmed tool admission when %s fails',
+    async (stage) => {
+      const parts: Part[] = [
+        {
+          functionResponse: {
+            id: 'read',
+            name: 'read_file',
+            response: { output: 'confirmed result' },
+          },
+        },
+      ];
+      const target = newChat({
+        recorder: {
+          recordToolResultAdmission: vi
+            .fn()
+            .mockResolvedValueOnce([{ parts, decision: 'admitted' }])
+            .mockResolvedValue([]),
+          recordAssistantTurn: vi.fn(),
+        },
+      });
+      target.addHistory({
+        role: 'model',
+        parts: [{ functionCall: { id: 'read', name: 'read_file', args: {} } }],
+      });
+      const failure = new Error('setup failed after admission');
+      if (stage === 'compression') {
+        vi.spyOn(
+          ChatCompressionService.prototype,
+          'compress',
+        ).mockRejectedValueOnce(failure);
+      } else {
+        vi.spyOn(
+          target as unknown as { getRequestHistory: () => Content[] },
+          'getRequestHistory',
+        ).mockImplementationOnce(() => {
+          throw failure;
+        });
+      }
+      const message = [...parts, { text: 'independent input' }];
+      await expect(
+        target.sendMessageStream(
+          'test-model',
+          { message },
+          'confirmed-admission',
+          undefined,
+          { toolResultParts: parts },
+        ),
+      ).rejects.toBe(failure);
+      expect(target.getHistory().at(-1)?.parts).toEqual([...message]);
+      expect(
+        getToolOutputProvenance(target['history'].at(-1)!.parts![0]),
+      ).toMatchObject({ callId: 'read', toolName: 'read_file' });
+      expect(target.getUserContentPushCount()).toBe(1);
+      expect(streamMock()).not.toHaveBeenCalled();
+      mockStream(textStream('next response'));
+      await sendDrain('Next.', 'next-after-setup-error', target);
+      const responses = (requestAt(0).contents as Content[])
+        .flatMap((content) => content.parts ?? [])
+        .filter((part) => part.functionResponse?.id === 'read');
+      expect(responses).toHaveLength(1);
+      expect(getToolOutputProvenance(responses[0])).toMatchObject({
+        callId: 'read',
+      });
+    },
+  );
+
+  it.each([
+    { stage: 'compression', outputSize: 20_000 },
+    { stage: 'history setup', outputSize: 20_000 },
+    { stage: 'success', outputSize: 20_000 },
+    { stage: 'success', outputSize: 128 },
+  ])(
+    'keeps the admitted send-guard output when $stage handles $outputSize characters',
+    async ({ stage, outputSize }) => {
+      mockConfig.getToolOutputBatchBudget = () => 1024;
+      const companion = { text: 'independent input' };
+      const independent = { text: companion.text };
+      const parts = attachToolOutputProvenance(
+        [
+          fnResponse(
+            'shell',
+            { output: 'x'.repeat(outputSize) },
+            'retained-cut',
+          ),
+          companion,
+        ],
+        {
+          callId: 'retained-cut',
+          toolName: 'shell',
+          promptId: 'guard-retention',
+          toolType: 'native',
+        },
+      );
+      const admission = vi
+        .fn()
+        .mockResolvedValue([{ parts, decision: 'admitted' }]);
+      const target = newChat({
+        recorder: {
+          recordToolResultAdmission: admission,
+          recordAssistantTurn: vi.fn(),
+        },
+      });
+      target.addHistory({
+        role: 'model',
+        parts: [fnCall('shell', {}, 'retained-cut')],
+      });
+      const failure = new Error(`failure during ${stage}`);
+      const compress = vi.spyOn(target, 'tryCompress').mockResolvedValue({
+        compressionStatus: CompressionStatus.NOOP,
+        originalTokenCount: 0,
+        newTokenCount: 0,
+      });
+      if (stage === 'compression') compress.mockRejectedValueOnce(failure);
+      if (stage === 'history setup') {
+        vi.spyOn(
+          target as unknown as { getRequestHistory: () => Content[] },
+          'getRequestHistory',
+        ).mockImplementationOnce(() => {
+          throw failure;
+        });
+      }
+      mockStream(textStream('done'));
+      const sending = target.sendMessageStream(
+        'test-model',
+        { message: [...parts, independent] },
+        'guard-retention',
+        undefined,
+        { toolResultParts: parts },
+      );
+      if (stage === 'success') await drain(await sending);
+      else await expect(sending).rejects.toBe(failure);
+
+      const guarded = compress.mock.calls[0][3]!.pendingUserMessage!;
+      const guardedResult = guarded.parts!.find(
+        (part) => part.functionResponse,
+      )!;
+      const guardedOutput = guardedResult.functionResponse!.response!['output'];
+      expect(typeof guardedOutput).toBe('string');
+      if (outputSize > 1024) {
+        expect((guardedOutput as string).length).toBeLessThanOrEqual(1024);
+        expect(getToolOutputProvenance(guardedResult)).toMatchObject({
+          callId: 'retained-cut',
+          toolName: 'shell',
+          truncated: true,
+          budgetSource: 'send_guard',
+        });
+      } else {
+        expect(guardedOutput).toBe('x'.repeat(outputSize));
+        expect(getToolOutputProvenance(guardedResult)?.truncated ?? false).toBe(
+          false,
+        );
+      }
+      const kept = target['history'].find((entry) =>
+        entry.parts?.some(
+          (part) => part.functionResponse?.id === 'retained-cut',
+        ),
+      )!;
+      expect(kept.parts).toEqual(guarded.parts);
+      expect(kept.parts).toContain(independent);
+      expect(kept.parts).toContain(parts[1]);
+      expect(getToolOutputProvenance(kept.parts![0])).toEqual(
+        getToolOutputProvenance(guardedResult),
+      );
+      expect(parts[0].functionResponse!.response!['output']).toBe(
+        'x'.repeat(outputSize),
+      );
+      expect(admission).toHaveBeenCalledOnce();
+      expect(target.getUserContentPushCount()).toBe(1);
+      expectStreamCalls(stage === 'success' ? 1 : 0);
+      if (stage === 'success') {
+        const dispatched = (requestAt(0).contents as Content[])
+          .flatMap((entry) => entry.parts ?? [])
+          .find((part) => part.functionResponse?.id === 'retained-cut')!;
+        expect(dispatched.functionResponse!.response!['output']).toBe(
+          guardedOutput,
+        );
+      }
+    },
+  );
+
+  it('restores a plan-exit notice separately from admitted guard output on pre-push failure', async () => {
+    mockConfig.getToolOutputBatchBudget = () => 1024;
+    const parts = [
+      fnResponse('shell', { output: 'x'.repeat(20_000) }, 'notice-cut'),
+    ];
+    const target = newChat({
+      recorder: {
+        recordToolResultAdmission: vi
+          .fn()
+          .mockResolvedValue([{ parts, decision: 'admitted' }]),
+        recordAssistantTurn: vi.fn(),
+      },
+    });
+    target.addHistory({
+      role: 'model',
+      parts: [fnCall('shell', {}, 'notice-cut')],
+    });
+    target.enableManualPlanExitNotices();
+    let pendingNotice = true;
+    let claimedNotice = false;
+    let failOnce = true;
+    const failure = new Error('catalog setup failed after claiming notice');
+    vi.mocked(mockConfig.takePendingManualPlanExitNotice).mockImplementation(
+      () => {
+        if (!pendingNotice) return undefined;
+        pendingNotice = false;
+        claimedNotice = true;
+        return { version: 19, currentMode: ApprovalMode.DEFAULT };
+      },
+    );
+    vi.mocked(mockConfig.restorePendingManualPlanExitNotice).mockImplementation(
+      () => {
+        pendingNotice = true;
+        claimedNotice = false;
+      },
+    );
+    mockConfig.getAutoMemoryContext = () => {
+      if (claimedNotice && failOnce) {
+        failOnce = false;
+        throw failure;
+      }
+      return '';
+    };
+    vi.spyOn(target, 'tryCompress').mockResolvedValue({
+      compressionStatus: CompressionStatus.NOOP,
+      originalTokenCount: 0,
+      newTokenCount: 0,
+    });
+    await expect(
+      target.sendMessageStream(
+        'test-model',
+        { message: parts },
+        'notice-cut',
+        undefined,
+        { toolResultParts: parts },
+      ),
+    ).rejects.toBe(failure);
+    const retained = target['history'].at(-1)!;
+    expect(
+      (retained.parts![0].functionResponse!.response!['output'] as string)
+        .length,
+    ).toBeLessThanOrEqual(1024);
+    const noticeText = 'changed outside the approved exit_plan_mode flow';
+    expect(JSON.stringify(retained)).not.toContain(noticeText);
+    expect(
+      mockConfig.restorePendingManualPlanExitNotice,
+    ).toHaveBeenCalledOnce();
+    expect(mockConfig.restorePendingManualPlanExitNotice).toHaveBeenCalledWith(
+      19,
+    );
+    mockStream(textStream('done'));
+    await sendDrain('next', 'after-notice-cut', target);
+    expect(
+      (requestAt(0).contents as Content[])
+        .flatMap((entry) => entry.parts ?? [])
+        .filter((part) => part.text?.includes(noticeText)),
+    ).toHaveLength(1);
+    expect(
+      target
+        .getHistory()
+        .flatMap((entry) => entry.parts ?? [])
+        .filter((part) => part.text?.includes(noticeText)),
+    ).toHaveLength(1);
+    expect(
+      mockConfig.restorePendingManualPlanExitNotice,
+    ).toHaveBeenCalledOnce();
+  });
+
+  it('preserves an ordinary prompt cancelled before send for interrupted-turn recovery', async () => {
+    const reason = new Error('user cancelled');
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      {
+        message: 'Keep this question for later.',
+        config: { abortSignal: AbortSignal.abort(reason) },
+      },
+      'cancelled-prompt',
+    );
+    await expect(drain(stream)).rejects.toBe(reason);
+    expect(chat.getHistory()).toEqual([
+      { role: 'user', parts: [{ text: 'Keep this question for later.' }] },
+    ]);
+    expect(detectTurnInterruption(chat.getHistory())).toMatchObject({
+      kind: 'interrupted_prompt',
+    });
+    expect(streamMock()).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'withholds cancelled tool-owned parts while preserving independent input: mixed=%s',
+    async (mixed) => {
+      const recordToolResultAdmission = vi.fn();
+      const target = newChat({
+        recorder: { recordToolResultAdmission, recordAssistantTurn: vi.fn() },
+      });
+      const toolResultParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'read',
+            name: 'read_file',
+            response: { output: 'private' },
+          },
+        },
+        { text: 'same text' },
+        { inlineData: { mimeType: 'image/png', data: 'private-image' } },
+      ];
+      const userPart = { text: 'same text' };
+      const message = [...toolResultParts, ...(mixed ? [userPart] : [])];
+      const reason = new Error('tool hook cancelled');
+      const cancelled = await target.sendMessageStream(
+        'test-model',
+        { message, config: { abortSignal: AbortSignal.abort(reason) } },
+        'first',
+        undefined,
+        { toolResultParts },
+      );
+      await expect(drain(cancelled)).rejects.toBe(reason);
+      expect(recordToolResultAdmission).not.toHaveBeenCalled();
+      expect(target.getHistory()).toEqual(
+        mixed ? [{ role: 'user', parts: [userPart] }] : [],
+      );
+      if (mixed) expect(target['history'][0]?.parts?.[0]).toBe(userPart);
+      expect(message).toHaveLength(mixed ? 4 : 3);
+      expect(streamMock()).not.toHaveBeenCalled();
+      mockStream(streamOf(stopResponse([{ text: 'done' }])));
+      await sendDrain('Next.', 'next', target);
+      expect(JSON.stringify(requestAt(0).contents)).not.toContain('private');
+    },
+  );
+
+  it('checks tool cancellation after waiting for the prior send lock', async () => {
+    const toolResultParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'read',
+          name: 'read_file',
+          response: { output: 'private' },
+        },
+      },
+    ];
+    let unlock!: () => void;
+    chat['sendPromise'] = new Promise<void>((resolve) => {
+      unlock = resolve;
+    });
+    const controller = new AbortController();
+    const pending = chat.sendMessageStream(
+      'test-model',
+      { message: toolResultParts, config: { abortSignal: controller.signal } },
+      'waiting',
+      undefined,
+      { toolResultParts },
+    );
+    controller.abort();
+    unlock();
+    await expect(drain(await pending)).rejects.toBe(controller.signal.reason);
+    expect(chat.getHistory()).toEqual([]);
+    mockStream(streamOf(stopResponse([{ text: 'done' }])));
+    await sendDrain('Next.', 'next');
+  });
+
   it('resyncs a tool_search response committed through the streaming send path', async () => {
     const syncReviewedDeclarations = vi.fn();
     vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
@@ -1096,6 +1528,46 @@ describe('LlmChat', async () => {
       await expect(drain(response)).rejects.toThrow();
       expect(streamMock()).toHaveBeenCalledOnce();
       expect(mode.prepare(context, null).reminder).toBeUndefined();
+    });
+
+    it('restores prepared history when cancellation arrives during route resolution', async () => {
+      const routeConfig = {
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+      };
+      const controller = new AbortController();
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        routeConfig,
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockImplementation(async () => {
+          controller.abort();
+          return {
+            model: 'test-model',
+            contentGenerator: mockContentGenerator,
+            contentGeneratorConfig: routeConfig,
+          };
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const history = [userText('saved interrupted request')];
+      const saved: LlmPreparedRequest = {
+        request: { model: 'test-model', contents: history, config: {} },
+        history,
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: llmPreparedProviderPin(routeConfig),
+        promptTokensForClamp: 15,
+      };
+      const stream = await chat.sendPreparedMessageStream(
+        saved,
+        'replay',
+        controller.signal,
+      );
+      await expect(drain(stream)).rejects.toBe(controller.signal.reason);
+      expect(chat.getHistory()).toEqual(history);
+      expect(streamMock()).not.toHaveBeenCalled();
+      mockStream(streamOf(stopResponse([{ text: 'done' }])));
+      await sendDrain('Next.', 'next');
     });
 
     it('reissues saved normalized history without another push, compaction or clamp', async () => {
@@ -12590,6 +13062,233 @@ describe('LlmChat', async () => {
   });
 
   describe('replaceSynthesizedToolResponse / getSynthesizedRepairCallIds', () => {
+    const repairHistory = () => [
+      content('model', fnCall('read_file', {}, 'call-1')),
+      content(
+        'user',
+        fnResponse(
+          'read_file',
+          { error: ORPHAN_TOOL_USE_REPAIR_REASON },
+          'call-1',
+        ),
+      ),
+    ];
+    it('refuses an async replacement before preparing when the first answer is genuine', async () => {
+      chat.setHistory([
+        content(
+          'user',
+          fnResponse('read_file', { output: 'genuine' }, 'call-1'),
+        ),
+        ...repairHistory(),
+      ]);
+      const prepare = vi.fn(async () => [
+        fnResponse('read_file', { output: 'late' }, 'call-1'),
+      ]);
+      expect(chat.getSynthesizedRepairCallIds()).toContain('call-1');
+      expect(
+        await chat.replaceSynthesizedToolResponseAsync('call-1', prepare),
+      ).toBe(false);
+      expect(prepare).not.toHaveBeenCalled();
+    });
+    it('protects a reserved placeholder and queues concurrent sends', async () => {
+      chat.setHistory(repairHistory());
+      const before = chat.getHistory();
+      let confirm!: (parts: Part[]) => void;
+      const prepare = vi.fn(
+        () =>
+          new Promise<Part[]>((resolve) => {
+            confirm = resolve;
+          }),
+      );
+      const replacing = chat.replaceSynthesizedToolResponseAsync(
+        'call-1',
+        prepare,
+      );
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
+      const mutators = [
+        () => chat.clearHistory(),
+        () => chat.addHistory(userText('new input')),
+        () => chat.setHistory([]),
+        () => chat.truncateHistory(0),
+        () => chat.stripThoughtsFromHistory(),
+        () => chat.stripOrphanedUserEntriesFromHistory(),
+        () => chat.repairOrphanedToolUseTurns(),
+        () => chat.redactApprovedPlanFromHistory('call-1', 'redacted'),
+        () => chat.compressFast(),
+        () => chat.replaceSynthesizedToolResponse('call-1', []),
+      ];
+      for (const mutate of mutators)
+        expect(mutate).toThrow('replacement is pending');
+      await expect(chat.tryCompress('reserved')).rejects.toThrow(
+        'replacement is pending',
+      );
+      expect(chat.getHistory()).toEqual(before);
+      streamMock().mockImplementation(async () => textStream('done'));
+      const first = sendDrain('next one', 'queued-1');
+      const second = sendDrain('next two', 'queued-2');
+      await Promise.resolve();
+      expect(streamMock()).not.toHaveBeenCalled();
+      confirm([fnResponse('read_file', { output: 'confirmed' }, 'call-1')]);
+      expect(await replacing).toBe(true);
+      await Promise.all([first, second]);
+      expect(streamMock()).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify(requestAt(0).contents)).toContain('confirmed');
+      expect(JSON.stringify(requestAt(0).contents)).not.toContain('next two');
+      expect(JSON.stringify(requestAt(1).contents)).toContain('next two');
+    });
+    it('releases a failed reservation without exposing output', async () => {
+      chat.setHistory(repairHistory());
+      const before = chat.getHistory();
+      const failure = new Error('write failed');
+      await expect(
+        chat.replaceSynthesizedToolResponseAsync('call-1', async () => {
+          throw failure;
+        }),
+      ).rejects.toBe(failure);
+      expect(chat.getHistory()).toEqual(before);
+      expect(
+        await chat.replaceSynthesizedToolResponseAsync('call-1', async () => [
+          fnResponse('read_file', { output: 'confirmed' }, 'call-1'),
+        ]),
+      ).toBe(true);
+    });
+    it('waits for an in-flight compression checkpoint before reserving', async () => {
+      chat.setHistory(repairHistory());
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockResolvedValue({
+        newHistory: repairHistory(),
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 50,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      let finish!: () => void;
+      const checkpoint = vi
+        .spyOn(
+          chat as unknown as { recordCompression: () => Promise<void> },
+          'recordCompression',
+        )
+        .mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        );
+      const compression = chat.tryCompress('checkpoint');
+      await vi.waitFor(() => expect(checkpoint).toHaveBeenCalledOnce());
+      const prepare = vi.fn(async () => [
+        fnResponse('read_file', { output: 'confirmed' }, 'call-1'),
+      ]);
+      const replacing = chat.replaceSynthesizedToolResponseAsync(
+        'call-1',
+        prepare,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(prepare).not.toHaveBeenCalled();
+      finish();
+      await compression;
+      expect(await replacing).toBe(true);
+    });
+
+    it('serializes competing replacements and resumes sending after a rejected preparation', async () => {
+      chat.setHistory(repairHistory());
+      let reject!: (error: Error) => void;
+      const firstPrepare = vi.fn(
+        () =>
+          new Promise<Part[]>((_resolve, fail) => {
+            reject = fail;
+          }),
+      );
+      const first = chat.replaceSynthesizedToolResponseAsync(
+        'call-1',
+        firstPrepare,
+      );
+      await vi.waitFor(() => expect(firstPrepare).toHaveBeenCalledOnce());
+      const settled = [
+        fnResponse('read_file', { output: 'confirmed' }, 'call-1'),
+      ];
+      const secondPrepare = vi.fn(async () => settled);
+      const second = chat.replaceSynthesizedToolResponseAsync(
+        'call-1',
+        secondPrepare,
+      );
+      const refusedPrepare = vi.fn(async () => settled);
+      const third = chat.replaceSynthesizedToolResponseAsync(
+        'call-1',
+        refusedPrepare,
+      );
+      streamMock().mockImplementation(async () => textStream('done'));
+      const sending = sendDrain('after failure', 'after-reject');
+      const failure = new Error('receipt failed');
+      const failed = first.then(
+        () => {
+          throw new Error('Expected rejected preparation');
+        },
+        (error: unknown) => {
+          expect(error).toBe(failure);
+        },
+      );
+      reject(failure);
+      await failed;
+      expect(await second).toBe(true);
+      expect(await third).toBe(false);
+      expect(refusedPrepare).not.toHaveBeenCalled();
+      await sending;
+      expect(JSON.stringify(requestAt(0).contents)).toContain('confirmed');
+    });
+
+    it('waits for an active stream and refuses a slot its model response overtook', async () => {
+      chat.setHistory(repairHistory());
+      let finish!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      mockStream(
+        (async function* () {
+          await blocked;
+          yield textChunk('done', 'STOP');
+        })(),
+      );
+      const sending = sendDrain('in flight', 'active-send');
+      await vi.waitFor(() => expect(streamMock()).toHaveBeenCalledOnce());
+      const prepare = vi.fn(async () => [
+        fnResponse('read_file', { output: 'confirmed' }, 'call-1'),
+      ]);
+      const replacing = chat.replaceSynthesizedToolResponseAsync(
+        'call-1',
+        prepare,
+      );
+      await Promise.resolve();
+      expect(prepare).not.toHaveBeenCalled();
+      finish();
+      await sending;
+      expect(await replacing).toBe(false);
+      expect(prepare).not.toHaveBeenCalled();
+    });
+
+    it.each(['before-user', 'after-user'] as const)(
+      'matches the recovery boundary for a degraded model %s',
+      async (position) => {
+        const history = repairHistory();
+        history.splice(
+          position === 'before-user' ? 1 : 2,
+          0,
+          modelText('(request timeout)'),
+        );
+        chat.setHistory(history);
+        const prepare = vi.fn(async () => [
+          fnResponse('read_file', { output: 'confirmed' }, 'call-1'),
+        ]);
+        expect(
+          await chat.replaceSynthesizedToolResponseAsync('call-1', prepare),
+        ).toBe(position === 'before-user');
+        expect(prepare).toHaveBeenCalledTimes(
+          position === 'before-user' ? 1 : 0,
+        );
+      },
+    );
+
     it('replaces the placeholder in place, preserving its slot and neighbours', () => {
       const realParts: Part[] = [
         fnResponse('read_file', { output: 'real contents' }, 'call-1'),
