@@ -321,6 +321,8 @@ back through pages of history.
 If the terminal is blurred for **5+ minutes** and gets focused again, a recap
 is generated and shown automatically (only when no model response is in
 progress; otherwise it waits for the current turn to finish and then fires).
+In the Web Shell the trigger is a tab going to the background instead, and
+a return that lands mid-turn is dropped rather than deferred.
 Unlike the manual command, the auto-trigger is fully silent on failure: if
 generation errors or there is nothing to summarize, no message is added to
 the history. Controlled by the `general.showSessionRecap` setting
