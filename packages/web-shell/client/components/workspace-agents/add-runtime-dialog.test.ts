@@ -4,11 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  connectExistingWith,
   findReplacementRuntime,
   joinCommands,
   joinCoordinatorCommand,
+  joinCoordinatorWith,
+  joinOutcome,
   parseJoinLink,
 } from './add-runtime-dialog';
 import { runtimePrograms } from './agents-view-logic';
@@ -132,4 +135,150 @@ describe('runtimePrograms', () => {
     expect(runtimePrograms({ programs: [] })).toEqual([]);
     expect(runtimePrograms({ programs: ['other'] })).toEqual([]);
   });
+});
+
+describe('joinOutcome', () => {
+  it('reports why a join was not saved, and nothing for a saved one', () => {
+    expect(
+      joinOutcome({ connected: true, saved: false, saveError: 'disk full' }),
+    ).toEqual({ saveError: 'disk full' });
+    expect(joinOutcome({ connected: true, saved: false })).toEqual({
+      saveError: '',
+    });
+    expect(joinOutcome({ connected: true, saved: true })).toEqual({});
+    // An older daemon sends no `saved` field; it always claimed the save.
+    expect(joinOutcome({ connected: true })).toEqual({});
+    expect(joinOutcome(undefined)).toEqual({});
+  });
+});
+
+describe('connectExistingWith', () => {
+  const input = {
+    remoteUrl: 'https://worker.example',
+    remoteToken: 'remote-token',
+    remoteCwd: '/remote',
+    serverUrl: 'https://hub.example:4170',
+    allowHttp: false,
+  };
+
+  it('reads the answer of a connect that went through', async () => {
+    const connect = vi.fn(async () => ({
+      connected: true,
+      saved: false,
+      saveError: 'disk full',
+      workspaceCwd: '/remote',
+    }));
+    const run = async (action: () => Promise<unknown>) => {
+      await action();
+      return true;
+    };
+
+    expect(await connectExistingWith(run, connect)(input)).toEqual({
+      saveError: 'disk full',
+      workspaceCwd: '/remote',
+    });
+    expect(connect).toHaveBeenCalledWith(input);
+  });
+
+  it.each([
+    ['without a workspace', { connected: true }],
+    ['with one that is not a path', { connected: true, workspaceCwd: 1 }],
+    ['with no body', null],
+  ])('reads an answer %s as from no workspace', async (_label, answer) => {
+    const run = async (action: () => Promise<unknown>) => {
+      await action();
+      return true;
+    };
+
+    expect(
+      await connectExistingWith(
+        run,
+        vi.fn(async () => answer),
+      )(input),
+    ).toEqual({});
+  });
+
+  it('passes on a connect that failed, whatever it answered', async () => {
+    const connect = vi.fn(async () => ({ connected: true, saved: false }));
+    const run = async (action: () => Promise<unknown>) => {
+      await action();
+      return false;
+    };
+
+    expect(await connectExistingWith(run, connect)(input)).toBe(false);
+  });
+
+  it('keeps the page busy while a remote connect runs', async () => {
+    const busy: boolean[] = [];
+    let busyDuring: boolean[] = [];
+    const connect = vi.fn(async () => {
+      busyDuring = [...busy];
+      return { connected: true, saved: false, saveError: 'disk full' };
+    });
+
+    const outcome = await connectExistingWith(
+      async (action) => {
+        await action();
+        return true;
+      },
+      connect,
+      (value) => busy.push(value),
+    )(input);
+
+    expect(outcome).toEqual({ saveError: 'disk full' });
+    expect(busyDuring).toEqual([true]);
+    expect(busy).toEqual([true, false]);
+  });
+});
+
+describe('joinCoordinatorWith', () => {
+  it('reads the answer of a join', async () => {
+    const join = vi.fn(async () => ({
+      connected: true,
+      saved: false,
+      saveError: 'disk full',
+    }));
+    const input = {
+      serverUrl: 'https://hub.example:4170',
+      workspaceId: 'ws_1',
+      enrollmentToken: 'join-token',
+      allowHttp: false,
+    };
+
+    expect(await joinCoordinatorWith(join)(input)).toEqual({
+      saveError: 'disk full',
+    });
+    expect(join).toHaveBeenCalledWith(input);
+  });
+
+  it.each([
+    ['settles', async () => ({ connected: true })],
+    [
+      'fails',
+      async () => {
+        throw new Error('Invalid or expired Agent Host enrollment token.');
+      },
+    ],
+  ] as const)(
+    'keeps the page busy while a join runs, until it %s',
+    async (_label, answer) => {
+      // Leaving the page meanwhile would unmount the dialog that sent it.
+      const busy: boolean[] = [];
+      let busyDuring: boolean[] = [];
+      const join = vi.fn(async () => {
+        busyDuring = [...busy];
+        return answer();
+      });
+
+      await joinCoordinatorWith(join, (value) => busy.push(value))({
+        serverUrl: 'https://hub.example:4170',
+        workspaceId: 'ws_1',
+        enrollmentToken: 'join-token',
+        allowHttp: false,
+      }).catch(() => undefined);
+
+      expect(busyDuring).toEqual([true]);
+      expect(busy).toEqual([true, false]);
+    },
+  );
 });

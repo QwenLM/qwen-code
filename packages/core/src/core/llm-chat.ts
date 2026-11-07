@@ -41,6 +41,7 @@ import {
   type HeartbeatInfo,
 } from '../utils/retry.js';
 import { beginRetryWait } from '../utils/retry-wait.js';
+import { movePromptContextAheadOfUserText } from './prompt-context-order.js';
 import {
   isQuotaExhaustedError,
   formatQuotaExhaustedMessage,
@@ -415,18 +416,24 @@ export function redactApprovedPlansInHistory(
  * Exported for tests; callers should prefer the inline use inside
  * `recordAssistantTurn` invocation below.
  */
-export function redactStructuredOutputArgsForRecording(
-  part: Part,
-): { functionCall: NonNullable<Part['functionCall']> } | null {
+export function redactStructuredOutputArgsForRecording(part: Part): {
+  functionCall: NonNullable<Part['functionCall']>;
+  thoughtSignature?: string;
+} | null {
   if (!part.functionCall) return null;
+  const signed = part.thoughtSignature !== undefined;
   if (part.functionCall.name !== ToolNames.STRUCTURED_OUTPUT) {
-    return { functionCall: part.functionCall };
+    return {
+      functionCall: part.functionCall,
+      ...(signed ? { thoughtSignature: part.thoughtSignature } : {}),
+    };
   }
   return {
     functionCall: {
       ...part.functionCall,
       args: { ...STRUCTURED_OUTPUT_REDACTED_ARGS },
     },
+    ...(signed ? { thoughtSignature: part.thoughtSignature } : {}),
   };
 }
 
@@ -2939,9 +2946,16 @@ export class LlmChat {
       this.unaccountedMemorySnapshots.add(snapshot);
     }
     // Recovery controls are removed after continuation and cannot own a durable snapshot.
-    return snapshot && !retainMemorySnapshot
-      ? appendAutoMemoryContext(request, catalog)
-      : request;
+    const withCatalog =
+      snapshot && !retainMemorySnapshot
+        ? appendAutoMemoryContext(request, catalog)
+        : request;
+    // Every user entry in this request copy is reordered the same way, so an
+    // entry's wire shape does not depend on its position; stored history keeps
+    // the shape the transcript and resume read.
+    return currentUserContent
+      ? movePromptContextAheadOfUserText(withCatalog)
+      : withCatalog;
   }
 
   /**

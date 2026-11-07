@@ -1,12 +1,14 @@
 package com.alibaba.qwen.code.managedagent.contracts.session;
 
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionOptions;
+import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.fasterxml.jackson.databind.JsonNode;
 
 import java.time.Duration;
 import java.util.List;
@@ -32,6 +34,18 @@ public interface SessionAdmissionStore {
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest);
 
+    public default Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionModelConfig modelConfig) {
+        if (modelConfig != null) {
+            throw new UnsupportedOperationException("Session model configuration is unavailable");
+        }
+        return insertSessionCommand(tenantId, actorId, operation, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest);
+    }
+
     /**
      * H4b: creates a child Session under its parent's exact binding,
      * stamping the lineage in the same transaction. The idempotency key
@@ -50,7 +64,7 @@ public interface SessionAdmissionStore {
     public default StoreModels.Admission insertPublicChildSessionCommand(String tenantId,
             String parentSessionId, String idempotencyKey, String requestDigest,
             String title, List<Map<String, Object>> input, String payloadDigest,
-            StoreModels.SessionLineage lineage, com.fasterxml.jackson.databind.JsonNode snapshot) {
+            StoreModels.SessionLineage lineage, JsonNode snapshot) {
         throw new UnsupportedOperationException("Public child Session creation is unavailable");
     }
 

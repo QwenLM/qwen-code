@@ -132,7 +132,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
                     + "connectionTimeZone=" + URLEncoder.encode(connectionZone, StandardCharsets.UTF_8)
                     + "&sessionVariables=" + URLEncoder.encode("time_zone='" + databaseZone + "'", StandardCharsets.UTF_8));
             var fixture = fixture();
-            var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(fixture.jdbc));
+            var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc);
             var writer = fixture.transactions.execute(ignored -> journal.acquireWriter("tenant", fixture.session,
                     "w".repeat(32), new AcquireWriterRequest("workspace", "original", 60_000L)));
             String id = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle("tenant", fixture.session,
@@ -173,7 +173,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
     @Test
     void admissionSerializesAnOrdinaryWriterOnThePlacementFence() throws Exception {
         var fixture = fixture();
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(fixture.jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc);
         try (var pool = Executors.newSingleThreadExecutor()) {
             var entered = new CountDownLatch(1);
             var queued = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.Future<Throwable>>();
@@ -206,7 +206,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
     @Test
     void ordinaryAuthorizationFencesOnlyWithinOneSession() throws Exception {
         var fixture = fixture();
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(fixture.jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc);
         String token = "w".repeat(32);
         String otherTenant = "other-tenant";
         String otherSession = "other-session";
@@ -252,7 +252,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
                     MySqlLockProbe.awaitLockWaits(fixture.jdbc, schema, 1, "the same-Session authorisation");
                     assertThat(sameSession.get()).isNotDone();
                 } catch (Exception error) {
-                    throw new IllegalStateException(error);
+                    throw new IllegalStateException(MySqlLockProbe.describeLockWaits(fixture.jdbc, schema), error);
                 }
             });
             sameSession.get().get(10, TimeUnit.SECONDS);
@@ -293,7 +293,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
     @ValueSource(booleans = {false, true})
     void idleJournalCheckReadsARevisionItsSnapshotCannotSee(boolean throughAdmission) throws Exception {
         var fixture = fixture();
-        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(fixture.jdbc));
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc);
         var journal = fixture.transactions.execute(ignored ->
                 new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
         var txManager = new DataSourceTransactionManager(source);
@@ -330,7 +330,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
     @Test
     void idleJournalCheckFailsClosedOnAJournalShortOfItsHead() throws Exception {
         var fixture = fixture();
-        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(fixture.jdbc));
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc);
         var journal = fixture.transactions.execute(ignored ->
                 new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
         commitPendingTurn(fixture, journal);
@@ -347,7 +347,7 @@ class WorkspaceLifecycleMySqlIT extends WorkspaceLifecycleStoreTest {
     @ValueSource(strings = {"accepted-settled", "other-settled", "accepted-pending"})
     void unadmittedCancellationUsesTheFencedJournalSnapshot(String cut) throws Exception {
         var fixture = fixture();
-        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(fixture.jdbc));
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc);
         fixture.transactions.executeWithoutResult(ignored ->
                 new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
         String turn = fixture.transactions.execute(ignored -> fixture.store.insertTurnCommand("tenant", "SUBMIT_TURN",

@@ -17,7 +17,8 @@
  * `git commit` runs through `ShellToolInvocation.execute()` in a real temp
  * repo, then the guard is asked whether the follow-up amend is allowed. The
  * fake `ShellExecutionService` really runs commands via `spawnSync`, so
- * `getGitHeadSync` / `getGitHead` see genuine HEADs, not stubbed SHAs.
+ * `getGitHeadBeforeCommand` / `getGitHead` see genuine HEADs, not stubbed
+ * SHAs.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -137,6 +138,16 @@ describe.skipIf(process.platform === 'win32')(
       rawGit('config commit.gpgsign false', dir);
       rawCommit('seed.txt', seed, subject, dir);
       return dir;
+    }
+
+    /** An initialized repository with no commit yet (unborn HEAD). */
+    function initUnbornRepo(): void {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+      fs.mkdirSync(repoDir, { recursive: true });
+      rawGit('init -q --initial-branch=main', repoDir);
+      rawGit('config user.email agent@example.com');
+      rawGit('config user.name Agent');
+      rawGit('config commit.gpgsign false');
     }
 
     /** A temp dir that is not a repository; removed in `afterEach`. */
@@ -672,6 +683,56 @@ describe.skipIf(process.platform === 'win32')(
       await vi.waitFor(() => expect(amendVerdict()).toBeNull());
     });
 
+    it('registers a promoted initial commit in a repository with an unborn HEAD (issue #12514-D)', async () => {
+      // An empty repository gives both a failed `rev-parse HEAD` and an
+      // unborn branch the same null SHA. The promoted path used to skip
+      // registration for both, so the next amend of the agent's root commit
+      // was falsely blocked. Capture must distinguish "verified repo with no
+      // HEAD" from "probe failed", and lineage must expect a null predecessor.
+      initUnbornRepo();
+      fs.writeFileSync(path.join(repoDir, 'initial.txt'), 'initial\n');
+
+      await runPromoted(
+        'git add initial.txt && git commit -m "initial feature"',
+      );
+
+      expect(lastLog('%s')).toBe('initial feature');
+      expect(amendVerdict()).toBeNull();
+    });
+
+    it('does not register an existing root commit when the pre-spawn HEAD probe is terminated', async () => {
+      initUnbornRepo();
+      rawCommit('human.txt', 'human\n', 'human root');
+      const humanSha = headSha();
+      const gitPath = execSync('command -v git', { encoding: 'utf-8' }).trim();
+      const probeBinDir = makeScratchDir('qwen-12514-probe-');
+      const probeGitPath = path.join(probeBinDir, 'git');
+      fs.writeFileSync(
+        probeGitPath,
+        '#!/bin/sh\n' +
+          'if [ "$1" = rev-parse ] && [ "$2" = --verify ] && [ "$3" = HEAD ]; then\n' +
+          '  kill -TERM "$$"\n' +
+          'fi\n' +
+          `exec ${JSON.stringify(gitPath)} "$@"\n`,
+      );
+      fs.chmodSync(probeGitPath, 0o755);
+      vi.stubEnv(
+        'PATH',
+        `${probeBinDir}${path.delimiter}${process.env['PATH']}`,
+      );
+      // Load-bearing: this row's closing assertions also hold when the shim is
+      // bypassed (the lineage check then rejects on a non-null predecessor), so
+      // pin that the interception is live before relying on it.
+      expect(() => rawGit('rev-parse --verify HEAD')).toThrow();
+
+      await runPromoted('git commit -m "nothing staged"', true);
+      firePromoteSettle!();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      expect(headSha()).toBe(humanSha);
+      expect(amendVerdict()?.blocked).toBe(true);
+    });
+
     it('does not adopt a commit somebody else landed while a promoted child ran (issue #12514)', async () => {
       // The promoted window is the child's whole lifetime, which #12523's
       // accepted foreground window does not cover: at settle the newest
@@ -943,6 +1004,45 @@ describe.skipIf(process.platform === 'win32')(
       expect(amendSpy).toHaveBeenCalledTimes(1);
       expect(amendSpy.mock.calls[0]![2]).toBe(true);
     });
+
+    it.each([
+      [
+        'control-flow keywords',
+        () => 'if true; then git commit --amend --no-edit; fi',
+      ],
+      [
+        'absolute git path',
+        () =>
+          `${execSync('command -v git', { encoding: 'utf-8' }).trim()} commit --amend --no-edit`,
+      ],
+      ['leading time keyword', () => 'time git commit --amend --no-edit'],
+    ])(
+      'uses the amend delta in the attribution note for an amend spelled with %s (issue #12514)',
+      async (_label, buildCommand) => {
+        // #12514-C: `isAmendCommit` was the one recogniser that still required
+        // `tokens[0] === 'git'`. A loose-spelled amend therefore reached
+        // attribution classified as a fresh commit, so the note diffed
+        // `postHead~1..postHead` instead of `preHead..postHead`. The extra file
+        // below makes that observable: it landed in the pre-amend commit but
+        // was untouched by the amend, so only the wrong range includes it.
+        rawCommit('first.txt', 'first version\n', 'add first');
+        rawCommit('second.txt', 'second version\n', 'add second');
+        fs.writeFileSync(path.join(repoDir, 'first.txt'), 'first amended\n');
+        rawGit('add first.txt');
+        CommitAttributionService.getInstance().recordEdit(
+          path.join(repoDir, 'first.txt'),
+          'first version\n',
+          'first amended\n',
+        );
+
+        await runShellCommand(buildCommand());
+
+        const note = JSON.parse(
+          rawGit('notes --ref=refs/notes/ai-attribution show HEAD'),
+        );
+        expect(Object.keys(note.files)).toEqual(['first.txt']);
+      },
+    );
 
     it('registers the commit even when gitCoAuthor.commit attribution is disabled', async () => {
       // Regression ④: session tracking is deliberately independent of the
