@@ -74,12 +74,14 @@ export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
 export const COMPACTION_BUDGET_SAFETY_MARGIN = 1_024;
 
 /**
- * Smallest output budget a cold compression request is sent with on windows
- * of 16K and up. Below it a `<state_snapshot>` is almost always cut off, so a
- * request that cannot leave this much room is reduced first and not sent if
- * it still cannot (#9455). Smaller windows need a quarter of the window
- * instead (minCompactionOutputTokens): a fixed 4,096 would take half of an 8K
- * window and all of a 4K one.
+ * Output room a cold compression request is sized to leave on windows of 16K
+ * and up. Below it a `<state_snapshot>` is almost always cut off, so a
+ * request that cannot leave this much room is reduced first (#9455). One
+ * that then fits the window is sent with the room left, and a summary cut
+ * off for lack of room is dropped by the truncation checks; only one that
+ * leaves no room at all is not sent (#15936 R3-7). Smaller windows need a
+ * quarter of the window instead (minCompactionOutputTokens): a fixed 4,096
+ * would take half of an 8K window and all of a 4K one.
  */
 export const MIN_COMPACTION_OUTPUT_TOKENS = 4_096;
 
@@ -1485,10 +1487,12 @@ export class ChatCompressionService {
     // estimator error (the ±30% variance the margin documents), so comparing
     // them against a clamped budget would convert that error into false
     // truncation verdicts for complete summaries. The fixed ceiling
-    // preserves the pre-#7960 semantics for the usage-missing path. No
-    // request is sent with a budget below minCompactionOutputTokens (the
-    // admission check and the retry sizing both refuse it), so the old floor
-    // regime, a 1-token cap that needed its own exception here, cannot occur.
+    // preserves the pre-#7960 semantics for the usage-missing path. A
+    // request can be sent with a budget below minCompactionOutputTokens when
+    // the reduced input leaves only that much room (#15936 R3-7). A summary
+    // cut short by it is still dropped: a provider count reaches the clamped
+    // budget here, and a local estimate leaves the snapshot unclosed or
+    // missing, which the well-formedness check below drops.
     //
     // TODO(finish_reason): the current `>= budget` check is a heuristic that
     // false-positives on legitimate summaries that happen to land exactly at
@@ -1531,28 +1535,29 @@ export class ChatCompressionService {
     // snapshot well-formedness too: a complete summary closes the
     // <state_snapshot> the directive asks for (the cache-sharing path gates
     // on the same check).
-    // - A summary that opens <state_snapshot> and never closes it was cut
-    //   off when its request filled the window it was sized for. A server
-    //   can stop the output where its window ends instead of rejecting
-    //   `prompt + max_tokens > window` (llama.cpp's server does); the count
-    //   it reports then stays below the budget requested, out of the
-    //   threshold's reach, but its prompt and output counts reach the
-    //   window. Without that sign the summary is kept: a model can end
-    //   without closing the tag, and dropping each such summary would trip
-    //   the failure breaker. A summary without the tags is left alone here.
+    // - A summary that opens <state_snapshot> and never closes it is kept
+    //   only when the server's own prompt and output counts show the window
+    //   had room left: then nothing cut it, a model can end without closing
+    //   the tag, and dropping it would only trip the failure breaker.
+    //   Otherwise it is dropped. A server can stop the output where its
+    //   window ends instead of rejecting `prompt + max_tokens > window`
+    //   (llama.cpp's server does); the count it reports then stays below the
+    //   budget requested, out of the threshold's reach. When a count is
+    //   missing (a reported prompt alone leaves the output a local
+    //   estimate), nothing shows the window was not filled (#15936 R4-8).
+    //   A summary without the tags is left alone here.
     // - When the budget was clamped and the count is a local estimate, output
     //   never exceeds the requested budget and the estimator tops out at
     //   ~1.5x actual tokens, so below ~2/3 of the ceiling the estimate can
     //   never reach the fixed threshold. That path also drops a summary
     //   without a closed snapshot.
-    const filledColdWindow =
+    const usageShowsRoom =
       !outputCountIsEstimated &&
       typeof compressionInputTokenCount === 'number' &&
       typeof compressionOutputTokenCount === 'number' &&
-      compressionInputTokenCount + compressionOutputTokenCount >=
+      compressionInputTokenCount + compressionOutputTokenCount <
         coldWindow - COMPACTION_BUDGET_SAFETY_MARGIN;
-    const cutMidSnapshot =
-      filledColdWindow && hasUnclosedStateSnapshot(summary);
+    const cutMidSnapshot = !usageShowsRoom && hasUnclosedStateSnapshot(summary);
     if (
       !usedCacheSharing &&
       !isSummaryEmpty &&
@@ -1566,7 +1571,8 @@ export class ChatCompressionService {
         .warn(
           cutMidSnapshot
             ? `[chat-compression] summary opens <state_snapshot> but never ` +
-                `closes it; dropping truncated result. This counts as a ` +
+                `closes it, and the reported usage does not show room left ` +
+                `in the window; dropping truncated result. This counts as a ` +
                 `compression failure for the per-chat circuit breaker.`
             : `[chat-compression] summary lacks a closed <state_snapshot> ` +
                 `while the output budget was clamped (${coldOutputBudget}) ` +
