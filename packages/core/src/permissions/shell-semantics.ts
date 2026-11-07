@@ -33,7 +33,7 @@
 
 import nodePath from 'node:path';
 import os from 'node:os';
-import { stripShellWrapper } from '../utils/shell-utils.js';
+import { decodeAnsiCEscape, stripShellWrapper } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { splitCompoundCommandSegments } from './rule-parser.js';
 
@@ -82,6 +82,17 @@ export interface ShellOperation {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Index of the next character the shell actually lexes after `from`: a
+ * `\`+newline continuation is removed outright, so `$` + continuation + `'`
+ * still opens the ANSI-C word (#16075 review, R7-1).
+ */
+function nextSignificantIndex(command: string, from: number): number {
+  let i = from;
+  while (command[i] === '\\' && command[i + 1] === '\n') i += 2;
+  return i;
+}
+
+/**
  * Tokenize a shell command string, respecting single/double quotes and
  * backslash escapes, splitting on unquoted whitespace.
  *
@@ -108,10 +119,62 @@ function tokenize(
   let bare = '';
   let inSingle = false;
   let inDouble = false;
+  // `$'…'` keeps its own quote state: `\'` does not close it and `\n` is a
+  // newline rather than layout, so decoding escapes here is what keeps
+  // `bash -c $'git commit --amend\ntrue'` from reading as one inert word.
+  let inAnsiC = false;
+  // A NUL ends the word bash builds inside an ANSI-C quote: `$'a\0b'c` is the
+  // word `ac` — the rest of the quoted segment is dropped, but a following
+  // concatenation segment still appends (#16075 review, R11-2). Once set, the
+  // scan skips to the segment's closing quote without emitting anything.
+  let ansiCTruncated = false;
   let escaped = false;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
+
+    if (inAnsiC) {
+      if (ansiCTruncated) {
+        // Skip an escaped character so `\'` does not read as the closing quote.
+        if (ch === '\\') {
+          i++;
+          continue;
+        }
+        if (ch === "'") {
+          inAnsiC = false;
+          ansiCTruncated = false;
+        }
+        continue;
+      }
+      if (ch === '\\') {
+        const escape = decodeAnsiCEscape(command, i);
+        if (!escape) {
+          current += '\\';
+          bare += '0';
+          continue;
+        }
+        if (escape.text === '\0') {
+          ansiCTruncated = true;
+          i += escape.length - 1;
+          continue;
+        }
+        current += escape.text;
+        // `bare` is one entry per UTF-16 unit of `current`; an escape such as
+        // `\U0001F600` decodes to a two-unit astral char, so a single '0' here
+        // desynced the positional map for the rest of the word and left
+        // trailing syntax (`)`) glued to the token (#16075 review, R13-2).
+        bare += '0'.repeat(escape.text.length);
+        i += escape.length - 1;
+        continue;
+      }
+      if (ch === "'") {
+        inAnsiC = false;
+        continue;
+      }
+      current += ch;
+      bare += '0';
+      continue;
+    }
 
     if (escaped) {
       current += ch;
@@ -120,8 +183,34 @@ function tokenize(
       continue;
     }
     if (ch === '\\' && !inSingle) {
+      // Bash removes a backslash-newline continuation outright, joining the
+      // word it interrupts — so `git commit \<newline>--amend` is the plain
+      // two-word invocation, not a token containing a newline.
+      if (command[i + 1] === '\n') {
+        i++;
+        continue;
+      }
       escaped = true;
       continue;
+    }
+    // `$'…'`: skip only the `$`; the quote that follows opens the ANSI-C
+    // word, so the payload stays one token instead of splitting on spaces.
+    // A `\`+newline between the two is removed first (#16075 review, R7-1).
+    // `$"…"` is bash's locale-translation quoting: the shell removes the
+    // introducer and quotes just like a double-quoted word, so `git $"commit"`
+    // runs the `commit` subcommand (#16075 review, R8-11).
+    if (ch === '$' && !inSingle && !inDouble) {
+      const next = nextSignificantIndex(command, i + 1);
+      if (command[next] === "'") {
+        inAnsiC = true;
+        i = next;
+        continue;
+      }
+      if (command[next] === '"') {
+        inDouble = true;
+        i = next;
+        continue;
+      }
     }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;

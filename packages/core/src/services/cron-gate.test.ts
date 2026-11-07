@@ -655,6 +655,14 @@ describe('gateCommandError', () => {
     expect(gateCommandError(gate)).toBeNull();
   });
 
+  it('refuses a wrapper whose payload expansion cannot be resolved', () => {
+    // `safetyCommand` equals the gate here, so only the unresolved flag can
+    // tell that the shell runs a script the rules never read.
+    const error = gateCommandError('bash -c "$X"');
+    expect(error).toContain('wrapped in a shell');
+    expect(error).toContain('"$X"');
+  });
+
   it('names a long checked command cut short, without halving a character', () => {
     // The 79th unit is the high half of 😀: the cut backs off before it.
     const error = gateCommandError(`bash -c '${'x'.repeat(78)}😀zzzz'`);

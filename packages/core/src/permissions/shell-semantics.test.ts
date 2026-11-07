@@ -829,3 +829,65 @@ describe('extractShellOperationsAcrossCommand', () => {
     expect(() => across(deep)).not.toThrow();
   });
 });
+
+describe('line continuations before a `$` construct', () => {
+  it('reads the ANSI-C word the continuation interrupts (#16075 review, R7-1)', () => {
+    // The shell removes `\`+newline before it lexes, so the ANSI-C opener it
+    // interrupts is the word bash runs; `$` + continuation + `'` is not a
+    // dangling `$` followed by an unrelated quoted word.
+    const literal = ops("mv /tmp/a $'/tmp/protected/x'");
+    expect(literal).not.toEqual([]);
+    expect(ops("mv /tmp/a $\\\n'/tmp/protected/x'")).toEqual(literal);
+  });
+});
+
+describe('ANSI-C words ending in a literal trailing \\c', () => {
+  it('keeps the redirect visible after the word', () => {
+    expect(
+      extractShellOperationsAcrossCommand("echo $'a\\c' > /etc/motd", '/repo'),
+    ).toEqual([write('/etc/motd')]);
+  });
+
+  it('keeps later operands visible after the word', () => {
+    const ops = extractShellOperationsAcrossCommand(
+      "cat $'x\\c' /etc/passwd",
+      '/tmp',
+    );
+    expect(ops.map((op) => op.filePath)).toContain('/etc/passwd');
+  });
+});
+
+// R13-2 (#16075): a multi-unit ANSI-C escape appends one `bare` entry per UTF-16
+// unit of its decoded text, so positional syntax trimming stays aligned and the
+// unquoted `)` after an astral filename is dropped, not kept in the path.
+describe('ANSI-C astral escape keeps bare aligned with current', () => {
+  it('trims the closing paren after a multi-unit escape', () => {
+    expect(
+      extractShellOperationsAcrossCommand("(cat > $'\\U0001F600')", '/repo'),
+    ).toEqual([write('/repo/😀')]);
+  });
+
+  it('still trims after a single-unit escape', () => {
+    expect(
+      extractShellOperationsAcrossCommand("(cat > $'\\x41')", '/repo'),
+    ).toEqual([write('/repo/A')]);
+  });
+});
+
+// R13-1 (#16075): a fully quoted -c payload that carries an expansion is still
+// unwrapped for op extraction, so a write inside it is reported (the monitor /
+// cron consumers keep the unresolved signal separately).
+describe('fully quoted wrapper payload stays visible to op extraction', () => {
+  it('reports a write inside a double-quoted payload with a substitution', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        'bash -c "echo hi; $(echo x > /etc/passwd)"',
+        '/repo',
+      ),
+    ).toEqual([write('/etc/passwd')]);
+  });
+});
+
+// R12-1 (#16075): an expanded program word is an amend only when its assigned
+// value can yield `git commit --amend` (or is genuinely unresolvable), not for
+// every assigned name.
