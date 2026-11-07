@@ -143,17 +143,25 @@ it('explains when the preference cannot persist', () => {
   );
 });
 
+type DesktopWindow = Window & {
+  __TAURI__?: unknown;
+  __QWEN_CODE_DESKTOP_PLATFORM__?: string;
+};
+function withDesktopShell(macOS: boolean, check: () => void) {
+  (window as DesktopWindow).__TAURI__ = { core: { invoke: async () => {} } };
+  if (macOS) (window as DesktopWindow).__QWEN_CODE_DESKTOP_PLATFORM__ = 'macos';
+  try {
+    check();
+  } finally {
+    delete (window as DesktopWindow).__TAURI__;
+    delete (window as DesktopWindow).__QWEN_CODE_DESKTOP_PLATFORM__;
+  }
+}
+
 it('shows enabled status in the macOS desktop shell when Web Notifications are denied', () => {
   settings.enabled = true;
   settings.permission = 'denied';
-  (window as Window & { __TAURI__?: unknown }).__TAURI__ = {
-    core: { invoke: async () => {} },
-  };
-  vi.stubGlobal('navigator', {
-    userAgent:
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15',
-  });
-  try {
+  withDesktopShell(true, () => {
     render();
     hover();
     const help = document.querySelector(popup)!;
@@ -161,11 +169,39 @@ it('shows enabled status in the macOS desktop shell when Web Notifications are d
       'Enabled for this site.',
     );
     expect(help.querySelector('button')?.disabled).toBe(true);
-  } finally {
-    delete (window as Window & { __TAURI__?: unknown }).__TAURI__;
-    vi.unstubAllGlobals();
-  }
+  });
 });
+
+it.each([
+  [true, 'denied'],
+  [true, 'unavailable'],
+  [false, 'denied'],
+] as const)(
+  'lets the user turn notifications on only through the macOS host (macOS host: %s, permission: %s)',
+  (macOS, permission) => {
+    settings.enabled = false;
+    settings.permission = permission;
+    withDesktopShell(macOS, () => {
+      render();
+      hover();
+      const help = document.querySelector(popup)!;
+      const status = help.querySelector('[role="status"]')?.textContent;
+      const allow = help.querySelector<HTMLButtonElement>('button')!;
+      expect(allow.textContent).toBe('Allow notifications');
+      if (macOS) {
+        expect(status).toBe('Disabled.');
+        expect(allow.disabled).toBe(false);
+        act(() => allow.click());
+        expect(settings.setEnabled).toHaveBeenCalledWith(true);
+      } else {
+        expect(status).toBe(
+          'Notifications are blocked. Allow them in your browser site settings.',
+        );
+        expect(allow.disabled).toBe(true);
+      }
+    });
+  },
+);
 
 it('keeps authorization help open through pending blur and restores focus after grant', async () => {
   settings.enabled = false;

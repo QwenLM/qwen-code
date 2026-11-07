@@ -15,7 +15,7 @@ import {
 } from 'react';
 import { notificationExcerpt } from './notification-text';
 import { getTranslator, type WebShellLanguage } from './i18n';
-import { isMacOSDesktopShell } from './utils/externalOpen';
+import { isMacOSDesktopShell, tauriInvoke } from './utils/externalOpen';
 import {
   createTurnNotificationObserver,
   TurnNotificationContext,
@@ -78,21 +78,11 @@ function permission(): Permission {
     : 'unavailable';
 }
 
-// Invoke a desktop host command from the daemon-served Web Shell. On the
-// packaged macOS desktop WebKit never grants Web Notification permission to
-// the embedded web shell, so the host posts the system notification itself.
-function desktopInvoke(): (
-  command: string,
-  args?: Record<string, unknown>,
-) => Promise<unknown> {
-  const core = (window as { __TAURI__?: { core?: { invoke?: unknown } } })
-    .__TAURI__?.core;
-  if (typeof core?.invoke !== 'function')
-    throw new Error('The desktop bridge is unavailable.');
-  return core.invoke as (
-    command: string,
-    args?: Record<string, unknown>,
-  ) => Promise<unknown>;
+// On the packaged macOS desktop WebKit never grants Web Notification
+// permission to the embedded web shell, so the desktop host authorizes and
+// posts the system notification itself over IPC.
+function hostDelivery(): boolean {
+  return isMacOSDesktopShell() && permission() !== 'granted';
 }
 
 function readStoredPreference(): string | null | undefined {
@@ -103,11 +93,18 @@ function readStoredPreference(): string | null | undefined {
   }
 }
 
+// The macOS desktop host starts its daemon on a new loopback port every
+// launch, so the page origin, and the localStorage holding this preference,
+// last only until the app restarts there.
+function storagePersists(stored: string | null | undefined) {
+  return stored !== undefined && !isMacOSDesktopShell();
+}
+
 function readPreference(defaultEnabled: boolean) {
   const stored = readStoredPreference();
   return {
     enabled: stored === 'true' || (stored === null && defaultEnabled),
-    persistent: stored !== undefined,
+    persistent: storagePersists(stored),
   };
 }
 
@@ -140,7 +137,12 @@ function StandaloneNotifications({
   activeRef.current = active;
   const [navigationTarget] = useState(() => new EventTarget());
   const [appLanguage, syncLanguage] = useState<WebShellLanguage>();
-  const [defaultEnabled] = useState(options?.defaultEnabled ?? false);
+  // The macOS desktop host delivers without any browser permission prompt,
+  // and its per-launch origin cannot keep an opt-out, so there notifications
+  // stay off until the user explicitly turns them on.
+  const [defaultEnabled] = useState(
+    () => !isMacOSDesktopShell() && (options?.defaultEnabled ?? false),
+  );
   const [preference, setPreference] = useState(() =>
     readPreference(defaultEnabled),
   );
@@ -167,7 +169,10 @@ function StandaloneNotifications({
     } catch {
       persistent = false;
     }
-    setPreference({ enabled, persistent });
+    setPreference({
+      enabled,
+      persistent: persistent && !isMacOSDesktopShell(),
+    });
   }, []);
 
   useEffect(() => {
@@ -202,6 +207,20 @@ function StandaloneNotifications({
         savePreference(false);
         return;
       }
+      if (hostDelivery()) {
+        // Only an explicit opt-in reaches here (the mount-time request skips
+        // the host), and the OS authorization prompt follows it.
+        setPending(false);
+        savePreference(true);
+        try {
+          const invoke = tauriInvoke();
+          if (!invoke) throw new Error('The desktop bridge is unavailable.');
+          await invoke('request_turn_notification_authorization');
+        } catch {
+          if (mounted.current && request === version.current) setError(true);
+        }
+        return;
+      }
       const storedBeforeRequest = readStoredPreference();
       let nextPermission = permission();
       if (nextPermission === 'default') {
@@ -227,11 +246,7 @@ function StandaloneNotifications({
         setPreference(next);
         return;
       }
-      // WebKit never grants the Web Notification permission in the macOS
-      // desktop shell, but the host posts the system notification itself,
-      // so the toggle must stick on anyway.
-      if (nextPermission === 'granted' || isMacOSDesktopShell())
-        savePreference(true);
+      if (nextPermission === 'granted') savePreference(true);
     },
     [savePreference, defaultEnabled],
   );
@@ -241,6 +256,7 @@ function StandaloneNotifications({
       !activeRef.current ||
       authorizationAttempted.current ||
       permission() !== 'default' ||
+      hostDelivery() ||
       readStoredPreference() === 'false'
     )
       return;
@@ -266,10 +282,7 @@ function StandaloneNotifications({
 
   notifyRef.current = (turn) => {
     const request = version.current;
-    // In the macOS desktop shell WebKit never grants the Web Notification
-    // permission, so deliver the system notification through the desktop
-    // host once the user has enabled task notifications.
-    const nativeHost = isMacOSDesktopShell() && permission() !== 'granted';
+    const nativeHost = hostDelivery();
     const canShow = () =>
       mounted.current &&
       activeRef.current &&
@@ -278,7 +291,7 @@ function StandaloneNotifications({
       (nativeHost || permission() === 'granted') &&
       (document.visibilityState !== 'visible' || !document.hasFocus());
     if (turn.outcome === 'cancelled' || !canShow()) return;
-    if (nativeHost) {
+    const message = () => {
       const t = getTranslator(appLanguage ?? language);
       const appName = options?.appName?.trim() || 'QwenCode';
       const title = notificationExcerpt(turn.sessionTitle ?? '', 60);
@@ -287,24 +300,24 @@ function StandaloneNotifications({
         turn.outcome === 'failed'
           ? ''
           : notificationExcerpt(turn.responseText ?? '', 120);
-      const status = t(`browserNotifications.${turn.outcome}`);
-      let invoke: ReturnType<typeof desktopInvoke>;
-      try {
-        invoke = desktopInvoke();
-      } catch {
-        if (mounted.current) setError(true);
-        return;
-      }
-      void invoke('show_turn_notification', {
+      return {
         title: title ? `${appName} · ${title}` : appName,
         body: [
-          status,
+          t(`browserNotifications.${turn.outcome}`),
           prompt && t('browserNotifications.prompt', { text: prompt }),
           excerpt && t('browserNotifications.reply', { text: excerpt }),
         ]
           .filter(Boolean)
           .join('\n'),
-      }).catch(() => {
+      };
+    };
+    if (nativeHost) {
+      const post = async () => {
+        const invoke = tauriInvoke();
+        if (!invoke) throw new Error('The desktop bridge is unavailable.');
+        await invoke('show_turn_notification', message());
+      };
+      void post().catch(() => {
         if (mounted.current) setError(true);
       });
       return;
@@ -339,30 +352,13 @@ function StandaloneNotifications({
             // Storage restrictions degrade to page-local deduplication and tag replacement.
           }
         }
-        const t = getTranslator(appLanguage ?? language);
-        const appName = options?.appName?.trim() || 'QwenCode';
-        const title = notificationExcerpt(turn.sessionTitle ?? '', 60);
-        const prompt = notificationExcerpt(turn.promptText ?? '', 80);
-        const excerpt =
-          turn.outcome === 'failed'
-            ? ''
-            : notificationExcerpt(turn.responseText ?? '', 120);
-        const status = t(`browserNotifications.${turn.outcome}`);
-        const notification = new window.Notification(
-          title ? `${appName} · ${title}` : appName,
-          {
-            body: [
-              status,
-              prompt && t('browserNotifications.prompt', { text: prompt }),
-              excerpt && t('browserNotifications.reply', { text: excerpt }),
-            ]
-              .filter(Boolean)
-              .join('\n'),
-            icon: options?.iconUrl?.trim() || NOTIFICATION_ICON_URL,
-            tag,
-            ...{ renotify: false },
-          },
-        );
+        const { title, body } = message();
+        const notification = new window.Notification(title, {
+          body,
+          icon: options?.iconUrl?.trim() || NOTIFICATION_ICON_URL,
+          tag,
+          ...{ renotify: false },
+        });
         notification.onclick = () => {
           try {
             window.focus();

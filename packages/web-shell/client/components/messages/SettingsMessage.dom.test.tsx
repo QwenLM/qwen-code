@@ -1750,3 +1750,60 @@ describe('SettingsMessage user-scope editing', () => {
     ).not.toBeNull();
   });
 });
+
+describe('SettingsMessage task notifications in the desktop shell', () => {
+  type DesktopWindow = Window & {
+    __TAURI__?: unknown;
+    __QWEN_CODE_DESKTOP_PLATFORM__?: string;
+  };
+  afterEach(() => {
+    delete (window as DesktopWindow).__TAURI__;
+    delete (window as DesktopWindow).__QWEN_CODE_DESKTOP_PLATFORM__;
+  });
+
+  it.each([
+    [true, 'denied', true, 'Enabled.'],
+    [true, 'denied', false, 'Disabled.'],
+    [true, 'default', true, 'Enabled.'],
+    [true, 'unavailable', false, 'Disabled.'],
+    [
+      false,
+      'denied',
+      true,
+      'Notifications are blocked. Allow them in your browser site settings.',
+    ],
+  ] as const)(
+    'reports the host preference (macOS host: %s, permission: %s, enabled: %s)',
+    (macOS, permission, enabled, status) => {
+      (window as DesktopWindow).__TAURI__ = {
+        core: { invoke: async () => {} },
+      };
+      if (macOS)
+        (window as DesktopWindow).__QWEN_CODE_DESKTOP_PLATFORM__ = 'macos';
+      browserNotificationsStub.current = {
+        enabled,
+        permission,
+        pending: false,
+        persistent: true,
+        error: false,
+        setEnabled: vi.fn(async () => {}),
+        refreshPermission: vi.fn(),
+        syncLanguage: vi.fn(),
+        requestPermissionOnce: vi.fn(),
+      };
+      const container = renderPanel(makeState([], vi.fn()), {
+        presentation: { includeItems: ['builtin:browser-notifications'] },
+      });
+      expect(container.textContent).toContain('Task notifications');
+      expect(container.textContent).toContain(status);
+      if (macOS)
+        expect(container.textContent).not.toContain(
+          'Notifications are blocked',
+        );
+      expect(container.textContent).not.toContain('Allow notifications');
+      const toggle = switchButton(container);
+      expect(toggle.getAttribute('aria-checked')).toBe(String(enabled));
+      expect(toggle.disabled).toBe(false);
+    },
+  );
+});

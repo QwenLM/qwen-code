@@ -6,14 +6,15 @@
  * plugin. Plain browsers keep native anchor behavior at the call sites.
  */
 
-type TauriInvoke = (
+export type TauriInvoke = (
   command: string,
   args?: Record<string, unknown>,
 ) => Promise<unknown>;
 
 const EXTERNAL_OPEN_SCHEMES = /^(https?:|mailto:)/i;
 
-function tauriInvoke(): TauriInvoke | undefined {
+/** The desktop host's IPC `invoke`, or undefined outside the desktop shell. */
+export function tauriInvoke(): TauriInvoke | undefined {
   if (typeof window === 'undefined') return undefined;
   const core = (window as { __TAURI__?: { core?: { invoke?: unknown } } })
     .__TAURI__?.core;
@@ -32,13 +33,14 @@ export function isDesktopShell(): boolean {
  * never grants Web Notification permission to the embedded web shell. The
  * macOS desktop host posts system notifications itself (see the
  * `show_turn_notification` Tauri command); other platforms keep the
- * standard Web Notification path.
+ * standard Web Notification path. The macOS host injects the platform flag
+ * at compile time, so this does not depend on the user-agent string.
  */
 export function isMacOSDesktopShell(): boolean {
   return (
     isDesktopShell() &&
-    typeof navigator !== 'undefined' &&
-    /macintosh|mac os x/i.test(navigator.userAgent)
+    (window as { __QWEN_CODE_DESKTOP_PLATFORM__?: unknown })
+      .__QWEN_CODE_DESKTOP_PLATFORM__ === 'macos'
   );
 }
 

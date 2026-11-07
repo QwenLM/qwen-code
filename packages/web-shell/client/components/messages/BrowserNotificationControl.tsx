@@ -45,11 +45,11 @@ export function BrowserNotificationControl() {
     hostNotified;
   const status = settings.pending
     ? 'requesting'
-    : settings.permission === 'unavailable'
+    : settings.permission === 'unavailable' && !hostNotified
       ? 'unavailable'
       : enabled
         ? 'helpEnabled'
-        : settings.permission === 'denied'
+        : settings.permission === 'denied' && !hostNotified
           ? 'denied'
           : settings.error
             ? 'error'
