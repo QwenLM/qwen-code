@@ -163,6 +163,8 @@ public class SurfaceAdmissionAcceptanceTest {
     private final AtomicInteger keys = new AtomicInteger();
     private String bound;
     private String legacy;
+    private String strangerOwned;
+    private String actorless;
     private String pendingAction;
     private String pendingActionPublic;
     private String pendingActionWeb;
@@ -225,6 +227,13 @@ public class SurfaceAdmissionAcceptanceTest {
                 StandardCharsets.UTF_8));
         bound = createSession(tenant, OWNER, true);
         legacy = createSession(tenant, OWNER, false);
+        // Positive pins for the list filter: a stranger's own row-present
+        // Session lists for that stranger but not anonymously, while a genuine
+        // actorless Session that never wrote a row lists tenant-wide. Without
+        // them an empty page would satisfy the negative half with the filter
+        // removed.
+        strangerOwned = createSession(tenant, STRANGER, false);
+        actorless = createSession(tenant, null, false);
         pendingAction = insertAction(tenant, bound);
         // An accepted answer consumes its Action, and the accepted probe
         // parks an ACTION_RESPONSE operation nothing else may shadow: the
@@ -420,26 +429,42 @@ public class SurfaceAdmissionAcceptanceTest {
                     expect(entry, null, 404, "automation_not_found");
                     expectAdmitted(entry, READER);
                 } else if (entry.capabilities().contains(Capability.SESSION_LIST)) {
-                    // The 200 pins filtering, not just the status: the
-                    // bound row must stay invisible while the legacy rows
-                    // the tenant owns still list — an empty page would
-                    // satisfy the negative half with the filter removed.
+                    // Unified ownership rule (round-4 contract change): a
+                    // present ownership row is the sole authority, so the
+                    // OWNER's row-present Sessions — bound and unbound alike —
+                    // stay invisible to a stranger and to an anonymous caller.
+                    // Only a genuine legacy Session that never wrote a row
+                    // lists tenant-wide. The positive pins (the stranger's own
+                    // row and the actorless row) keep the 200 from passing on
+                    // an empty page with the filter removed.
                     MvcResult strangers = expect(entry, STRANGER, 200, null);
                     MvcResult anonymous = expect(entry, null, 200, null);
                     assertThat(strangers.getResponse().getContentAsString())
                             .as("%s leaks the bound Session to a stranger",
                                     entry.routeKey())
                             .doesNotContain(bound)
-                            .as("%s drops the legacy rows for a stranger",
+                            .as("%s leaks the owner's unbound row to a stranger",
                                     entry.routeKey())
-                            .contains(legacy);
+                            .doesNotContain(legacy)
+                            .as("%s drops the stranger's own row",
+                                    entry.routeKey())
+                            .contains(strangerOwned)
+                            .as("%s drops the tenant-wide legacy row",
+                                    entry.routeKey())
+                            .contains(actorless);
                     assertThat(anonymous.getResponse().getContentAsString())
                             .as("%s leaks the bound Session anonymously",
                                     entry.routeKey())
                             .doesNotContain(bound)
-                            .as("%s drops the legacy rows anonymously",
+                            .as("%s leaks the owner's unbound row anonymously",
                                     entry.routeKey())
-                            .contains(legacy);
+                            .doesNotContain(legacy)
+                            .as("%s leaks a stranger's row anonymously",
+                                    entry.routeKey())
+                            .doesNotContain(strangerOwned)
+                            .as("%s drops the tenant-wide legacy row anonymously",
+                                    entry.routeKey())
+                            .contains(actorless);
                 } else {
                     // Every other reader family entry hides a bound
                     // Session below the grant and admits the reader. The
@@ -675,9 +700,11 @@ public class SurfaceAdmissionAcceptanceTest {
     @Test
     public void submitterRoutesAdmitTheLegacyArmAndAnOperatorHitsDomainRefusal()
             throws Exception {
-        // Every admitted mutation gets its own legacy Session, so no
-        // in-progress operation or Turn collides with the next probe.
-        String renamed = createSession(tenant, OWNER, false);
+        // Every admitted mutation gets its own genuine legacy Session — one
+        // created without a principal, so it never wrote an ownership row and
+        // mutates tenant-wide — and no in-progress operation or Turn collides
+        // with the next probe.
+        String renamed = createSession(tenant, null, false);
         mvc.perform(patch("/v1/agents/sessions/" + renamed)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", nextKey())
@@ -685,8 +712,8 @@ public class SurfaceAdmissionAcceptanceTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"renamed\"}"))
                 .andExpect(status().isOk());
-        String receiving = createSession(tenant, OWNER, false);
-        String second = createSession(tenant, OWNER, false);
+        String receiving = createSession(tenant, null, false);
+        String second = createSession(tenant, null, false);
         String message = "\"input\":[{\"type\":\"text\",\"text\":\"hi\"}]";
         MvcResult submitted = mvc.perform(post("/v1/agents/sessions/"
                         + receiving + "/events")
@@ -770,8 +797,9 @@ public class SurfaceAdmissionAcceptanceTest {
                                 + "\"option_id\":\"allow\"}"))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.type").value("action_response"));
-        // The legacy arm of lifecycle is tenant-wide.
-        String extra = createSession(tenant, OWNER, false);
+        // The legacy arm of lifecycle is tenant-wide: a genuine no-row Session
+        // closes for any caller in the tenant, even a stranger.
+        String extra = createSession(tenant, null, false);
         mvc.perform(post("/api/agent/web-shell/v1/sessions/close")
                         .header(TenantContextFilter.HEADER, tenant)
                         .principal(actor(tenant, STRANGER))
@@ -780,10 +808,11 @@ public class SurfaceAdmissionAcceptanceTest {
                                 + "\",\"idempotencyKey\":\"" + nextKey()
                                 + "\"}"))
                 .andExpect(status().isAccepted());
-        // The legacy arm of respond: the recorded owner answers. The
+        // The legacy arm of respond: a genuine no-row Session has no recorded
+        // owner, so its unbound Action gate admits the caller tenant-wide. The
         // carrying Session is fresh: an accepted response parks an
         // ACTION_RESPONSE operation that must not shadow later probes.
-        String answered = createSession(tenant, OWNER, false);
+        String answered = createSession(tenant, null, false);
         String action = insertAction(tenant, answered);
         String body = "{\"sessionId\":\"" + answered + "\",\"actionId\":\""
                 + action + "\",\"idempotencyKey\":\"" + nextKey()

@@ -60,7 +60,7 @@ class SessionRecoveryServiceTest {
                 + " head_kind VARCHAR, recovery_status VARCHAR, recovery_detail_code VARCHAR)");
         jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?)",
                 "tenant", "session", "MANAGED_SESSION", "READY", null);
-        when(sessions.requireReadableSession(ACTOR, "session")).thenReturn(session);
+        when(sessions.requireReadableSession("tenant", ACTOR, "session")).thenReturn(session);
         when(store.findLatestTurns("tenant", List.of("session"))).thenReturn(Map.of());
         service = new SessionRecoveryService(sessions, store, coordinator, harness, new com.alibaba.qwen.code.managedagent.persistence.JdbcSessionRecoveryRepository(jdbc), mock(ManagedSessionStore.class));
     }
@@ -68,7 +68,7 @@ class SessionRecoveryServiceTest {
     @Test
     void anEmptyNeverExecutedSessionIsReadyWithoutLoadingAnything() {
         jdbc.update("DELETE FROM ma_session_head");
-        when(sessions.requireReadableSession(ACTOR, "session")).thenReturn(
+        when(sessions.requireReadableSession("tenant", ACTOR, "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", "title", "ACTIVE",
                         null, null, 0, 0, 1, 1, null, 1));
         var recovery = service.query("tenant", "actor", "session");
@@ -82,7 +82,7 @@ class SessionRecoveryServiceTest {
     @ValueSource(strings = {"boot", "epoch", "both"})
     void aBoundSessionWithoutItsNativeHeadCannotUseEvenAWarmReadyCache(String identity) {
         jdbc.update("DELETE FROM ma_session_head");
-        when(sessions.requireReadableSession(ACTOR, "session")).thenReturn(
+        when(sessions.requireReadableSession("tenant", ACTOR, "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", "title", "ACTIVE",
                         "epoch".equals(identity) ? null : "boot", "boot".equals(identity) ? null : "epoch",
                         0, 0, 1, 1, null, 1));
@@ -396,7 +396,7 @@ class SessionRecoveryServiceTest {
 
     @Test
     void foreignOrInvisibleSessionsNeverReachTheirEvidence() {
-        when(sessions.requireReadableSession(FOREIGN, "session"))
+        when(sessions.requireReadableSession("foreign", FOREIGN, "session"))
                 .thenThrow(new ManagedAgentException(404,
                         "session_not_found", "Not found"));
         assertThatThrownBy(() -> service.query("foreign", "actor", "session"))

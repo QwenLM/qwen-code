@@ -320,7 +320,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         if (command == null) {
             return null;
         }
-        store.requireSessionOwnership(tenantId, command.sessionId(),
+        store.requireSessionAuthority(tenantId, command.sessionId(),
                 principal);
         return store.replayCommand(tenantId, operation, idempotencyKey,
                 requestDigest);
@@ -2238,7 +2238,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private void requireReplayCreator(SessionRecord session,
             SessionPrincipal principal) {
         if (session.workspace() == null) {
-            store.requireSessionOwnership(session.tenantId(),
+            store.requireSessionAuthority(session.tenantId(),
                     session.sessionId(), principal);
             return;
         }
@@ -2274,7 +2274,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private void requireCancellerRole(SessionRecord session,
             SessionPrincipal principal) {
         if (session.workspace() == null) {
-            store.requireSessionOwnership(session.tenantId(),
+            store.requireSessionAuthority(session.tenantId(),
                     session.sessionId(), principal);
             return;
         }
@@ -2296,7 +2296,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private void requireCancellerShape(SessionRecord session,
             SessionPrincipal principal) {
         if (session.workspace() == null) {
-            store.requireSessionOwnership(session.tenantId(),
+            store.requireSessionAuthority(session.tenantId(),
                     session.sessionId(), principal);
             return;
         }
@@ -2343,7 +2343,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     void requireTaskCanceller(SessionRecord session,
             SessionPrincipal principal) {
         if (session.workspace() == null) {
-            store.requireSessionOwnership(session.tenantId(),
+            store.requireSessionAuthority(session.tenantId(),
                     session.sessionId(), principal);
             return;
         }
@@ -2457,11 +2457,12 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     void requireReadGrant(SessionRecord session,
             SessionPrincipal principal) {
         if (session.workspace() == null) {
-            // The legacy tenant-header arm (null principal) reads unbound
-            // Sessions tenant-wide; a present principal must own the Session
-            // exactly, so ownership is never downgraded to the actorless user.
+            // A present principal meets the unified read authority — its
+            // ownership row, or tenant-wide visibility for a legacy Session
+            // that never wrote a row. The action surface reads tenant-wide
+            // through requireActionReadableSession instead.
             if (principal != null) {
-                store.requireSessionOwnership(session.tenantId(),
+                store.requireSessionReadAuthority(session.tenantId(),
                         session.sessionId(), principal);
             }
             return;
@@ -2472,6 +2473,33 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             throw new ManagedAgentException(404,
                     "session_not_found", "The Session was not found.");
         }
+    }
+
+    /**
+     * The action surface read: visibility plus the Workspace read grant, but
+     * tenant-wide for an unbound Session. The action gate enforces creator
+     * authority itself (403 action_forbidden), so a foreign actor must reach
+     * it rather than collapse to a 404 at the read.
+     */
+    public SessionRecord requireActionReadableSession(String tenantId,
+            SessionPrincipal principal, String sessionId) {
+        SessionRecord session = inputPolicy.requireVisibleSession(tenantId,
+                sessionId);
+        if (session.workspace() != null && !workspaces.canRead(
+                session.tenantId(),
+                principal == null ? null : principal.userId(),
+                session.workspace().getWorkspaceId())) {
+            throw new ManagedAgentException(404,
+                    "session_not_found", "The Session was not found.");
+        }
+        return session;
+    }
+
+    public SessionRecord requireActionReadableSession(SessionPrincipal principal,
+            String sessionId) {
+        return requireActionReadableSession(
+                principal == null ? null : principal.tenantId(), principal,
+                sessionId);
     }
 
     private static SessionPrincipal principalOf(String tenantId,
@@ -2607,7 +2635,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             // gating on the recorded Session's ownership. A caller that cannot
             // read the recorded Session gets 404; the owner's own collision
             // falls through to idempotency_conflict.
-            store.requireSessionOwnership(requested.tenantId(),
+            store.requireSessionAuthority(requested.tenantId(),
                     command.sessionId(), principal);
         } else {
             // Bound Workspace Sessions share their workspace context: gate on

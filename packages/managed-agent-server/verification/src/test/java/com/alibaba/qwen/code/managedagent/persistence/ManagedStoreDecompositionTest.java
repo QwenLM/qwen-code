@@ -144,6 +144,7 @@ class ManagedStoreDecompositionTest {
                 appendPublicEventIfAbsent/7::REQUIRED:DEFAULT:false appendLiveSessionEventIfAbsent/5::REQUIRED:DEFAULT:false findLastVisibleStatusBeforeDelete/2:-
                 requireSession/2:- readBinding/1:- insertSessionCommand/9::REQUIRED:DEFAULT:false
                 listOwnedSessions/7:- ownsSession/3:- requireSessionOwnership/3:-
+                requireSessionAuthority/3:- requireSessionReadAuthority/3:-
                 """);
         assertEntries(ManagedSessionStore.class, """
                 authorizeLifecycle/5::REQUIRED:DEFAULT:false skipContended/2:- lockBounded/1:-

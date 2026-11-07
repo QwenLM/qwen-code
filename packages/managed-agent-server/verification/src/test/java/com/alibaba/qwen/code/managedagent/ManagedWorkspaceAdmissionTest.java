@@ -1154,7 +1154,10 @@ class ManagedWorkspaceAdmissionTest {
         // insert: the winner's PENDING row, replayed, no actor gate on that
         // path. Simulating the post-race answer here keeps the test
         // deterministic; the entry gate's own refusal of a visible
-        // recorder row is covered by the store-level replay tests.
+        // recorder row is covered by the store-level replay tests. The
+        // service admits through the principal overload, so stub that one:
+        // the creator gate is deferred to the settle arm below, never the
+        // raced admission.
         org.mockito.Mockito.doAnswer(call ->
                 new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationCommand(
                         sessionId, "PENDING", true,
@@ -1165,7 +1168,8 @@ class ManagedWorkspaceAdmissionTest {
                         org.mockito.ArgumentMatchers.anyString(),
                         org.mockito.ArgumentMatchers.anyString(),
                         org.mockito.ArgumentMatchers.anyString(),
-                        org.mockito.ArgumentMatchers.anyString());
+                        org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.any());
         // The dispatcher wins the claim actor-b's request just admitted
         // and completes the delivery while the request waits.
         org.mockito.Mockito.doAnswer(call -> {

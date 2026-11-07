@@ -277,7 +277,7 @@ final class AgentSessionCommands {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
-            ManagedSessionPrincipal.requireOwnership(jdbc, tenantId, sessionId,
+            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId,
                     principal);
         }
         // The Session lock serializes this Session's admissions without gap-locking missing index
@@ -417,7 +417,7 @@ final class AgentSessionCommands {
             CommandRecord previous, String actorId,
             SessionPrincipal principal) {
         if (session.workspace() == null) {
-            ManagedSessionPrincipal.requireOwnership(jdbc, session.tenantId(),
+            ManagedSessionPrincipal.requireAuthority(jdbc, session.tenantId(),
                     session.sessionId(), principal);
             return;
         }
@@ -667,7 +667,7 @@ final class AgentSessionCommands {
         // tenant-scoped key loses on the receipt's unique key instead (see insertCommand below).
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
-            ManagedSessionPrincipal.requireOwnership(jdbc, tenantId, sessionId,
+            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId,
                     principal);
         }
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
@@ -753,7 +753,7 @@ final class AgentSessionCommands {
             }
             return null;
         }
-        ManagedSessionPrincipal.requireOwnership(jdbc, tenantId, sessionId,
+        ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId,
                 principal);
         return principal;
     }
@@ -763,7 +763,7 @@ final class AgentSessionCommands {
             SessionPrincipal principal) {
         if (command.sessionId().equals(requested.sessionId())) {
             if (requested.workspace() == null) {
-                ManagedSessionPrincipal.requireOwnership(jdbc, tenantId,
+                ManagedSessionPrincipal.requireAuthority(jdbc, tenantId,
                         requested.sessionId(), principal);
             }
             return;
@@ -773,9 +773,9 @@ final class AgentSessionCommands {
         // on whether the receipt was visible before the insert.
         if (requested.workspace() == null) {
             // Unbound Sessions are private: gate on the recorded Session's
-            // ownership to hide a foreign key's existence (404); the owner's
+            // authority to hide a foreign key's existence (404); the owner's
             // own collision falls through to idempotency_conflict.
-            ManagedSessionPrincipal.requireOwnership(jdbc, tenantId,
+            ManagedSessionPrincipal.requireAuthority(jdbc, tenantId,
                     command.sessionId(), principal);
         } else if (!workspaces.createdSession(tenantId, actorId,
                 requested.sessionId())) {

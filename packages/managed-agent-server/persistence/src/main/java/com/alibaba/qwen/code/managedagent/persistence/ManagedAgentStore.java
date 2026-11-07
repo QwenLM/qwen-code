@@ -217,6 +217,18 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
+    public void requireSessionAuthority(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        sessionAdmissions.requireSessionAuthority(tenantId, sessionId, principal);
+    }
+
+    @Override
+    public void requireSessionReadAuthority(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        sessionAdmissions.requireSessionReadAuthority(tenantId, sessionId, principal);
+    }
+
+    @Override
     public boolean ownsSession(String tenantId, String sessionId,
             SessionPrincipal principal) {
         return sessionAdmissions.ownsSession(tenantId, sessionId, principal);

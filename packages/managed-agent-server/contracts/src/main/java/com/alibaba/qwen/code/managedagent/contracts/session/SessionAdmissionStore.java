@@ -92,6 +92,29 @@ public interface SessionAdmissionStore {
     }
 
     /**
+     * The unified write authority over an unbound Session; identical to
+     * {@link #requireSessionReadAuthority}. A present ownership row is the sole
+     * authority; a legacy Session without a row has no per-actor mutation gate
+     * and stays tenant-wide.
+     */
+    public default void requireSessionAuthority(String tenantId,
+            String sessionId, SessionPrincipal principal) {
+        throw new UnsupportedOperationException(
+                "Session ownership checks are unavailable");
+    }
+
+    /**
+     * The unified read authority over an unbound Session: a present ownership
+     * row is the sole authority; a legacy Session without a row stays
+     * tenant-wide readable.
+     */
+    public default void requireSessionReadAuthority(String tenantId,
+            String sessionId, SessionPrincipal principal) {
+        throw new UnsupportedOperationException(
+                "Session ownership checks are unavailable");
+    }
+
+    /**
      * H4b: creates a child Session under its parent's exact binding,
      * stamping the lineage in the same transaction. The idempotency key
      * derives from the parent's committed launch, so a replay returns the

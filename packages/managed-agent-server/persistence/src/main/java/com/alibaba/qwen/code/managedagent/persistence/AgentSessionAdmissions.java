@@ -182,6 +182,18 @@ final class AgentSessionAdmissions {
                 principal);
     }
 
+    void requireSessionAuthority(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId,
+                principal);
+    }
+
+    void requireSessionReadAuthority(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        ManagedSessionPrincipal.requireReadAuthority(jdbc, tenantId, sessionId,
+                principal);
+    }
+
     Admission insertWorkspaceSessionCommand(SessionCreationCommand command) {
         String tenantId = command.tenantId();
         String actorId = command.actorId();

@@ -40,8 +40,12 @@ class ManagedEventStreamServiceTest {
             2, 1, 1, null, 1);
 
     @Test
-    void actorlessStreamRequestsFailClosedBeforeAnyRead() {
+    void actorlessStreamRequestsResolveVisibilityBeforeStreaming() {
         ManagedAgentService agentService = mock(ManagedAgentService.class);
+        when(agentService.requireReadableSession("tenant",
+                (com.alibaba.qwen.code.managedagent.model.SessionPrincipal) null, "session"))
+                .thenThrow(new ManagedAgentException(404, "session_not_found",
+                        "The Session was not found."));
         ManagedEventStreamService service = new ManagedEventStreamService(
                 agentService, new SessionEventHub(),
                 Executors.newSingleThreadExecutor(), new ManagedAgentProperties());
@@ -52,11 +56,14 @@ class ManagedEventStreamServiceTest {
                 () -> service.webShellStream("tenant", " ", "session", 0))) {
             assertThatThrownBy(open::run)
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
-                        assertThat(error.getStatus()).isEqualTo(401);
-                        assertThat(error.getCode()).isEqualTo("actor_required");
+                        assertThat(error.getStatus()).isEqualTo(404);
+                        assertThat(error.getCode()).isEqualTo("session_not_found");
                     });
         }
-        verifyNoInteractions(agentService);
+        // Visibility ran with the caller's own tenant and a null principal;
+        // its refusal precedes any emitter or streaming task.
+        verify(agentService, times(4)).requireReadableSession("tenant",
+                (com.alibaba.qwen.code.managedagent.model.SessionPrincipal) null, "session");
     }
 
     @Test
@@ -656,7 +663,7 @@ class ManagedEventStreamServiceTest {
     void pushesCommittedEventsWithoutWaitingForReconciliation()
             throws Exception {
         ManagedAgentService agentService = mock(ManagedAgentService.class);
-        when(agentService.requireReadableSession(
+        when(agentService.requireReadableSession("tenant",
                 new com.alibaba.qwen.code.managedagent.model.SessionPrincipal("tenant", "actor", null), "session"))
                 .thenReturn(SESSION);
         CountDownLatch initialRead = new CountDownLatch(1);
@@ -699,7 +706,7 @@ class ManagedEventStreamServiceTest {
     @Test
     void treatsClientDisconnectAsACompletedStream() throws Exception {
         ManagedAgentService agentService = mock(ManagedAgentService.class);
-        when(agentService.requireReadableSession(
+        when(agentService.requireReadableSession("tenant",
                 new com.alibaba.qwen.code.managedagent.model.SessionPrincipal("tenant", "actor", null), "session"))
                 .thenReturn(SESSION);
         when(agentService.streamEvents(SESSION, 0))

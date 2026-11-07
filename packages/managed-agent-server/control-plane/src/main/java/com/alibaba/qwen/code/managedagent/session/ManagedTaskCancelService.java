@@ -48,7 +48,7 @@ public class ManagedTaskCancelService {
             String actorId, String idempotencyKey, String sessionId,
             String taskId) {
         OperationAdmission admission = admit(tenantId,
-                SessionPrincipal.ofUser(tenantId, actorId),
+                principalOf(tenantId, actorId),
                 idempotencyKey, sessionId, taskId);
         return operations.publicOperation(admission.operation(),
                 admission.replayed());
@@ -58,7 +58,7 @@ public class ManagedTaskCancelService {
             String actorId, String idempotencyKey, String sessionId,
             String taskId) {
         OperationAdmission admission = admit(tenantId,
-                SessionPrincipal.ofUser(tenantId, actorId),
+                principalOf(tenantId, actorId),
                 idempotencyKey, sessionId, taskId);
         return operations.webShellOperation(admission.operation(),
                 admission.replayed());
@@ -90,8 +90,8 @@ public class ManagedTaskCancelService {
         // Access is current, never replayed: a caller who lost the Session,
         // the task or the role since admission gets 404 or 403 even while
         // its operation is retained.
-        SessionRecord session = sessions.requireReadableSession(principal,
-                sessionId);
+        SessionRecord session = sessions.requireReadableSession(tenantId,
+                principal, sessionId);
         if (records.findTask(tenantId, sessionId, taskId).isEmpty()) {
             throw new ManagedAgentException(404, "task_not_found",
                     "The task was not found.");
@@ -101,12 +101,20 @@ public class ManagedTaskCancelService {
         // carrying another request id still replays.
         String requestDigest = digests.digest(Map.of("sessionId", sessionId,
                 "operation", "TASK_CANCEL", "taskId", taskId));
-        String actorDigest = session.workspace() != null
-                ? digests.digest(Map.of("actorId", principal.userId()))
-                : digests.digest(Map.of("userId", principal.userId(),
-                        "actorPresent", principal.actorPresent(),
-                        "actorSubjectId", principal.actorSubjectId() == null
-                                ? "" : principal.actorSubjectId()));
+        String actorDigest;
+        if (principal == null) {
+            // An anonymous caller admitted to a legacy no-row Session has no
+            // principal identity; the cancel is scoped to the tenant-wide
+            // anonymous actor. A bound Session never reaches here anonymously.
+            actorDigest = digests.digest(Map.of("anonymous", "legacy"));
+        } else if (session.workspace() != null) {
+            actorDigest = digests.digest(Map.of("actorId", principal.userId()));
+        } else {
+            actorDigest = digests.digest(Map.of("userId", principal.userId(),
+                    "actorPresent", principal.actorPresent(),
+                    "actorSubjectId", principal.actorSubjectId() == null
+                            ? "" : principal.actorSubjectId()));
+        }
         OperationAdmission admission = store.beginTaskCancelOperation(
                 tenantId, sessionId, taskId, actorDigest, idempotencyKey,
                 requestDigest);
@@ -115,5 +123,12 @@ public class ManagedTaskCancelService {
                     admission.operation().operationId());
         }
         return admission;
+    }
+
+    // An anonymous caller keeps its tenant: visibility runs before the actor
+    // guard, so a foreign Session is 404 rather than actor_required.
+    private static SessionPrincipal principalOf(String tenantId, String actorId) {
+        return actorId == null || actorId.isBlank() ? null
+                : SessionPrincipal.ofUser(tenantId, actorId);
     }
 }

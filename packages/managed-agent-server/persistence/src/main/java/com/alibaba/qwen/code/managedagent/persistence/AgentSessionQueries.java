@@ -258,8 +258,29 @@ final class AgentSessionQueries {
         arguments.add(principal == null ? null
                 : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(
                         tenantId, principal.userId()));
-        String ownershipClause = "";
+        // A legacy unbound Session — one that never wrote an ownership row —
+        // lists tenant-wide. The CREATE_SESSION receipt is an exclusion mark,
+        // not a required one: a principal-created Session stamps the non-empty
+        // structured principal key, which never equals the raw creator key, so
+        // a deleted row cannot resurrect the Session into the page. A legacy
+        // create (raw creator key or empty UNATTRIBUTED key) and the oldest
+        // rows that predate the receipt altogether carry no such mark and stay
+        // visible.
+        String legacyUnbound = " (ma_session.workspace_id IS NULL AND NOT"
+                + " EXISTS (SELECT 1 FROM ma_session_principal sp WHERE"
+                + " sp.tenant_id = ma_session.tenant_id AND"
+                + " sp.session_id = ma_session.session_id) AND NOT EXISTS"
+                + " (SELECT 1 FROM ma_request_receipt r WHERE"
+                + " r.tenant_id = ma_session.tenant_id AND"
+                + " r.session_id = ma_session.session_id AND"
+                + " r.namespace = 'SESSION_COMMAND' AND"
+                + " r.operation = 'CREATE_SESSION' AND"
+                + " r.actor_id IS NOT NULL AND LENGTH(r.actor_id) > 0 AND"
+                + " r.actor_id <> ma_session.creator_actor_key))";
+        String ownershipClause;
         if (principal != null) {
+            // A present ownership row is the sole authority over an unbound
+            // Session; the legacy arm below adds the tenant-wide no-row rows.
             ownershipClause = " OR EXISTS (SELECT 1 FROM"
                     + " ma_session_principal sp WHERE"
                     + " ma_session.workspace_id IS NULL AND sp.tenant_id ="
@@ -268,16 +289,16 @@ final class AgentSessionQueries {
                     + ManagedSessionPrincipal.VERSION
                     + " AND sp.user_id = ? AND sp.actor_present = ? AND"
                     + " (sp.actor_subject_id = ? OR"
-                    + " (sp.actor_subject_id IS NULL AND ? IS NULL)))";
+                    + " (sp.actor_subject_id IS NULL AND ? IS NULL)))"
+                    + " OR" + legacyUnbound;
             arguments.add(principal.userId());
             arguments.add(principal.actorPresent());
             arguments.add(principal.actorSubjectId());
             arguments.add(principal.actorSubjectId());
         } else {
-            // The legacy tenant-header arm lists unbound Sessions tenant-wide
-            // (the pre-ownership workspace_id IS NULL arm); a present principal
-            // keeps the exact-ownership filter above.
-            ownershipClause = " OR ma_session.workspace_id IS NULL";
+            // The anonymous arm sees only the tenant-wide legacy rows; a
+            // row-present Session is its owner's alone.
+            ownershipClause = " OR" + legacyUnbound;
         }
         String ownerClause = "";
         if (ownerOnly) {

@@ -53,7 +53,8 @@ public class ManagedEventStreamService {
     public SseEmitter publicStream(String tenantId, String actorId,
             String sessionId, long afterSequence) {
         return publicStream(tenantId,
-                actorId == null ? null : SessionPrincipal.ofUser(tenantId, actorId),
+                actorId == null || actorId.isBlank() ? null
+                        : SessionPrincipal.ofUser(tenantId, actorId),
                 sessionId, afterSequence);
     }
 
@@ -79,7 +80,8 @@ public class ManagedEventStreamService {
     public SseEmitter webShellStream(String tenantId, String actorId,
             String sessionId, long afterSequence) {
         return webShellStream(tenantId,
-                actorId == null ? null : SessionPrincipal.ofUser(tenantId, actorId),
+                actorId == null || actorId.isBlank() ? null
+                        : SessionPrincipal.ofUser(tenantId, actorId),
                 sessionId, afterSequence);
     }
 

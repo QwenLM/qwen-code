@@ -34,7 +34,7 @@ public class ManagedMcpController {
     @GetMapping("/v1/agents/sessions/{sessionId}/mcp-catalog")
     public ResponseEntity<JsonNode> get(TenantContext tenant, @PathVariable String sessionId) {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
-                .body(service.get(tenant.requirePrincipal(), sessionId));
+                .body(service.get(tenant.tenantId(), tenant.actorId(), sessionId));
     }
 
     @PostMapping("/api/agent/web-shell/v1/session-mcp/query")
