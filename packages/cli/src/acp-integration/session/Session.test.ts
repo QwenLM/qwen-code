@@ -37546,6 +37546,32 @@ describe('Session', () => {
         });
       });
 
+      it('tags the stacked-skill overflow notice for channel replies', async () => {
+        const notice =
+          'Only the first 5 skills were loaded. Additional /skill tokens were treated as prompt text.';
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Expanded prompt' }],
+          stackedSkillOverflow: notice,
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/skill a /skill b' }],
+        });
+
+        expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(1, {
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: notice },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        });
+      });
+
       it('forwards the structured compression result and records it for replay', async () => {
         const compression = {
           phase: 'done' as const,
@@ -52776,6 +52802,34 @@ describe('Session', () => {
           errorType: undefined,
         }),
       );
+    });
+
+    it('reports a returned interruption as interrupted and keeps its output', async () => {
+      const abortController = new AbortController();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return {
+          llmContent: 'Below is the output before it was cancelled.\npartial',
+          returnDisplay: 'partial',
+          interruptedBeforeCompletion: true,
+        };
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('cancel_tool', execute),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(abortController.signal, 'prompt-interrupted-cancel', [
+        { id: 'interrupted_cancel_call', name: 'cancel_tool', args: {} },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error:
+          'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.\n\nBelow is the output before it was cancelled.\npartial',
+      });
     });
 
     it('does not execute after cancellation settles during PreToolUse', async () => {

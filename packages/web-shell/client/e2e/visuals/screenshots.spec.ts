@@ -1595,6 +1595,69 @@ for (const theme of THEMES) {
       );
     });
 
+    test(`Channel repository filter editor`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'github',
+            displayName: 'GitHub',
+            manageable: true,
+            fields: githubManagement.fields,
+          },
+        ],
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await page.getByRole('button', { name: 'Configure GitHub' }).click();
+      const editor = page.getByRole('dialog');
+      await expect(
+        editor.getByRole('heading', { name: 'Configure GitHub' }),
+      ).toBeVisible();
+      await editor
+        .getByRole('switch', { name: 'Use Local GitHub CLI Authentication' })
+        .click();
+
+      // Anchors: the filter defaults to Off and the repository list stays
+      // hidden until a mode is chosen. A renderer that always shows the list
+      // (or lacks the field) fails here instead of shipping a stale capture.
+      const modeSelect = editor.getByLabel('Repository Filter');
+      await modeSelect.scrollIntoViewIfNeeded();
+      await expect(editor.getByLabel('Filtered Repositories')).toHaveCount(0);
+      await captureScreenshot(page, `channel-repo-filter-off-${theme}`);
+
+      await modeSelect.click();
+      await page
+        .getByRole('option', {
+          name: 'Blocklist — all except listed repositories',
+        })
+        .click();
+      const repositories = editor.getByLabel('Filtered Repositories');
+      await expect(repositories).toBeVisible();
+      await repositories.fill(
+        'https://github.com/QwenLM/qwen-code/pull/16117, octo/noisy-repo',
+      );
+      await captureScreenshot(page, `channel-repo-filter-blocklist-${theme}`);
+    });
+
     test(`Channel events`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         capabilities: {
