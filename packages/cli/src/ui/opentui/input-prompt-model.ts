@@ -24,13 +24,12 @@
  *  - the double-Esc clear state machine (arm → 500ms window → clear);
  *  - history edge decisions feeding the ported InputHistory.
  *
- * The OpenTUI component owns the edit buffer (opentui EditBufferRenderable)
- * and the keyboard; it delegates every decision here.
+ * The OpenTUI component owns the Ink text buffer and keyboard; it delegates
+ * completion and submission decisions here.
  */
 
-import { escapePath } from '@qwen-code/qwen-code-core';
 import { Fzf, type FzfResultItem } from 'fzf';
-import type { Suggestion } from '../utils/suggestions.js';
+import type { Suggestion, SuggestionCategory } from '../utils/suggestions.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../utils/suggestions.js';
 import {
   CommandKind,
@@ -46,7 +45,10 @@ import {
   isStackedSkillCompletableCommand,
   isValidStackedSkillPrefix,
 } from '../commands/commands.js';
-import { getCommandDisplayName } from '../../services/commandMetadata.js';
+import {
+  getCommandDisplayName,
+  getCommandSourceBadge,
+} from '../../services/commandMetadata.js';
 import { getCachedStringWidth, toCodePoints } from '../utils/textUtils.js';
 import type { InputHistory } from './input-history.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
@@ -62,8 +64,9 @@ export { MAX_SUGGESTIONS_TO_SHOW };
 // line_start_weight + col where the rope weighs each newline as 1. The
 // helpers in this module work in code-point units (toCodePoints
 // coordinates, matching the ink ports they were derived from). These pure
-// converters bridge the two; the component calls them at the editor
-// boundary so every helper keeps its code-point contract.
+// legacy converters describe scalar-width coordinates. Editing now uses the
+// existing Ink buffer directly: grapheme/display positions are not invertible.
+// Native mouse/view projection lives in text-buffer-view.ts.
 
 const codePointWidth = (cp: string): number => getCachedStringWidth(cp);
 
@@ -214,7 +217,7 @@ export function detectCompletionTarget(
       const pathStart = i + 1;
       return {
         mode: CompletionMode.AT,
-        query: currentLine.substring(pathStart, end),
+        query: codePoints.slice(pathStart, end).join(''),
         start: pathStart,
         end,
       };
@@ -830,6 +833,7 @@ function toCommandSuggestion(
     label: getCommandDisplayName(command, { matchedAlias, includeAliases }),
     value: command.name,
     description: command.description,
+    sourceBadge: getCommandSourceBadge(command) ?? undefined,
     argumentHint: command.argumentHint,
     matchedAlias,
     submitOnAccept: command.submitOnAccept,
@@ -925,18 +929,46 @@ export function applyCompletion(
   };
 }
 
+/** Fixed display order of `@` category tabs (ink's CATEGORY_ORDER). */
+const CATEGORY_ORDER: SuggestionCategory[] = [
+  'file',
+  'session',
+  'mcp',
+  'extension',
+];
+
+export type CompletionCategory = SuggestionCategory | 'all';
+
 /**
- * Maps core FileSearch results onto @-completion suggestions, mirroring
- * useAtCompletion's mapping (directories keep their trailing '/', the value
- * is the shell-escaped path).
+ * Tabs for a raw `@` suggestion set. A single present category yields just
+ * `['all']`, which is what keeps the bar hidden for files-only results.
  */
-export function fileSearchToSuggestions(paths: string[]): Suggestion[] {
-  return paths.map((p) => ({
-    label: p,
-    value: escapePath(p),
-    isDirectory: p.endsWith('/'),
-    category: 'file' as const,
-  }));
+export function atCategoryTabs(
+  suggestions: readonly Suggestion[],
+): CompletionCategory[] {
+  const present = new Set(suggestions.map((s) => s.category ?? 'file'));
+  const ordered = CATEGORY_ORDER.filter((c) => present.has(c));
+  return ordered.length > 1 ? ['all', ...ordered] : ['all'];
+}
+
+export function filterByCategory(
+  suggestions: readonly Suggestion[],
+  category: CompletionCategory,
+): readonly Suggestion[] {
+  return category === 'all'
+    ? suggestions
+    : suggestions.filter((s) => (s.category ?? 'file') === category);
+}
+
+/** Step one tab, wrapping; a tab that left the set falls back to `'all'`. */
+export function nextCategory(
+  tabs: readonly CompletionCategory[],
+  active: CompletionCategory,
+  direction: 1 | -1,
+): CompletionCategory {
+  const idx = tabs.indexOf(active);
+  if (idx === -1) return 'all';
+  return tabs[(idx + direction + tabs.length) % tabs.length];
 }
 
 /** What the view should show in the suggestion window. */
@@ -1060,27 +1092,7 @@ export function freePastePlaceholderId(
   activeIds.get(charCount)?.delete(id);
 }
 
-/** Restores every placeholder in `value` to its pasted content on submit. */
-export function expandPendingPastePlaceholders(
-  value: string,
-  pendingPastes: ReadonlyMap<string, string>,
-): string {
-  if (pendingPastes.size === 0) {
-    return value;
-  }
-  const placeholders = Array.from(pendingPastes.keys()).sort(
-    (a, b) => b.length - a.length,
-  );
-  const escapedPlaceholders = placeholders.map((placeholderValue) =>
-    placeholderValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-  );
-  const placeholderRegex = new RegExp(escapedPlaceholders.join('|'), 'g');
-  return value.replace(
-    placeholderRegex,
-    (matchedPlaceholder) =>
-      pendingPastes.get(matchedPlaceholder) ?? matchedPlaceholder,
-  );
-}
+export { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
 
 /** The double-Esc clear state machine (500ms arm window). */
 export class EscapeClearModel {

@@ -11,7 +11,7 @@
  */
 
 import { Box, Text } from 'ink';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   useAgentViewState,
   useAgentViewActions,

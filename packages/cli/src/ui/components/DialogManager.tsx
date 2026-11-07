@@ -10,6 +10,7 @@ import { CommandFormatMigrationNudge } from '../CommandFormatMigrationNudge.js';
 import { LoopDetectionConfirmation } from './LoopDetectionConfirmation.js';
 import { FolderTrustDialog } from './FolderTrustDialog.js';
 import { MCPServerApprovalDialog } from './mcp/MCPServerApprovalDialog.js';
+import { ProjectHooksApprovalDialog } from './hooks/ProjectHooksApprovalDialog.js';
 import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { ConsentPrompt } from './ConsentPrompt.js';
 import { ProviderUpdatePrompt } from './ProviderUpdatePrompt.js';
@@ -61,6 +62,7 @@ import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.j
 import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
 import { t } from '../../i18n/index.js';
 import { getDialogMaxHeight } from '../utils/layoutUtils.js';
+import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -147,6 +149,16 @@ export const DialogManager = ({
       />
     );
   }
+  if (uiState.isProjectHooksApprovalDialogOpen && uiState.pendingProjectHooks) {
+    return (
+      <ProjectHooksApprovalDialog
+        lines={uiState.pendingProjectHooks.lines}
+        terminalWidth={terminalWidth}
+        availableTerminalHeight={listDialogHeight}
+        onSelect={uiActions.handleProjectHooksApprovalSelect}
+      />
+    );
+  }
   if (uiState.shellConfirmationRequest) {
     return (
       <ShellConfirmationDialog
@@ -159,6 +171,7 @@ export const DialogManager = ({
   if (uiState.loopDetectionConfirmationRequest) {
     return (
       <LoopDetectionConfirmation
+        cause={uiState.loopDetectionConfirmationRequest.cause}
         onComplete={uiState.loopDetectionConfirmationRequest.onComplete}
       />
     );
@@ -191,8 +204,11 @@ export const DialogManager = ({
     );
   }
   if (uiState.providerUpdateRequest) {
+    // Keyed per prompt so a queued prompt opens on its default choice
+    // instead of the row highlighted in the previous one.
     return (
       <ProviderUpdatePrompt
+        key={uiState.providerUpdateRequest.id}
         entries={uiState.providerUpdateRequest.entries}
         onConfirm={uiState.providerUpdateRequest.onConfirm}
       />
@@ -271,6 +287,7 @@ export const DialogManager = ({
       <ModelDialog
         onClose={uiActions.closeModelDialog}
         isFastModelMode={uiState.isFastModelMode}
+        isAdvisorModelMode={uiState.isAdvisorModelMode}
         isVoiceModelMode={uiState.isVoiceModelMode}
         isVisionModelMode={uiState.isVisionModelMode}
         isCompactionModelMode={uiState.isCompactionModelMode}
@@ -358,6 +375,7 @@ export const DialogManager = ({
       <Box flexDirection="column">
         <EffortDialog
           currentEffort={config.getReasoningEffort()}
+          efforts={getReasoningEffortsForConfig(config)}
           onSelect={uiActions.handleEffortSelect}
         />
       </Box>

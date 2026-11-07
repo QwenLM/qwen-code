@@ -33,6 +33,7 @@ const LOCK_OPTIONS: LockOptions = {
 export interface LiveDiscoveryRecord {
   url: string;
   token?: string;
+  configPath?: string;
   protocolVersion: typeof LIVE_HOST_PROTOCOL_VERSION;
   pid: number;
   instanceNonce: string;

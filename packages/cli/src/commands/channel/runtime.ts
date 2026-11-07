@@ -8,6 +8,7 @@ import type {
   ChannelBase,
   ChannelBaseOptions,
   ChannelPlugin,
+  BackgroundResponseContext,
   PermissionRequestEvent,
   PermissionResolvedEvent,
   ToolCallEvent,
@@ -26,6 +27,17 @@ export type ParsedChannelConfig = Awaited<
 export interface ParsedChannel {
   name: string;
   config: ParsedChannelConfig;
+}
+
+export function resolveChannelLocale(value: unknown): 'en' | 'zh' {
+  if (typeof value !== 'string') return 'en';
+  const language = value.trim().replaceAll('_', '-').toLowerCase();
+  return language === 'zh' ||
+    language.startsWith('zh-') ||
+    language === 'chinese' ||
+    language === '中文'
+    ? 'zh'
+    : 'en';
 }
 
 export function sessionsPath(): string {
@@ -213,29 +225,32 @@ export function registerBackgroundResponseRelay(
   router: SessionRouter,
   channels: Map<string, ChannelBase>,
 ): void {
-  bridge.on('backgroundResponse', (sessionId: string, text: string) => {
-    const target = router.getTarget(sessionId);
-    if (!target) {
-      writeStderrLine(
-        `[Channel] No route for background response from session ${sanitizeLogText(sessionId, 128)}`,
-      );
-      return;
-    }
-    const channel = channels.get(target.channelName);
-    if (!channel) {
-      writeStderrLine(
-        `[Channel] No channel "${sanitizeLogText(target.channelName, 64)}" for background response from session ${sanitizeLogText(sessionId, 128)}`,
-      );
-      return;
-    }
-    void channel
-      .dispatchBackgroundResponse(sessionId, text)
-      .catch((err: unknown) => {
+  bridge.on(
+    'backgroundResponse',
+    (sessionId: string, text: string, context?: BackgroundResponseContext) => {
+      const target = router.getTarget(sessionId);
+      if (!target) {
         writeStderrLine(
-          `[Channel] Background response relay failed for session ${sanitizeLogText(sessionId, 128)}: ${err instanceof Error ? sanitizeLogText(err.message, 512) : sanitizeLogText(String(err), 512)}`,
+          `[Channel] No route for background response from session ${sanitizeLogText(sessionId, 128)}`,
         );
-      });
-  });
+        return;
+      }
+      const channel = channels.get(target.channelName);
+      if (!channel) {
+        writeStderrLine(
+          `[Channel] No channel "${sanitizeLogText(target.channelName, 64)}" for background response from session ${sanitizeLogText(sessionId, 128)}`,
+        );
+        return;
+      }
+      void channel
+        .dispatchBackgroundResponse(sessionId, text, context)
+        .catch((err: unknown) => {
+          writeStderrLine(
+            `[Channel] Background response relay failed for session ${sanitizeLogText(sessionId, 128)}: ${err instanceof Error ? sanitizeLogText(err.message, 512) : sanitizeLogText(String(err), 512)}`,
+          );
+        });
+    },
+  );
 }
 
 function cancelPermissionRequest(

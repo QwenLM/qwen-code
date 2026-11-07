@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
   createHookOutput,
+  isBlockingHookOutput,
   DefaultHookOutput,
   UserPromptExpansionHookOutput,
   HookEventName,
@@ -179,5 +180,38 @@ describe('isToolArtifactLike', () => {
         }),
       ).toBe(false);
     }
+  });
+});
+
+describe('isBlockingHookOutput', () => {
+  it('blocks on a PreToolUse deny permission decision', () => {
+    expect(
+      isBlockingHookOutput('PreToolUse', {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it('lets a PreToolUse allow permission decision win over decision: deny', () => {
+    expect(
+      isBlockingHookOutput('PreToolUse', {
+        decision: 'deny',
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it('blocks on decision: block for other events', () => {
+    expect(isBlockingHookOutput('Stop', { decision: 'block' })).toBe(true);
+  });
+
+  it('does not block on an approving decision for other events', () => {
+    expect(isBlockingHookOutput('Stop', { decision: 'approve' })).toBe(false);
   });
 });

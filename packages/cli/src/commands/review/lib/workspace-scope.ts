@@ -196,7 +196,7 @@ export function resolveTestScope(input: {
   const unmapped = affected.filter(
     (d) => d !== '.' && !scriptsOf.has(d) && !skipped.includes(d),
   );
-  // Files a negation excludes (!packages/desktop-shell — a separate toolchain with
+  // Files a negation excludes (!packages/desktop — a separate toolchain with
   // its own lockfile) cannot affect any included workspace's tests, so they
   // earn no incomplete-scope caveat — but their own suites were not run
   // either, and "nothing is silent" covers that too: disclose it as the
@@ -251,9 +251,9 @@ export function resolveTestScope(input: {
   if (input.rootTestFansOut && workspaces.includes('.')) {
     workspaces = workspaces.filter((d) => d !== '.');
     fanOutCaveat =
-      "the root's `test` script fans out over every workspace " +
-      '(`--workspaces`), so the root suite did not run — it cannot finish ' +
-      'inside one command deadline; the scoped member suites are the coverage';
+      "the root's `test` script fans out over every workspace, so the root " +
+      'suite did not run — it cannot finish inside one command deadline; the ' +
+      'scoped member suites are the coverage';
   }
 
   // Testable-to-testable: a closure past half the suites that CAN run is not a

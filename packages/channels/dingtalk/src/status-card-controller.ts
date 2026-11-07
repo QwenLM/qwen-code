@@ -9,7 +9,13 @@ import {
   type DingtalkInteractiveCardClient,
 } from './interactive-card-client.js';
 import type { DingtalkCardCallbackResult } from './interactive-card-types.js';
+import { escapeDingTalkMarkdown } from './markdown.js';
 import { sanitizeStreamingImageMarkers } from './outbound-image.js';
+import {
+  isChinesePresentationLanguage,
+  presentationPhaseLabel,
+  type DingtalkPresentationPhase,
+} from './presentation-phase.js';
 
 const FLUSH_INTERVAL_MS = 500;
 const STATUS_REFRESH_INTERVAL_MS = 1_000;
@@ -21,7 +27,13 @@ const MAX_RETRY_INTERVAL_MS = 30_000;
 export const CONTENT_LIMIT = 20_000;
 export const TRUNCATION_MARKER = '[Earlier output truncated]\n';
 
-type StatusState = 'Running' | 'Completed' | 'Failed' | 'Stopped' | 'Cancelled';
+type StatusState =
+  | 'Running'
+  | 'Completed'
+  | 'Failed'
+  | 'Stopped'
+  | 'Cancelled'
+  | 'Partial';
 
 interface TerminalIntent {
   content: string;
@@ -39,6 +51,8 @@ interface StatusRecord {
   target: { chatId: string; isGroup: boolean };
   outTrackId: string;
   content: string;
+  sourcePrefix?: string;
+  phase: DingtalkPresentationPhase;
   startedAt: number;
   lastStatusSecond: number;
   lastContentSyncSecond: number;
@@ -73,6 +87,7 @@ export interface StatusCardControllerOptions {
   client: DingtalkInteractiveCardClient;
   cancelRun(sessionId: string, runId: string): Promise<boolean>;
   model?: string;
+  language?: string;
   onError?(operation: string, error: unknown): void;
 }
 
@@ -80,6 +95,36 @@ function boundContent(content: string): string {
   if (content.length <= CONTENT_LIMIT) return content;
   return `${TRUNCATION_MARKER}${content.slice(
     content.length - (CONTENT_LIMIT - TRUNCATION_MARKER.length),
+  )}`;
+}
+
+function activeContent(
+  phase: DingtalkPresentationPhase,
+  content: string,
+  language?: string,
+  sourcePrefix?: string,
+): string {
+  const label = presentationPhaseLabel(phase, language);
+  const sanitized = sanitizeStreamingImageMarkers(content);
+  const renderedSourcePrefix =
+    sourcePrefix &&
+    (sanitized === sourcePrefix || sanitized.startsWith(`${sourcePrefix}\n\n`))
+      ? sourcePrefix
+      : undefined;
+  const body = renderedSourcePrefix
+    ? sanitized.slice(
+        renderedSourcePrefix.length +
+          (sanitized.length === renderedSourcePrefix.length ? 0 : 2),
+      )
+    : sanitized;
+  const prefix = [label, renderedSourcePrefix].filter(Boolean).join('\n\n');
+  if (!body) return prefix;
+
+  const separator = '\n\n';
+  const available = CONTENT_LIMIT - prefix.length - separator.length;
+  if (body.length <= available) return `${prefix}${separator}${body}`;
+  return `${prefix}${separator}${TRUNCATION_MARKER}${body.slice(
+    body.length - (available - TRUNCATION_MARKER.length),
   )}`;
 }
 
@@ -91,6 +136,59 @@ export class StatusCardController {
   private disposed = false;
 
   constructor(private readonly options: StatusCardControllerOptions) {}
+
+  async deliverCompletedResult(
+    target: { chatId: string; isGroup: boolean },
+    text: string,
+    sourceLabel?: string,
+    result: { status: string; partial?: boolean } = { status: 'completed' },
+  ): Promise<boolean> {
+    const content = sourceLabel
+      ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n${text}`
+      : text;
+    if (this.disposed || !text.trim() || content.length > CONTENT_LIMIT) {
+      return false;
+    }
+    const state =
+      result.status === 'failed'
+        ? 'Failed'
+        : result.status === 'stopped'
+          ? 'Stopped'
+          : result.status === 'cancelled'
+            ? 'Cancelled'
+            : result.partial || result.status !== 'completed'
+              ? 'Partial'
+              : 'Completed';
+    try {
+      await this.options.client.createAndDeliver({
+        templateId: STATUS_CARD_TEMPLATE_ID,
+        outTrackId: `qwen-result-${randomUUID()}`,
+        target,
+        cardParamMap: this.terminalCardParams(
+          content,
+          [this.statusStateLabel(state), this.options.model?.trim()]
+            .filter(Boolean)
+            .join(' · '),
+        ),
+      });
+      return true;
+    } catch (error) {
+      this.options.onError?.('completed result card', error);
+      return false;
+    }
+  }
+
+  private terminalCardParams(content: string, statusLine: string) {
+    return {
+      blockList: JSON.stringify([{ type: 0, markdown: content }]),
+      content,
+      copy_content: content,
+      flowStatus: 3,
+      statusLine,
+      hasAction: 'false',
+      stop_action: 'false',
+    };
+  }
 
   ensure(
     segment: ChannelOutputSegmentContext,
@@ -213,6 +311,10 @@ export class StatusCardController {
       target,
       outTrackId,
       content: boundContent(initialContent),
+      ...(segment.sourceLabel
+        ? { sourcePrefix: escapeDingTalkMarkdown(segment.sourceLabel) }
+        : {}),
+      phase: 'thinking',
       startedAt: Date.now(),
       lastStatusSecond: 0,
       lastContentSyncSecond: 0,
@@ -249,14 +351,34 @@ export class StatusCardController {
     segmentId: string,
     text: string,
     retainedContent?: (content: string) => string,
+    partial = false,
   ): Promise<boolean> {
     return this.finalize(
       segmentId,
       boundContent(text),
-      'Completed',
+      partial ? 'Partial' : 'Completed',
       false,
       retainedContent,
     );
+  }
+
+  updateRunPhase(runId: string, phase: DingtalkPresentationPhase): void {
+    if (this.disposed) return;
+    for (const segmentId of this.segmentIdsByRun.get(runId) ?? []) {
+      const record = this.recordsBySegment.get(segmentId);
+      if (
+        !record ||
+        record.terminal ||
+        record.streamFailed ||
+        record.phase === phase
+      ) {
+        continue;
+      }
+      record.phase = phase;
+      record.contentVersion++;
+      record.hasPendingWrite = true;
+      this.scheduleFlush(record);
+    }
   }
 
   fail(segmentId: string, error: string): void {
@@ -328,9 +450,14 @@ export class StatusCardController {
           outTrackId: record.outTrackId,
           target,
           cardParamMap: {
-            content: sanitizeStreamingImageMarkers(record.content),
+            content: activeContent(
+              record.phase,
+              record.content,
+              this.options.language,
+              record.sourcePrefix,
+            ),
             flowStatus: 2,
-            statusLine: this.statusLine(record, 'Running').text,
+            statusLine: this.statusLine(record).text,
             hasAction: 'true',
             stop_action: 'true',
           },
@@ -357,7 +484,12 @@ export class StatusCardController {
       await this.options.client.openOrUpdateStream({
         outTrackId: record.outTrackId,
         key: 'content',
-        content: sanitizeStreamingImageMarkers(record.content),
+        content: activeContent(
+          record.phase,
+          record.content,
+          this.options.language,
+          record.sourcePrefix,
+        ),
         finalize: false,
       });
     } catch (error) {
@@ -422,7 +554,12 @@ export class StatusCardController {
         await this.options.client.openOrUpdateStream({
           outTrackId: record.outTrackId,
           key: 'content',
-          content: sanitizeStreamingImageMarkers(record.content),
+          content: activeContent(
+            record.phase,
+            record.content,
+            this.options.language,
+            record.sourcePrefix,
+          ),
           finalize: false,
         });
         contentWritten = true;
@@ -516,20 +653,10 @@ export class StatusCardController {
     try {
       await this.options.client.updateInstance({
         outTrackId: record.outTrackId,
-        cardParamMap: {
-          blockList: JSON.stringify([
-            {
-              type: 0,
-              markdown: intent.content,
-            },
-          ]),
-          content: intent.content,
-          copy_content: intent.content,
-          flowStatus: 3,
-          statusLine: intent.statusLine,
-          hasAction: 'false',
-          stop_action: 'false',
-        },
+        cardParamMap: this.terminalCardParams(
+          intent.content,
+          intent.statusLine,
+        ),
       });
       record.content = '';
       this.removeRecord(record);
@@ -638,7 +765,7 @@ export class StatusCardController {
 
   private statusLine(
     record: StatusRecord,
-    state: StatusState,
+    state?: Exclude<StatusState, 'Running'>,
   ): { text: string; second: number } {
     const second = Math.max(
       0,
@@ -646,14 +773,33 @@ export class StatusCardController {
     );
     const model = this.options.model?.trim();
     return {
-      text: [state, model, `${second}s`].filter(Boolean).join(' · '),
+      text: [
+        state ? this.statusStateLabel(state) : undefined,
+        model,
+        `${second}s`,
+      ]
+        .filter(Boolean)
+        .join(' · '),
       second,
     };
   }
 
+  private statusStateLabel(state: Exclude<StatusState, 'Running'>): string {
+    if (!isChinesePresentationLanguage(this.options.language)) return state;
+    return (
+      {
+        Completed: '已完成',
+        Failed: '已失败',
+        Stopped: '已终止',
+        Cancelled: '已取消',
+        Partial: '部分结果',
+      }[state] ?? state
+    );
+  }
+
   private async updateRunningStatus(record: StatusRecord): Promise<void> {
     if (this.disposed || record.terminal || record.streamFailed) return;
-    const status = this.statusLine(record, 'Running');
+    const status = this.statusLine(record);
     if (status.second === record.lastStatusSecond) return;
     const syncContent =
       status.second - record.lastContentSyncSecond >=
@@ -663,7 +809,14 @@ export class StatusCardController {
         outTrackId: record.outTrackId,
         cardParamMap: {
           ...(syncContent
-            ? { content: sanitizeStreamingImageMarkers(record.content) }
+            ? {
+                content: activeContent(
+                  record.phase,
+                  record.content,
+                  this.options.language,
+                  record.sourcePrefix,
+                ),
+              }
             : {}),
           statusLine: status.text,
         },

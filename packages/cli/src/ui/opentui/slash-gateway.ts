@@ -21,9 +21,11 @@
  *    gate ({@link normalizeQuitSubmission}).
  */
 
+import { hasSlashCommandPathSeparator } from '../utils/commandUtils.js';
 import type {
   OpenTuiDispatchOutcome,
   OpenTuiSlashDispatcher,
+  TypedInput,
 } from './commands-dispatch.js';
 
 // ink's quit family (AppContainer.handleFinalSubmit): `/exit` is quit's own
@@ -97,6 +99,28 @@ export class OpenTuiSlashGateway {
     return this.dispatcher?.mustDeferDuringStreaming(text) ?? false;
   }
 
+  /**
+   * Whether the dispatcher claims this input instead of the shell lane — the
+   * single admission rule the shell must reuse when tagging a mid-turn
+   * shell-mode submission, so routing cannot diverge between the two gates.
+   */
+  async takesAsSlashCommand(text: string): Promise<boolean> {
+    await this.ready;
+    if (!this.dispatcher) {
+      // No registry to ask (failed init): mirror the real admission rule's
+      // shape so a slash-form submission still reaches dispatch and its
+      // recorded init-error rejection, instead of `?? false` tagging it for
+      // bash. A `/`-prefixed path keeps the shell lane via the same
+      // separator carve-out the dispatcher applies.
+      const trimmed = text.trim();
+      return (
+        trimmed.startsWith('?') ||
+        (trimmed.startsWith('/') && !hasSlashCommandPathSeparator(trimmed))
+      );
+    }
+    return this.dispatcher.takesAsSlashCommand(text.trim());
+  }
+
   /** True while a dispatched command is still running. */
   isBusy(): boolean {
     return this.busy;
@@ -115,7 +139,7 @@ export class OpenTuiSlashGateway {
    * Waits for readiness, then runs one input through the dispatcher. Rejects
    * while initialization failed or another command is in flight.
    */
-  async dispatch(text: string): Promise<SlashSettlement> {
+  async dispatch(text: string, typed?: TypedInput): Promise<SlashSettlement> {
     await this.ready;
     if (!this.dispatcher) {
       return {
@@ -134,7 +158,7 @@ export class OpenTuiSlashGateway {
     }
     this.busy = true;
     try {
-      const outcome = await this.dispatcher.handle(text);
+      const outcome = await this.dispatcher.handle(text, typed);
       return { kind: 'dispatched', outcome };
     } finally {
       this.busy = false;

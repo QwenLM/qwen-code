@@ -23,8 +23,12 @@ import * as fs from 'node:fs';
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getInvocationContext } from '../utils/invocation-context.js';
 import { openSyncNoFollow } from '../utils/no-follow-open.js';
-import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
 import {
   isBidiControlChar,
   stripDisplayControlChars,
@@ -54,12 +58,25 @@ function stripOutputControlChars(text: string): string {
   return out;
 }
 
-type OutputTailResult =
+export type BackgroundShellOutputTail =
   | { text: string; truncated: boolean }
   | { error: string }
   | undefined;
 
-function readOutputTail(outputFile: string): OutputTailResult {
+/**
+ * Reads the last {@link MAX_NOTIFICATION_OUTPUT_TAIL_BYTES} bytes of a
+ * background shell's captured stdout/stderr.
+ *
+ * The completion notification uses this to show the model what the shell
+ * printed; the daemon's shell-task detail route reads the same tail so the
+ * user sees the same bytes. `undefined` means no displayable text (an empty
+ * or non-regular file, or a tail containing only stripped control characters
+ * and trailing whitespace). `{ error }` means the read failed, including a
+ * missing file.
+ */
+export function readBackgroundShellOutputTail(
+  outputFile: string,
+): BackgroundShellOutputTail {
   let fd: number | undefined;
   try {
     // O_NOFOLLOW (or the compensating identity check where the flag does
@@ -159,6 +176,14 @@ export type BackgroundShellStatus =
 export interface ShellTask extends TaskBase {
   kind: 'shell';
   /**
+   * Turn that registered this shell, captured once at `register()` time.
+   * The Web Shell session only delivers a queued notification into the turn
+   * it belongs to, so stamping the registering turn is what lets a shell
+   * that settles mid-turn surface mid-turn instead of waiting for the turn
+   * to end. Absent for shells registered with no turn context.
+   */
+  sourceTurnId?: string;
+  /**
    * @deprecated Read `id` instead; kept as a synonym during the back-compat
    * window. Always equals `id`.
    */
@@ -223,6 +248,7 @@ export interface ShellNotificationMeta {
   status: BackgroundShellStatus;
   exitCode?: number;
   todoWorkChainId?: string;
+  sourceTurnId?: string;
 }
 
 export type BackgroundShellNotificationCallback = (
@@ -259,6 +285,25 @@ export class BackgroundShellRegistry {
     cb: BackgroundShellNotificationCallback | undefined,
   ): void {
     this.notificationCallback = cb;
+    // Best-effort replay for a transient unbind of THIS instance. No in-tree
+    // caller rebinds a registry that already holds entries — Session and the
+    // TUI hook each bind once against their own Config's fresh registry — so
+    // this serves out-of-tree consumers of the exported class. The terminal
+    // retention cap bounds what can be replayed.
+    if (!cb) return;
+    const replayableEntries = Array.from(this.entries.values())
+      .filter((entry) => entry.status !== 'running' && !entry.notified)
+      .sort(
+        (a, b) =>
+          (a.endTime ?? a.startTime) - (b.endTime ?? b.startTime) ||
+          a.startTime - b.startTime,
+      );
+    for (const entry of replayableEntries) {
+      debugLogger.debug(
+        `Redelivering retained terminal notification for shell ${entry.shellId}`,
+      );
+      this.emitNotification(entry);
+    }
   }
 
   /**
@@ -295,6 +340,13 @@ export class BackgroundShellRegistry {
     entry.outputOffset = 0;
     entry.notified = false;
     entry.todoWorkChainId ??= todoWorkChainContext.getStore();
+    // Capture the registering turn here, once, because both ways a shell
+    // becomes background — a direct `is_background: true` spawn and a
+    // foreground→background promote — funnel through `register()`. For a
+    // promoted shell this attributes the result to the promoting turn, which
+    // is the turn that ends up waiting for it.
+    entry.sourceTurnId =
+      getInvocationContext()?.promptId ?? promptIdContext.getStore();
     this.entries.set(entry.shellId, entry);
     this.writeStatusFile(entry);
     this.fireRegister(entry);
@@ -476,14 +528,15 @@ export class BackgroundShellRegistry {
 
   private emitNotification(entry: ShellTask): void {
     if (entry.notified) return;
-    entry.notified = true;
 
     if (!this.notificationCallback) {
       debugLogger.debug(
-        `Notification dropped for shell ${entry.shellId}: no callback registered`,
+        `Notification left eligible for shell ${entry.shellId}: no callback registered`,
       );
       return;
     }
+
+    entry.notified = true;
 
     const statusText =
       entry.status === 'completed'
@@ -517,7 +570,7 @@ export class BackgroundShellRegistry {
         `<result>${escapeXml(stripDisplayControlChars(entry.error))}</result>`,
       );
     }
-    const outputTail = readOutputTail(entry.outputFile);
+    const outputTail = readBackgroundShellOutputTail(entry.outputFile);
     if (outputTail) {
       if ('error' in outputTail) {
         xmlParts.push(`<output-tail error="unreadable" />`);
@@ -537,12 +590,16 @@ export class BackgroundShellRegistry {
       status: entry.status,
       exitCode: entry.exitCode,
       todoWorkChainId: entry.todoWorkChainId,
+      sourceTurnId: entry.sourceTurnId,
     };
 
     try {
       this.notificationCallback(displayText, xmlParts.join('\n'), meta);
     } catch (error) {
-      debugLogger.error('Failed to emit shell notification:', error);
+      debugLogger.error(
+        `Failed to emit shell notification for shell ${entry.shellId}:`,
+        error,
+      );
     }
   }
 
@@ -603,6 +660,10 @@ export class BackgroundShellRegistry {
     for (const entry of Array.from(this.entries.values())) {
       if (entry.status !== 'running') continue;
       this.settleAsCancelled(entry, endTime);
+      // Suppressed, not deferred: marking the entry notified is what keeps a
+      // later rebind from replaying a shutdown cancellation, and matches the
+      // sibling registries' `abortAll({ notify: false })` handling.
+      entry.notified = true;
       lastCancelled = entry;
     }
     if (!lastCancelled) return;

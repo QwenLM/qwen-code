@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'node:fs';
 import {
   SessionIdCaseConflictError,
   SessionService,
@@ -19,7 +20,10 @@ import {
   SessionNotArchivedError,
   SessionNotFoundError,
 } from '../acp-session-bridge.js';
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  LOG_LINE_UNSAFE_RE,
+  writeStderrLine,
+} from '../../utils/stdioHelpers.js';
 import { safeLogValue } from './request-helpers.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import {
@@ -27,6 +31,13 @@ import {
   enableTasksForSessions,
   removeTasksForSessions,
 } from '../scheduled-task-session-lifecycle.js';
+import {
+  acquireWorktreeCleanupLock,
+  executeWorktreeCleanup,
+  logWorktreeCleanupPreserve,
+  preclassifyWorktreeCleanup,
+  verifyWorktreeCleanupOwnership,
+} from './worktree-orphan-cleanup.js';
 
 export interface DaemonArchiveSessionsResult {
   archived: string[];
@@ -254,10 +265,9 @@ async function runWithDaemonWriterLease<T>(params: {
       ) {
         throw error;
       }
-      lease = await service.acquireSessionMaintenanceLease(
-        sessionId,
-        leaseOptions,
-      );
+      lease =
+        (await service.acquireSealedManagedMaintenanceLease(sessionId)) ??
+        (await service.acquireSessionMaintenanceLease(sessionId, leaseOptions));
     }
   } catch (error) {
     return { mutationApplied: false, error };
@@ -494,6 +504,7 @@ export async function deleteDaemonSessions(params: {
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
   assertCanMutate?: () => void;
+  runtimeWorkspaceCwd?: string;
   onError?: (entry: {
     phase: DaemonDeleteErrorPhase;
     sessionId: string;
@@ -507,6 +518,7 @@ export async function deleteDaemonSessions(params: {
     coordinator,
     coordinatorLockHeld = false,
     assertCanMutate,
+    runtimeWorkspaceCwd,
     onError,
   } = params;
   const uniqueSessionIds = [
@@ -517,6 +529,71 @@ export async function deleteDaemonSessions(params: {
       coordinator.assertNotTransitioning(sessionId);
     }
   }
+  // Ownership-verified worktree cleanup (#11024): classify before the
+  // record deletion (the deletion destroys the sidecar), execute only
+  // after a confirmed removal, all under the worktree ownership lock so
+  // no restore or reset can interleave. Only the caller-locked path is
+  // armed: with `coordinatorLockHeld` an outer batch lock is already
+  // held, taking the worktree lock there would invert the
+  // worktree→coordinator order restores and resets follow — and
+  // internal-runtime sessions never own Part 4A worktrees.
+  const runWithWorktreeCleanup = async (
+    sessionId: string,
+    mutateSession: () => Promise<DeleteOneResult>,
+  ): Promise<DeleteOneResult> => {
+    // Fast path for sessions with no worktree sidecar at either
+    // location: nothing to classify, so go straight to the coordinator
+    // without awaiting. Keeping the coordinator call on the task's
+    // synchronous prefix preserves the pre-cleanup batch scheduling —
+    // an awaited pre-read here reshuffles which sibling reaches
+    // `runExclusiveMany` first and made the gate-race test
+    // non-deterministic (#11024).
+    const activeSidecarPath = service.getWorktreeSessionPath(sessionId);
+    const archivedSidecarPath = service.getWorktreeSessionPathForArchiveState(
+      sessionId,
+      'archived',
+    );
+    if (
+      !fs.existsSync(activeSidecarPath) &&
+      (archivedSidecarPath === activeSidecarPath ||
+        !fs.existsSync(archivedSidecarPath))
+    ) {
+      return coordinator.runExclusiveMany([sessionId], mutateSession);
+    }
+    const cleanupPlan = await preclassifyWorktreeCleanup(
+      service,
+      sessionId,
+      runtimeWorkspaceCwd,
+    );
+    if (!cleanupPlan) {
+      return coordinator.runExclusiveMany([sessionId], mutateSession);
+    }
+    const releaseCleanupLock = await acquireWorktreeCleanupLock(cleanupPlan);
+    try {
+      const ownership = await verifyWorktreeCleanupOwnership(cleanupPlan);
+      if (!ownership.ok) {
+        logWorktreeCleanupPreserve(sessionId, ownership.reason);
+      }
+      const result = await coordinator.runExclusiveMany(
+        [sessionId],
+        mutateSession,
+      );
+      if (ownership.ok && result.kind === 'removed') {
+        try {
+          assertCanMutate?.();
+          await executeWorktreeCleanup(cleanupPlan);
+        } catch (error) {
+          logWorktreeCleanupPreserve(
+            sessionId,
+            `cleanup execution failed: ${errorMessage(error)}`,
+          );
+        }
+      }
+      return result;
+    } finally {
+      releaseCleanupLock();
+    }
+  };
   const results = await Promise.all(
     uniqueSessionIds.map(async (sessionId) => {
       try {
@@ -562,7 +639,15 @@ export async function deleteDaemonSessions(params: {
           try {
             await bridge.closeSession(sessionId);
           } catch (error) {
-            if (isSessionNotFoundError(error)) {
+            // A 'session_closing' refusal means a bridge-internal
+            // auto-close (last-detach, idle reaper) is in flight — the
+            // child may still hold the checkout as its cwd, so the
+            // record must NOT fold into a removal that would arm the
+            // destructive cleanup. Only a genuine not-found folds.
+            if (
+              isSessionNotFoundError(error) &&
+              (error as SessionNotFoundError).code !== 'session_closing'
+            ) {
               return await removePersistedSession();
             }
             onError?.({
@@ -581,7 +666,7 @@ export async function deleteDaemonSessions(params: {
         };
         return await (coordinatorLockHeld
           ? mutateSession()
-          : coordinator.runExclusiveMany([sessionId], mutateSession));
+          : runWithWorktreeCleanup(sessionId, mutateSession));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;
@@ -819,12 +904,6 @@ export function logSessionArchiveWarning(message: string): void {
   writeStderrLine(`qwen serve: ${sanitizeLogLine(message)}`);
 }
 
-// Control characters are intentionally stripped from daemon log lines.
-/* eslint-disable no-control-regex */
-const LOG_LINE_UNSAFE_RE =
-  /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g;
-/* eslint-enable no-control-regex */
-
 function sanitizeLogLine(message: string): string {
   return message.replace(LOG_LINE_UNSAFE_RE, ' ').slice(0, 4096);
 }
@@ -836,6 +915,7 @@ export async function archiveDaemonSessions(params: {
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
   resolveConflicts?: boolean;
+  requireIdle?: boolean;
   assertCanMutate?: () => void;
 }): Promise<DaemonArchiveSessionsResult> {
   const {
@@ -845,6 +925,7 @@ export async function archiveDaemonSessions(params: {
     coordinator,
     coordinatorLockHeld = false,
     resolveConflicts = false,
+    requireIdle = false,
     assertCanMutate,
   } = params;
   const uniqueSessionIds = [
@@ -863,9 +944,13 @@ export async function archiveDaemonSessions(params: {
           try {
             await bridge.closeSession(sessionId, undefined, {
               requireAgentClose: true,
+              requireIdle,
             });
           } catch (error) {
-            if (!isSessionNotFoundError(error)) {
+            if (
+              !isSessionNotFoundError(error) ||
+              (error as SessionNotFoundError).code === 'session_closing'
+            ) {
               return {
                 kind: 'error' as const,
                 error,

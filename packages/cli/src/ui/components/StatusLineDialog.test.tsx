@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act } from 'react';
+import { act, type ComponentProps } from 'react';
 import { render } from 'ink-testing-library';
 import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -15,6 +15,7 @@ import { LoadedSettings, SettingScope } from '../../config/settings.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { MessageType, StreamingState } from '../types.js';
+import { STATUS_LINE_PRESET_ITEMS } from '../statusLinePresets.js';
 import { StatusLineDialog } from './StatusLineDialog.js';
 
 function createSettings(): LoadedSettings {
@@ -70,21 +71,37 @@ const uiState = {
   },
 } as UIState;
 
+type DialogProps = ComponentProps<typeof StatusLineDialog>;
+
+function dialog(overrides: Partial<DialogProps> = {}) {
+  return (
+    <KeypressProvider kittyProtocolEnabled={false}>
+      <StatusLineDialog
+        settings={createSettings()}
+        config={config}
+        uiState={uiState}
+        addItem={vi.fn()}
+        onClose={vi.fn()}
+        availableTerminalHeight={18}
+        {...overrides}
+      />
+    </KeypressProvider>
+  );
+}
+
+function renderDialog(overrides: Partial<DialogProps> = {}, columns?: number) {
+  const ui = dialog(overrides);
+  const result = render(ui);
+  if (columns !== undefined) {
+    Object.defineProperty(result.stdout, 'columns', { value: columns });
+    result.rerender(ui);
+  }
+  return result;
+}
+
 describe('StatusLineDialog', () => {
   it('renders a searchable preset picker with preview', () => {
-    const settings = createSettings();
-    const { lastFrame } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={settings}
-          config={config}
-          uiState={uiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={18}
-        />
-      </KeypressProvider>,
-    );
+    const { lastFrame } = renderDialog({ availableTerminalHeight: 25 });
 
     expect(lastFrame()).toContain('Configure Status Line');
     expect(lastFrame()).toContain('Type to search');
@@ -123,19 +140,13 @@ describe('StatusLineDialog', () => {
       ...config,
       getChatRecordingService: () => ({ recordSlashCommand }),
     } as unknown as Config;
-    const { stdin } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={settings}
-          config={recordingConfig}
-          uiState={uiState}
-          addItem={addItem}
-          onSaved={onSaved}
-          onClose={onClose}
-          availableTerminalHeight={18}
-        />
-      </KeypressProvider>,
-    );
+    const { stdin } = renderDialog({
+      settings,
+      config: recordingConfig,
+      addItem,
+      onSaved,
+      onClose,
+    });
 
     act(() => {
       stdin.write('\r');
@@ -178,18 +189,7 @@ describe('StatusLineDialog', () => {
 
   it('keeps preset priority order after an item is toggled off and on', async () => {
     const settings = createSettings();
-    const { stdin, lastFrame } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={settings}
-          config={config}
-          uiState={uiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={18}
-        />
-      </KeypressProvider>,
-    );
+    const { stdin, lastFrame } = renderDialog({ settings });
 
     const press = async (input: string) => {
       act(() => {
@@ -237,18 +237,7 @@ describe('StatusLineDialog', () => {
       settings.workspace.originalSettings.ui = settings.workspace.settings.ui;
       settings.recomputeMerged();
       const addItem = vi.fn();
-      const { stdin } = render(
-        <KeypressProvider kittyProtocolEnabled={false}>
-          <StatusLineDialog
-            settings={settings}
-            config={config}
-            uiState={uiState}
-            addItem={addItem}
-            onClose={vi.fn()}
-            availableTerminalHeight={18}
-          />
-        </KeypressProvider>,
-      );
+      const { stdin } = renderDialog({ settings, addItem });
 
       act(() => {
         stdin.write('\r');
@@ -285,18 +274,7 @@ describe('StatusLineDialog', () => {
     };
     settings.workspace.originalSettings.ui = settings.workspace.settings.ui;
     settings.recomputeMerged();
-    const { stdin } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={settings}
-          config={config}
-          uiState={uiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={18}
-        />
-      </KeypressProvider>,
-    );
+    const { stdin } = renderDialog({ settings });
 
     act(() => {
       stdin.write('\r');
@@ -324,18 +302,7 @@ describe('StatusLineDialog', () => {
       },
     };
     settings.recomputeMerged();
-    const { stdin } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={settings}
-          config={config}
-          uiState={uiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={18}
-        />
-      </KeypressProvider>,
-    );
+    const { stdin } = renderDialog({ settings });
 
     act(() => {
       stdin.write('\r');
@@ -351,19 +318,7 @@ describe('StatusLineDialog', () => {
   });
 
   it('does not append navigation keys to the search query', async () => {
-    const settings = createSettings();
-    const { stdin, lastFrame } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={settings}
-          config={config}
-          uiState={uiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={18}
-        />
-      </KeypressProvider>,
-    );
+    const { stdin, lastFrame } = renderDialog();
 
     act(() => {
       stdin.write('m');
@@ -375,5 +330,129 @@ describe('StatusLineDialog', () => {
     expect(lastFrame()).toContain('> m');
     expect(lastFrame()).not.toContain('> mj');
     expect(lastFrame()).not.toContain('> mk');
+  });
+
+  it('excludes the separator from search results', async () => {
+    const { stdin, lastFrame } = renderDialog();
+
+    act(() => stdin.write('separator'));
+
+    await vi.waitFor(() =>
+      expect(lastFrame()).toContain('No preset items match.'),
+    );
+    expect(lastFrame()).not.toMatch(/›\s+─/);
+  });
+
+  it.each([
+    [16, true],
+    [15, false],
+  ] as const)(
+    'uses the expected layout at the %i-row boundary',
+    (availableTerminalHeight, hasFullLayout) => {
+      const { lastFrame } = renderDialog({ availableTerminalHeight });
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split('\n').length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame.includes('Configure Status Line')).toBe(hasFullLayout);
+    },
+  );
+
+  it('uses every available row in an intermediate compact layout', () => {
+    const { lastFrame } = renderDialog({ availableTerminalHeight: 5 });
+
+    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(5);
+    expect(lastFrame()).toContain('model-with-reasoning');
+  });
+
+  it('keeps every option reachable in a one-line layout', async () => {
+    const { stdin, lastFrame } = renderDialog({ availableTerminalHeight: 1 });
+
+    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(1);
+    expect(lastFrame()).not.toContain('Configure Status Line');
+
+    for (let i = 0; i < STATUS_LINE_PRESET_ITEMS.length; i++) {
+      act(() => {
+        stdin.write('j');
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(lastFrame()).toMatch(/›.*session-id/);
+  });
+
+  it('bypasses a hidden query in compact mode and restores it', async () => {
+    const settings = createSettings();
+    const renderAt = (availableTerminalHeight: number) =>
+      dialog({ settings, availableTerminalHeight });
+    const { stdin, lastFrame, rerender } = render(renderAt(18));
+
+    act(() => stdin.write('identifier'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(lastFrame()).toContain('> identifier');
+    expect(lastFrame()).toContain('session-id');
+    expect(lastFrame()).not.toContain('project-name');
+
+    rerender(renderAt(15));
+    expect(lastFrame()).not.toContain('Type to search');
+    expect(lastFrame()).toContain('project-name');
+
+    rerender(renderAt(18));
+    expect(lastFrame()).toContain('> identifier');
+    expect(lastFrame()).toContain('session-id');
+    expect(lastFrame()).not.toContain('project-name');
+  });
+
+  it('closes on escape in the compact layout', async () => {
+    // Below the full-layout threshold, query input and backspace are gated
+    // off and MultiSelect has no escape handling of its own — the
+    // fall-through to onClose() is the dialog's only dismissal path.
+    const onClose = vi.fn();
+    const { stdin } = renderDialog({
+      onClose,
+      availableTerminalHeight: 5,
+    });
+
+    act(() => {
+      stdin.write('\u001b');
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('stays within the height budget at 10 columns', () => {
+    const { lastFrame, unmount } = renderDialog(
+      { availableTerminalHeight: 20 },
+      10,
+    );
+    try {
+      expect(lastFrame()).toContain('[x]');
+      expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(20);
+    } finally {
+      unmount();
+    }
+  });
+
+  it('truncates the empty-preview fallback at narrow widths', () => {
+    // With nothing selected the preview renders a 48-cell fallback text;
+    // at 50 columns (46-cell content area) it must truncate, not wrap.
+    const settings = createSettings();
+    settings.user.settings.ui = {
+      statusLine: { type: 'preset', useThemeColors: false, items: [] },
+    };
+    settings.recomputeMerged();
+    const narrowUiState = { ...uiState, mainAreaWidth: 50 };
+    const { lastFrame, unmount } = renderDialog(
+      { settings, uiState: narrowUiState, availableTerminalHeight: 20 },
+      50,
+    );
+    try {
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Select at least one item');
+      expect(frame.split('\n').length).toBeLessThanOrEqual(20);
+    } finally {
+      unmount();
+    }
   });
 });

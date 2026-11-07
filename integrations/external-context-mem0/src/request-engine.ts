@@ -8,9 +8,10 @@ import { buildSearchUrl } from './config.js';
 import type {
   DialectV1,
   ExternalContextItem,
-  RuntimeConfiguration,
+  SearchRuntimeConfiguration,
   ScopeLocation,
   SearchProvider,
+  AuthenticationKind,
 } from './types.js';
 
 const MAX_RESULTS = 5;
@@ -22,7 +23,7 @@ export type FetchLike = (
 ) => Promise<Response>;
 
 export function createRequestEngine(
-  runtime: RuntimeConfiguration,
+  runtime: SearchRuntimeConfiguration,
   fetcher: FetchLike = fetch,
 ): SearchProvider {
   return async ({ query, signal }) => {
@@ -54,9 +55,9 @@ export function createRequestEngine(
   };
 }
 
-function applyAuthentication(
+export function applyAuthentication(
   headers: Headers,
-  runtime: RuntimeConfiguration,
+  runtime: { dialect: { auth: AuthenticationKind }; credential: string },
 ): void {
   switch (runtime.dialect.auth) {
     case 'authorization-token':
@@ -75,7 +76,7 @@ function applyAuthentication(
 
 function buildRequest(
   url: URL,
-  runtime: RuntimeConfiguration,
+  runtime: SearchRuntimeConfiguration,
   query: string,
 ): string | undefined {
   const body: Record<string, unknown> = {};
@@ -168,7 +169,7 @@ function placeValue(
   filters[name] = value;
 }
 
-async function readBoundedBody(response: Response): Promise<string> {
+export async function readBoundedBody(response: Response): Promise<string> {
   const declaredLength = response.headers.get('content-length');
   if (declaredLength !== null) {
     const bytes = Number(declaredLength);

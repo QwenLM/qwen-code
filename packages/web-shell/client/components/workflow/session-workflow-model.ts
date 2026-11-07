@@ -12,12 +12,20 @@ import {
   todoIdOf,
   type PlanNodeStatus,
   type TaskExecutionIndex,
-} from '../messages/PlanExecutionView';
+} from '../messages/taskExecutionIndex';
 
 export interface SessionWorkflowProjection {
+  /**
+   * The task execution index this projection was built from, so a surface
+   * rendering per-tool live status (the graph's executions) reuses the one
+   * build instead of raising its own.
+   */
+  taskIndex: TaskExecutionIndex;
   todosById: ReadonlyMap<string, TodoItem>;
   toolsByTaskId: ReadonlyMap<string, ACPToolCall>;
   toolsByTodo: ReadonlyMap<string, readonly ACPToolCall[]>;
+  /** Tool calls whose `todo_id` is missing or points outside the plan. */
+  unassignedTools: readonly ACPToolCall[];
   agentToolsByTodo: ReadonlyMap<string, readonly ACPToolCall[]>;
   tasksByTool: ReadonlyMap<ACPToolCall, DaemonSessionAgentTaskStatus>;
   states: ReadonlyMap<string, { status: PlanNodeStatus; attention: boolean }>;
@@ -122,9 +130,15 @@ export function buildSessionWorkflowProjection(
   const todosById = new Map(todos.map((todo) => [todo.id, todo]));
   const toolsByTodo = new Map<string, ACPToolCall[]>();
   const agentToolsByTodo = new Map<string, ACPToolCall[]>();
+  const unassignedTools: ACPToolCall[] = [];
   for (const tool of tools) {
     const todoId = todoIdOf(tool);
-    if (!todoId || !todosById.has(todoId)) continue;
+    if (!todoId || !todosById.has(todoId)) {
+      // The graph renders these in its unassigned bucket; derived here so
+      // the shared projection and the graph agree on one grouping walk.
+      unassignedTools.push(tool);
+      continue;
+    }
     const group = toolsByTodo.get(todoId) ?? [];
     group.push(tool);
     toolsByTodo.set(todoId, group);
@@ -195,9 +209,11 @@ export function buildSessionWorkflowProjection(
           : 'waiting';
 
   return {
+    taskIndex,
     todosById,
     toolsByTaskId,
     toolsByTodo,
+    unassignedTools,
     agentToolsByTodo,
     tasksByTool,
     states,

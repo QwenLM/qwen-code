@@ -78,13 +78,20 @@ export class Logger {
   private logs: LogEntry[] = []; // In-memory cache, ideally reflects the last known state of the file
   private lastLoggedUserEntry: LogEntry | null = null; // Tracks the most recently persisted USER entry for cancel-undo (mirrors claude-code's lastAddedEntry).
   // Per-instance write queue for the log-history file (logs.json).
-  // Only `logMessage` and `removeLastUserMessage` chain on this queue;
-  // their read → splice/append → writeFile cycle is otherwise non-atomic
-  // and a fast cancel + resubmit could make removeLast clobber the
-  // just-appended entry. Checkpoint ops (saveCheckpoint /
-  // deleteCheckpoint / loadCheckpoint) write to *separate* files and are
-  // intentionally not serialized on this queue.
+  // `logMessage`, `removeLastUserMessage` and `removeSessionsMessages`
+  // chain on this queue; their read → splice/append/filter → writeFile
+  // cycle is otherwise non-atomic and a fast cancel + resubmit could make
+  // removeLast clobber the just-appended entry. Checkpoint ops
+  // (saveCheckpoint / deleteCheckpoint / loadCheckpoint) write to
+  // *separate* files and are intentionally not serialized on this queue.
   private writeQueue: Promise<unknown> = Promise.resolve();
+  // Sessions whose removal is decided but whose write has not landed yet. Every op
+  // assigns `this.logs` from its OWN disk snapshot, and that snapshot still holds the
+  // rows of any purge queued behind it — so every such assignment goes through
+  // `adoptDiskSnapshot`, or an earlier op re-adopts rows a later optimistic removal
+  // already dropped, and a read inside that window returns a prompt from a session
+  // the user was just told was deleted.
+  private pendingPurgeSessions = new Set<string>();
   private debugLogger: DebugLogger;
 
   constructor(
@@ -98,11 +105,12 @@ export class Logger {
   /**
    * Serializes a log-history mutation against every previously enqueued
    * op on this Logger. Errors propagate to the caller but do NOT poison
-   * the queue (the next op runs regardless). Scope: only `logMessage`
-   * and `removeLastUserMessage` go through here — checkpoint ops touch
-   * separate files and don't share this queue. Single-instance only:
-   * a separate Logger pointing at the same file would have its own
-   * queue, which is why callers should share one Logger per session.
+   * the queue (the next op runs regardless). Scope: only `logMessage`,
+   * `removeLastUserMessage` and `removeSessionsMessages` go through here —
+   * checkpoint ops touch separate files and don't share this queue.
+   * Single-instance only: a separate Logger pointing at the same file
+   * would have its own queue, which is why callers should share one
+   * Logger per session.
    */
   private serialize<T>(op: () => Promise<T>): Promise<T> {
     // The queue's tail is always sourced from `.catch(() => undefined)`
@@ -114,6 +122,23 @@ export class Logger {
     const next = this.writeQueue.then(() => op());
     this.writeQueue = next.catch(() => undefined);
     return next;
+  }
+
+  /**
+   * Makes a disk snapshot the in-memory cache, minus the rows of every purge
+   * that has not been written yet. `ownRow`, the row the adopting op just
+   * wrote, is kept: if the purge behind it fails, its rollback restores only
+   * the rows it removed itself. Only the cache is filtered, never the array an
+   * op writes to disk, so a failed purge still leaves the file as it was.
+   */
+  private adoptDiskSnapshot(rows: LogEntry[], ownRow?: LogEntry): void {
+    this.logs =
+      this.pendingPurgeSessions.size === 0
+        ? rows
+        : rows.filter(
+            (row) =>
+              row === ownRow || !this.pendingPurgeSessions.has(row.sessionId),
+          );
   }
 
   private async _readLogFile(): Promise<LogEntry[]> {
@@ -252,7 +277,7 @@ export class Logger {
       this.debugLogger.debug(
         `Duplicate log entry detected and skipped: session ${entryToAppend.sessionId}, messageId ${entryToAppend.messageId}`,
       );
-      this.logs = currentLogsOnDisk; // Ensure in-memory is synced with disk
+      this.adoptDiskSnapshot(currentLogsOnDisk); // Ensure in-memory is synced with disk
       return null; // Indicate that no new entry was actually added
     }
 
@@ -264,7 +289,7 @@ export class Logger {
         JSON.stringify(currentLogsOnDisk, null, 2),
         { encoding: 'utf-8' },
       );
-      this.logs = currentLogsOnDisk;
+      this.adoptDiskSnapshot(currentLogsOnDisk, entryToAppend);
       return entryToAppend; // Return the successfully appended entry
     } catch (error) {
       this.debugLogger.debug('Error writing to log file:', error);
@@ -455,7 +480,7 @@ export class Logger {
         // Entry already gone from disk (concurrent rotation/clear).
         // Adopt disk state as truth so the in-memory cache doesn't
         // diverge from a freshly-rotated file.
-        this.logs = currentLogsOnDisk;
+        this.adoptDiskSnapshot(currentLogsOnDisk);
         return false;
       }
 
@@ -467,7 +492,7 @@ export class Logger {
           JSON.stringify(currentLogsOnDisk, null, 2),
           { encoding: 'utf-8' },
         );
-        this.logs = currentLogsOnDisk;
+        this.adoptDiskSnapshot(currentLogsOnDisk);
         // Roll back this instance's nextMessageId so a subsequent log doesn't
         // skip the freed slot (matters for tests that assert sequential ids).
         if (
@@ -486,6 +511,174 @@ export class Logger {
         return false;
       }
     });
+  }
+
+  /**
+   * Purge every log-history row belonging to `sessionId` — used by the
+   * `/delete` flow so a removed session's prompts don't live on in the
+   * project-shared `<tmp>/<project-hash>/logs.json`, and stop resurfacing in
+   * ↑-history via {@link getPreviousUserMessages}.
+   *
+   * ↑-history is deliberately cross-session, so the fix for a deleted session
+   * is to drop its rows — NOT to filter {@link getPreviousUserMessages} by
+   * session id, which would also hide the prompts of sessions that still
+   * exist.
+   *
+   * Two-phase semantics mirror {@link removeLastUserMessage}:
+   *   1. Synchronous in-memory removal from `this.logs`, so the
+   *      `getPreviousUserMessages()` read triggered by the "Session deleted"
+   *      history item already omits the purged prompts.
+   *   2. Async serialized disk reconciliation (read → filter → write) on the
+   *      shared write queue, so a purge can't clobber a prompt `logMessage`
+   *      is appending concurrently.
+   *
+   * When the disk read or write throws, the optimistic removal is rolled
+   * back, so a `false` return never means "gone from memory but still on
+   * disk". Any session id is safe to pass, including this Logger's own:
+   * `_updateLogFile` recomputes the next messageId from disk on every append.
+   *
+   * @returns true when rows were actually removed from the file.
+   */
+  async removeSessionMessages(sessionId: string): Promise<boolean> {
+    return this.removeSessionsMessages([sessionId]);
+  }
+
+  /**
+   * The batch form of {@link removeSessionMessages}, for a multi-session delete.
+   *
+   * One optimistic in-memory removal, one queued op, one file rewrite — not one of
+   * each per id. Per-id calls cost a full read → filter → write of the whole
+   * project-shared `logs.json` each, which the next `logMessage` then waits behind
+   * on the same queue. Per-id calls stay correct, since every adoption goes through
+   * `adoptDiskSnapshot`; the batch only saves the extra rewrites.
+   *
+   * @param sessionIds the sessions to purge; duplicates and unknown ids are harmless
+   * @returns true when rows were actually removed from the file
+   */
+  async removeSessionsMessages(
+    sessionIds: readonly string[],
+  ): Promise<boolean> {
+    if (!this.initialized || !this.logFilePath || sessionIds.length === 0) {
+      return false;
+    }
+    const doomed = new Set(sessionIds);
+    const belongsToSession = (e: LogEntry): boolean => doomed.has(e.sessionId);
+    const rowKey = (e: LogEntry): string =>
+      JSON.stringify([
+        e.sessionId,
+        e.messageId,
+        e.timestamp,
+        e.message,
+        e.type,
+      ]);
+
+    // Optimistic in-memory removal BEFORE the async serialize queue runs,
+    // for the same reason as removeLastUserMessage: AppContainer's
+    // userMessages effect re-runs on the history item the delete flow adds
+    // and reads `this.logs` through getPreviousUserMessages().
+    const beforeRemoval = this.logs;
+    const optimisticallyRemoved: Array<[number, LogEntry]> = [];
+    beforeRemoval.forEach((entry, index) => {
+      if (belongsToSession(entry)) optimisticallyRemoved.push([index, entry]);
+    });
+    if (optimisticallyRemoved.length > 0) {
+      this.logs = beforeRemoval.filter((entry) => !belongsToSession(entry));
+    }
+    const afterRemoval = this.logs;
+    for (const id of doomed) this.pendingPurgeSessions.add(id);
+    // An undo target from a purged session died with it; leaving it would
+    // point removeLastUserMessage at a row that no longer exists.
+    const droppedUndoTarget =
+      this.lastLoggedUserEntry !== null &&
+      belongsToSession(this.lastLoggedUserEntry)
+        ? this.lastLoggedUserEntry
+        : null;
+    if (droppedUndoTarget !== null) {
+      this.lastLoggedUserEntry = null;
+    }
+
+    const restoreOptimistic = () => {
+      if (this.logs === afterRemoval) {
+        // Nothing replaced the cache since the removal.
+        this.logs = beforeRemoval;
+      } else {
+        // Another op adopted a disk snapshot in between. Re-insert each removed
+        // row at its original index unless that snapshot already has it, in one
+        // pass: inserting row by row copies the whole cache once per row.
+        const present = new Set(this.logs.map(rowKey));
+        const restored: LogEntry[] = [];
+        let next = 0;
+        for (const [index, entry] of optimisticallyRemoved) {
+          if (present.has(rowKey(entry))) continue;
+          while (restored.length < index && next < this.logs.length) {
+            restored.push(this.logs[next++]);
+          }
+          restored.push(entry);
+        }
+        this.logs = restored.concat(this.logs.slice(next));
+      }
+      if (droppedUndoTarget !== null && this.lastLoggedUserEntry === null) {
+        this.lastLoggedUserEntry = droppedUndoTarget;
+      }
+    };
+
+    const logFilePath = this.logFilePath;
+    return this.serialize(async () => {
+      try {
+        return await this.purgeFromDisk(
+          logFilePath,
+          belongsToSession,
+          restoreOptimistic,
+        );
+      } finally {
+        for (const id of doomed) this.pendingPurgeSessions.delete(id);
+      }
+    });
+  }
+
+  /** The disk half of a purge: read, filter, write, with rollback on either failure. */
+  private async purgeFromDisk(
+    logFilePath: string,
+    belongsToSession: (entry: LogEntry) => boolean,
+    restoreOptimistic: () => void,
+  ): Promise<boolean> {
+    {
+      let currentLogsOnDisk: LogEntry[];
+      try {
+        currentLogsOnDisk = await this._readLogFile();
+      } catch (error) {
+        this.debugLogger.debug(
+          'Failed to read log file while purging deleted sessions:',
+          error,
+        );
+        restoreOptimistic();
+        return false;
+      }
+
+      const kept = currentLogsOnDisk.filter((e) => !belongsToSession(e));
+      if (kept.length === currentLogsOnDisk.length) {
+        // None of the sessions has anything on disk (they never logged a prompt,
+        // or another instance already purged them). Adopt the disk snapshot so the
+        // cache doesn't diverge from a file that moved on underneath us.
+        this.adoptDiskSnapshot(currentLogsOnDisk);
+        return false;
+      }
+
+      try {
+        await atomicWriteFile(logFilePath, JSON.stringify(kept, null, 2), {
+          encoding: 'utf-8',
+        });
+        this.adoptDiskSnapshot(kept);
+        return true;
+      } catch (error) {
+        this.debugLogger.debug(
+          'Failed to write log file while purging deleted sessions:',
+          error,
+        );
+        restoreOptimistic();
+        return false;
+      }
+    }
   }
 
   private _checkpointPath(tag: string): string {

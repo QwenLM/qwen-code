@@ -22,6 +22,7 @@
 
 import { createHash } from 'node:crypto';
 import {
+  describeSessionKind,
   listLiveSessions,
   type SessionRegistryRecord,
 } from '../services/session-registry.js';
@@ -36,6 +37,14 @@ export interface PeerSessionInfo {
   ref: string;
   cwd: string;
   pid: number;
+  /**
+   * What the peer says registered it — see `SessionKind`. A claim, like
+   * `name` and `cwd`: it tells a reader what to expect on the other end
+   * (a person at a terminal, a session a daemon drives), never what the
+   * sender may do. Always a string here; a record without one reads as
+   * `tui`.
+   */
+  kind: string;
   ipcPath: string;
   /**
    * Inbox auth token from the peer's record. Absent for a peer written by
@@ -79,6 +88,10 @@ export function toPeerSessionInfo(
     ref: peerRef(record.sessionId),
     cwd: flattenPeerLabel(record.cwd),
     pid: record.pid,
+    // Not flattened: the registry's own read guard already bounds `kind`
+    // to lowercase ASCII, digits and dashes, which is narrower than
+    // anything flattening would remove.
+    kind: describeSessionKind(record.kind),
     ipcPath: record.ipcPath,
     ...(record.ipcToken !== undefined ? { ipcToken: record.ipcToken } : {}),
     startedAt: record.startedAt,
@@ -97,16 +110,28 @@ export async function listMessageablePeers(): Promise<PeerSessionInfo[]> {
     .map(toPeerSessionInfo)
     .filter((peer): peer is PeerSessionInfo => peer !== null);
 
-  const verdicts = await Promise.all(
-    candidates.map((peer) => probePeerSocketVerdict(peer.ipcPath)),
+  // One address per probe, not one record per probe. A process hosting
+  // several sessions advertises the same inbox in every one of their
+  // records, and dialling it once per record would mean a fistful of
+  // simultaneous connections to a single socket on every listing and
+  // every send — from every session on the machine. The answer is a
+  // property of the address, so asking once is also the honest shape.
+  const verdicts = new Map(
+    await Promise.all(
+      [...new Set(candidates.map((peer) => peer.ipcPath))].map(
+        async (ipcPath) =>
+          [ipcPath, await probePeerSocketVerdict(ipcPath)] as const,
+      ),
+    ),
   );
   // Only a definitive `alive` advertises a peer. An `unknown` verdict --
   // local descriptor exhaustion, a permission error, the 250 ms deadline --
   // establishes nothing about the peer, and admitting it here would let a
   // newer, unreachable twin shadow the one that answers in the dedupe
   // below, whose tie-break is `startedAt` alone.
-  const reachable = verdicts.map((verdict) => verdict === 'alive');
-  return dedupeSameNameTwins(candidates.filter((_, index) => reachable[index]));
+  return dedupeSameNameTwins(
+    candidates.filter((peer) => verdicts.get(peer.ipcPath) === 'alive'),
+  );
 }
 
 /**

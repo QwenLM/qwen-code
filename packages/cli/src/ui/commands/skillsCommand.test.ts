@@ -15,6 +15,8 @@ interface FakeSkill {
   priority?: number;
   userInvocable?: boolean;
   level?: string;
+  extensionName?: string;
+  extensionDisplayName?: string;
 }
 
 function makeContext(opts: {
@@ -153,6 +155,40 @@ describe('skillsCommand bare entry', () => {
     const lowIdx = content.indexOf('low');
     expect(highIdx).toBeLessThan(midIdx);
     expect(midIdx).toBeLessThan(lowIdx);
+  });
+
+  it('names the owning extension on each extension row of the listing', async () => {
+    if (!skillsCommand.action) throw new Error('action missing');
+    const context = makeContext({
+      skills: [
+        {
+          name: 'rust:functions',
+          description: 'Rust review',
+          level: 'extension',
+          extensionName: 'rust',
+          extensionDisplayName: 'Rust',
+        },
+        {
+          // No display name: the id is the only owner the reader can act on.
+          name: 'ponytail:ponytail',
+          description: 'Lazy mode',
+          level: 'extension',
+          extensionName: 'ponytail',
+        },
+      ],
+      executionMode: 'acp',
+    });
+
+    const result = await skillsCommand.action(context, '');
+    const content = (
+      result as Extract<SlashCommandActionReturn, { type: 'message' }>
+    ).content;
+
+    expect(content).toContain('(Extension: Rust)');
+    expect(content).toContain('(Extension: ponytail)');
+    // The bare level tag is gone for these rows — `(Extension)` alone would
+    // leave two rows indistinguishable on a screen listing both extensions.
+    expect(content).not.toContain('(Extension)');
   });
 
   it('handles skills without description or level gracefully', async () => {

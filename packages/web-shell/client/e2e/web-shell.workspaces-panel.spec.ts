@@ -111,7 +111,9 @@ async function openPanel(
   daemon: MockDaemonController,
 ): Promise<void> {
   await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   const connection = await daemon.sse.waitForConnection(scenario.sessionId);
   await daemon.sendEvent(
     replayCompleteEvent({
@@ -119,6 +121,7 @@ async function openPanel(
       replayedCount: scenario.events.length,
     }),
   );
+  await page.getByTestId('manage-workspaces').locator('../..').hover();
   await page.getByTestId('manage-workspaces').click();
   await expect(page.getByTestId('workspaces-overview-panel')).toBeVisible();
 }
@@ -149,7 +152,7 @@ test('lists every workspace with its health from the Projects entry', async ({
   // The secondary row shows its own MCP facet, not the primary's.
   await expect(secondaryRow.getByText('1/1')).toBeVisible();
   await expect(
-    secondaryRow.getByRole('button', { name: 'New task' }),
+    secondaryRow.getByRole('button', { name: 'New session' }),
   ).toBeEnabled();
 
   // The back arrow returns to the chat view.

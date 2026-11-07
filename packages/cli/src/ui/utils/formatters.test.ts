@@ -6,8 +6,11 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  contextUsageLabel,
+  formatClockTime,
   formatDuration,
   formatMemoryUsage,
+  formatPercentageUsed,
   formatRelativeTime,
   formatTokenCount,
 } from './formatters.js';
@@ -212,6 +215,64 @@ describe('formatters', () => {
       expect(formatTokenCount(10000)).toBe('10k');
       expect(formatTokenCount(15000)).toBe('15k');
       expect(formatTokenCount(100000)).toBe('100k');
+    });
+  });
+
+  describe('formatPercentageUsed', () => {
+    it('renders the used fraction with one decimal', () => {
+      expect(formatPercentageUsed(0)).toBe('0.0');
+      expect(formatPercentageUsed(0.045)).toBe('4.5');
+    });
+
+    it('treats exactly 100% as in limit', () => {
+      expect(formatPercentageUsed(1)).toBe('100.0');
+    });
+
+    it('reports past-limit usage as >100', () => {
+      expect(formatPercentageUsed(1.5)).toBe('>100');
+    });
+  });
+
+  describe('contextUsageLabel', () => {
+    it('uses the full label at 100 columns and wider', () => {
+      expect(contextUsageLabel(100)).toBe('% context used');
+      expect(contextUsageLabel(110)).toBe('% context used');
+    });
+
+    it('drops "context" below 100 columns', () => {
+      expect(contextUsageLabel(99)).toBe('% used');
+      expect(contextUsageLabel(40)).toBe('% used');
+    });
+  });
+
+  describe('formatClockTime', () => {
+    // The label is built from the host locale clock, so pin the zone: without
+    // this the same instant renders differently on a contributor's machine and
+    // on CI.
+    const originalTz = process.env['TZ'];
+
+    beforeEach(() => {
+      process.env['TZ'] = 'UTC';
+    });
+
+    afterEach(() => {
+      if (originalTz === undefined) delete process.env['TZ'];
+      else process.env['TZ'] = originalTz;
+    });
+
+    it('renders a zero-padded 24-hour [HH:MM:SS] label', () => {
+      expect(formatClockTime(Date.UTC(2026, 8, 18, 7, 5, 9))).toBe(
+        '[07:05:09]',
+      );
+    });
+
+    it('keeps 24-hour numbering instead of a 12-hour clock', () => {
+      expect(formatClockTime(Date.UTC(2026, 8, 18, 23, 0, 0))).toBe(
+        '[23:00:00]',
+      );
+      expect(formatClockTime(Date.UTC(2026, 8, 18, 0, 0, 0))).toBe(
+        '[00:00:00]',
+      );
     });
   });
 });

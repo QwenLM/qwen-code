@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { resolveProviderProtocol } from '@qwen-code/qwen-code-core';
+import { resolveModelProtocol } from '@qwen-code/qwen-code-core';
 import type {
   ModelProvidersConfig,
   ProviderProtocolConfig,
@@ -56,9 +56,10 @@ export function removeModelFromProviders(
   let idOnly: { key: string; index: number } | undefined;
   for (const [key, models] of Object.entries(modelProviders)) {
     if (!Array.isArray(models)) continue;
-    const protocol = resolveProviderProtocol(key, providerProtocol) ?? key;
-    if (protocol !== target.authType) continue;
     for (let index = 0; index < models.length; index++) {
+      const protocol =
+        resolveModelProtocol(key, models[index], providerProtocol) ?? key;
+      if (protocol !== target.authType) continue;
       if (models[index].id !== target.modelId) continue;
       if (
         target.baseUrl === undefined ||
@@ -104,7 +105,9 @@ export function isActiveModelSelection(
   activeModelName: string | undefined,
   activeBaseUrl: string | undefined,
   target: RemoveModelTarget,
+  activeAuthType?: string,
 ): boolean {
+  if (activeAuthType && activeAuthType !== target.authType) return false;
   if (!activeModelName || activeModelName !== target.modelId) return false;
   // No explicit active baseUrl → the selection isn't pinned to an endpoint, so
   // an id match is enough. When the active selection IS pinned to a baseUrl,

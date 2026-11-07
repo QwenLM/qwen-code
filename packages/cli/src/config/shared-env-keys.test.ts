@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { EXTRACT_NOOP_SKIP_TURNS_ENV } from '@qwen-code/qwen-code-core/memory/extract-cadence.js';
 import {
   acquireInheritedLoaderEnvScrub,
   clearLoaderKeyRejectionReporterIfCurrent,
@@ -45,9 +46,41 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
       'QWEN_CODE_WARNINGS_FILE',
     );
   });
+
+  // These select which file becomes the System / SystemDefaults layer. A
+  // project .env pointing them at a repo-shipped file would promote
+  // repository content into the highest-precedence settings layer — above
+  // the operator's own User settings (e.g. rebranding the Web Shell).
+  it('keeps the System settings layer selection operator-owned', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+    );
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+    );
+  });
   it('keeps ACP repeated-tool-failure rollout policy operator-owned', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
+    );
+  });
+
+  // The extraction-cadence experiment (#13004) is default-off, and its gate
+  // reads process.env on every call: a repo-shipped .env that set it would
+  // switch the experiment on for every session in that repository without an
+  // operator opt-in and change what the paired runs measure.
+  it('keeps the extraction-cadence experiment operator-owned', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      EXTRACT_NOOP_SKIP_TURNS_ENV,
+    );
+  });
+
+  // The name-only lock is a deployment policy: a repo-shipped .env, or a
+  // mid-session edit of one, must not overwrite the operator's exported =1
+  // and silently let the model run workflow scripts again.
+  it('keeps the named-workflows-only lock operator-owned', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_WORKFLOW_NAME_ONLY',
     );
   });
 
@@ -146,6 +179,20 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
       'PIP_CERT',
     ]) {
       expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
+    }
+  });
+
+  // Where a `/verify-pr --publish` round publishes its screenshots. A project
+  // `.env` or settings.env is repository-controlled, so either could redirect
+  // a maintainer's evidence to a fork the operator did not choose; only the
+  // launch env, a home `.env`, or the operator-scope `verifyPr.*` may set them.
+  it('excludes QWEN_VERIFY_ASSETS_* so a project .env cannot redirect published evidence', () => {
+    for (const key of [
+      'QWEN_VERIFY_ASSETS_REPO',
+      'QWEN_VERIFY_ASSETS_BRANCH',
+    ]) {
+      expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
+      expect(isHardcodedProjectEnvExclusion(key.toLowerCase())).toBe(true);
     }
   });
 
@@ -256,11 +303,13 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     );
   });
 
-  // Workspace settings.env QWEN_SERVER_TOKEN is an intentional fast-path
-  // feature (fast-path.test.ts loads it without the full settings loader);
-  // it stays reload-only rather than hardcoded-excluded.
-  it('keeps QWEN_SERVER_TOKEN out of the hardcoded exclusions', () => {
-    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).not.toContain('QWEN_SERVER_TOKEN');
+  // The serve daemon bearer token must come from the operator (--token, an
+  // exported env var, or a home-scoped .env) — never from repository content
+  // — so the key sits in the hardcoded project exclusions: a cloned repo's
+  // project .env/.qwen/.env or settings.env must not preset the credential
+  // that guards the daemon the operator launches.
+  it('keeps QWEN_SERVER_TOKEN in the hardcoded exclusions', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_SERVER_TOKEN');
   });
 
   it('does not bootstrap attribution markers from a home .env', () => {
@@ -280,11 +329,28 @@ describe('isHardcodedProjectEnvExclusion', () => {
     expect(isHardcodedProjectEnvExclusion('qwen_cli_entry')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('DEV')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('dev')).toBe(true);
-    expect(isHardcodedProjectEnvExclusion('QWEN_SERVER_TOKEN')).toBe(false);
+    expect(isHardcodedProjectEnvExclusion('QWEN_SERVER_TOKEN')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_server_token')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('NODE_OPTIONS')).toBe(false);
   });
 
   it('matches the newly added hardcoded exclusions case-insensitively', () => {
+    expect(isHardcodedProjectEnvExclusion('QWEN_CODE_MODELS_DEV_URL')).toBe(
+      true,
+    );
+    expect(isHardcodedProjectEnvExclusion('qwen_code_models_dev_url')).toBe(
+      true,
+    );
+    // The two switches the URL key sits beside: a project must not flip the
+    // catalog daemon-wide (or over the operator's exported `off`) either.
+    expect(isHardcodedProjectEnvExclusion('QWEN_CODE_MODELS_DEV')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_code_models_dev')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_CODE_MODELS_DEV_REFRESH')).toBe(
+      true,
+    );
+    expect(isHardcodedProjectEnvExclusion('qwen_code_models_dev_refresh')).toBe(
+      true,
+    );
     expect(isHardcodedProjectEnvExclusion('SSL_CERT_FILE')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('ssl_cert_file')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('GIT_SSH_COMMAND')).toBe(true);
@@ -330,6 +396,24 @@ describe('isHardcodedProjectEnvExclusion', () => {
     expect(
       isHardcodedProjectEnvExclusion('qwen_serve_cdp_tunnel_over_ws'),
     ).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_SANDBOX_PROXY_COMMAND')).toBe(
+      true,
+    );
+    expect(isHardcodedProjectEnvExclusion('qwen_sandbox_proxy_command')).toBe(
+      true,
+    );
+    expect(isHardcodedProjectEnvExclusion('QWEN_SANDBOX_NET')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_sandbox_net')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_SANDBOX')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_sandbox')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_SANDBOX_IMAGE')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_sandbox_image')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('XDG_CACHE_HOME')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('xdg_cache_home')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('TMPDIR')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('tmpdir')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('TMP')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('TEMP')).toBe(true);
   });
 
   // Numbered GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs are an unbounded
@@ -366,6 +450,9 @@ describe('isLoaderEnvKey', () => {
     expect(isLoaderEnvKey('npm_config_node-options')).toBe(true);
     expect(isLoaderEnvKey('NPM_CONFIG_NODE-OPTIONS')).toBe(true);
     expect(isLoaderEnvKey('Node_Options')).toBe(true);
+    expect(isLoaderEnvKey('BUN_OPTIONS')).toBe(true);
+    expect(isLoaderEnvKey('bun_options')).toBe(true);
+    expect(isLoaderEnvKey('BUN_OPTIONS_EXTRA')).toBe(false);
     expect(isLoaderEnvKey('ld_preload')).toBe(true);
     expect(isLoaderEnvKey('npm_config_registry')).toBe(false);
     expect(isLoaderEnvKey('PATH')).toBe(false);
@@ -452,6 +539,7 @@ describe('scrubInheritedLoaderEnv', () => {
   it('removes every loader-affecting key and keeps the rest', () => {
     const env: NodeJS.ProcessEnv = {
       NODE_OPTIONS: '--import file:///other-checkout/register.mjs',
+      BUN_OPTIONS: '--preload /other-checkout/hook.mjs',
       npm_config_node_options: '--import file:///other-checkout/hook.mjs',
       npm_config_userconfig: '/other-checkout/.npmrc',
       NODE_PATH: '/other-checkout/node_modules',
@@ -482,6 +570,7 @@ describe('scrubInheritedLoaderEnv', () => {
     // keys that were actually present.
     expect(removedKeys).toEqual([
       'NODE_OPTIONS',
+      'BUN_OPTIONS',
       'npm_config_node_options',
       'npm_config_userconfig',
       'NODE_PATH',
@@ -549,6 +638,7 @@ describe('scrubInheritedLoaderEnv', () => {
   it('pins the exact loader-key list so silent edits fail', () => {
     expect([...INHERITED_LOADER_ENV_KEYS].sort()).toEqual([
       'BASH_ENV',
+      'BUN_OPTIONS',
       'DYLD_INSERT_LIBRARIES',
       'LD_AUDIT',
       'LD_PRELOAD',

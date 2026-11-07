@@ -31,8 +31,49 @@ const sdkLibrary = resolveCuaSdkLibraryPath()
 const runtimePath = resolveCuaSdkRuntimePath()
 const resolveLibPath = () => sdkLibrary
 const require = createRequire(import.meta.url)
-const { UniffiNativeModule } = require(runtimePath) as {
+const { UniffiNativeModule, pumpMainRunLoop } = require(runtimePath) as {
   UniffiNativeModule: unknown
+  pumpMainRunLoop: () => void
+}
+
+let users = 0
+let timer: ReturnType<typeof setInterval> | undefined
+let nativeIsLive: (() => boolean) | undefined
+
+function stopWhenIdle() {
+  if (users === 0 && !nativeIsLive?.() && timer) {
+    clearInterval(timer)
+    timer = undefined
+  }
+}
+
+export function retainMainRunLoop(liveness?: () => boolean): () => void {
+  pumpMainRunLoop()
+  if (liveness) nativeIsLive = liveness
+  users++
+  if (!timer) {
+    timer = setInterval(() => {
+      pumpMainRunLoop()
+      stopWhenIdle()
+    }, 10)
+    timer.unref()
+  }
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    users--
+    stopWhenIdle()
+  }
+}
+
+export async function withMainRunLoop<T>(operation: () => Promise<T>): Promise<T> {
+  const release = retainMainRunLoop()
+  try {
+    return await operation()
+  } finally {
+    release()
+  }
 }
 
 export default { FfiType, resolveLibPath, UniffiNativeModule }

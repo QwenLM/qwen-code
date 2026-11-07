@@ -7,7 +7,7 @@
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
-import { HookType } from '@qwen-code/qwen-code-core';
+import { HookType } from '@qwen-code/qwen-code-core/hooks/types.js';
 import type { HookConfigDisplayInfo } from './types.js';
 import { getConfigSourceDisplay } from './sourceLabels.js';
 import { t } from '../../../i18n/index.js';
@@ -32,7 +32,10 @@ export function HandlerListBody({
       </Text>
       {configs.map((config, index) => {
         const isSelected = index === selectedIndex;
-        const sourceDisplay = getConfigSourceDisplay(config);
+        // Only project hooks withheld by the approval gate are listed disabled.
+        const sourceDisplay = config.enabled
+          ? getConfigSourceDisplay(config)
+          : `${getConfigSourceDisplay(config)} · ${config.rejected ? t('disabled (rejected)') : t('disabled (not approved)')}`;
         const hookDisplay = describeHook(config);
         const typeDisplay = formatTypeDisplay(config);
 

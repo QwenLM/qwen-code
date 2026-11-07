@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  isShellResultDisplay,
+  mapShellResultText,
+} from '@qwen-code/qwen-code-core/shellResult';
 import type {
   DaemonToolPreview,
   DaemonToolResultPreview,
@@ -23,7 +27,7 @@ import {
 } from './utils.js';
 
 const MAX_TOOL_PREVIEW_DEPTH = 8;
-const MAX_TODO_PREVIEW_ENTRIES = 1_000;
+const MAX_TOOL_PREVIEW_ENTRIES = 1_000;
 const MAX_TOOL_RESULT_PREVIEW_LENGTH = 100_000;
 const MAX_TODO_ID_LENGTH = 512;
 
@@ -124,6 +128,56 @@ export function createDaemonToolResultPreview(
   content?: unknown,
   opts: { toolName?: string; toolKind?: string } = {},
 ): DaemonToolResultPreview | undefined {
+  if (isShellResultDisplay(output)) {
+    const count = 2 + output.notices.length + (output.error === null ? 0 : 1);
+    const limit = Math.floor(
+      (MAX_TOOL_RESULT_PREVIEW_LENGTH -
+        output.directory.length -
+        output.outputFiles.join('').length) /
+        count,
+    );
+    return {
+      kind: 'shell_result',
+      result: mapShellResultText(output, (value) => {
+        if (value.length <= limit) return value;
+        const last = value.charCodeAt(limit - 1);
+        const end = last >= 0xd800 && last <= 0xdbff ? limit - 1 : limit;
+        return detachString(value.slice(0, end));
+      }),
+    };
+  }
+
+  if (
+    isRecord(output) &&
+    output['type'] === 'ask_user_question_answers' &&
+    typeof output['text'] === 'string'
+  ) {
+    const text = output['text'];
+    const fallback = createDaemonToolResultTextPreview(text);
+    const entries = output['answers'];
+    if (!Array.isArray(entries) || entries.length > MAX_TOOL_PREVIEW_ENTRIES) {
+      return fallback;
+    }
+    let remaining = MAX_TOOL_RESULT_PREVIEW_LENGTH - text.length;
+    const answers: Array<{ question: string; answer: string }> = [];
+    for (const entry of entries) {
+      if (
+        !isRecord(entry) ||
+        typeof entry['question'] !== 'string' ||
+        typeof entry['answer'] !== 'string'
+      ) {
+        return fallback;
+      }
+      const question = entry['question'];
+      const answer = entry['answer'];
+      remaining -= question.length + answer.length;
+      if (remaining < 0) return fallback;
+      answers.push({ question, answer });
+    }
+    return remaining >= 0
+      ? { kind: 'question_answers', text, answers }
+      : fallback;
+  }
   const todoList = detectTodoList(output, opts, false);
   if (todoList) return todoList;
 
@@ -156,7 +210,7 @@ function detectTodoList(
     return undefined;
   }
 
-  const retainedEntries = entries.slice(0, MAX_TODO_PREVIEW_ENTRIES);
+  const retainedEntries = entries.slice(0, MAX_TOOL_PREVIEW_ENTRIES);
   const authoredIds = new Set<string>();
   for (const entry of retainedEntries) {
     if (!isRecord(entry)) continue;
@@ -172,9 +226,9 @@ function detectTodoList(
 
   const normalized: DaemonTranscriptTodoItem[] = [];
   const usedIds = new Set<string>();
-  let truncated = entries.length > MAX_TODO_PREVIEW_ENTRIES;
+  let truncated = entries.length > MAX_TOOL_PREVIEW_ENTRIES;
   let remainingText = MAX_TOOL_RESULT_PREVIEW_LENGTH;
-  let remainingDependencyInputs = MAX_TODO_PREVIEW_ENTRIES;
+  let remainingDependencyInputs = MAX_TOOL_PREVIEW_ENTRIES;
   retainedEntries.forEach((entry, index) => {
     if (!isRecord(entry)) {
       truncated = true;

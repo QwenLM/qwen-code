@@ -59,6 +59,7 @@ const originalQwenHome = process.env['QWEN_HOME'];
 const originalHome = process.env['HOME'];
 const originalUserProfile = process.env['USERPROFILE'];
 const originalQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+const originalConversationsDir = process.env['QWEN_CONVERSATIONS_DIR'];
 const originalMcpApprovalsPath = process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
 const originalSystemSettingsPath =
   process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
@@ -367,6 +368,11 @@ afterEach(() => {
   } else {
     process.env['QWEN_RUNTIME_DIR'] = originalQwenRuntimeDir;
   }
+  if (originalConversationsDir === undefined) {
+    delete process.env['QWEN_CONVERSATIONS_DIR'];
+  } else {
+    process.env['QWEN_CONVERSATIONS_DIR'] = originalConversationsDir;
+  }
   if (originalMcpApprovalsPath === undefined) {
     delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
   } else {
@@ -454,7 +460,6 @@ describe('CLI entry import boundary', () => {
     const runServeSource = readFileSync('src/serve/run-qwen-serve.ts', 'utf8');
 
     expect(runServeSource).not.toMatch(/from ['"]\.\/server\.js['"]/);
-    expect(runServeSource).not.toMatch(/from ['"]\.\/web-shell-static\.js['"]/);
     expect(runServeSource).not.toMatch(
       /from ['"]\.\/acp-session-bridge\.js['"]/,
     );
@@ -466,6 +471,14 @@ describe('CLI entry import boundary', () => {
     );
     expect(runServeSource).toContain("import('./server.js')");
     expect(runServeSource).toContain("import('@qwen-code/acp-bridge/bridge')");
+    expect(runServeSource).not.toMatch(/import \{ SessionService \} from/);
+    expect(runServeSource).toMatch(
+      /await import\(\s*'@qwen-code\/qwen-code-core\/services\/sessionService\.js'/,
+    );
+    // web-shell-static (express-static/CSP machinery) must stay out of the
+    // fast-path static closure at every depth, including transitive edges
+    // through server/self-origin.js and web-shell-preauth.js; the static
+    // source-graph walk below pins that instead of per-hop regexes.
   });
 
   it('keeps request helpers from value-importing the ACP compatibility shim', () => {
@@ -496,7 +509,9 @@ describe('CLI entry import boundary', () => {
 
     expect(graph.unresolvedLocalImports).toEqual([]);
     const forbiddenLocalFiles = [...graph.localFiles].filter(
-      (filePath) => filePath === 'src/serve/acp-session-bridge.ts',
+      (filePath) =>
+        filePath === 'src/serve/acp-session-bridge.ts' ||
+        filePath === 'src/serve/web-shell-static.ts',
     );
     expect(
       forbiddenLocalFiles,
@@ -509,6 +524,7 @@ describe('CLI entry import boundary', () => {
       '@qwen-code/acp-bridge/spawnChannel',
       '@qwen-code/acp-bridge/bridgeClient',
       '@qwen-code/acp-bridge/bridgeErrors',
+      '@qwen-code/qwen-code-core',
     ];
     const forbiddenImports = [...graph.externalValueImports].filter(
       (specifier) => forbiddenExternalImports.includes(specifier),
@@ -521,6 +537,27 @@ describe('CLI entry import boundary', () => {
 });
 
 describe('serve fast path argument parsing', () => {
+  it.each([
+    ['--conversations-dir', '/persistent/Qwen Conversations '],
+    ['--conversations-dir=/persistent/Qwen Conversations '],
+  ])('preserves the Conversations root in %j', (...args) => {
+    expect(parseServeFastPathArgs(['serve', ...args])).toMatchObject({
+      kind: 'serve',
+      options: { conversationsDir: '/persistent/Qwen Conversations ' },
+    });
+  });
+
+  it.each([
+    ['--conversations-dir'],
+    ['--conversations-dir='],
+    ['--conversations-dir', ''],
+    ['--conversations-dir=/one', '--conversations-dir=/two'],
+  ])('defers incomplete or repeated Conversations options %j', (...args) => {
+    expect(parseServeFastPathArgs(['serve', ...args])).toEqual({
+      kind: 'fallback',
+    });
+  });
+
   it('parses the common daemon startup flags without loading the full CLI parser', () => {
     const parsed = parseServeFastPathArgs([
       'serve',
@@ -667,6 +704,12 @@ describe('serve fast path argument parsing', () => {
       (name) => name.length > 1 && !options.alias[name]?.length,
     );
     const sampleArgvByOption = new Map<string, string[]>([
+      ['managed', ['--managed']],
+      ['managed-data-dir', ['--managed-data-dir', '/tmp/qwen-managed-data']],
+      [
+        'managed-web-config',
+        ['--managed-web-config', '/etc/qwen-web/gateway.json'],
+      ],
       ['port', ['--port', '0']],
       ['hostname', ['--hostname', '127.0.0.1']],
       ['token', ['--token', 'token']],
@@ -678,6 +721,7 @@ describe('serve fast path argument parsing', () => {
       ],
       ['max-connections', ['--max-connections', '256']],
       ['event-ring-size', ['--event-ring-size', '8000']],
+      ['event-ring-max-bytes', ['--event-ring-max-bytes', '1048576']],
       [
         'compacted-replay-max-bytes',
         ['--compacted-replay-max-bytes', '4194304'],
@@ -685,6 +729,10 @@ describe('serve fast path argument parsing', () => {
       ['max-journal-events', ['--max-journal-events', '10000']],
       ['max-journal-bytes', ['--max-journal-bytes', '8388608']],
       ['workspace', ['--workspace', process.cwd()]],
+      [
+        'conversations-dir',
+        ['--conversations-dir', '/persistent/conversations'],
+      ],
       ['memory-project-scope', ['--memory-project-scope', 'workspace']],
       ['require-auth', ['--require-auth']],
       ['enable-session-shell', ['--enable-session-shell']],
@@ -693,6 +741,7 @@ describe('serve fast path argument parsing', () => {
       ['web', ['--no-web']],
       ['open', ['--open']],
       ['open-with-auth', ['--open-with-auth']],
+      ['token-qr', ['--token-qr']],
       ['local-control', ['--local-control']],
       ['local-control-address', ['--local-control-address', '192.168.1.2']],
       ['http-bridge', ['--no-http-bridge']],
@@ -724,6 +773,37 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-read', ['--rate-limit-read', '120']],
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
+      ['profile', ['--profile', 'hosted-harness']],
+      [
+        'hosted-harness-capability-digest',
+        ['--hosted-harness-capability-digest', `sha256:${'a'.repeat(64)}`],
+      ],
+      ['experimental-paired-engines', ['--experimental-paired-engines']],
+      ['experimental-managed-agents', ['--experimental-managed-agents']],
+      [
+        'experimental-managed-runtime-worker',
+        ['--experimental-managed-runtime-worker'],
+      ],
+      [
+        'experimental-managed-runtime-auto-local',
+        ['--experimental-managed-runtime-auto-local'],
+      ],
+      [
+        'experimental-managed-runtime-url',
+        ['--experimental-managed-runtime-url', 'http://127.0.0.1:3001'],
+      ],
+      [
+        'experimental-managed-runtime-token',
+        ['--experimental-managed-runtime-token', 'test-token'],
+      ],
+      [
+        'managed-runtime-broker-url',
+        ['--managed-runtime-broker-url', 'http://127.0.0.1:3002'],
+      ],
+      [
+        'managed-runtime-broker-token',
+        ['--managed-runtime-broker-token', 'test-token'],
+      ],
       ['restore-ask-user-question', ['--restore-ask-user-question']],
       ['external-tool-guard-mode', ['--external-tool-guard-mode', 'off']],
       [
@@ -735,14 +815,44 @@ describe('serve fast path argument parsing', () => {
         ['--external-tool-guard-timeout-ms', '3000'],
       ],
       ['channel', ['--channel', 'telegram']],
+      // The managed Agent Host worker flags. A Host runs its own `qwen serve`
+      // that only reaches out, so these have to be reachable the same way
+      // every other serve option is.
+      ['agent-host-server', ['--agent-host-server', 'https://example.invalid']],
+      ['agent-host-workspace-id', ['--agent-host-workspace-id', 'ws_1']],
+      ['agent-host-name', ['--agent-host-name', 'builder']],
+      ['agent-host-allow-http', ['--agent-host-allow-http']],
+      ['join', ['--join', 'https://example.invalid/join/ws_1']],
       ['help', ['--help']],
       ['version', ['--version']],
     ]);
     const expectedFallbackOptions = new Set([
+      // The fast path exists to start a plain daemon without loading the full
+      // CLI. Managed local serve and Agent Host run different process
+      // lifecycles, so these hand off rather than being taught to the fast
+      // path.
+      'agent-host-allow-http',
+      'agent-host-name',
+      'agent-host-server',
+      'agent-host-workspace-id',
       'channel',
+      'managed',
+      'managed-data-dir',
+      'managed-web-config',
+      'profile',
+      'hosted-harness-capability-digest',
+      'experimental-paired-engines',
+      'experimental-managed-agents',
+      'experimental-managed-runtime-worker',
+      'experimental-managed-runtime-auto-local',
+      'experimental-managed-runtime-url',
+      'experimental-managed-runtime-token',
+      'managed-runtime-broker-url',
+      'managed-runtime-broker-token',
       'external-tool-guard-endpoint',
       'external-tool-guard-mode',
       'external-tool-guard-timeout-ms',
+      'join',
       'help',
       'local-control',
       'local-control-address',
@@ -778,6 +888,7 @@ describe('serve fast path argument parsing', () => {
     expect(fastPathParsed).not.toHaveProperty('options.maxTotalSessions');
     expect(fastPathParsed).not.toHaveProperty('options.maxConnections');
     expect(fastPathParsed).not.toHaveProperty('options.eventRingSize');
+    expect(fastPathParsed).not.toHaveProperty('options.eventRingMaxBytes');
     expect(fastPathParsed).not.toHaveProperty(
       'options.compactedReplayMaxBytes',
     );
@@ -803,6 +914,21 @@ describe('serve fast path argument parsing', () => {
     ).toEqual({ kind: 'fallback' });
   });
 
+  it.each(['admit', 'enforce'])(
+    'parses opt-in child heap mode %s in both flag forms',
+    (mode) => {
+      for (const args of [
+        ['--child-heap-mode', mode],
+        [`--child-heap-mode=${mode}`],
+      ]) {
+        expect(parseServeFastPathArgs(['serve', ...args])).toMatchObject({
+          kind: 'serve',
+          options: { childHeapMode: mode },
+        });
+      }
+    },
+  );
+
   it('parses --child-heap-mode and falls back on an unknown value', () => {
     for (const argv of [
       ['serve', '--child-heap-mode', 'off'],
@@ -813,10 +939,8 @@ describe('serve fast path argument parsing', () => {
         options: { childHeapMode: 'off' },
       });
     }
-    // `enforce` is deliberately not a value yet, so it is the sample worth
-    // pinning: the fast path must defer to yargs rather than smuggle it in.
     expect(
-      parseServeFastPathArgs(['serve', '--child-heap-mode', 'enforce']),
+      parseServeFastPathArgs(['serve', '--child-heap-mode', 'unknown']),
     ).toEqual({ kind: 'fallback' });
   });
 
@@ -831,6 +955,48 @@ describe('serve fast path argument parsing', () => {
         options: { memoryBudgetMb: 8192 },
       });
     }
+  });
+
+  it('parses --event-ring-max-bytes on both fast-path flag forms', () => {
+    for (const args of [
+      ['--event-ring-max-bytes', '1048576'],
+      ['--event-ring-max-bytes=1048576'],
+    ]) {
+      expect(parseServeFastPathArgs(['serve', ...args])).toMatchObject({
+        kind: 'serve',
+        options: { eventRingMaxBytes: 1024 * 1024 },
+      });
+    }
+    expect(parseServeFastPathArgs(['serve', '--event-ring-max-bytes'])).toEqual(
+      {
+        kind: 'fallback',
+      },
+    );
+  });
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    Infinity,
+    -Infinity,
+    Number.MAX_SAFE_INTEGER + 1,
+    256 * 1024 * 1024 + 1,
+  ])('rejects fast-path eventRingMaxBytes=%s before startup', async (value) => {
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('process.exit(1)');
+    }) as typeof process.exit);
+    const boot = vi.spyOn(runQwenServeModule, 'runQwenServe');
+    await expect(
+      tryRunServeFastPath(['serve', `--event-ring-max-bytes=${value}`]),
+    ).rejects.toThrow('process.exit(1)');
+    expect(stderrWrites.join('')).toContain('eventRingMaxBytes');
+    expect(boot).not.toHaveBeenCalled();
   });
 
   it('parses --compacted-replay-max-bytes on the fast path', () => {
@@ -963,7 +1129,7 @@ describe('serve fast path argument parsing', () => {
   it.each([
     [['serve', '--memory-budget-mb', '8192'], 'valid --memory-budget-mb'],
     [['serve'], 'absent --memory-budget-mb'],
-  ])('accepts %s without a range error', async (argv, _label) => {
+  ])('validates %s before loading operator settings', async (argv, _label) => {
     const qwenHome = useTempQwenHome();
     writeFileSync(join(qwenHome, 'settings.json'), '{');
     const stderrWrites: string[] = [];
@@ -975,11 +1141,10 @@ describe('serve fast path argument parsing', () => {
       throw new Error('unexpected process.exit');
     }) as typeof process.exit);
 
-    // Bootstrap fails (broken settings.json), but validation must pass
-    // first — a spurious range error would exit(1) before reaching it.
-    const result = await tryRunServeFastPath(argv);
+    await expect(tryRunServeFastPath(argv)).rejects.toThrow(
+      'Cannot read operator sandbox policy',
+    );
 
-    expect(result).toBe(false);
     expect(exitSpy).not.toHaveBeenCalled();
     expect(stderrWrites.join('')).not.toContain(
       'must be an integer in [1024, 1048576]',
@@ -1037,6 +1202,69 @@ describe('serve fast path argument parsing', () => {
 });
 
 describe('serve fast path environment bootstrap', () => {
+  it.each(['', '/persistent/Qwen Conversations '])(
+    'preserves a user .env Conversations root %j despite a project .env',
+    async (root) => {
+      const qwenHome = useTempQwenHome();
+      delete process.env['QWEN_CONVERSATIONS_DIR'];
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-conversations-')),
+      );
+      writeFileSync(
+        join(qwenHome, '.env'),
+        `QWEN_CONVERSATIONS_DIR=${JSON.stringify(root)}\n`,
+      );
+      writeFileSync(
+        join(tempWorkspace, '.env'),
+        'QWEN_CONVERSATIONS_DIR=/project/root\nFAST_PATH_REFERENCED_TOKEN=loaded\n',
+      );
+      delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+      preResolveServeFastPathHomeEnvOverrides();
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
+      await bootstrapServeFastPathEnvironment(tempWorkspace);
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
+      expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('loaded');
+    },
+  );
+
+  it('keeps an empty launch root instead of replacing it from home .env', async () => {
+    const qwenHome = useTempQwenHome();
+    process.env['QWEN_CONVERSATIONS_DIR'] = '';
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-conversations-empty-')),
+    );
+    writeFileSync(
+      join(qwenHome, '.env'),
+      'QWEN_CONVERSATIONS_DIR=/home/root\n',
+    );
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+    expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe('');
+  });
+
+  it.each(['.env', '.qwen/.env'])(
+    'rejects a Conversations root from project %s and settings.env',
+    (file) => {
+      useTempQwenHome();
+      delete process.env['QWEN_CONVERSATIONS_DIR'];
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-conversations-project-')),
+      );
+      const envPath = join(tempWorkspace, file);
+      mkdirSync(dirname(envPath), { recursive: true });
+      writeFileSync(
+        envPath,
+        'QWEN_CONVERSATIONS_DIR=/project/root\nFAST_PATH_REFERENCED_TOKEN=loaded\n',
+      );
+      delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+      loadServeFastPathEnvironment(
+        { env: { QWEN_CONVERSATIONS_DIR: '/settings/root' } },
+        tempWorkspace,
+      );
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBeUndefined();
+      expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('loaded');
+    },
+  );
+
   it('keeps the lite settings directory name in sync with core QWEN_DIR', () => {
     expect(SETTINGS_DIRECTORY_NAME).toBe(QWEN_DIR);
   });
@@ -1271,13 +1499,13 @@ describe('serve fast path environment bootstrap', () => {
     );
   }, 10_000);
 
-  it('falls back to the full CLI when fast-path settings bootstrap fails', async () => {
+  it('fails closed when operator settings bootstrap fails', async () => {
     const qwenHome = useTempQwenHome();
     writeFileSync(join(qwenHome, 'settings.json'), '{');
 
     await expect(
       tryRunServeFastPath(['serve', '--port', '0', '--no-open', '--no-web']),
-    ).resolves.toBe(false);
+    ).rejects.toThrow('Cannot read operator sandbox policy');
   }, 10_000);
 
   it.each([
@@ -1308,23 +1536,44 @@ describe('serve fast path environment bootstrap', () => {
     },
   );
 
-  it('loads QWEN_SERVER_TOKEN from the workspace .env before the daemon starts', async () => {
-    delete process.env['QWEN_SERVER_TOKEN'];
-    useTempQwenHome();
-    tempWorkspace = realpathSync(
-      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-env-')),
-    );
-    mkdirSync(join(tempWorkspace, '.qwen'));
-    writeFileSync(
-      join(tempWorkspace, '.qwen', '.env'),
-      'QWEN_SERVER_TOKEN=from-workspace-env\n',
-    );
-    process.chdir(tempWorkspace);
+  it.each(['.env', '.qwen/.env'])(
+    'never applies QWEN_SERVER_TOKEN from the workspace %s before the daemon starts',
+    async (envRelPath) => {
+      delete process.env['QWEN_SERVER_TOKEN'];
+      delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+      vi.stubEnv('qwen_server_token', undefined);
+      useTempQwenHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-token-reject-')),
+      );
+      const envPath = join(tempWorkspace, ...envRelPath.split('/'));
+      mkdirSync(dirname(envPath), { recursive: true });
+      writeFileSync(
+        envPath,
+        [
+          'QWEN_SERVER_TOKEN=from-workspace-env',
+          'qwen_server_token=from-workspace-env-lower',
+          // Positive control: the file is read and merged under the default
+          // (trust-disabled) configuration; only the token keys are
+          // rejected. The control is an inert marker: a QWEN_SERVE_* knob
+          // could join the same exclusion list one day and turn this
+          // evidence into a second false alarm.
+          'FAST_PATH_REFERENCED_TOKEN=7',
+        ].join('\n'),
+      );
+      process.chdir(tempWorkspace);
 
-    await bootstrapServeFastPathEnvironment(tempWorkspace);
+      try {
+        await bootstrapServeFastPathEnvironment(tempWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-workspace-env');
-  });
+        expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+        expect(process.env['qwen_server_token']).toBeUndefined();
+        expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('7');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('preserves workspace .env compile cache over the pending default', async () => {
     delete process.env['NODE_COMPILE_CACHE'];
@@ -1347,6 +1596,7 @@ describe('serve fast path environment bootstrap', () => {
   });
 
   it('loads .env from --workspace even when launched from another directory', async () => {
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     delete process.env['QWEN_SERVER_TOKEN'];
     useTempQwenHome();
     tempWorkspace = realpathSync(
@@ -1358,15 +1608,19 @@ describe('serve fast path environment bootstrap', () => {
     mkdirSync(join(tempWorkspace, '.qwen'));
     writeFileSync(
       join(tempWorkspace, '.qwen', '.env'),
-      'QWEN_SERVER_TOKEN=from-explicit-workspace-env\n',
+      [
+        'FAST_PATH_REFERENCED_TOKEN=from-explicit-workspace-env',
+        'QWEN_SERVER_TOKEN=from-explicit-workspace-env',
+      ].join('\n'),
     );
     process.chdir(tempLaunchCwd);
 
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe(
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe(
       'from-explicit-workspace-env',
     );
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
   it('loads home .env after workspace .env for daemon boot-time keys', async () => {
@@ -1395,46 +1649,70 @@ describe('serve fast path environment bootstrap', () => {
 
   it('applies legacy excludedProjectEnvVars before loading workspace .env', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();
     writeFileSync(
       join(qwenHome, 'settings.json'),
-      JSON.stringify({ excludedProjectEnvVars: ['QWEN_SERVER_TOKEN'] }),
+      JSON.stringify({
+        excludedProjectEnvVars: [
+          'QWEN_SERVER_TOKEN',
+          'FAST_PATH_REFERENCED_TOKEN',
+        ],
+      }),
     );
     tempWorkspace = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-legacy-env-')),
     );
     writeFileSync(
       join(tempWorkspace, '.env'),
-      'QWEN_SERVER_TOKEN=from-workspace-env\n',
+      [
+        'QWEN_SERVER_TOKEN=from-workspace-env',
+        'FAST_PATH_REFERENCED_TOKEN=from-workspace-env',
+      ].join('\n'),
     );
     process.chdir(tempWorkspace);
 
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
   });
 
-  it('loads QWEN_SERVER_TOKEN from workspace settings.env without the full settings loader', async () => {
-    delete process.env['QWEN_SERVER_TOKEN'];
-    useTempQwenHome();
-    tempWorkspace = realpathSync(
-      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-settings-env-')),
-    );
-    mkdirSync(join(tempWorkspace, '.qwen'));
-    writeFileSync(
-      join(tempWorkspace, '.qwen', 'settings.json'),
-      JSON.stringify({
-        env: { QWEN_SERVER_TOKEN: 'from-workspace-settings-env' },
-      }),
-    );
-    process.chdir(tempWorkspace);
+  it.each(['workspace', 'home'])(
+    'never applies QWEN_SERVER_TOKEN from %s settings.env without the full settings loader',
+    async (scope) => {
+      delete process.env['QWEN_SERVER_TOKEN'];
+      delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+      const qwenHome = useTempQwenHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), `qws-fast-path-settings-env-${scope}-`)),
+      );
+      const settingsDir =
+        scope === 'home' ? qwenHome : join(tempWorkspace, '.qwen');
+      mkdirSync(settingsDir, { recursive: true });
+      writeFileSync(
+        join(settingsDir, 'settings.json'),
+        JSON.stringify({
+          env: {
+            QWEN_SERVER_TOKEN: `from-${scope}-settings-env`,
+            // Positive control: settings.env is merged and applied at both
+            // scopes; only the token key is rejected. A home `.env` is an
+            // operator channel for the bearer, a home settings.json is not.
+            // The control is an inert marker: a QWEN_SERVE_* knob could
+            // join the same exclusion list one day and turn this evidence
+            // into a second false alarm.
+            FAST_PATH_REFERENCED_TOKEN: '7',
+          },
+        }),
+      );
+      process.chdir(tempWorkspace);
 
-    await bootstrapServeFastPathEnvironment(tempWorkspace);
+      await bootstrapServeFastPathEnvironment(tempWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe(
-      'from-workspace-settings-env',
-    );
-  });
+      expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+      expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('7');
+    },
+  );
 
   it('pre-resolves home env overrides in the same order as the full loader', () => {
     delete process.env['QWEN_HOME'];
@@ -1638,6 +1916,350 @@ describe('serve fast path environment bootstrap', () => {
     expect(settings.advanced?.runtimeOutputDir).toBe('.qwen-runtime');
   });
 
+  it('retains unrelated boot settings when workspace startup channels are malformed', () => {
+    useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-invalid-channels-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        context: { fileName: 'CUSTOM.md' },
+        policy: { permissionStrategy: 'consensus', consensusQuorum: 3 },
+        advanced: { runtimeOutputDir: '.runtime' },
+        serve: { channels: 'telegram' },
+      }),
+    );
+    const settings = loadServeFastPathSettings(tempWorkspace);
+    expect(settings.context?.fileName).toBe('CUSTOM.md');
+    expect(settings.policy?.permissionStrategy).toBe('consensus');
+    expect(settings.advanced?.runtimeOutputDir).toBe('.runtime');
+  });
+
+  it('loads startup channels from workspace settings only', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-startup-channels-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ serve: { channels: ['discord'] } }),
+    );
+
+    expect(loadServeFastPathSettings(tempWorkspace).serve).toBeUndefined();
+
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+
+    expect(loadServeFastPathSettings(tempWorkspace).serve).toEqual({
+      channels: ['telegram'],
+    });
+  });
+
+  it('ignores malformed user startup channels without dropping other scopes', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-user-channels-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        context: { fileName: 'USER.md' },
+        serve: { channels: 'telegram' },
+      }),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+
+    const settings = loadServeFastPathSettings(tempWorkspace);
+
+    expect(settings.context?.fileName).toBe('USER.md');
+    expect(settings.serve).toEqual({ channels: ['telegram'] });
+  });
+
+  it('loads serve.tokenQr from user scope but never from workspace scope', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-token-qr-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    // A workspace file must never enable it — the key would push the
+    // operator's stable bearer into captured stdout.
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { tokenQr: true } }),
+    );
+    const workspaceScoped = loadServeFastPathSettings(tempWorkspace);
+    expect(workspaceScoped.serve?.tokenQr).toBeUndefined();
+    // The drop is report-only: the value never enters the summary, but the
+    // boot path names it on stderr instead of discarding it silently.
+    expect(workspaceScoped.ignoredWorkspaceKeys).toEqual(['serve.tokenQr']);
+
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ serve: { tokenQr: true } }),
+    );
+    const fromUserScope = loadServeFastPathSettings(tempWorkspace);
+    expect(fromUserScope.serve?.tokenQr).toBe(true);
+    // A workspace value stays ignored — and reported — even when an
+    // operator scope also sets the key.
+    expect(fromUserScope.ignoredWorkspaceKeys).toEqual(['serve.tokenQr']);
+  });
+
+  it('loads serve.maxSessions from user scope but never from workspace scope', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-max-sessions-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    // A workspace file must never raise a daemon-wide resource cap.
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { maxSessions: 4 } }),
+    );
+    const workspaceScoped = loadServeFastPathSettings(tempWorkspace);
+    expect(workspaceScoped.serve?.maxSessions).toBeUndefined();
+    expect(workspaceScoped.ignoredWorkspaceKeys).toEqual(['serve.maxSessions']);
+
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ serve: { maxSessions: 64 } }),
+    );
+    const fromUserScope = loadServeFastPathSettings(tempWorkspace);
+    expect(fromUserScope.serve?.maxSessions).toBe(64);
+    // A workspace value stays ignored — and reported — even when an
+    // operator scope also sets the key.
+    expect(fromUserScope.ignoredWorkspaceKeys).toEqual(['serve.maxSessions']);
+  });
+
+  it('loads serve.maxSessions from operator scopes and lets system override user', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-max-sessions-system-')),
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH']!,
+      JSON.stringify({ serve: { maxSessions: 8 } }),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.maxSessions).toBe(8);
+
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ serve: { maxSessions: 64 } }),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.maxSessions).toBe(
+      64,
+    );
+
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']!,
+      JSON.stringify({ serve: { maxSessions: 16 } }),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.maxSessions).toBe(
+      16,
+    );
+  });
+
+  it('keeps operator settings when the workspace document cannot be read', () => {
+    // A repo-local file must not be able to discard an operator-owned cap.
+    // `[]` is valid JSON but not an object; the second case is a parse error.
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-bad-workspace-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ serve: { maxSessions: 3, tokenQr: true } }),
+    );
+
+    const onWorkspaceSettingsError = vi.fn();
+    for (const contents of ['[]', '{not json']) {
+      writeFileSync(join(tempWorkspace, '.qwen', 'settings.json'), contents);
+      const settings = loadServeFastPathSettings(tempWorkspace, {
+        onWorkspaceSettingsError,
+      });
+      expect(settings.serve?.maxSessions).toBe(3);
+      expect(settings.serve?.tokenQr).toBe(true);
+    }
+    expect(onWorkspaceSettingsError).toHaveBeenCalledTimes(2);
+    expect(String(onWorkspaceSettingsError.mock.calls[0][0])).toContain(
+      'must be a JSON object',
+    );
+  });
+
+  it('keeps user-scope serve.tokenQr when workspace startup channels merge', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-token-qr-channels-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ serve: { tokenQr: true } }),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+
+    const merged = loadServeFastPathSettings(tempWorkspace);
+    expect(merged.serve).toEqual({
+      channels: ['telegram'],
+      tokenQr: true,
+    });
+    // A workspace file without serve.tokenQr has nothing to report.
+    expect(merged.ignoredWorkspaceKeys).toBeUndefined();
+  });
+
+  it('loads serve.tokenQr from the system scope and lets system override user', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-token-qr-system-')),
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']!,
+      JSON.stringify({ serve: { tokenQr: true } }),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.tokenQr).toBe(true);
+
+    // Merge precedence: system applies last, so an explicit system false
+    // must override a user true — otherwise a fleet policy cannot force the
+    // suppression back on.
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ serve: { tokenQr: true } }),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.tokenQr).toBe(true);
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']!,
+      JSON.stringify({ serve: { tokenQr: false } }),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.tokenQr).toBe(false);
+  });
+
+  it('loads serve.tokenQr from the system-defaults scope', () => {
+    useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-token-qr-defaults-')),
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH']!,
+      JSON.stringify({ serve: { tokenQr: true } }),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.tokenQr).toBe(true);
+  });
+
+  it('passes a malformed serve.tokenQr through without discarding the summary', () => {
+    const qwenHome = useTempQwenHome();
+    const workspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-token-qr-malformed-')),
+    );
+    tempWorkspace = workspace;
+    // The reader must not throw here: it is shared with policy.* and
+    // serve.channels, and a whole-summary abort would downgrade permission
+    // mediation to its default because of a display knob. The consumer
+    // (run-qwen-serve) validates, warns, and treats it as absent.
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        policy: { permissionStrategy: 'consensus', consensusQuorum: 2 },
+        serve: { tokenQr: 'true' },
+      }),
+    );
+    const settings = loadServeFastPathSettings(workspace);
+    expect(settings.policy?.permissionStrategy).toBe('consensus');
+    expect(settings.serve?.tokenQr).toBe('true');
+  });
+
+  it.each([
+    {
+      label: 'unknown',
+      userEnabled: true,
+      systemEnabled: true,
+      rule: undefined,
+      loads: false,
+    },
+    {
+      label: 'trusted',
+      userEnabled: true,
+      systemEnabled: true,
+      rule: TrustLevel.TRUST_FOLDER,
+      loads: true,
+    },
+    {
+      label: 'untrusted',
+      userEnabled: true,
+      systemEnabled: true,
+      rule: TrustLevel.DO_NOT_TRUST,
+      loads: false,
+    },
+    {
+      label: 'system enables trust',
+      userEnabled: false,
+      systemEnabled: true,
+      rule: undefined,
+      loads: false,
+    },
+    {
+      label: 'system disables trust',
+      userEnabled: true,
+      systemEnabled: false,
+      rule: undefined,
+      loads: true,
+    },
+  ])(
+    'loads startup channels using effective trust: $label',
+    ({ userEnabled, systemEnabled, rule, loads }) => {
+      const qwenHome = useTempQwenHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-startup-trust-')),
+      );
+      mkdirSync(join(tempWorkspace, '.qwen'));
+      writeFileSync(
+        join(qwenHome, 'settings.json'),
+        JSON.stringify({ security: { folderTrust: { enabled: userEnabled } } }),
+      );
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = join(
+        qwenHome,
+        'system.json',
+      );
+      process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'] = join(
+        qwenHome,
+        'system-defaults.json',
+      );
+      writeFileSync(
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'],
+        JSON.stringify({
+          security: { folderTrust: { enabled: systemEnabled } },
+        }),
+      );
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+        qwenHome,
+        'trustedFolders.json',
+      );
+      writeFileSync(
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+        JSON.stringify(rule ? { [tempWorkspace]: rule } : {}),
+      );
+      writeFileSync(
+        join(tempWorkspace, '.qwen', 'settings.json'),
+        JSON.stringify({ serve: { channels: ['telegram'] } }),
+      );
+
+      expect(loadServeFastPathSettings(tempWorkspace).serve).toEqual(
+        loads ? { channels: ['telegram'] } : undefined,
+      );
+    },
+  );
+
   it('ignores stale legacy keys in current-version settings files', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
@@ -1666,6 +2288,7 @@ describe('serve fast path environment bootstrap', () => {
 
   it('uses trusted-folders path from home .env before loading workspace env', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     delete process.env['QWEN_RUNTIME_DIR'];
     delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
     const qwenHome = useTempQwenHome();
@@ -1687,7 +2310,10 @@ describe('serve fast path environment bootstrap', () => {
     );
     writeFileSync(
       join(tempWorkspace, '.env'),
-      'QWEN_SERVER_TOKEN=from-untrusted-workspace-env\n',
+      [
+        'QWEN_SERVER_TOKEN=from-untrusted-workspace-env',
+        'FAST_PATH_REFERENCED_TOKEN=from-untrusted-workspace-env',
+      ].join('\n'),
     );
 
     await bootstrapServeFastPathEnvironment(tempWorkspace);
@@ -1696,10 +2322,12 @@ describe('serve fast path environment bootstrap', () => {
       customTrustedFoldersPath,
     );
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
   });
 
   it('uses legacy folderTrust before loading workspace env', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-legacy-trust-')),
@@ -1718,16 +2346,20 @@ describe('serve fast path environment bootstrap', () => {
     );
     writeFileSync(
       join(tempWorkspace, '.env'),
-      'QWEN_SERVER_TOKEN=from-untrusted-workspace-env\n',
+      [
+        'QWEN_SERVER_TOKEN=from-untrusted-workspace-env',
+        'FAST_PATH_REFERENCED_TOKEN=from-untrusted-workspace-env',
+      ].join('\n'),
     );
 
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
   });
 
   it('caches trusted folders during a single fast-path bootstrap', () => {
-    delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trust-cache-')),
@@ -1744,7 +2376,10 @@ describe('serve fast path environment bootstrap', () => {
       process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
       JSON.stringify({ [tempWorkspace]: TrustLevel.TRUST_FOLDER }),
     );
-    writeFileSync(join(tempWorkspace, '.env'), 'QWEN_SERVER_TOKEN=trusted\n');
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      'FAST_PATH_REFERENCED_TOKEN=trusted\n',
+    );
 
     const settings = loadServeFastPathSettings(tempWorkspace);
     writeFileSync(
@@ -1754,8 +2389,100 @@ describe('serve fast path environment bootstrap', () => {
 
     loadServeFastPathEnvironment(settings, tempWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe('trusted');
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('trusted');
   });
+
+  it('never applies QWEN_SERVER_TOKEN from a trusted workspace .env under folder trust', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trusted-token-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({ [tempWorkspace]: TrustLevel.TRUST_FOLDER }),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      [
+        'QWEN_SERVER_TOKEN=from-trusted-workspace-env',
+        // Positive control: the trusted workspace's .env loads; trust never
+        // waives the project-scope exclusion for the daemon bearer. The
+        // control is an inert marker: a QWEN_SERVE_* knob could join the
+        // same exclusion list one day and turn this evidence into a second
+        // false alarm.
+        'FAST_PATH_REFERENCED_TOKEN=7',
+      ].join('\n'),
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('7');
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  it.each(['.env', '.qwen/.env', 'settings.env'])(
+    'keeps update download sources user-owned when loading %s',
+    (source) => {
+      const qwenHome = useTempQwenHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-update-source-')),
+      );
+      const keys = [
+        'QWEN_UPDATE_BASE_URL',
+        'qwen_update_base_url',
+        'Qwen_Update_Base_Url',
+      ];
+      for (const key of keys) vi.stubEnv(key, undefined);
+      const values = Object.fromEntries(
+        keys.map((key) => [key, 'https://project.example.com']),
+      );
+      const settings: ServeFastPathSettings = {
+        advanced: { excludedEnvVars: [] },
+      };
+      if (source === 'settings.env') {
+        settings.env = values;
+      } else {
+        const envPath = join(tempWorkspace, source);
+        mkdirSync(dirname(envPath), { recursive: true });
+        writeFileSync(
+          envPath,
+          Object.entries(values)
+            .map(([key, value]) => `${key}=${value}`)
+            .join('\n'),
+        );
+      }
+      try {
+        loadServeFastPathEnvironment(settings, tempWorkspace);
+        for (const key of keys) expect(process.env[key]).toBeUndefined();
+
+        const trustedUrl = 'https://downloads.example.com/releases';
+        writeFileSync(
+          join(qwenHome, '.env'),
+          `QWEN_UPDATE_BASE_URL=${trustedUrl}\n`,
+        );
+        loadServeFastPathEnvironment(settings, tempWorkspace);
+        expect(process.env['QWEN_UPDATE_BASE_URL']).toBe(trustedUrl);
+
+        process.env['QWEN_UPDATE_BASE_URL'] = 'https://shell.example.com';
+        loadServeFastPathEnvironment(settings, tempWorkspace);
+        expect(process.env['QWEN_UPDATE_BASE_URL']).toBe(
+          'https://shell.example.com',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   // Regression for #8653: the fast path runs before runQwenServeImpl freezes
   // daemonRuntimeBaseEnv, so any loader key it applies is baked into the base
@@ -2216,6 +2943,7 @@ describe('serve fast path environment bootstrap', () => {
 
   it('does not load env from an explicitly untrusted nested workspace', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trust-precedence-')),
@@ -2237,15 +2965,104 @@ describe('serve fast path environment bootstrap', () => {
         [childWorkspace]: TrustLevel.DO_NOT_TRUST,
       }),
     );
-    writeFileSync(join(childWorkspace, '.env'), 'QWEN_SERVER_TOKEN=trusted\n');
+    writeFileSync(
+      join(childWorkspace, '.env'),
+      ['QWEN_SERVER_TOKEN=trusted', 'FAST_PATH_REFERENCED_TOKEN=trusted'].join(
+        '\n',
+      ),
+    );
 
     await bootstrapServeFastPathEnvironment(childWorkspace);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
+  });
+
+  it('honours folder trust enabled only in system defaults', async () => {
+    delete process.env['FAST_PATH_SYSTEM_DEFAULTS_MARKER'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-system-defaults-trust-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'system-defaults.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        env: { FAST_PATH_SYSTEM_DEFAULTS_MARKER: 'from-workspace-settings' },
+      }),
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    // The operator scope enables folder trust and nothing has answered for
+    // this workspace, so its own settings scope stays unmerged - the same
+    // call the CLI makes once it sees folder trust as enabled.
+    expect(process.env['FAST_PATH_SYSTEM_DEFAULTS_MARKER']).toBeUndefined();
+  });
+
+  it('uses system folder trust over a disabled user setting', async () => {
+    delete process.env['FAST_PATH_SYSTEM_TRUST_MARKER'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-system-trust-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: false } } }),
+    );
+    process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = join(
+      qwenHome,
+      'system.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'],
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        env: { FAST_PATH_SYSTEM_TRUST_MARKER: 'from-workspace-settings' },
+      }),
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['FAST_PATH_SYSTEM_TRUST_MARKER']).toBeUndefined();
+  });
+
+  it('does not load env before a folder trust decision', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-undecided-trust-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      [
+        'QWEN_SERVER_TOKEN=from-undecided-workspace',
+        'FAST_PATH_REFERENCED_TOKEN=from-undecided-workspace',
+      ].join('\n'),
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
   });
 
   it('does not load env from a descendant of an explicitly untrusted workspace', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trust-descendant-')),
@@ -2270,15 +3087,20 @@ describe('serve fast path environment bootstrap', () => {
     );
     writeFileSync(
       join(childWorkspace, '.env'),
-      'QWEN_SERVER_TOKEN=from-untrusted-descendant-env\n',
+      [
+        'QWEN_SERVER_TOKEN=from-untrusted-descendant-env',
+        'FAST_PATH_REFERENCED_TOKEN=from-untrusted-descendant-env',
+      ].join('\n'),
     );
 
     await bootstrapServeFastPathEnvironment(subDir);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
   });
 
   it('allows a trusted child rule to override an untrusted parent', async () => {
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
@@ -2304,16 +3126,23 @@ describe('serve fast path environment bootstrap', () => {
     );
     writeFileSync(
       join(trustedWorkspace, '.env'),
-      'QWEN_SERVER_TOKEN=from-trusted-child-env\n',
+      [
+        'FAST_PATH_REFERENCED_TOKEN=from-trusted-child-env',
+        'QWEN_SERVER_TOKEN=from-trusted-child-env',
+      ].join('\n'),
     );
 
     await bootstrapServeFastPathEnvironment(subDir);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-trusted-child-env');
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe(
+      'from-trusted-child-env',
+    );
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
   it('does not load a distrusted parent .env for a trusted child workspace', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trusted-child-')),
@@ -2322,7 +3151,10 @@ describe('serve fast path environment bootstrap', () => {
     mkdirSync(childWorkspace);
     writeFileSync(
       join(tempWorkspace, '.env'),
-      'QWEN_SERVER_TOKEN=from-distrusted-parent-env\n',
+      [
+        'QWEN_SERVER_TOKEN=from-distrusted-parent-env',
+        'FAST_PATH_REFERENCED_TOKEN=from-distrusted-parent-env',
+      ].join('\n'),
     );
     writeFileSync(
       join(qwenHome, 'settings.json'),
@@ -2343,9 +3175,53 @@ describe('serve fast path environment bootstrap', () => {
     await bootstrapServeFastPathEnvironment(childWorkspace);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
+  });
+
+  it('loads an ancestor .env of an explicitly trusted child workspace', async () => {
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+    delete process.env['QWEN_SERVER_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trusted-ancestor-')),
+    );
+    const childWorkspace = join(tempWorkspace, 'child');
+    mkdirSync(childWorkspace);
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      [
+        'FAST_PATH_REFERENCED_TOKEN=from-trusted-ancestor-env',
+        'QWEN_SERVER_TOKEN=from-trusted-ancestor-env',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    // The rule is keyed on the child workspace only, so it cannot match the
+    // ancestor: re-resolving trust per candidate directory would drop this
+    // .env, and with it the value the daemon freezes into its base env.
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({
+        [childWorkspace]: TrustLevel.TRUST_FOLDER,
+      }),
+    );
+
+    await bootstrapServeFastPathEnvironment(childWorkspace);
+
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe(
+      'from-trusted-ancestor-env',
+    );
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
   it('treats TRUST_PARENT as trusting the containing folder', async () => {
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
@@ -2365,11 +3241,18 @@ describe('serve fast path environment bootstrap', () => {
         [join(tempWorkspace, 'marker')]: TrustLevel.TRUST_PARENT,
       }),
     );
-    writeFileSync(join(tempWorkspace, '.env'), 'QWEN_SERVER_TOKEN=trusted\n');
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      [
+        'FAST_PATH_REFERENCED_TOKEN=trusted',
+        'QWEN_SERVER_TOKEN=from-trust-parent-workspace',
+      ].join('\n'),
+    );
 
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe('trusted');
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('trusted');
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
   it('matches Cloud Shell default project behavior for empty env values', async () => {
@@ -2387,6 +3270,7 @@ describe('serve fast path environment bootstrap', () => {
   });
 
   it('expands process environment placeholders in workspace settings.env', async () => {
+    delete process.env['QWEN_SERVE_RATE_LIMIT'];
     delete process.env['QWEN_SERVER_TOKEN'];
     useTempQwenHome();
     process.env['FAST_PATH_REFERENCED_TOKEN'] = 'from-referenced-env';
@@ -2397,14 +3281,20 @@ describe('serve fast path environment bootstrap', () => {
     writeFileSync(
       join(tempWorkspace, '.qwen', 'settings.json'),
       JSON.stringify({
-        env: { QWEN_SERVER_TOKEN: '${FAST_PATH_REFERENCED_TOKEN}' },
+        env: {
+          QWEN_SERVE_RATE_LIMIT: '${FAST_PATH_REFERENCED_TOKEN}',
+          QWEN_SERVER_TOKEN: '${FAST_PATH_REFERENCED_TOKEN}',
+        },
       }),
     );
     process.chdir(tempWorkspace);
 
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-referenced-env');
+    // Placeholder expansion still happens in the settings merge; the
+    // project-scope rejection applies only to the daemon bearer key itself.
+    expect(process.env['QWEN_SERVE_RATE_LIMIT']).toBe('from-referenced-env');
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
   it('never expands Qwen-internal secrets referenced from workspace settings.env', async () => {
@@ -2439,6 +3329,7 @@ describe('serve fast path environment bootstrap', () => {
   });
 
   it('expands home .env fallback placeholders in workspace settings.env', async () => {
+    delete process.env['QWEN_SERVE_RATE_LIMIT'];
     delete process.env['QWEN_SERVER_TOKEN'];
     delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();
@@ -2453,14 +3344,14 @@ describe('serve fast path environment bootstrap', () => {
     writeFileSync(
       join(tempWorkspace, '.qwen', 'settings.json'),
       JSON.stringify({
-        env: { QWEN_SERVER_TOKEN: '${FAST_PATH_REFERENCED_TOKEN}' },
+        env: { QWEN_SERVE_RATE_LIMIT: '${FAST_PATH_REFERENCED_TOKEN}' },
       }),
     );
     process.chdir(tempWorkspace);
 
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
-    expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-home-env');
+    expect(process.env['QWEN_SERVE_RATE_LIMIT']).toBe('from-home-env');
   });
 
   it.each([
@@ -2516,6 +3407,7 @@ describe('serve fast path environment bootstrap', () => {
 
   it('does not load env from an explicit untrusted workspace when launched elsewhere', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-untrusted-env-')),
@@ -2541,7 +3433,10 @@ describe('serve fast path environment bootstrap', () => {
     );
     writeFileSync(
       join(tempWorkspace, '.env'),
-      'QWEN_SERVER_TOKEN=from-untrusted-workspace-env\n',
+      [
+        'QWEN_SERVER_TOKEN=from-untrusted-workspace-env',
+        'FAST_PATH_REFERENCED_TOKEN=from-untrusted-workspace-env',
+      ].join('\n'),
     );
     writeFileSync(
       join(tempWorkspace, '.qwen', 'settings.json'),
@@ -2554,10 +3449,12 @@ describe('serve fast path environment bootstrap', () => {
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
   });
 
   it('checks trust against the canonical explicit workspace path', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-real-untrusted-env-')),
@@ -2584,12 +3481,16 @@ describe('serve fast path environment bootstrap', () => {
     );
     writeFileSync(
       join(tempWorkspace, '.env'),
-      'QWEN_SERVER_TOKEN=from-symlinked-untrusted-workspace-env\n',
+      [
+        'QWEN_SERVER_TOKEN=from-symlinked-untrusted-workspace-env',
+        'FAST_PATH_REFERENCED_TOKEN=from-symlinked-untrusted-workspace-env',
+      ].join('\n'),
     );
     process.chdir(tempLaunchCwd);
 
     await bootstrapServeFastPathEnvironment(tempSymlink);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
   });
 });
