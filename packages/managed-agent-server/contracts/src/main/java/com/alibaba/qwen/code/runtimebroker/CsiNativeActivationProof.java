@@ -22,14 +22,19 @@ import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.text.Normalizer;
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.function.Function;
 
@@ -195,7 +200,7 @@ public final class CsiNativeActivationProof {
             Function<JsonNode, byte[]> resources) {
         require(records.size() == 2);
         JsonNode engine = records.getFirst();
-        Set<String> engineFields = new java.util.HashSet<>(ENVELOPE);
+        Set<String> engineFields = new HashSet<>(ENVELOPE);
         engineFields.remove("managedSession");
         engineFields.add("systemPayload");
         closed(engine, engineFields);
@@ -359,7 +364,7 @@ public final class CsiNativeActivationProof {
         uuid(id(history, "messageId"));
         try {
             Instant.parse(text(history, "timestamp"));
-        } catch (java.time.DateTimeException error) {
+        } catch (DateTimeException error) {
             throw invalid();
         }
         require(previous.attempt() != null && text(previous.attempt().route(), "model").equals(text(history, "model")));
@@ -409,7 +414,7 @@ public final class CsiNativeActivationProof {
             response.put("output", output);
         } else {
             String fallback = error != null ? error.path("message").textValue() : "Runtime tool " + status + ".";
-            response.put("error", !com.alibaba.qwen.code.runtimebroker.CsiNativeToolContent.trim(output).isEmpty() && !"Tool execution succeeded.".equals(output) ? output : fallback);
+            response.put("error", !CsiNativeToolContent.trim(output).isEmpty() && !"Tool execution succeeded.".equals(output) ? output : fallback);
         }
         if (error != null) {
             response.set("runtimeError", error);
@@ -460,7 +465,7 @@ public final class CsiNativeActivationProof {
             String functionId = id(response, "id");
             var call = batch.calls().stream().filter(item -> functionId.equals(item.id()))
                     .findFirst().orElseThrow(CsiNativeActivationProof::invalid);
-            String reason = com.alibaba.qwen.code.runtimebroker.CsiNativeToolContent.refusalReason(original, call);
+            String reason = CsiNativeToolContent.refusalReason(original, call);
             require(reason != null && reason.equals(text(response.path("response"), "error"))
                     && call.name().equals(text(response, "name")));
             Set<String> refused = new HashSet<>(batch.refusedFunctionIds());
@@ -610,7 +615,7 @@ public final class CsiNativeActivationProof {
         byte[] input = reference(payload.path("argsRef"), "managed-tool-input", resources);
         byte[] definition = reference(payload.path("toolDefinitionRef"), "managed-tool-definition", resources);
         require(!id(payload.path("argsRef"), "resourceId").equals(id(payload.path("toolDefinitionRef"), "resourceId")));
-        var content = com.alibaba.qwen.code.runtimebroker.CsiNativeToolContent.content(original, batch.batch().calls().get((int) ordinal), input, definition);
+        var content = CsiNativeToolContent.content(original, batch.batch().calls().get((int) ordinal), input, definition);
         var frozen = previous.fileHistory() == null ? null : previous.fileHistory().batches().get(batchId);
         if (frozen == null) {
             require("read_file".equals(batch.batch().calls().get((int) ordinal).name()));
@@ -646,7 +651,7 @@ public final class CsiNativeActivationProof {
         List<ToolIntent> pending = previous.intents().values().stream().filter(intent ->
                 previous.pendingBatch().messageId().equals(id(intent.payload(), "batchId"))
                         && !recorded.contains(id(intent.payload(), "executionCallId")))
-                .sorted(java.util.Comparator.comparingLong(ToolIntent::sequence)).toList();
+                .sorted(Comparator.comparingLong(ToolIntent::sequence)).toList();
         require(!pending.isEmpty());
         JsonNode event = transaction.events().getFirst();
         JsonNode payload = harnessEvent(event, "checkpoint.committed", original, activation, previousSequence + 1);
@@ -909,7 +914,7 @@ public final class CsiNativeActivationProof {
         List<JsonNode> result = new ArrayList<>();
         Set<String> executions = new HashSet<>();
         Set<String> calls = new HashSet<>();
-        var paths = new java.util.TreeSet<String>();
+        var paths = new TreeSet<String>();
         long ordinal = -1;
         for (JsonNode invocation : preparation.path("invocations")) {
             closed(invocation, Set.of("executionCallId", "callId", "functionCallId", "toolName", "partIndex",
@@ -920,7 +925,7 @@ public final class CsiNativeActivationProof {
             require(ordinal < batch.batch().calls().size()
                     && batch.batch().calls().get((int) ordinal).name().equals(text(invocation, "toolName")));
             JsonNode ref = historyExecutionReference(original, preparation, invocation);
-            var input = com.alibaba.qwen.code.runtimebroker.CsiNativeToolContent.qualifyContent(original, batch, ref, text(invocation, "requestDigest"),
+            var input = CsiNativeToolContent.qualifyContent(original, batch, ref, text(invocation, "requestDigest"),
                     reference(invocation.path("inputRef"), "managed-tool-input", resources),
                     reference(invocation.path("toolDefinitionRef"), "managed-tool-definition", resources));
             if (!"read_file".equals(text(invocation, "toolName"))) {
@@ -1212,7 +1217,7 @@ public final class CsiNativeActivationProof {
             require(encodedValue.isTextual() && !encodedValue.textValue().isEmpty());
             String encoded = encodedValue.textValue();
             try {
-                require(java.util.Base64.getEncoder().encodeToString(java.util.Base64.getDecoder().decode(encoded))
+                require(Base64.getEncoder().encodeToString(Base64.getDecoder().decode(encoded))
                         .equals(encoded));
             } catch (IllegalArgumentException error) {
                 throw invalid();
@@ -1281,7 +1286,7 @@ public final class CsiNativeActivationProof {
                 && "hosted-harness/1".equals(text(record, "version")));
         try {
             Instant.parse(text(record, "timestamp"));
-        } catch (java.time.DateTimeException error) {
+        } catch (DateTimeException error) {
             throw invalid();
         }
     }
@@ -1718,7 +1723,7 @@ public final class CsiNativeActivationProof {
         key(event.path("sessionKey"), original);
         time(event.get("occurredAt"));
         JsonNode payload = event.path("payload");
-        Set<String> payloadFields = new java.util.HashSet<>(PAYLOAD);
+        Set<String> payloadFields = new HashSet<>(PAYLOAD);
         if (!install) {
             payloadFields.add("renewalSeq");
         }
@@ -1799,9 +1804,9 @@ public final class CsiNativeActivationProof {
         String encoded = text(value, field);
         require(encoded.length() <= ((limit + 2) / 3) * 4);
         try {
-            byte[] bytes = java.util.Base64.getDecoder().decode(encoded);
+            byte[] bytes = Base64.getDecoder().decode(encoded);
             require(bytes.length > 0 && bytes.length <= limit
-                    && java.util.Base64.getEncoder().encodeToString(bytes).equals(encoded));
+                    && Base64.getEncoder().encodeToString(bytes).equals(encoded));
             return bytes;
         } catch (IllegalArgumentException malformed) {
             throw invalid();
@@ -1910,7 +1915,7 @@ public final class CsiNativeActivationProof {
         uuid(text(record, "uuid"));
         try {
             Instant.parse(text(record, "timestamp"));
-        } catch (java.time.DateTimeException error) {
+        } catch (DateTimeException error) {
             throw invalid();
         }
         text(record, "version");
@@ -1988,7 +1993,7 @@ public final class CsiNativeActivationProof {
         String value = text(node, field);
         byte[] utf8 = value.getBytes(StandardCharsets.UTF_8);
         require(utf8.length <= 512 && new String(utf8, StandardCharsets.UTF_8).equals(value)
-                && java.text.Normalizer.isNormalized(value, java.text.Normalizer.Form.NFC)
+                && Normalizer.isNormalized(value, Normalizer.Form.NFC)
                 && value.codePoints().noneMatch(character -> character < 0x20 || character >= 0x7f && character <= 0x9f));
         return value;
     }

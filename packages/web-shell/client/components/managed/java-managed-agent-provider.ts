@@ -1253,6 +1253,7 @@ function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
       toolName: action.toolName,
       inputRevision: action.inputRevision,
       policyRevision: action.policyRevision,
+      createdAt: action.createdAt,
       expiresAt: action.expiresAt,
       ...(action.kind === 'question'
         ? { kind: 'question' as const, questions: action.questions }

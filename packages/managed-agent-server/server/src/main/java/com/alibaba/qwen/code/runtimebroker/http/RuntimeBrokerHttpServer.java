@@ -301,7 +301,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                                 "workspaceGeneration", record.getRequest().getScope().getWorkspaceGeneration(),
                                 "isolationClass", record.getRequest().getScope().getIsolationClass(),
                                 "capabilityDigest", record.getRequest().getScope().getCapabilityDigest()),
-                        "runtime", Map.of("bindingId", record.getBindingId(), "generation", Long.toString(record.getGeneration()))));
+                        "runtime", Map.of("bindingId", record.getBindingId(), "generation", Long.toString(record.getGeneration()),
+                                "provisionerKind", record.getRequest().getProvisionerKind())));
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod()) && "/runtimes:authorize-lifecycle".equals(relative)) {
@@ -409,7 +410,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             }
             response.put("scope", savedScope);
             response.put("runtime", Map.of("bindingId", record.getBindingId(),
-                    "generation", Long.toString(record.getRuntimeGeneration())));
+                    "generation", Long.toString(record.getRuntimeGeneration()),
+                    "provisionerKind", service.runtimeProvisionerKind(record)));
             return response;
         });
     }

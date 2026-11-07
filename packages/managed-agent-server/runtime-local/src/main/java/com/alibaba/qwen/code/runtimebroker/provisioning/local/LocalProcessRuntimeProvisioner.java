@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
+import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
@@ -399,8 +400,8 @@ public final class LocalProcessRuntimeProvisioner
                 if (!originalBootStopped && !neverStarted && worker == null && !registration.processAbsent()) {
                     throw LocalRuntimeStore.blocked();
                 }
-                boolean extended = com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.admits(binding.getRequest().getScope().getCapabilityDigest());
-                String mode = extended ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.mode(binding.getRequest().getScope().getCapabilityDigest()) : null;
+                boolean extended = ManagedExtensionExecutionProfile.admits(binding.getRequest().getScope().getCapabilityDigest());
+                String mode = extended ? ManagedExtensionExecutionProfile.mode(binding.getRequest().getScope().getCapabilityDigest()) : null;
                 String proofScope = extended ? ("linux-cgroup".equals(mode) ? "process_tree" : "process_group") : null;
                 if (extended && !neverStarted && !originalBootStopped) {
                     if (binding.getLease() == null || worker == null) {
@@ -673,7 +674,7 @@ public final class LocalProcessRuntimeProvisioner
         boot.put("workspaceGeneration", scope.getWorkspaceGeneration());
         boot.put("workspaceId", scope.getWorkspaceId());
         Map<String, Object> document = request.isManagedContext()
-                ? ManagedContextProtocol.boot(request, seed, com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.admits(scope.getCapabilityDigest()) ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.configuration(scope.getCapabilityDigest(), managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null) : boot;
+                ? ManagedContextProtocol.boot(request, seed, ManagedExtensionExecutionProfile.admits(scope.getCapabilityDigest()) ? ManagedExtensionExecutionProfile.configuration(scope.getCapabilityDigest(), managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null) : boot;
         byte[] encoded = JsonCodec.encode(document);
         if (encoded.length > READY_RECORD_LIMIT) {
             throw new IllegalArgumentException("Managed Runtime boot exceeds 32 KiB.");

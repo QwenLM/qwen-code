@@ -374,6 +374,7 @@ interface ManagedAgentActionIdentity {
   toolName: string;
   inputRevision: number;
   policyRevision: string;
+  createdAt?: number;
   expiresAt: number;
 }
 

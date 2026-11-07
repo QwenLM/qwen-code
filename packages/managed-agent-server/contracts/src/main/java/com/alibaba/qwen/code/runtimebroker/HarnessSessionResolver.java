@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 /**
@@ -45,7 +46,7 @@ public interface HarnessSessionResolver {
 
     public default CompletionStage<RuntimeScope> resolve(String harnessSessionId, RuntimeLifecycleAuthority authority) {
         if (authority != null) {
-            return java.util.concurrent.CompletableFuture.failedFuture(new RuntimeBrokerException(
+            return CompletableFuture.failedFuture(new RuntimeBrokerException(
                     409, "runtime_lifecycle_unavailable", "Lifecycle authority is unavailable", false));
         }
         return resolve(harnessSessionId);

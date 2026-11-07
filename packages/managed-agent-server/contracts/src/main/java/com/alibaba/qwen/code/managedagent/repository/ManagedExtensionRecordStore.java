@@ -18,7 +18,7 @@ import java.util.Map;
 import java.util.Optional;
 
 public interface ManagedExtensionRecordStore {
-    public com.fasterxml.jackson.databind.JsonNode currentMcpSettings(String tenant, String session);
+    public JsonNode currentMcpSettings(String tenant, String session);
 
     public static final String ERROR_MESSAGE_LINEAGE =
             "session_message_lineage_refused";
