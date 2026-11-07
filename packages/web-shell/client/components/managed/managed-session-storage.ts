@@ -46,8 +46,16 @@ export function managedSelectionFromUrl(defaultOpen = false): {
  */
 export function managedSelectionFromRoute(
   route: { page: string; sessionId?: string } | undefined,
+  hasLocalTarget = false,
 ): { open: boolean; sessionId?: string } {
-  return managedSelectionFromUrl(route?.page !== 'chat' || !route?.sessionId);
+  // A host that drives the view only through props (`urlNavigation` omitted)
+  // has no route. Fall back to its own target: an explicit local target keeps
+  // the daemon view, and only a targetless host defaults to the managed home.
+  return managedSelectionFromUrl(
+    route === undefined
+      ? !hasLocalTarget
+      : route.page !== 'chat' || !route.sessionId,
+  );
 }
 
 export function saveManagedSelection(open: boolean, sessionId?: string): void {

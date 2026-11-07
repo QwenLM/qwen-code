@@ -56,6 +56,24 @@ function withChrome(
   };
 }
 
+/**
+ * 宿主省略 `urlNavigation` 时这条路径上没有路由，选择态只能由宿主自己给的目标决定：
+ * 只要带了显式本地目标就是本地视图，门禁不得豁免。
+ */
+function hasLocalTarget(props: {
+  sessionId?: string;
+  workspaceId?: string;
+  workspaceCwd?: string;
+  sessionContext?: DaemonProductSessionContext;
+}): boolean {
+  return (
+    props.sessionId !== undefined ||
+    props.workspaceId !== undefined ||
+    props.workspaceCwd !== undefined ||
+    props.sessionContext !== undefined
+  );
+}
+
 interface WorkspaceSessionProviderProps {
   viewHidden?: boolean;
   urlNavigation?: WebShellUrlNavigationOptions;
@@ -326,7 +344,10 @@ function WorkspaceSessionProviderWorkspace({
   // 页面且 URL 未写 managed=0）；本地会话目标（chat 页 + 会话 id）永远保留 daemon 门禁。
   const managedProvided =
     appProps.managedAgentProvider !== undefined &&
-    managedSelectionFromRoute(navigation?.route).open;
+    managedSelectionFromRoute(
+      navigation?.route,
+      hasLocalTarget({ sessionId, workspaceId, workspaceCwd, sessionContext }),
+    ).open;
   // Keep an unscoped session mounted when a later refresh fails.
   if (
     !managedProvided &&
@@ -609,7 +630,14 @@ function StandaloneSessionGate({
   // 与 workspace 分支同口径：只有 managed 视图才豁免 daemon 门禁，本地会话目标始终保留。
   const managedProvided =
     appProps.managedAgentProvider !== undefined &&
-    managedSelectionFromRoute(navigation?.route).open;
+    managedSelectionFromRoute(
+      navigation?.route,
+      hasLocalTarget({
+        ...workspaceProviderProps,
+        sessionId,
+        sessionContext,
+      }),
+    ).open;
   if (!managedProvided && workspace.status === 'error') {
     return (
       <WorkspaceUnavailableState

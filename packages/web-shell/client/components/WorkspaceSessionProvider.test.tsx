@@ -536,6 +536,68 @@ describe('WorkspaceSessionProvider targets', () => {
     );
   }
 
+  async function renderManagedShellWithoutNavigation(
+    extra: {
+      sessionId?: string;
+      workspaceCwd?: string;
+      lockWorkspaceCwd?: string;
+    } = {},
+  ) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({
+          mode: 'managed',
+          productScope: 'local:installation-1',
+          agentId: 'qwen-code',
+          enableWorkspaceBinding: true,
+        }),
+      ),
+    );
+    await act(async () =>
+      root.render(
+        <ManagedStandaloneApp daemonToken="browser-token">
+          {(managedAgentProvider) => (
+            <WorkspaceSessionProvider
+              sessionId={extra.sessionId}
+              workspaceCwd={extra.workspaceCwd}
+              lockWorkspaceCwd={extra.lockWorkspaceCwd}
+              webShellProps={{ managedAgentProvider }}
+            />
+          )}
+        </ManagedStandaloneApp>,
+      ),
+    );
+  }
+
+  it('keeps the workspace refusal for a props-driven host without urlNavigation', async () => {
+    window.history.replaceState(null, '', '/');
+    await renderManagedShellWithoutNavigation({
+      sessionId: 'session-missing',
+      workspaceCwd: '/work/missing',
+    });
+    // This path has no route, so the view is classified by the host target:
+    // an explicit local session target must keep the daemon gate.
+    expect(mocks.providerMounts).toBe(0);
+    expect(container.textContent).toContain('Workspace not found');
+  });
+
+  it('keeps the managed home exempt for a props-driven host without a local target', async () => {
+    window.history.replaceState(null, '', '/');
+    mocks.addWorkspace.mockRejectedValueOnce(
+      new Error('daemon unreachable') as never,
+    );
+    await renderManagedShellWithoutNavigation({
+      lockWorkspaceCwd: '/work/locked',
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // No local target: the host still defaults to the managed home, so the
+    // exemption has to survive the props-path classification.
+    expect(mocks.providerMounts).toBe(1);
+  });
+
   it.each([
     '/session/old-runtime?workspace=missing',
     '/app/session/old-runtime?workspace=missing',
