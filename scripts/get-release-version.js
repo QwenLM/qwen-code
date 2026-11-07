@@ -349,11 +349,17 @@ function bumpPastPublishedLatest(baseVersion, label, target, refBase) {
     );
   }
   // When the preview base already leads `latest`, no bump is computed below,
-  // so the bumped-version check cannot fire; compare the derived base with
-  // the checked-out ref directly.
-  if (refBase && semver.valid(baseVersion) && semver.lt(refBase, baseVersion)) {
+  // so the bumped-version check cannot fire. Only a base on another release
+  // line is refused here: a patch ahead on the ref's own line is the ordinary
+  // next release.
+  if (
+    refBase &&
+    semver.valid(baseVersion) &&
+    semver.lt(refBase, baseVersion) &&
+    semver.diff(refBase, baseVersion) !== 'patch'
+  ) {
     throw new Error(
-      `Derived base ${baseVersion} is ahead of the checked-out package.json version ${refBase}. Refusing a stale or cross-line stable release.`,
+      `Derived base ${baseVersion} is on a different release line than the checked-out package.json version ${refBase}. Refusing a cross-line stable release.`,
     );
   }
   if (

@@ -869,8 +869,39 @@ describe('getVersion', () => {
       vi.mocked(execSync).mockImplementation(mockWithAheadPreviewAtLatest);
 
       expect(() => getVersion({ type: 'stable' })).toThrow(
-        'Derived base 0.27.0 is ahead of the checked-out package.json version 0.26.8',
+        'Derived base 0.27.0 is on a different release line than the checked-out package.json version 0.26.8',
       );
+    });
+
+    it('should allow the ordinary next patch when the checked-out ref matches latest', () => {
+      // main after v0.26.8: package.json 0.26.8, `latest` 0.26.8, and the
+      // Tuesday preview already targets 0.26.9. A versionless stable dispatch
+      // promotes that preview; it is not a cross-line release.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.26.8' }),
+      );
+      const mockWithNextPatchPreview = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.9-preview.0';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.8';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.26.8', '0.26.9-preview.0']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithNextPatchPreview);
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.26.9');
+      expect(result.npmTag).toBe('latest');
     });
 
     it('should refuse a stable release when the ref is behind latest on the same line', () => {
