@@ -3960,6 +3960,49 @@ describe('extension tests', () => {
       expect(process.env['ISOLATED_EXTENSION_KEY']).toBeUndefined();
     });
 
+    it('preserves reserved placeholders declared as saved extension settings', async () => {
+      vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+      const reservedNames = [
+        'SESSION_ID',
+        'QWEN_CODE_SESSION_ID',
+        'QWEN_SERVER_TOKEN',
+      ];
+      const config: ExtensionConfig = {
+        name: 'reserved-settings',
+        version: '1.0.0',
+        settings: reservedNames.map((envVar) => ({
+          name: envVar,
+          description: 'Reserved test setting',
+          envVar,
+          sensitive: true,
+        })),
+        mcpServers: {
+          remote: {
+            command: 'node',
+            headers: Object.fromEntries(
+              reservedNames.map((name) => [name, '$' + name]),
+            ),
+            env: Object.fromEntries(
+              reservedNames.map((name) => [name, '${' + name + '}']),
+            ),
+          },
+        },
+      };
+      writeManifest(path.join(userExtensionsDir, config.name), config);
+      await maybePromptForSettings(
+        config,
+        getExtensionId(config),
+        async () => 'saved-reserved-value',
+      );
+      const { extension } = await ready();
+      expect(extension.mcpServers?.['remote'].headers).toEqual(
+        config.mcpServers!['remote'].headers,
+      );
+      expect(extension.mcpServers?.['remote'].env).toEqual(
+        config.mcpServers!['remote'].env,
+      );
+    });
+
     it('uses workspace extension settings before user settings', async () => {
       vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
       vi.stubEnv('SCOPED_EXTENSION_KEY', undefined);
@@ -4024,11 +4067,9 @@ describe('extension tests', () => {
       vi.mocked(process.cwd).mockReturnValue(tempWorkspaceDir);
       const other = await ready({ workspaceDir: otherWorkspace });
       expect(
-        other.extension.config.mcpServers?.['remote'].headers?.[
-          'Authorization'
-        ],
+        other.extension.mcpServers?.['remote'].headers?.['Authorization'],
       ).toBe('user-value');
-      expect(other.extension.config.mcpServers?.['remote'].env?.['LABEL']).toBe(
+      expect(other.extension.mcpServers?.['remote'].env?.['LABEL']).toBe(
         'user-value',
       );
       const daemon = await ready({ workspaceDir: daemonWorkspace });
