@@ -491,14 +491,19 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const results = (frames: unknown[]) =>
       frames.filter((frame) => (frame as JsonObject)['type'] === 'result');
 
-    // The current loop reports the second message as a success that repeats
-    // the first answer, without asking the model.
+    // The client counts turns per session, so it refuses the second message
+    // before it reaches the wire. The current loop now reports that as the
+    // terminal error `-p` reports, instead of a success repeating the first
+    // answer.
     expect(current.exitCode).toBe(0);
     expect(current.requests).toHaveLength(1);
-    expect(results(current.frames)).toMatchObject([
+    const currentResults = results(current.frames);
+    expect(currentResults).toMatchObject([
       { is_error: false, result: 'answer 1' },
-      { is_error: false, result: 'answer 1' },
+      { is_error: true, subtype: 'error_max_turns' },
     ]);
+    // The error replaces the replayed answer rather than sitting next to it.
+    expect(currentResults[1]).not.toHaveProperty('result');
     // The shared loop ends the run at the limit the way headless reports its
     // own limit: the error on stderr and exit code 53.
     expect(shared.exitCode).toBe(53);
