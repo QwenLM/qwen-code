@@ -72,6 +72,9 @@ export async function composeManagedCsiFiles(options: {
         approvalMode: ApprovalMode.YOLO,
         fileCheckpointingEnabled: false,
         fileReadCacheDisabled: true,
+        // The CSI profile declares no record_artifact and its results carry
+        // no artifact metadata to the host.
+        artifactRecordingSupported: false,
       });
       config.setFileSystemService(storage);
       const history = new ManagedRuntimeFileHistory(

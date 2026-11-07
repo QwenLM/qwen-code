@@ -342,6 +342,128 @@ describe('useComposerCore tooltip portal', () => {
 });
 
 describe('useComposerCore history and drafts', () => {
+  it.each([
+    ['panel', 'ArrowUp', false],
+    ['panel', 'ArrowDown', false],
+    ['search', 'ArrowUp', false],
+    ['search', 'ArrowDown', false],
+    ['panel', 'ArrowUp', true],
+    ['panel', 'ArrowDown', true],
+    ['search', 'ArrowUp', true],
+    ['search', 'ArrowDown', true],
+  ] as const)(
+    'keeps caret control after a wrapped %s recall followed by %s (paged: %s)',
+    async (recall, key, paged) => {
+      const entry = 'line one line two line three';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify([entry, 'middle prompt', 'newest prompt']),
+      );
+      const onFocusFooter = vi.fn(() => true);
+      await mount({ onFocusFooter });
+      act(() => latest!.setText('unsent draft'));
+      if (paged) {
+        act(() => pressHistoryKey('ArrowUp'));
+        expect(latest!.getText()).toBe('newest prompt');
+      }
+      act(() => latest!.searchState.openHistorySearch());
+      if (recall === 'panel') {
+        act(() => latest!.searchState.restoreSearchMatch!(entry));
+        act(() => latest!.searchState.closeSearch(false));
+      } else {
+        act(() =>
+          latest!.searchState.handleSearchInput({
+            target: { value: 'line two' },
+            nativeEvent: { isComposing: false },
+          } as unknown as React.ChangeEvent<HTMLInputElement>),
+        );
+        act(() =>
+          latest!.searchState.handleSearchKeyDown({
+            key: 'Tab',
+            nativeEvent: { isComposing: false },
+            preventDefault: vi.fn(),
+          } as unknown as React.KeyboardEvent<HTMLInputElement>),
+        );
+      }
+      expect(latest!.getText()).toBe(entry);
+      const view = latest!.viewRef.current!;
+      vi.spyOn(view, 'coordsAtPos').mockImplementation((position) => {
+        const top =
+          position === 0 ? 0 : position === view.state.doc.length ? 44 : 22;
+        return { left: 0, right: 1, top, bottom: top + 22 };
+      });
+      act(() => view.dispatch({ selection: { anchor: 12 } }));
+      act(() => pressHistoryKey(key));
+      expect(latest!.getText()).toBe(entry);
+      expect(onFocusFooter).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'keeps ArrowDown in a short panel recall until paging returns to its draft (paged: %s)',
+    async (paged) => {
+      const entry = 'short entry';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify([entry, 'newest prompt']),
+      );
+      const onFocusFooter = vi.fn(() => true);
+      await mount({ onFocusFooter });
+      act(() => latest!.setText('unsent draft'));
+      if (paged) {
+        act(() => pressHistoryKey('ArrowUp'));
+        expect(latest!.getText()).toBe('newest prompt');
+      }
+      act(() => latest!.searchState.restoreSearchMatch!(entry));
+      act(() => pressHistoryKey('ArrowDown'));
+      expect(latest!.getText()).toBe(entry);
+      expect(onFocusFooter).not.toHaveBeenCalled();
+
+      act(() => pressHistoryKey('ArrowUp'));
+      expect(latest!.getText()).toBe('newest prompt');
+      act(() => pressHistoryKey('ArrowDown'));
+      expect(latest!.getText()).toBe(entry);
+      act(() => pressHistoryKey('ArrowDown'));
+      expect(onFocusFooter).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['ArrowUp', 'ArrowDown'] as const)(
+    'keeps a selected history entry when pressing %s',
+    async (key) => {
+      const entry = 'recalled entry';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify(['older prompt', entry]),
+      );
+      await mount();
+      act(() => pressHistoryKey('ArrowUp'));
+      expect(latest!.getText()).toBe(entry);
+      const view = latest!.viewRef.current!;
+      act(() => view.dispatch({ selection: { anchor: 2, head: 8 } }));
+      act(() => pressHistoryKey(key));
+      expect(latest!.getText()).toBe(entry);
+    },
+  );
+
+  it.each(['ArrowUp', 'ArrowDown'] as const)(
+    'keeps hard-newline history text while %s moves inside it',
+    async (key) => {
+      const entry = 'line one\nline two\nline three';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify(['older prompt', entry]),
+      );
+      await mount();
+      act(() => latest!.setText('unsent draft'));
+      act(() => pressHistoryKey('ArrowUp'));
+      const view = latest!.viewRef.current!;
+      act(() => view.dispatch({ selection: { anchor: 12 } }));
+      act(() => pressHistoryKey(key));
+      expect(latest!.getText()).toBe(entry);
+    },
+  );
+
   it('places the caret after a draft restored on initial mount', async () => {
     localStorage.setItem(
       getSessionDraftKey('restored-session'),
@@ -1268,6 +1390,131 @@ describe('useComposerCore history and drafts', () => {
 });
 
 describe('useComposerCore paste', () => {
+  it.each([
+    { text: 'https://example.com/image.png', images: 1, attach: true },
+    { text: ' http://example.com/image.png ', images: 1, attach: true },
+    {
+      text: 'PPT text with https://example.com/image.png',
+      images: 1,
+      attach: false,
+    },
+    {
+      text: 'https://example.com/image.png\ncaption',
+      images: 1,
+      attach: false,
+    },
+    { text: 'https://example.com/image.png', images: 0, attach: false },
+    { text: 'https://example.com/image.png', images: 2, attach: false },
+  ])(
+    'distinguishes image URLs from editable text: $text / $images images',
+    async ({ text, images, attach }) => {
+      const onImageIngestionNotice = vi.fn();
+      await mount({ onImageIngestionNotice });
+      const files = Array.from(
+        { length: images },
+        () => new File(['png'], 'image.png', { type: 'image/png' }),
+      );
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files,
+          items: [],
+          types: images ? ['Files', 'text/plain'] : ['text/plain'],
+          getData: (type: string) => (type === 'text/plain' ? text : ''),
+        },
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      await waitForImageIngestion();
+
+      expect(latest!.getText()).toBe(attach ? '' : text);
+      expect(latest!.pastedImages).toHaveLength(attach ? 1 : 0);
+      expect(onImageIngestionNotice).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['/fork ', '  /extensions install ', '!curl '])(
+    'keeps image URL arguments inline in command drafts: %s',
+    async (draft) => {
+      const { onSubmit } = await mount();
+      act(() => {
+        latest!.setText(draft);
+        latest!.viewRef.current!.dispatch({
+          selection: { anchor: draft.length },
+        });
+      });
+      const text = 'https://example.com/image.png';
+      const image = new File(['png'], 'image.png', { type: 'image/png' });
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [image],
+          items: [],
+          types: ['Files', 'text/plain'],
+          getData: () => text,
+        },
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      await waitForImageIngestion();
+      expect(latest!.getText()).toBe(draft + text);
+      expect(latest!.pastedImages).toEqual([]);
+      act(() => latest!.submitText());
+      expect(onSubmit.mock.calls[0]![0]).toBe((draft + text).trim());
+      expect(onSubmit.mock.calls[0]![1]).toBeUndefined();
+    },
+  );
+
+  it.each(['disabled', 'shell', 'attachments-disabled', 'other-control'])(
+    'keeps URL text editable for %s',
+    async (mode) => {
+      await mount({
+        disabled: mode === 'disabled',
+        attachmentsEnabled: mode !== 'attachments-disabled',
+      });
+      if (mode === 'shell') act(() => latest!.toggleShellMode());
+      const text = 'https://example.com/image.png';
+      const image = new File(['png'], 'image.png', { type: 'image/png' });
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [image],
+          items: [],
+          types: ['Files', 'text/plain'],
+          getData: () => text,
+        },
+      });
+      const target = container!.querySelector(
+        mode === 'other-control'
+          ? '[data-testid="composer-surface-input"]'
+          : '.cm-content',
+      )!;
+      act(() => target.dispatchEvent(event));
+      await waitForImageIngestion();
+      expect(latest!.pastedImages).toEqual([]);
+      expect(latest!.pendingImageBatchCount).toBe(0);
+      if (mode === 'shell' || mode === 'attachments-disabled') {
+        expect(latest!.getText()).toBe(text);
+      }
+      if (mode === 'other-control') expect(event.defaultPrevented).toBe(false);
+    },
+  );
+
+  it('warns when a paste advertises files without exposing any file', async () => {
+    const onImageIngestionNotice = vi.fn();
+    await mount({ onImageIngestionNotice });
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: { files: [], items: [], types: ['Files'], getData: () => '' },
+    });
+    act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+    await waitForImageIngestion();
+    expect(latest!.pastedImages).toEqual([]);
+    expect(onImageIngestionNotice).toHaveBeenCalledOnce();
+    expect(onImageIngestionNotice).toHaveBeenCalledWith(
+      'warning',
+      '1 file(s) were unavailable and skipped.',
+    );
+  });
+
   it('pastes editable text when PPT clipboard also includes an image', async () => {
     const { onSubmit } = await mount();
     const text = '第一季度收入增长 20%\n请改写这段文字。';
@@ -3100,6 +3347,24 @@ describe('useComposerCore tags', () => {
 
     expect(latest!.getText()).toBe(draftText);
     expect(latest!.composerTags).toEqual([draftTag]);
+  });
+
+  it('does not restore old draft tags after paging from a panel recall', async () => {
+    await mount();
+    act(() => {
+      latest!.setText('previous prompt');
+      latest!.submitText();
+      latest!.setText('draft prompt');
+      latest!.addTags([
+        { id: 'file:draft.txt', value: 'draft.txt', serialized: '@draft.txt' },
+      ]);
+    });
+    act(() => pressHistoryKey('ArrowUp'));
+    act(() => latest!.searchState.restoreSearchMatch!('selected prompt'));
+    act(() => pressHistoryKey('ArrowUp'));
+    act(() => pressHistoryKey('ArrowDown'));
+    expect(latest!.getText()).toBe('selected prompt');
+    expect(latest!.composerTags).toEqual([]);
   });
 
   it('restores tags when Tab or a search-result selection recalls history', async () => {
