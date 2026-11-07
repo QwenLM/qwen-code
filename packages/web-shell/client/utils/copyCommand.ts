@@ -1,5 +1,10 @@
 import type { Message } from '../adapters/types';
 import { writeClipboardText } from './clipboard';
+import {
+  isShellCompletionAckRow,
+  isTurnStartMessage,
+  shellAckRowFromMessage,
+} from './shellCompletionAck';
 
 interface FencedCodeBlock {
   lang: string | null;
@@ -350,11 +355,32 @@ function selectLatexBlock(
 }
 
 function getLastAssistantOutput(messages: readonly Message[]): string | null {
+  const rows = messages.map(shellAckRowFromMessage);
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
-    if (message.role === 'assistant' && message.content) {
-      return message.content;
+    if (message.role !== 'assistant' || !message.content) continue;
+    let turnStart = -1;
+    for (let j = i - 1; j >= 0; j--) {
+      if (isTurnStartMessage(messages[j])) {
+        turnStart = j;
+        break;
+      }
     }
+    // Bound the span at the turn's own end, not the transcript's: rows of
+    // later turns are not a continuation of this one.
+    let turnEnd = messages.length - 1;
+    for (let j = i + 1; j < messages.length; j++) {
+      if (isTurnStartMessage(messages[j])) {
+        turnEnd = j - 1;
+        break;
+      }
+    }
+    // The collapse path shows the turn's main answer, not a bookkeeping
+    // reply to a background shell completion; /copy must agree with it.
+    if (isShellCompletionAckRow(rows, i, turnStart, turnEnd)) {
+      continue;
+    }
+    return message.content;
   }
   return null;
 }

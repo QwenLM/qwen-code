@@ -5,6 +5,7 @@
  */
 
 import { readReportedArtifacts } from './reported-artifacts.js';
+import { BACKGROUND_NOTIFICATION_RESPONSE } from '../utils/shellCompletionAck.js';
 import { isAskUserQuestionToolName } from '../constants/toolNames.js';
 import {
   isTaskExecutionMode,
@@ -790,6 +791,15 @@ export function transcriptBlocksToDaemonMessages(
           break;
         }
         const meta = getRecord(textBlock.meta);
+        // The daemon tags the model's reply to a background notification
+        // with `_meta.source`. Keep only that tag: other `_meta.source`
+        // values (e.g. `slash_command`) are provenance, not message state.
+        // The turn-collapse ack fold and /copy read it to tell a
+        // bookkeeping ack from a real reply.
+        const source =
+          getString(meta, 'source') === BACKGROUND_NOTIFICATION_RESPONSE
+            ? BACKGROUND_NOTIFICATION_RESPONSE
+            : undefined;
         const reportedArtifacts = readReportedArtifacts(meta ?? undefined);
         if (notice?.source === 'vision_bridge_notice') {
           messages.push({
@@ -999,6 +1009,7 @@ export function transcriptBlocksToDaemonMessages(
             role: 'assistant',
             content: textBlock.text,
             ...(reportedArtifacts.length ? { reportedArtifacts } : {}),
+            ...(source ? { source } : {}),
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
             sourceBlockIds: [block.id],
