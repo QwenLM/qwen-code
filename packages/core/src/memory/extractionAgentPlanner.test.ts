@@ -14,6 +14,7 @@ import {
   getUserAutoMemoryRoot,
 } from './paths.js';
 import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
+import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { formatDateForContext } from '../core/environmentContext.js';
@@ -847,16 +848,40 @@ describe('runAutoMemoryExtractionByAgent', () => {
     ).rejects.toThrow('no cache-safe params');
   });
 
-  it('throws when the agent fails to complete', async () => {
+  it('throws the shared wording for a real terminate mode', async () => {
+    // The runtime reports `AgentTerminateMode` values only (see
+    // forkedAgent.ts), so a real token is what this branch actually sees.
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'failed',
-      terminateReason: 'timeout',
+      terminateReason: AgentTerminateMode.TIMEOUT,
+      filesTouched: [],
+    });
+
+    const error: Error = await runAutoMemoryExtractionByAgent(
+      mockConfig,
+      '/tmp/project',
+    ).then(
+      () => {
+        throw new Error('extraction should have rejected');
+      },
+      (e: Error) => e,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toBe('Agent stopped: time limit reached.');
+    expect(error.message).not.toContain(AgentTerminateMode.TIMEOUT);
+  });
+
+  it('passes a free-form terminate reason through', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'failed',
+      terminateReason: 'model timed out',
       filesTouched: [],
     });
 
     await expect(
       runAutoMemoryExtractionByAgent(mockConfig, '/tmp/project'),
-    ).rejects.toThrow('timeout');
+    ).rejects.toThrow('model timed out');
   });
 
   it('ignores non-memory file paths in filesTouched', async () => {

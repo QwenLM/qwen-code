@@ -41,7 +41,7 @@ import {
   type AgentInteractiveConfig,
   type AgentMessage,
 } from './agent-types.js';
-import type { LoopType } from '../../telemetry/types.js';
+import { terminateModeMessage } from './terminate-mode-message.js';
 
 const debugLogger = createDebugLogger('AGENT_INTERACTIVE');
 
@@ -511,43 +511,5 @@ export class AgentInteractive {
         this.core.setPendingApproval(event.callId, fullDetails);
       },
     );
-  }
-}
-
-/**
- * Map a non-GOAL terminate mode to a visible status message for the UI,
- * or return null to suppress the message entirely.
- *
- * CANCELLED is suppressed here because cancelCurrentRound() already emits
- * its own warning. SHUTDOWN is suppressed as a normal lifecycle end.
- */
-function terminateModeMessage(
-  mode: AgentTerminateMode,
-  loopType?: LoopType | null,
-): { text: string; level: 'info' | 'warning' | 'error' } | null {
-  switch (mode) {
-    case AgentTerminateMode.MAX_TURNS:
-      return {
-        text: 'Agent stopped: maximum turns reached.',
-        level: 'warning',
-      };
-    case AgentTerminateMode.TIMEOUT:
-      return { text: 'Agent stopped: time limit reached.', level: 'warning' };
-    case AgentTerminateMode.ERROR:
-      return { text: 'Agent stopped due to an error.', level: 'error' };
-    case AgentTerminateMode.LOOP_DETECTED:
-      return {
-        // Name the exact detector so a stop is attributable (issue #9450)
-        // instead of collapsing every loop type into one generic label.
-        text: loopType
-          ? `Agent stopped: duplicate tool-call loop detected (${loopType}).`
-          : 'Agent stopped: duplicate tool-call loop detected.',
-        level: 'error',
-      };
-    case AgentTerminateMode.CANCELLED:
-    case AgentTerminateMode.SHUTDOWN:
-      return null;
-    default:
-      return null;
   }
 }

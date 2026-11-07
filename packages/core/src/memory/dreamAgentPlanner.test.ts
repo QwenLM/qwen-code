@@ -376,6 +376,21 @@ describe('dreamAgentPlanner', () => {
     ).rejects.toThrow('Model timed out');
   });
 
+  it('reports a turn-cap stop in plain words, not the raw mode token', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'failed',
+      terminateReason: 'MAX_TURNS',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+
+    const result = planManagedAutoMemoryDreamByAgent(config, projectRoot);
+
+    await expect(result).rejects.toThrow(
+      'Agent stopped: maximum turns reached.',
+    );
+    await expect(result).rejects.not.toThrow('MAX_TURNS');
+  });
+
   it('throws when the agent terminates as cancelled', async () => {
     // runForkedAgent maps AgentTerminateMode.CANCELLED to a resolved
     // `{status: 'cancelled'}` rather than a rejection. Without

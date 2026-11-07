@@ -271,21 +271,28 @@ describe('User Dream agent planner', () => {
     );
   });
 
-  it.each([
-    ['failed', 'Model timed out'],
-    ['cancelled', 'CANCELLED'],
-  ] as const)(
-    'rejects when the agent finishes as %s',
-    async (status, reason) => {
-      vi.mocked(runForkedAgent).mockResolvedValue({
-        status,
-        terminateReason: reason,
-        filesTouched: [],
-      } satisfies ForkedAgentResult);
+  it('rejects when the agent finishes as failed', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'failed',
+      terminateReason: 'Model timed out',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
 
-      await expect(
-        planUserAutoMemoryDreamByAgent(config, projectRoot),
-      ).rejects.toThrow(reason);
-    },
-  );
+    await expect(
+      planUserAutoMemoryDreamByAgent(config, projectRoot),
+    ).rejects.toThrow('Model timed out');
+  });
+
+  it('reports a cancelled run without leaking the raw mode token', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'cancelled',
+      terminateReason: 'CANCELLED',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+
+    const result = planUserAutoMemoryDreamByAgent(config, projectRoot);
+
+    await expect(result).rejects.toThrow(/cancelled/i);
+    await expect(result).rejects.not.toThrow('CANCELLED');
+  });
 });
