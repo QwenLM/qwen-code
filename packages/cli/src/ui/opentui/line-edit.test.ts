@@ -51,7 +51,7 @@ function inkState(text: string, cursor: number): TextBufferState {
   const lines = text.length === 0 ? [''] : text.split('\n');
   let row = 0;
   let remaining = cursor;
-  while (row < lines.length - 1 && remaining > lines[row].length) {
+  while (row < lines.length - 1 && remaining > cpLen(lines[row])) {
     remaining -= [...lines[row]].length + 1;
     row++;
   }
@@ -473,6 +473,97 @@ describe('line-edit', () => {
       }
     });
 
+    it.each([
+      ['k', 'kill_line_right'],
+      ['u', 'kill_line_left'],
+    ] as const)(
+      'matches Ink kill-line behavior for Ctrl+%s',
+      (name, action) => {
+        for (const state of [
+          { text: 'abc', cursor: 1 },
+          { text: 'a😀中b', cursor: 2 },
+          { text: 'abc\ndefghi', cursor: 6 },
+          { text: 'abc\ndef', cursor: 3 },
+          { text: 'abc\ndef', cursor: 4 },
+          { text: 'abc', cursor: 0 },
+          { text: 'abc', cursor: 3 },
+          { text: '', cursor: 0 },
+        ]) {
+          const expected = step(inkState(state.text, state.cursor), {
+            type: action,
+          });
+          expect(applyLineKey(state, key(name, { ctrl: true }))).toEqual({
+            text: inkText(expected),
+            cursor: inkOffset(expected),
+          });
+        }
+      },
+    );
+
+    it.each([
+      [
+        key('left', { ctrl: true }),
+        { type: 'move', payload: { dir: 'wordLeft' } },
+      ],
+      [
+        key('left', { meta: true }),
+        { type: 'move', payload: { dir: 'wordLeft' } },
+      ],
+      [
+        key('b', { meta: true }),
+        { type: 'move', payload: { dir: 'wordLeft' } },
+      ],
+      [
+        key('right', { ctrl: true }),
+        { type: 'move', payload: { dir: 'wordRight' } },
+      ],
+      [
+        key('right', { meta: true }),
+        { type: 'move', payload: { dir: 'wordRight' } },
+      ],
+      [
+        key('f', { meta: true }),
+        { type: 'move', payload: { dir: 'wordRight' } },
+      ],
+      [key('d', { meta: true }), { type: 'delete_word_right' }],
+      [key('delete', { ctrl: true }), { type: 'delete_word_right' }],
+      [key('delete', { meta: true }), { type: 'delete_word_right' }],
+    ] as const)('matches Ink for word-edit key %j', (binding, action) => {
+      for (const state of [
+        { text: 'one two_three', cursor: 4 },
+        { text: 'a😀中文 b', cursor: 2 },
+        { text: '😀a\n中文 b', cursor: 3 },
+        { text: 'abc\ndef', cursor: 3 },
+        { text: 'abc\ndef', cursor: 4 },
+        { text: 'abc', cursor: 0 },
+        { text: 'abc', cursor: 3 },
+        { text: '', cursor: 0 },
+      ]) {
+        const expected = step(inkState(state.text, state.cursor), action);
+        expect(applyLineKey(state, binding)).toEqual({
+          text: inkText(expected),
+          cursor: inkOffset(expected),
+        });
+      }
+    });
+
+    it('keeps Ctrl+B/F precedence when both Ctrl and Meta are reported', () => {
+      expect(applyLineKey(mid, key('b', { ctrl: true, meta: true }))).toEqual({
+        ...mid,
+        cursor: mid.cursor - 1,
+      });
+      expect(applyLineKey(mid, key('f', { ctrl: true, meta: true }))).toEqual({
+        ...mid,
+        cursor: mid.cursor + 1,
+      });
+    });
+
+    it('keeps Ctrl+D owned by the global exit handler with Meta too', () => {
+      expect(
+        applyLineKey(mid, key('d', { ctrl: true, meta: true })),
+      ).toBeNull();
+    });
+
     it('hands every other key back to the dialog', () => {
       for (const k of [
         key('return'),
@@ -480,16 +571,7 @@ describe('line-edit', () => {
         key('down'),
         key('tab'),
         key('d', { ctrl: true }),
-        key('k', { ctrl: true }),
-        key('u', { ctrl: true }),
         key('z', { ctrl: true }),
-        key('left', { meta: true }),
-        key('right', { meta: true }),
-        key('b', { meta: true }),
-        key('f', { meta: true }),
-        key('d', { meta: true }),
-        key('delete', { ctrl: true }),
-        key('delete', { meta: true }),
       ]) {
         expect(applyLineKey(mid, k)).toBeNull();
       }
