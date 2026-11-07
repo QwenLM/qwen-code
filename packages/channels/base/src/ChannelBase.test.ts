@@ -16748,10 +16748,48 @@ describe('ChannelBase', () => {
         );
         expect(ch.taskEvents.some(({ type }) => type === 'failed')).toBe(false);
         // The failure is logged for developers instead.
-        expect(stderr).toHaveBeenCalled();
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining('turn notice delivery failed'),
+        );
       } finally {
         stderr.mockRestore();
       }
+    });
+
+    it('fails the turn when the notice is the only delivery and its send fails', async () => {
+      const events = bridge as unknown as EventEmitter;
+      vi.mocked(bridge.prompt).mockImplementation(async (sid) => {
+        events.emit('turnNotice', sid, 'Overflow notice');
+        return 'Overflow notice';
+      });
+      const ch = createChannel();
+      const sendMessage = ch.sendMessage.bind(ch);
+      ch.sendMessage = async (chatId, text) => {
+        if (text.includes('Overflow notice')) {
+          throw new Error('rate limited (429)');
+        }
+        await sendMessage(chatId, text);
+      };
+
+      await expect(
+        ch.handleInbound(envelope({ messageId: 'notice-only-failure' })),
+      ).rejects.toThrow('rate limited (429)');
+
+      // The prompt result was the notice itself, so nothing reached the user:
+      // the turn must fail instead of reporting completed.
+      expect(ch.sent).toEqual([]);
+      expect(ch.taskEvents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'failed',
+            phase: 'delivery',
+            messageId: 'notice-only-failure',
+          }),
+        ]),
+      );
+      expect(ch.taskEvents.some(({ type }) => type === 'completed')).toBe(
+        false,
+      );
     });
 
     it('keeps partial paragraphs in adapter updates until the final response', async () => {

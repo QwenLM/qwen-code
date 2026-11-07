@@ -7619,6 +7619,7 @@ export abstract class ChannelBase {
         promptBridge.on('responseBoundary', onResponseBoundary);
 
         let taskResultPartial = false;
+        let answerDelivered = false;
         try {
           if (!this.canStartInboundTurn()) {
             throw new ChannelPromptCancelledError();
@@ -7661,6 +7662,7 @@ export abstract class ChannelBase {
               sessionId,
               segment,
             );
+            answerDelivered = true;
             if (segment && promptState.activeSegmentId === segment.segmentId) {
               promptState.activeSegmentId = undefined;
             }
@@ -7676,6 +7678,10 @@ export abstract class ChannelBase {
                 sourceLabel,
               );
             } catch (err) {
+              // The prompt result is `turnNotice || body`, so on an empty body
+              // the notice is the turn's only delivery: rethrow instead of
+              // reporting a completed turn the user never received.
+              if (!answerDelivered) throw err;
               // The answer is already delivered, so the turn's outcome is fixed
               // (see the deliveryStarted invariant below): log the failed
               // notice instead of letting it rewrite completed into failed.
