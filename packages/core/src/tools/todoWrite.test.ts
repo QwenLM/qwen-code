@@ -6,11 +6,17 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { TodoWriteParams } from './todoWrite.js';
-import { TodoWriteTool, listTodoSessions } from './todoWrite.js';
+import {
+  TodoWriteTool,
+  listTodoSessions,
+  readTodosForSession,
+} from './todoWrite.js';
 import type { ToolResult } from './tools.js';
 import { DefaultHookOutput, HookPhase, type TodoItem } from '../hooks/types.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
+import type { PathLike } from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
@@ -19,17 +25,66 @@ import { Storage } from '../config/storage.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 
-// Mock fs modules
+const mockRealpathSync = vi.hoisted(() => vi.fn());
+const mockDebugLogger = vi.hoisted(() => ({
+  isEnabled: vi.fn(() => false),
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+// Mock fs modules. `fs` and `node:fs` resolve to the same module, so a single
+// factory covers both. It keeps existsSync as a mock fn (the auto-mock behavior
+// the getDescription tests rely on) and overrides realpathSync with the hoisted
+// mock used by the containment/symlink tests.
 vi.mock('fs/promises');
-vi.mock('fs');
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  const mocked = {
+    ...actual,
+    existsSync: vi.fn(),
+    realpathSync: mockRealpathSync,
+  };
+  return {
+    ...mocked,
+    default: mocked,
+  };
+});
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const mocked = {
+    ...actual,
+    existsSync: vi.fn(),
+    realpathSync: mockRealpathSync,
+  };
+  return {
+    ...mocked,
+    default: mocked,
+  };
+});
 
 vi.mock('../utils/atomicFileWrite.js', () => ({
   atomicWriteFile: vi.fn(),
+}));
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => mockDebugLogger),
 }));
 
 const mockFs = vi.mocked(fs);
 const mockFsSync = vi.mocked(fsSync);
 const mockAtomicWrite = vi.mocked(atomicWriteFile);
+
+function mockRealpath(realpaths = new Map<string, string>()) {
+  mockRealpathSync.mockImplementation((pathToResolve: PathLike) => {
+    const resolvedPath = pathToResolve.toString();
+    return realpaths.get(resolvedPath) ?? resolvedPath;
+  });
+}
+
+beforeEach(() => {
+  mockRealpath();
+});
 
 const MODIFIED = 'Todos have been modified successfully';
 
@@ -91,6 +146,9 @@ describe('TodoWriteTool', () => {
   function setConfig(methods: Record<string, unknown>): void {
     mockConfig = {
       getSessionId: () => 'test-session-123',
+      getTodosDir: () => Storage.getTodosDir(),
+      getTodosAnchorTargetDir: () => path.resolve('workspace', 'project'),
+      isTodosDirectoryConfigured: () => false,
       ...methods,
     } as unknown as Config;
     tool = new TodoWriteTool(mockConfig);
@@ -252,7 +310,7 @@ describe('TodoWriteTool', () => {
       expect(mockAtomicWrite).toHaveBeenCalledWith(
         expect.stringContaining('test-session-123.json'),
         body,
-        { encoding: 'utf-8' },
+        { encoding: 'utf-8', noFollow: true },
       );
     }
 
@@ -285,6 +343,25 @@ describe('TodoWriteTool', () => {
       expect(mockConfig.setActiveTodoReminder).toHaveBeenCalledWith(
         'todo-prompt',
         expect.stringContaining('Task 1'),
+      );
+    });
+
+    it('should sanitize session ID when building todo file path', async () => {
+      setConfig({
+        getSessionId: () => '../../../escape',
+        getHookSystem: () => undefined,
+      });
+      const todoFilePath = path.join(Storage.getTodosDir(), 'escape.json');
+      noTodoFile();
+      writesSucceed();
+
+      await run({ todos: [todo('1', 'Task 1', 'pending')] });
+
+      expect(mockFs.readFile).toHaveBeenCalledWith(todoFilePath, 'utf-8');
+      expect(mockAtomicWrite).toHaveBeenCalledWith(
+        todoFilePath,
+        expect.stringContaining('"todos"'),
+        { encoding: 'utf-8', noFollow: true },
       );
     });
 
@@ -1062,6 +1139,9 @@ describe('TodoWriteTool – runtime output directory', () => {
   beforeEach(() => {
     mockConfig = {
       getSessionId: () => 'runtime-session',
+      getTodosDir: () => Storage.getTodosDir(),
+      getTodosAnchorTargetDir: () => path.resolve('workspace', 'project'),
+      isTodosDirectoryConfigured: () => false,
       getHookSystem: () => undefined,
     } as unknown as Config;
     tool = new TodoWriteTool(mockConfig);
@@ -1102,6 +1182,268 @@ describe('TodoWriteTool – runtime output directory', () => {
     expect(await writePath()).toContain(path.join('.qwen', 'todos'));
   });
 
+  it('should read and write todos from the configured todos directory', async () => {
+    const configuredTodoDir = path.join(os.tmpdir(), 'qwen-configured-todos');
+    mockConfig = {
+      getSessionId: () => 'configured-session',
+      getHookSystem: () => undefined,
+      getTodosDir: () => configuredTodoDir,
+      getTodosAnchorTargetDir: () => path.dirname(configuredTodoDir),
+      isTodosDirectoryConfigured: () => true,
+    } as Config;
+    tool = new TodoWriteTool(mockConfig);
+
+    const existingTodos: TodoItem[] = [
+      { id: '1', content: 'Existing task', status: 'pending' },
+    ];
+    const params: TodoWriteParams = {
+      todos: [{ id: '1', content: 'Existing task', status: 'completed' }],
+    };
+    const todoFilePath = path.join(
+      configuredTodoDir,
+      'configured-session.json',
+    );
+
+    mockFs.readFile.mockResolvedValue(
+      JSON.stringify({
+        todos: existingTodos,
+        sessionId: 'configured-session',
+      }),
+    );
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockAtomicWrite.mockResolvedValue(undefined);
+
+    const invocation = tool.build(params);
+    const result = await invocation.execute(mockAbortSignal);
+
+    expect(mockFs.readFile).toHaveBeenCalledWith(todoFilePath, 'utf-8');
+    expect(mockFs.mkdir).toHaveBeenCalledWith(configuredTodoDir, {
+      recursive: true,
+    });
+    expect(mockAtomicWrite).toHaveBeenCalledWith(
+      todoFilePath,
+      expect.any(String),
+      { encoding: 'utf-8', noFollow: true },
+    );
+    const persisted = JSON.parse(mockAtomicWrite.mock.calls[0]?.[1] as string);
+    expect(persisted).toMatchObject({
+      todos: params.todos,
+      sessionId: 'configured-session',
+    });
+    expect(result.llmContent).toContain(
+      'Todos have been modified successfully',
+    );
+  });
+
+  it('should read todos for a session from a configured todos directory', async () => {
+    const configuredTodoDir = path.join(os.tmpdir(), 'qwen-configured-todos');
+    const todos: TodoItem[] = [
+      { id: '1', content: 'Existing task', status: 'pending' },
+    ];
+    mockFs.readFile.mockResolvedValue(
+      JSON.stringify({
+        todos,
+        sessionId: 'configured-session',
+      }),
+    );
+
+    const result = await readTodosForSession(
+      'configured-session',
+      configuredTodoDir,
+    );
+
+    expect(mockFs.readFile).toHaveBeenCalledWith(
+      path.join(configuredTodoDir, 'configured-session.json'),
+      'utf-8',
+    );
+    expect(result).toEqual(todos);
+  });
+
+  it('should read todos for a session from config todos directory', async () => {
+    const configuredTodoDir = path.join(os.tmpdir(), 'qwen-configured-todos');
+    const todos: TodoItem[] = [
+      { id: '1', content: 'Existing task', status: 'pending' },
+    ];
+    mockFs.readFile.mockResolvedValue(
+      JSON.stringify({
+        todos,
+        sessionId: 'configured-session',
+      }),
+    );
+    mockConfig = {
+      getTodosDir: () => configuredTodoDir,
+      getTodosAnchorTargetDir: () => path.dirname(configuredTodoDir),
+      isTodosDirectoryConfigured: () => true,
+    } as Config;
+
+    const result = await readTodosForSession(mockConfig, 'configured-session');
+
+    expect(mockFs.readFile).toHaveBeenCalledWith(
+      path.join(configuredTodoDir, 'configured-session.json'),
+      'utf-8',
+    );
+    expect(result).toEqual(todos);
+  });
+
+  it('should reject a configured todosDirectory outside targetDir before reading', async () => {
+    const projectRoot = path.resolve('workspace', 'project');
+    const outsideTodoDir = path.resolve(projectRoot, '..', 'outside-todos');
+    mockConfig = {
+      getTodosDir: () => outsideTodoDir,
+      getTodosAnchorTargetDir: () => projectRoot,
+      isTodosDirectoryConfigured: () => true,
+    } as Config;
+
+    await expect(
+      readTodosForSession(mockConfig, 'configured-session'),
+    ).rejects.toThrow('todosDirectory must resolve within the project root');
+    expect(mockFs.readFile).not.toHaveBeenCalled();
+  });
+
+  it('should revalidate an explicitly configured directory that matches the runtime default', async () => {
+    const projectRoot = path.resolve('workspace', 'project');
+    Storage.setRuntimeBaseDir(path.join(projectRoot, '.qwen'));
+    const todoDir = Storage.getTodosDir();
+    const todoFilePath = path.join(todoDir, 'configured-session.json');
+    const outsideTodoDir = path.resolve(projectRoot, '..', 'outside-todos');
+    mockRealpath(
+      new Map([
+        [projectRoot, projectRoot],
+        [todoDir, outsideTodoDir],
+        [todoFilePath, path.join(outsideTodoDir, 'configured-session.json')],
+      ]),
+    );
+    mockConfig = {
+      getTodosDir: () => todoDir,
+      getTodosAnchorTargetDir: () => projectRoot,
+      isTodosDirectoryConfigured: () => true,
+    } as Config;
+
+    await expect(
+      readTodosForSession(mockConfig, 'configured-session'),
+    ).rejects.toThrow('todosDirectory must resolve within the project root');
+    expect(mockFs.readFile).not.toHaveBeenCalled();
+  });
+
+  it('should reject a configured todosDirectory that escapes targetDir before writing', async () => {
+    const projectRoot = path.resolve('workspace', 'project');
+    const outsideTodoDir = path.resolve(projectRoot, '..', 'outside-todos');
+    mockConfig = {
+      getSessionId: () => 'configured-session',
+      getHookSystem: () => undefined,
+      getTodosDir: () => outsideTodoDir,
+      getTodosAnchorTargetDir: () => projectRoot,
+      isTodosDirectoryConfigured: () => true,
+    } as Config;
+    tool = new TodoWriteTool(mockConfig);
+    const params: TodoWriteParams = {
+      todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
+    };
+
+    const invocation = tool.build(params);
+    const result = await invocation.execute(mockAbortSignal);
+
+    expect(result.returnDisplay).toContain(
+      'todosDirectory must resolve within the project root',
+    );
+    expect(mockFsSync.existsSync).not.toHaveBeenCalled();
+    expect(mockFs.readFile).not.toHaveBeenCalled();
+    expect(mockFs.mkdir).not.toHaveBeenCalled();
+    expect(mockAtomicWrite).not.toHaveBeenCalled();
+  });
+
+  it('should reject a configured todosDirectory symlink that escapes targetDir before writing', async () => {
+    const projectRoot = path.resolve('workspace', 'project');
+    const todoDir = path.join(projectRoot, '.qwen', 'todos');
+    const todoFilePath = path.join(todoDir, 'configured-session.json');
+    const outsideTodoDir = path.resolve(projectRoot, '..', 'outside-todos');
+    mockRealpath(
+      new Map([
+        [projectRoot, projectRoot],
+        [todoDir, outsideTodoDir],
+        [todoFilePath, path.join(outsideTodoDir, 'configured-session.json')],
+      ]),
+    );
+    mockConfig = {
+      getSessionId: () => 'configured-session',
+      getHookSystem: () => undefined,
+      getTodosDir: () => todoDir,
+      getTodosAnchorTargetDir: () => projectRoot,
+      isTodosDirectoryConfigured: () => true,
+    } as Config;
+    tool = new TodoWriteTool(mockConfig);
+    const params: TodoWriteParams = {
+      todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
+    };
+
+    const invocation = tool.build(params);
+    const result = await invocation.execute(mockAbortSignal);
+
+    expect(result.returnDisplay).toContain(
+      'todosDirectory must resolve within the project root',
+    );
+    expect(mockFs.readFile).not.toHaveBeenCalled();
+    expect(mockFs.mkdir).not.toHaveBeenCalled();
+    expect(mockAtomicWrite).not.toHaveBeenCalled();
+  });
+
+  it('should log a rollback failure when post-write containment check fails', async () => {
+    const projectRoot = path.resolve('workspace', 'project');
+    const todoDir = path.join(projectRoot, '.qwen', 'todos');
+    const todoFilePath = path.join(todoDir, 'configured-session.json');
+    const outsideTodoFilePath = path.resolve(
+      projectRoot,
+      '..',
+      'outside-todos',
+      'configured-session.json',
+    );
+    let writeCompleted = false;
+    mockRealpathSync.mockImplementation((pathToResolve: PathLike) => {
+      const resolvedPath = pathToResolve.toString();
+      if (writeCompleted && resolvedPath === todoFilePath) {
+        return outsideTodoFilePath;
+      }
+      return resolvedPath;
+    });
+    mockConfig = {
+      getSessionId: () => 'configured-session',
+      getHookSystem: () => undefined,
+      getTodosDir: () => todoDir,
+      getTodosAnchorTargetDir: () => projectRoot,
+      isTodosDirectoryConfigured: () => true,
+    } as Config;
+    tool = new TodoWriteTool(mockConfig);
+    const params: TodoWriteParams = {
+      todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
+    };
+    const enoentError = new Error('ENOENT') as Error & { code: string };
+    enoentError.code = 'ENOENT';
+    mockFs.readFile.mockRejectedValue(enoentError);
+    mockFs.mkdir.mockResolvedValue(undefined);
+    const rollbackError = new Error('permission denied');
+    mockFs.unlink.mockRejectedValue(rollbackError);
+    mockAtomicWrite.mockImplementation(async () => {
+      writeCompleted = true;
+    });
+
+    const invocation = tool.build(params);
+    const result = await invocation.execute(mockAbortSignal);
+
+    expect(result.returnDisplay).toContain(
+      'Todo file path must resolve within the todos directory',
+    );
+    expect(mockAtomicWrite).toHaveBeenCalledWith(
+      todoFilePath,
+      expect.any(String),
+      { encoding: 'utf-8', noFollow: true },
+    );
+    expect(mockFs.unlink).toHaveBeenCalledWith(todoFilePath);
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      `[TodoWriteTool] Post-write containment rollback failed: could not unlink ${todoFilePath}`,
+      rollbackError,
+    );
+  });
+
   it('should check file existence in custom runtime dir for getDescription', () => {
     const customRuntimeDir = path.resolve('custom', 'runtime');
     Storage.setRuntimeBaseDir(customRuntimeDir);
@@ -1130,5 +1472,90 @@ describe('TodoWriteTool – runtime output directory', () => {
       path.join(customRuntimeDir, 'todos'),
     );
     expect(sessions).toEqual(['a', 'b']);
+  });
+
+  it('should list todo sessions from a configured todos directory', async () => {
+    const configuredTodoDir = path.join(os.tmpdir(), 'qwen-configured-todos');
+    mockFs.readdir.mockResolvedValue([
+      'configured.json',
+      'other.json',
+      'README.md',
+    ] as never);
+
+    const sessions = await listTodoSessions(configuredTodoDir);
+
+    expect(mockFs.readdir).toHaveBeenCalledWith(configuredTodoDir);
+    expect(sessions).toEqual(['configured', 'other']);
+  });
+
+  it('should list todo sessions from config todos directory', async () => {
+    const configuredTodoDir = path.join(os.tmpdir(), 'qwen-configured-todos');
+    mockFs.readdir.mockResolvedValue([
+      'configured.json',
+      'other.json',
+      'README.md',
+    ] as never);
+    mockConfig = {
+      getTodosDir: () => configuredTodoDir,
+      getTodosAnchorTargetDir: () => path.dirname(configuredTodoDir),
+      isTodosDirectoryConfigured: () => true,
+    } as Config;
+
+    const sessions = await listTodoSessions(mockConfig);
+
+    expect(mockFs.readdir).toHaveBeenCalledWith(configuredTodoDir);
+    expect(sessions).toEqual(['configured', 'other']);
+  });
+
+  it('should reject listing a configured todosDirectory outside the project root', async () => {
+    const projectRoot = path.resolve('workspace', 'project');
+    mockFs.readdir.mockResolvedValue(['leaked-session.json'] as never);
+    mockConfig = {
+      getTodosDir: () => path.resolve(projectRoot, '..', 'outside-todos'),
+      getTodosAnchorTargetDir: () => projectRoot,
+      isTodosDirectoryConfigured: () => true,
+    } as Config;
+
+    await expect(listTodoSessions(mockConfig)).rejects.toThrow(
+      'todosDirectory must resolve within the project root',
+    );
+    expect(mockFs.readdir).not.toHaveBeenCalled();
+  });
+
+  it('should reject listing a configured todosDirectory symlink that escapes the project root', async () => {
+    const projectRoot = path.resolve('workspace', 'project');
+    const todoDir = path.join(projectRoot, 'project-todos');
+    const outsideTodoDir = path.resolve(projectRoot, '..', 'outside-todos');
+    mockRealpath(
+      new Map([
+        [projectRoot, projectRoot],
+        [todoDir, outsideTodoDir],
+      ]),
+    );
+    mockFs.readdir.mockResolvedValue(['leaked-session.json'] as never);
+    mockConfig = {
+      getTodosDir: () => todoDir,
+      getTodosAnchorTargetDir: () => projectRoot,
+      isTodosDirectoryConfigured: () => true,
+    } as Config;
+
+    await expect(listTodoSessions(mockConfig)).rejects.toThrow(
+      'todosDirectory must resolve within the project root',
+    );
+    expect(mockFs.readdir).not.toHaveBeenCalled();
+  });
+
+  it('should list a configured todosDirectory inside the project root that is not under .qwen', async () => {
+    const projectRoot = path.resolve('workspace', 'project');
+    const todoDir = path.join(projectRoot, 'project-todos');
+    mockFs.readdir.mockResolvedValue(['in-root.json'] as never);
+    mockConfig = {
+      getTodosDir: () => todoDir,
+      getTodosAnchorTargetDir: () => projectRoot,
+      isTodosDirectoryConfigured: () => true,
+    } as Config;
+
+    await expect(listTodoSessions(mockConfig)).resolves.toEqual(['in-root']);
+    expect(mockFs.readdir).toHaveBeenCalledWith(todoDir);
   });
 });
