@@ -643,6 +643,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_resume',
   'unstable_session_resume',
   'session_list',
+  'session_last_user_prompt_sort',
   'session_catalog_batch',
   'session_info',
   'session_source_metadata',
