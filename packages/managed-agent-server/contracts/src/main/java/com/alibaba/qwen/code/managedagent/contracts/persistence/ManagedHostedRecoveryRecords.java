@@ -314,7 +314,15 @@ public final class ManagedHostedRecoveryRecords {
             }
             ManagedExtensionRecords.oneOf(body.get("stage"), List.of("approval", "final"), "stage");
             JsonNode runtime = body.get("runtime");
-            ManagedExtensionRecords.closed(runtime, Set.of("runtimeSessionId", "bindingId", "generation", "workspaceGeneration"), "native Runtime");
+            Set<String> runtimeFields = new HashSet<>(Set.of("runtimeSessionId", "bindingId", "generation", "workspaceGeneration"));
+            if (runtime != null && runtime.has("provisionerKind")) {
+                runtimeFields.add("provisionerKind");
+                ManagedExtensionRecords.oneOf(runtime.get("provisionerKind"), List.of("local-process"), "native Runtime provider");
+                require(!body.has("commandStep") && body.path("calls").isArray() && body.path("calls").size() == 1
+                        && "ask_user_question".equals(body.path("calls").get(0).path("call").path("name").asText()),
+                        "Native Runtime provider pin requires a single question.");
+            }
+            ManagedExtensionRecords.closed(runtime, runtimeFields, "native Runtime");
             if (body.has("commandStep")) {
                 ManagedExtensionRecords.id(runtime.get("runtimeSessionId"), "command Runtime owner");
             } else {

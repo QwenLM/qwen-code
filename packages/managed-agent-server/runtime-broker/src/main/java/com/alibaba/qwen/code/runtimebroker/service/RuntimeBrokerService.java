@@ -43,14 +43,12 @@ import com.alibaba.qwen.code.runtimebroker.transport.ManagedHoldFamily;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedHookProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMcpProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMonitorProtocol;
+import org.apache.commons.codec.digest.DigestUtils;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -158,27 +156,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
      */
     public RuntimeBindingRecord findLatestBindingByHarnessSession(
             String tenantId, String harnessSessionId) {
-        String after = null;
-        RuntimeBindingRecord best = null;
-        for (;;) {
-            List<RuntimeBindingRecord> page = bindingRepository
-                    .findByHarnessSession(tenantId, harnessSessionId, after,
-                            100);
-            if (page.isEmpty()) {
-                return best;
-            }
-            for (RuntimeBindingRecord candidate : page) {
-                if (candidate.getState() == RuntimeBindingRecord.State.READY
-                        && (best == null || candidate.getBindingId()
-                                .compareTo(best.getBindingId()) > 0)) {
-                    best = candidate;
-                }
-            }
-            if (page.size() < 100) {
-                return best;
-            }
-            after = page.get(page.size() - 1).getBindingId();
-        }
+        return bindingRegistry.findLatestBindingByHarnessSession(tenantId, harnessSessionId, true);
     }
 
     /**
@@ -191,26 +169,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
      */
     public RuntimeBindingRecord findLatestBindingByHarnessSessionAnyState(
             String tenantId, String harnessSessionId) {
-        String after = null;
-        RuntimeBindingRecord best = null;
-        for (;;) {
-            List<RuntimeBindingRecord> page = bindingRepository
-                    .findByHarnessSession(tenantId, harnessSessionId, after,
-                            100);
-            if (page.isEmpty()) {
-                return best;
-            }
-            for (RuntimeBindingRecord candidate : page) {
-                if (best == null || candidate.getBindingId()
-                        .compareTo(best.getBindingId()) > 0) {
-                    best = candidate;
-                }
-            }
-            if (page.size() < 100) {
-                return best;
-            }
-            after = page.get(page.size() - 1).getBindingId();
-        }
+        return bindingRegistry.findLatestBindingByHarnessSession(tenantId, harnessSessionId, false);
     }
 
     public RuntimeBrokerService(HarnessSessionResolver sessionResolver,
@@ -1129,6 +1088,10 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                 .thenApply(BindingContext::record);
     }
 
+    public String runtimeProvisionerKind(RuntimeSessionRecord record) {
+        return bindingRegistry.runtimeProvisionerKind(record);
+    }
+
     public CompletionStage<RuntimeSessionRecord> acquire(
             String harnessSessionId, String runtimeSessionId,
             String turnKind) {
@@ -1659,12 +1622,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                         if (bytes.length > 256 * 1024) {
                             throw invalid("runtime_payload_invalid", "Tool payload exceeds 256 KiB");
                         }
-                        String digest;
-                        try {
-                            digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-                        } catch (NoSuchAlgorithmException exception) {
-                            throw new IllegalStateException(exception);
-                        }
+                        String digest = "sha256:" + DigestUtils.sha256Hex(bytes);
                         if (!digest.equals(record.getRequestDigest())) {
                             throw conflict("runtime_idempotency_conflict", "Tool payload differs from its reserved digest");
                         }
