@@ -623,6 +623,53 @@ describe('runNonInteractiveStreamJson', () => {
     }
   });
 
+  it('fails the prompt queued behind an initialization that rejects after the reply deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      // Once the reply is abandoned, the rejection handler registered on the
+      // init promise is the only thing that can still settle readiness. A
+      // queued prompt waits on that gate, so losing it means no result frame
+      // and a `run()` that never returns.
+      let rejectInitialization!: (error: Error) => void;
+      const initialization = new Promise<void>((_resolve, reject) => {
+        rejectInitialization = reject;
+      });
+      config = createConfig({ initialize: vi.fn(() => initialization) });
+      mockDispatcher.dispatch.mockResolvedValue({ ready: true });
+
+      const initRequest = createControlRequest('initialize');
+      initRequest.request = {
+        subtype: 'initialize',
+        timeout: { controlRequest: 20_000 },
+      };
+      mockInputReader.read = async function* () {
+        yield initRequest;
+        yield createUserMessage('after the deadline');
+      };
+
+      const run = runNonInteractiveStreamJson(config, '');
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(mockDispatcher.sendError).toHaveBeenCalledWith(
+        'req-1',
+        'Initialization did not finish within 15s',
+      );
+
+      rejectInitialization(new Error('MCP discovery failed'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(mockOutputAdapter.emitResult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isError: true,
+          errorMessage: 'MCP discovery failed',
+        }),
+      );
+      expect(runNonInteractiveMock).not.toHaveBeenCalled();
+      await run;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('replies to initialize with an error when SDK mode initialization fails', async () => {
     config = createConfig({
       initialize: vi.fn().mockRejectedValue(new Error('extension store busy')),
