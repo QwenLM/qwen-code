@@ -183,7 +183,12 @@ const COMPLETION_TTL_SWEEP_INTERVAL_MS = 5 * 60_000;
  * that cannot reach the record fails toward retention, never toward removal.
  * Scans the tail window from the end; the window's first line may be a
  * fragment of an earlier record, and a fragment fails to parse and is
- * skipped. */
+ * skipped. A turn start (a subtype-less `user` prompt record or a
+ * `turn_attempt` system record) met before any turn result means the
+ * session's last turn never settled — a revival interrupted before settle
+ * leaves such a start at the tail — so the row is unclassifiable: an older
+ * result must not classify it clean, or the sweep would remove a transcript
+ * with an unfinished turn. */
 async function lastPersistedTurnOutcome(
   service: SessionService,
   sessionId: string,
@@ -216,7 +221,17 @@ async function lastPersistedTurnOutcome(
         continue;
       }
       if (typeof record !== 'object' || record === null) continue;
-      const typed = record as { subtype?: unknown; systemPayload?: unknown };
+      const typed = record as {
+        type?: unknown;
+        subtype?: unknown;
+        systemPayload?: unknown;
+      };
+      if (
+        (typed.type === 'user' && typed.subtype === undefined) ||
+        typed.subtype === 'turn_attempt'
+      ) {
+        return undefined;
+      }
       if (typed.subtype !== 'turn_result') continue;
       const payload = typed.systemPayload;
       if (typeof payload !== 'object' || payload === null) continue;
@@ -1123,7 +1138,8 @@ export function createSubSessionLauncher(
    * cannot be the daemon's primary session), and its last persisted turn
    * result must be a clean completion (`completed`/`end_turn`) — a failed or
    * cancelled turn keeps its diagnostic transcript, and a transcript without
-   * a readable turn result is unclassifiable, so it stays with the user. An
+   * a readable turn result, or whose last turn started but never settled, is
+   * unclassifiable, so it stays with the user. An
    * armed row's TTL clock starts at the transcript's last write. Discovered
    * rows are seeded into `completedAt` only — never into `spawnedSessionIds`,
    * whose depth-1 gate must count only the live roster. A scan failure

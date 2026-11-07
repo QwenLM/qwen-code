@@ -2659,6 +2659,125 @@ describe('sub-session completion TTL', () => {
     }
   });
 
+  it('keeps a clean sub-session whose later turn started but never settled, and a clean session without parent lineage', async () => {
+    // A clean result is the session's outcome only while no later turn has
+    // started: a send_message revival writes its user prompt (then a
+    // turn_attempt), a retry or continuation writes only the turn_attempt,
+    // and a daemon that dies before that turn settles leaves the start at
+    // the tail. Such a row is unclassifiable and must stay. A clean session
+    // without a parent_session record is not a sub-session at all. Two
+    // siblings in the same sweep prove the sweep ran: a plain clean
+    // sub-session, and one whose trailing user record is a multi-agent
+    // message (a subtype-bearing user record never starts a turn).
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const cleanResult = {
+      type: 'system',
+      subtype: 'turn_result',
+      systemPayload: {
+        promptId: 'p1',
+        state: 'completed',
+        stopReason: 'end_turn',
+        endedAt: Date.parse(OLD),
+      },
+    };
+    const userPrompt = (uuid: string) => ({
+      uuid,
+      timestamp: OLD,
+      type: 'user',
+      message: { role: 'user', parts: [{ text: uuid }] },
+      version: '1.0.0',
+    });
+    const turnAttempt = {
+      type: 'system',
+      subtype: 'turn_attempt',
+      promptId: 'p1',
+      daemonPromptId: 'd2',
+    };
+    const writeTranscript = (
+      sessionId: string,
+      withParent: boolean,
+      tail: Array<Record<string, unknown>>,
+    ) => {
+      const p = service.getSessionTranscriptPath(sessionId);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      const records: Array<Record<string, unknown>> = [
+        userPrompt('u1'),
+        ...(withParent
+          ? [
+              {
+                type: 'system',
+                subtype: 'parent_session',
+                systemPayload: { parentSessionId: 'parent-1' },
+              },
+            ]
+          : []),
+        cleanResult,
+        ...tail,
+      ];
+      fs.writeFileSync(
+        p,
+        records
+          .map((r) => `${JSON.stringify({ ...r, sessionId, cwd: ws })}\n`)
+          .join(''),
+        'utf8',
+      );
+      const aged = (Date.now() - TTL_MS - SWEEP_MS) / 1000;
+      fs.utimesSync(p, aged, aged);
+    };
+    const cleanId = '880e8400-e29b-41d4-a716-446655440001';
+    const agentMessageId = '880e8400-e29b-41d4-a716-446655440002';
+    const interruptedId = '880e8400-e29b-41d4-a716-446655440003';
+    const userAfterCleanId = '880e8400-e29b-41d4-a716-446655440004';
+    const attemptAfterCleanId = '880e8400-e29b-41d4-a716-446655440005';
+    const topLevelId = '880e8400-e29b-41d4-a716-446655440006';
+    writeTranscript(cleanId, true, []);
+    writeTranscript(agentMessageId, true, [
+      { ...userPrompt('u2'), subtype: 'agent_message' },
+    ]);
+    writeTranscript(interruptedId, true, [userPrompt('u2'), turnAttempt]);
+    writeTranscript(userAfterCleanId, true, [userPrompt('u2')]);
+    writeTranscript(attemptAfterCleanId, true, [turnAttempt]);
+    writeTranscript(topLevelId, false, []);
+    for (const id of [
+      cleanId,
+      agentMessageId,
+      interruptedId,
+      userAfterCleanId,
+      attemptAfterCleanId,
+      topLevelId,
+    ]) {
+      liveSummaries.set(id, null);
+    }
+    const fake = makeTtlBridge();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      // Discovery classifies every row before the sweep removes any, so
+      // once both clean siblings are gone the kept rows were decided; the
+      // extra turns let a wrongly armed row's removal land before the check.
+      await drainRealEvents(() => removeSession.mock.calls.length >= 2);
+      for (let i = 0; i < 200; i++) {
+        await new Promise((resolve) => realSetImmediate(resolve));
+      }
+      expect([...fake.closes].sort()).toEqual([cleanId, agentMessageId].sort());
+      expect(removeSession.mock.calls.map(([id]) => id).sort()).toEqual(
+        [cleanId, agentMessageId].sort(),
+      );
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
   it('restarts the TTL from persisted freshness when a reaped transcript was revived', async () => {
     const fake = makeTtlBridge();
     const service = new SessionService(ws, { runtimeBaseDir });

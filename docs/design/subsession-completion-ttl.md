@@ -113,9 +113,13 @@ page's last entry) and re-arms the rows it can prove finished: the persisted
 creation metadata names a `parentSessionId` (such a row is a sub-session,
 never a primary session), and the transcript's last persisted turn result
 (`turn_result` record, appended at turn settle) is a clean completion
-(`completed`/`end_turn`). A failed or cancelled turn keeps its diagnostic
-transcript, and a transcript without a readable turn result is
-unclassifiable, so it stays with the user. An armed row's clock starts at
+(`completed`/`end_turn`) with no turn started after it. A failed or
+cancelled turn keeps its diagnostic transcript. A transcript without a
+readable turn result is unclassifiable, and so is one whose tail shows a
+turn start (a subtype-less `user` prompt record or a `turn_attempt` record)
+newer than its last turn result — a revival or retry interrupted before it
+settled; both stay with the user. A clean session with no parent lineage is
+never a candidate. An armed row's clock starts at
 the transcript's `mtime`. Discovered rows are seeded into the completion
 clock only, never into the roster set whose depth-1 gate must count only the
 live roster. A scan failure re-arms the discovery for the next sweep.
@@ -159,7 +163,9 @@ live roster. A scan failure re-arms the discovery for the next sweep.
   removal, second-sweep no-op (terminal state), discovery of a persisted
   completed transcript in a fresh launcher, exhaustive discovery of an
   mtime-tied batch (the old paged cursor's skip class), failed/cancelled and
-  unclassifiable transcript retention after a restart, revival restart,
+  unclassifiable transcript retention after a restart (including a turn
+  started after the last clean result and a clean top-level session),
+  revival restart,
   work-state guards, removal retry after close/removal failure,
   serialization of overlapping sweeps, the lifecycle lane (deferral while
   it is held, admission refused mid-removal, the in-lane re-check),
