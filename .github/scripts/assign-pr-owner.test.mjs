@@ -15,15 +15,16 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, describe, it } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 
-import { loadPolicy, pickOwner } from './assign-issue-owner.mjs';
+import { loadPolicy } from './assign-issue-owner.mjs';
 import {
   alreadyCovered,
   changedFiles,
   matchAreaByPath,
   matchedAreasByPath,
+  pickPrOwner,
   skipPrReason,
 } from './assign-pr-owner.mjs';
 
@@ -205,8 +206,51 @@ describe('assign-pr-owner: pure routing', () => {
   });
 });
 
-// The stub reports the zeroLoadOwner as the least loaded owner so the pick is
-// unambiguous regardless of the rotation offset for PR 77.
+describe('assign-pr-owner: weighted selection', () => {
+  it('uses inverse issue-count weights with reachable interval boundaries', () => {
+    const owners = ['a', 'b', 'c'];
+    const loads = new Map([
+      ['a', 0],
+      ['b', 1],
+      ['c', 1],
+    ]);
+    for (const [draw, expected] of [
+      [0, 'a'],
+      [0.5 - Number.EPSILON, 'a'],
+      [0.5, 'b'],
+      [0.75 - Number.EPSILON, 'b'],
+      [0.75, 'c'],
+      [1 - Number.EPSILON, 'c'],
+    ]) {
+      assert.equal(pickPrOwner(owners, loads, draw), expected);
+    }
+  });
+
+  it('gives loads 0, 1, and 3 the independently calculated 4:2:1 ratio', () => {
+    const owners = ['a', 'b', 'c'];
+    const loads = new Map([
+      ['a', 0],
+      ['b', 1],
+      ['c', 3],
+    ]);
+    const counts = { a: 0, b: 0, c: 0 };
+    for (let index = 0; index < 700; index += 1) {
+      counts[pickPrOwner(owners, loads, (index + 0.5) / 700)] += 1;
+    }
+    assert.deepEqual(counts, { a: 400, b: 200, c: 100 });
+  });
+
+  it('gives equal loads equal chances and keeps a single owner selectable', () => {
+    const owners = ['a', 'b'];
+    const loads = new Map(owners.map((owner) => [owner, 100]));
+    assert.equal(pickPrOwner(owners, loads, 0), 'a');
+    assert.equal(pickPrOwner(owners, loads, 0.5), 'b');
+    assert.equal(pickPrOwner(['a'], loads, 0), 'a');
+    assert.equal(pickPrOwner(['a'], loads, 1 - Number.EPSILON), 'a');
+  });
+});
+
+// A test-only preload fixes the random draw for the real script entrypoint.
 function runAssign(dryRun, options = {}) {
   const {
     prJson = JSON.stringify(corePr),
@@ -220,6 +264,7 @@ function runAssign(dryRun, options = {}) {
     fileList,
     previousFiles = [],
     zeroLoadOwner = 'DennisYu07',
+    randomValue = 0.5,
     // What every collaborator permission lookup answers; 'error' fails the
     // lookup outright instead of answering.
     permission = 'write',
@@ -244,6 +289,16 @@ function runAssign(dryRun, options = {}) {
   tempDirs.push(dir);
   const log = join(dir, 'gh.log');
   const gh = join(dir, 'gh');
+  const randomPreload = join(dir, 'random.mjs');
+  writeFileSync(
+    randomPreload,
+    `let draws = 0;
+Math.random = () => {
+  if (++draws > 1) throw new Error('second Math.random draw');
+  return ${randomValue};
+};
+`,
+  );
   writeFileSync(
     gh,
     `#!/bin/sh
@@ -308,42 +363,46 @@ esac
 `,
   );
   chmodSync(gh, 0o755);
-  const result = spawnSync(process.execPath, [script], {
-    cwd: repoRoot,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      PATH: `${dir}:${process.env.PATH}`,
-      GH_STUB_LOG: log,
-      GH_STUB_PR: prJson,
-      GH_STUB_PR_LATEST: prLatestJson,
-      // What the legacy text-rendering filter would print: one filename per
-      // line, so an embedded newline forges extra entries.
-      GH_STUB_FILES: fileNames.join('\n'),
-      // What the fixed `| @base64` filter prints: one base64 token per
-      // filename, so an embedded newline stays inside one entry.
-      GH_STUB_FILES_B64: fileNames
-        .map((name) => Buffer.from(name, 'utf8').toString('base64'))
-        .join('\n'),
-      GH_STUB_PREVIOUS_FILES_B64: previousFiles
-        .map((name) => Buffer.from(name, 'utf8').toString('base64'))
-        .join('\n'),
-      GH_STUB_PERMISSION: permission,
-      // The stub's deny branch pattern-expands this login; '__none__' can
-      // never collide with a real collaborator lookup.
-      GH_STUB_DENY_LOGIN: denyLogin || '__none__',
-      GH_STUB_DENY_PERM: denyPerm,
-      GH_STUB_EDIT_EXIT: String(editExit),
-      GH_STUB_EDIT_ERR: editErr,
-      GH_STUB_ASSIGN: assignResult,
-      GH_STUB_LOAD_FAIL: loadFail,
-      GH_STUB_LOAD_ERR: loadErr,
-      GITHUB_REPOSITORY: 'QwenLM/qwen-code',
-      GITHUB_STEP_SUMMARY: '',
-      PR_NUMBER: '77',
-      DRY_RUN: String(dryRun),
+  const result = spawnSync(
+    process.execPath,
+    ['--import', pathToFileURL(randomPreload).href, script],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH}`,
+        GH_STUB_LOG: log,
+        GH_STUB_PR: prJson,
+        GH_STUB_PR_LATEST: prLatestJson,
+        // What the legacy text-rendering filter would print: one filename per
+        // line, so an embedded newline forges extra entries.
+        GH_STUB_FILES: fileNames.join('\n'),
+        // What the fixed `| @base64` filter prints: one base64 token per
+        // filename, so an embedded newline stays inside one entry.
+        GH_STUB_FILES_B64: fileNames
+          .map((name) => Buffer.from(name, 'utf8').toString('base64'))
+          .join('\n'),
+        GH_STUB_PREVIOUS_FILES_B64: previousFiles
+          .map((name) => Buffer.from(name, 'utf8').toString('base64'))
+          .join('\n'),
+        GH_STUB_PERMISSION: permission,
+        // The stub's deny branch pattern-expands this login; '__none__' can
+        // never collide with a real collaborator lookup.
+        GH_STUB_DENY_LOGIN: denyLogin || '__none__',
+        GH_STUB_DENY_PERM: denyPerm,
+        GH_STUB_EDIT_EXIT: String(editExit),
+        GH_STUB_EDIT_ERR: editErr,
+        GH_STUB_ASSIGN: assignResult,
+        GH_STUB_LOAD_FAIL: loadFail,
+        GH_STUB_LOAD_ERR: loadErr,
+        GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+        GITHUB_STEP_SUMMARY: '',
+        PR_NUMBER: '77',
+        DRY_RUN: String(dryRun),
+      },
     },
-  });
+  );
   assert.equal(result.status, expectExit, result.stderr);
   return {
     log: readFileSync(log, 'utf8'),
@@ -362,13 +421,26 @@ const assignCall = (login) =>
   );
 
 describe('assign-pr-owner: apply boundary', () => {
-  it('assigns the least loaded eligible owner', () => {
+  it('assigns the weighted candidate selected by the random draw', () => {
     const { log, stdout } = runAssign(false);
     assert.match(log, assignCall('DennisYu07'));
     assert.match(stdout, /assigned @DennisYu07/);
+    assert.match(stdout, /Selection: draw 0\.5; loads /);
+    assert.match(stdout, /DennisYu07:0/);
+    assert.match(stdout, /ZijianZhang989:5/);
+    assert.match(stdout, /; unavailable: none/);
     // `gh pr edit` requests repository.pullRequest.projectCards, which
     // GitHub rejects on the gh builds the ECS runners carry.
     assert.doesNotMatch(log, /pr edit/);
+  });
+
+  it('can assign a busier owner instead of always selecting the minimum', () => {
+    const { log, stdout } = runAssign(false, {
+      randomValue: 0.9900000000000001,
+    });
+    assert.match(log, assignCall('ZijianZhang989'));
+    assert.match(stdout, /assigned @ZijianZhang989 \(5 open\)/);
+    assert.match(stdout, /Selection: draw 0\.9900000000000001; loads /);
   });
 
   it('matches the returned assignee case-insensitively', () => {
@@ -388,6 +460,10 @@ describe('assign-pr-owner: apply boundary', () => {
       stdout,
       /skipped — GitHub did not accept @DennisYu07 as an assignee/,
     );
+    assert.match(stdout, /Selection: draw 0\.5; loads /);
+    assert.match(stdout, /DennisYu07:0/);
+    assert.match(stdout, /ZijianZhang989:5/);
+    assert.match(stdout, /; unavailable: none/);
     assert.match(stderr, /::warning::GitHub did not add @DennisYu07/);
   });
 
@@ -395,14 +471,17 @@ describe('assign-pr-owner: apply boundary', () => {
     const { log, stdout } = runAssign(true);
     assert.doesNotMatch(log, ASSIGN_CALL);
     assert.match(stdout, /dry-run — would assign @DennisYu07/);
+    assert.match(stdout, /Selection: draw 0\.5; loads /);
+    assert.match(stdout, /DennisYu07:0/);
+    assert.match(stdout, /; unavailable: none/);
   });
 
   it('never assigns the PR author to their own work', () => {
     const { log, stdout } = runAssign(false, {
       prJson: JSON.stringify({ ...corePr, author: { login: 'DennisYu07' } }),
-      // Without the exclusion the zero-load author would win outright.
+      // This draw would select the zero-load author without the exclusion.
     });
-    assert.doesNotMatch(log, /--add-assignee DennisYu07\b/);
+    assert.doesNotMatch(log, assignCall('DennisYu07'));
     assert.match(stdout, /assigned @/);
   });
 
@@ -490,10 +569,7 @@ describe('assign-pr-owner: apply boundary', () => {
       files: 'packages/core/src/skills/loader.ts',
     });
     assert.match(stdout, /falling back to core/);
-    assert.doesNotMatch(
-      log,
-      new RegExp(`--add-assignee ${module.owners[0]}\\b`),
-    );
+    assert.doesNotMatch(log, assignCall(module.owners[0]));
     assert.match(log, assignCall('DennisYu07'));
   });
 
@@ -560,20 +636,20 @@ describe('assign-pr-owner: apply boundary', () => {
     assert.doesNotMatch(stderr, /Cannot read open-issue load/);
     assert.match(log, assignCall('DennisYu07'));
     assert.match(stdout, /assigned @DennisYu07 \(0 open\)/);
+    assert.match(stdout, /; unavailable: none/);
   });
 
-  it('still assigns through rotation when every issue-list lookup fails', () => {
+  it('still draws an owner when every issue-list lookup fails', () => {
     // @wenshao's second failing run: issues disabled made every load lookup
     // throw and failed the check. All loads must degrade with a warning and
-    // the rotation must still land an owner — the load metric is a
-    // tie-break heuristic, not a gate on assigning.
-    const owners = policy.areas.find((area) => area.name === 'core').owners;
-    const degraded = new Map(owners.map((owner) => [owner, 0]));
-    const rotated = pickOwner(owners, degraded, 77);
+    // the equal-weight draw must still land an owner.
     const { log, stdout, stderr } = runAssign(false, { loadFail: 'always' });
     assert.match(stderr, /Cannot read open-issue load/);
-    assert.match(log, assignCall(rotated));
-    assert.match(stdout, new RegExp(`assigned @${rotated}`));
+    assert.match(log, assignCall('chiga0'));
+    assert.match(stdout, /assigned @chiga0/);
+    const owners = policy.areas.find((area) => area.name === 'core').owners;
+    assert.ok(stdout.includes(`; unavailable: ${owners.join(', ')}`));
+    for (const owner of owners) assert.ok(stdout.includes(`${owner}:0`));
   });
 });
 

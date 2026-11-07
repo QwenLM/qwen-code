@@ -574,6 +574,30 @@ describe('fetchGitBranches push-side tracking', () => {
     expect(headG?.upstream).toBe('origin/master');
     expect(headG?.pushTarget).toBeUndefined();
   });
+
+  it('reports neither upstream nor push destination for a pushed but untracked branch', async () => {
+    // Pushing without `-u` leaves the remote ref in place while git still
+    // resolves no upstream, so `%(push)` comes back empty too. This is the
+    // shape the web-shell push row renders as "Sets upstream on push"
+    // (hasUpstream === false && !pushKnown); every other pushTarget-undefined
+    // case above carries a live upstream, so nothing else pins it.
+    const dir = makeRepo();
+    addRemote(dir, 'origin', 'origin', 'master');
+
+    const head = await localBranch(dir, hermeticEnv());
+    // Pin the branch first: without this the undefined assertions below would
+    // also pass if the listing failed to find `master` at all.
+    expect(head?.name).toBe('master');
+    expect(head?.isHead).toBe(true);
+    expect(head?.upstream).toBeUndefined();
+    expect(head?.upstreamGone).toBeUndefined();
+    expect(head?.pushTarget).toBeUndefined();
+    expect(head?.pushAhead).toBeUndefined();
+    expect(head?.pushBehind).toBeUndefined();
+    expect(head?.pushGone).toBeUndefined();
+    expect(head?.ahead).toBe(0);
+    expect(head?.behind).toBe(0);
+  });
 });
 
 describe('fetchGitBranches recent branches', () => {

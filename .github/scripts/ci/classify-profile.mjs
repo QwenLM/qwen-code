@@ -4,8 +4,31 @@ import { readFileSync } from 'node:fs';
 export const CI_PROFILES = {
   DOCS_ONLY: 'docs_only',
   GITHUB_CI_ONLY: 'github_ci_only',
+  JAVA_ONLY: 'java_only',
   FULL: 'full',
 };
+
+// The Java packages build and test in sdk-java.yml and managed-agent-gate.yml.
+// A change confined to them needs Lint & Static and the scripts/tests suites
+// (seventeen of them read these trees), not the TypeScript build, unit shards
+// or browser lanes. The carve-outs are files TypeScript suites read at run
+// time: the OpenAPI contracts and the capability-parity fixtures.
+const JAVA_ONLY_ROOTS = [
+  'packages/managed-agent-server/',
+  'packages/sdk-java/',
+];
+const JAVA_FILES_READ_BY_TYPESCRIPT = [
+  'packages/managed-agent-server/contracts/',
+  'packages/managed-agent-server/verification/src/test/resources/',
+];
+
+function isJavaOnlyFile(file) {
+  const normalized = file.replace(/\\/g, '/');
+  return (
+    JAVA_ONLY_ROOTS.some((root) => normalized.startsWith(root)) &&
+    !JAVA_FILES_READ_BY_TYPESCRIPT.some((root) => normalized.startsWith(root))
+  );
+}
 
 // Membership skips application tests while keeping full-effort automatic
 // review (only docs_only downgrades review). Add a path only when the
@@ -56,10 +79,14 @@ export const TEST_READ_MARKDOWN = new Set([
   '.qwen/skills/verify-pr/references/android.md',
   'AGENTS.md',
   'CLAUDE.md',
+  'integrations/generated-ui/README.md',
+  'integrations/generated-ui/skills/generated-ui/SKILL.md',
   'integrations/test-failure-explorer/skills/test-failure-explorer/SKILL.md',
   'packages/cua-driver/docs/tool-output-format.md',
   'packages/cua-driver/scripts/README.md',
   'packages/managed-agent-server/README.md',
+  'packages/managed-agent-server/distribution/systemd/README.md',
+  'packages/managed-agent-server/distribution/systemd/README.zh-CN.md',
   'packages/sdk-java/client/QWEN.md',
   'packages/sdk-java/qwencode/RELEASE.md',
   'packages/sdk-python/README.md',
@@ -85,6 +112,11 @@ function classifyPath(file) {
   if (isDocsOnlyFile(file)) return CI_PROFILES.DOCS_ONLY;
   if (GITHUB_CI_ONLY_FILES.has(file)) return CI_PROFILES.GITHUB_CI_ONLY;
   if (isTestFreeMarkdown(file)) return CI_PROFILES.GITHUB_CI_ONLY;
+  // A test may read it from a TypeScript suite, so it keeps the full profile.
+  if (TEST_READ_MARKDOWN.has(file.replace(/\\/g, '/'))) {
+    return CI_PROFILES.FULL;
+  }
+  if (isJavaOnlyFile(file)) return CI_PROFILES.JAVA_ONLY;
   return CI_PROFILES.FULL;
 }
 
@@ -111,12 +143,12 @@ export function classifyChangedFiles(files) {
   if (profiles.every((profile) => profile === CI_PROFILES.DOCS_ONLY)) {
     return CI_PROFILES.DOCS_ONLY;
   }
+  if (profiles.includes(CI_PROFILES.FULL)) return CI_PROFILES.FULL;
+  // Java plus docs or helper files: the java_only lanes cover both.
+  if (profiles.includes(CI_PROFILES.JAVA_ONLY)) return CI_PROFILES.JAVA_ONLY;
   // Any mix of docs, test-free Markdown and helper files still needs no
   // application tests; it keeps full review because it is not pure docs.
-  if (profiles.every((profile) => profile !== CI_PROFILES.FULL)) {
-    return CI_PROFILES.GITHUB_CI_ONLY;
-  }
-  return CI_PROFILES.FULL;
+  return CI_PROFILES.GITHUB_CI_ONLY;
 }
 
 function parseChangedFiles(text) {

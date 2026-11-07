@@ -165,6 +165,43 @@ describe('CronListTool', () => {
     );
   });
 
+  it('prints a gated task with its gate and the gate status', async () => {
+    await writeCronTasks(tmpDir, [
+      {
+        ...makeDurableTask({ id: 'gated001', prompt: 'watch the PR' }),
+        gate: 'qwen autofix-pr snapshot --gate 15057',
+        gateStatus: {
+          lastAt: Date.UTC(2026, 9, 21, 5, 7),
+          lastOutcome: 'quiet',
+          quietSinceDelivery: 41,
+          lastDeliveredAt: Date.UTC(2026, 9, 21, 5, 5),
+          consecutiveFailures: 0,
+        },
+      },
+    ]);
+    config._scheduler.create(
+      '*/2 * * * *',
+      'watch the repo',
+      true,
+      './probe.sh',
+    );
+
+    const invocation = tool.build({});
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain(
+      'gated001 — 0 */2 * * * (recurring) [durable]: watch the PR\n' +
+        '    gate: qwen autofix-pr snapshot --gate 15057 — last quiet at 2026-10-21T05:07:00.000Z, quiet ×41, last delivered 2026-10-21T05:05:00.000Z, 0 failures',
+    );
+    expect(result.llmContent).toContain(
+      '[session-only]: watch the repo\n    gate: ./probe.sh — not run yet',
+    );
+    expect(result.returnDisplay).toContain(
+      'gated001 Every 2 hours [durable, gated]',
+    );
+    expect(result.returnDisplay).toContain('[session-only, gated]');
+  });
+
   it('merges file-backed durable jobs with session-only jobs', async () => {
     await writeCronTasks(tmpDir, [makeDurableTask()]);
     config._scheduler.create('*/10 * * * *', 'session task', true);

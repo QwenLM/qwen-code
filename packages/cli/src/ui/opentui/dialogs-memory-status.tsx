@@ -7,9 +7,8 @@
  */
 
 /**
- * Compact native OpenTUI Memory and StatusLine dialogs (M3 long-tail, #8677).
- * Faithful-enough display ports: Memory lists the user/project memory sources
- * + toggles from settings; StatusLine lists the preset items. Esc closes.
+ * Native OpenTUI Memory dialog: user/project sources and settings toggles.
+ * Esc closes.
  */
 
 import { useLayoutEffect } from 'react';
@@ -20,7 +19,6 @@ import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { getAllGeminiMdFilenames } from '@qwen-code/qwen-code-core/utils/memory-constants.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import { STATUS_LINE_PRESET_ITEMS } from '../statusLinePresets.js';
 import { C } from './theme.js';
 
 /**
@@ -157,29 +155,6 @@ export function OpenTuiMemoryDialog(props: {
           label="Auto-skill:"
           value={toggle('enableAutoSkill') ? 'on' : 'off'}
         />
-      </box>
-    </Shell>
-  );
-}
-
-export function OpenTuiStatusLineDialog(props: {
-  settings: LoadedSettings;
-  onClose: () => void;
-  /** The popup region's row budget; the statusline body does not window, so it is ignored. */
-  availableTerminalHeight?: number;
-}) {
-  const { onClose } = props;
-  useEsc(onClose);
-  return (
-    <Shell title="Status Line">
-      <box flexDirection="column" marginTop={1}>
-        <text fg={C.dim}>{'Preset items:'}</text>
-        {STATUS_LINE_PRESET_ITEMS.map((it) => (
-          <box key={it.id} flexDirection="row">
-            <text fg={C.green}>{'• '}</text>
-            <text fg={C.text}>{it.label}</text>
-          </box>
-        ))}
       </box>
     </Shell>
   );

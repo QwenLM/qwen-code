@@ -28,7 +28,10 @@ export function useManagedTasks(
   sessionId: string | undefined,
   open: boolean,
 ) {
-  const owner = useMemo(() => ({ provider, sessionId }), [provider, sessionId]);
+  const owner = useMemo(
+    () => ({ provider, clientId, sessionId }),
+    [provider, clientId, sessionId],
+  );
   const [state, setState] = useState<{
     owner: typeof owner;
     cursors: Array<string | undefined>;

@@ -4,10 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useModelRefresh } from '../hooks/useModelRefresh';
+import { useSubscriptionLogout } from '../hooks/useSubscriptionLogout';
 import { CapacityRecoveryDialog } from './workspaces/CapacityRecoveryDialog';
 import { useCapacityRecovery } from '../hooks/useCapacityRecovery';
 import {
+  beginLocalCommand,
+  finishLocalCommand,
+} from '../utils/message-deletion';
+import {
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -38,6 +45,8 @@ import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../workflowDetailsContext';
 import { useI18n } from '../i18n';
+import { getWorkflowModeMessages } from './workflow-mode-messages';
+import { McpAppVisibilityContext } from '../mcpAppHostContext';
 import { getSubagentDetailsUnavailableReason } from './messages/toolFormatting';
 import { useWebShellCustomization } from '../customization';
 import {
@@ -62,6 +71,10 @@ import {
   resolveModelManagement,
   type WebShellModelManagementOptions,
 } from '../modelManagement';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../unavailableModels';
 import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
@@ -116,7 +129,8 @@ import { QueuedPromptDisplay } from './QueuedPromptDisplay';
 import { GoalStatusStrip } from './GoalStatusStrip';
 import composerStatusStyles from './ComposerStatusStack.module.css';
 import { GoalEditDialog } from './dialogs/GoalEditDialog';
-import { parsePlanCommand } from '../utils/planMode';
+import { nextApprovalMode, parsePlanCommand } from '../utils/planMode';
+import { useApprovalModes } from '../hooks/useApprovalModes';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
 import { createContextUsageMessageData } from './messages/ContextUsageMessage';
@@ -142,6 +156,7 @@ const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
   'addMenu',
   'approvalMode',
   'plan',
+  'workflowMode',
   'contextUsage',
   'model',
   'voice',
@@ -228,6 +243,8 @@ export interface ChatPaneProps {
   /** Host slash-command callback shared with the main chat composer. */
   onSlashCommand?: WebShellSlashCommandHandler;
   modelManagement?: WebShellModelManagementOptions;
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   onOpenGoals?: () => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onOpenMonitor?: (
@@ -282,6 +299,8 @@ export function ChatPane({
   onImageIngestionNotice,
   onSlashCommand,
   modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   onOpenGoals,
   onRightPanelOpen,
   onOpenMonitor,
@@ -301,13 +320,27 @@ export function ChatPane({
   showResponseTokensPerSecond = false,
   planControlVisible = false,
 }: ChatPaneProps) {
-  const { t } = useI18n();
-  const { renderComposerFooter: CustomComposerFooter, askUserFreeTextLabel } =
-    useWebShellCustomization();
+  const { t, language } = useI18n();
+  const parentSurfaceVisible = useContext(McpAppVisibilityContext);
+  const {
+    renderComposerFooter: CustomComposerFooter,
+    askUserFreeTextLabel,
+    onRefreshModels,
+    allowedApprovalModes,
+  } = useWebShellCustomization();
   const connection = useConnection();
+  const modelRefresh = useModelRefresh(onRefreshModels);
   const actions = useActions();
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const workspace = useWorkspace();
+  const paneSettingsCwd =
+    connection.sessionContext?.kind === 'standalone'
+      ? undefined
+      : (workspaceCwd ?? connection.workspaceCwd);
+  const availableApprovalModes = useApprovalModes(
+    paneSettingsCwd,
+    allowedApprovalModes,
+  );
   const capacityRecovery = useCapacityRecovery(
     workspace.client,
     workspace.capabilities?.features,
@@ -592,6 +625,35 @@ export function ChatPane({
   modelManagementRef.current = modelManagementPolicy;
   const onSlashCommandRef = useRef(onSlashCommand);
   onSlashCommandRef.current = onSlashCommand;
+  const {
+    available: subscriptionAvailable,
+    handleCommand: handleSubscriptionLogout,
+  } = useSubscriptionLogout({
+    t,
+    onCommand: (text) =>
+      invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError),
+    workspaceCwd: paneSettingsCwd,
+    isBlocked: () =>
+      streamingStateRef.current !== 'idle' ||
+      sessionHasActivePromptRef.current ||
+      isGoalGateBlocked({
+        sessionId: connectionRef.current.sessionId,
+        goalState: connectionRef.current.goalState,
+      }),
+    onBlocked: () => {
+      onImageIngestionNotice?.('warning', t('queue.commandBlocked'));
+      return false;
+    },
+    onNotice: (_kind, message) =>
+      store.dispatch([
+        {
+          type: 'status',
+          promptId: `local-command:${crypto.randomUUID()}`,
+          text: message,
+        },
+      ]),
+    onError: reportError,
+  });
   const pendingApproval = useMemo(
     () => extractPendingPermission(blocks),
     [blocks],
@@ -712,6 +774,8 @@ export function ChatPane({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canQueryPendingPrompts:
+      connection.capabilities?.features.includes('session_prompt') === true,
     canInjectMidTurnMedia,
     workspaceFileActions: attachmentWorkspaceTarget?.actions,
     streamingState,
@@ -727,6 +791,12 @@ export function ChatPane({
   // timestamp) rather than letting StreamingStatus fall back to "now" — so a
   // pane opened mid-turn shows the real elapsed time, not a reset-to-zero clock.
   const activeTurnStartedAt = useMemo(() => {
+    if (
+      connection.localPrompt &&
+      connection.localPrompt.sessionId === connection.sessionId
+    ) {
+      return connection.localPrompt.startedAt;
+    }
     if (connection.backgroundTurn) return connection.backgroundTurn.startedAt;
     if (!isResponding) return undefined;
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -734,7 +804,13 @@ export function ChatPane({
       if (message?.role === 'user') return message.timestamp;
     }
     return undefined;
-  }, [messages, isResponding, connection.backgroundTurn]);
+  }, [
+    messages,
+    isResponding,
+    connection.backgroundTurn,
+    connection.localPrompt,
+    connection.sessionId,
+  ]);
 
   const controlGoal = useCallback(
     async (
@@ -940,9 +1016,9 @@ export function ChatPane({
         return false;
       }
       transcriptViewportRef.current?.scrollToBottom();
-      // The host handler is documented as running before Web Shell handles a
-      // slash command, so it gets `/goal` first here exactly as it does in the
-      // main composer — otherwise an override works on one surface only.
+      // Account commands must pass login and model checks before host overrides.
+      const subscriptionHandled = handleSubscriptionLogout(text);
+      if (subscriptionHandled !== undefined) return subscriptionHandled;
       if (
         trimmed &&
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
@@ -1045,7 +1121,9 @@ export function ChatPane({
           operation.kind === 'set' || operation.kind === 'edit'
             ? operation.objective
             : undefined;
-        store.appendLocalUserMessage(text);
+        store.appendLocalUserMessage(text, undefined, {
+          localCommandId: `local-command:${crypto.randomUUID()}`,
+        });
         void controlGoal(action, objective).catch((error: unknown) => {
           reportError(error, `Failed to ${operation.kind} /goal`);
         });
@@ -1215,6 +1293,7 @@ export function ChatPane({
       connection.sessionId,
       connection.status,
       controlGoal,
+      handleSubscriptionLogout,
       enqueuePrompt,
       onFirstPromptAdmitted,
       onImageIngestionNotice,
@@ -1397,9 +1476,18 @@ export function ChatPane({
   // session's own actions; the SDK reflects the change back on `connection`.
   const commands = useMemo(() => {
     return localizeBuiltinDescriptions(
-      mergeCommands(connection.commands ?? [], getLocalCommands(t)),
+      mergeCommands(
+        connection.commands ?? [],
+        getLocalCommands(t, { subscriptionAvailable }),
+      ),
       t,
     )
+      .filter(
+        (command) =>
+          subscriptionAvailable ||
+          !['logout', 'upgrade'].includes(command.name) ||
+          Boolean(command.source && command.source !== 'builtin-command'),
+      )
       .filter(
         (command) =>
           modelManagementPolicy.allowAdd ||
@@ -1414,7 +1502,12 @@ export function ChatPane({
           description: t(skillKey),
         };
       });
-  }, [connection.commands, modelManagementPolicy.allowAdd, t]);
+  }, [
+    connection.commands,
+    modelManagementPolicy.allowAdd,
+    subscriptionAvailable,
+    t,
+  ]);
   const skills = useMemo(() => {
     const commandsByName = new Map(
       commands.map((command) => [command.name.toLowerCase(), command]),
@@ -1441,16 +1534,20 @@ export function ChatPane({
       return;
     }
     const owner = sessionOwnerGuard.capture();
+    const localCommandId = `local-command:${crypto.randomUUID()}`;
+    beginLocalCommand(store, localCommandId);
     if (streamingStateRef.current === 'idle') {
-      store.appendLocalUserMessage('/context');
+      store.appendLocalUserMessage('/context', undefined, { localCommandId });
     }
     actions
       .getContextUsage({ detail: false })
+      .finally(() => finishLocalCommand(store, localCommandId))
       .then((result) => {
         if (!owner.isCurrent()) return;
         store.dispatch([
           {
             type: 'status',
+            promptId: localCommandId,
             text: t('contextUsage.title'),
             data: createContextUsageMessageData(result),
             clearActiveText: false,
@@ -1479,10 +1576,25 @@ export function ChatPane({
   );
   const handleSelectMode = useCallback(
     (modeId: string) => {
+      if (
+        isDaemonApprovalMode(modeId) &&
+        modeId !== 'plan' &&
+        !availableApprovalModes.some((mode) => mode === modeId)
+      ) {
+        reportError(
+          new Error(`Approval mode not offered here: ${modeId}`),
+          'Failed to set approval mode',
+        );
+        return;
+      }
       void setComposerMode(modeId, planMode);
     },
-    [setComposerMode, planMode],
+    [availableApprovalModes, setComposerMode, planMode, reportError],
   );
+  const handleCycleMode = useCallback(() => {
+    const next = nextApprovalMode(availableApprovalModes, executionMode);
+    if (next) handleSelectMode(next);
+  }, [availableApprovalModes, executionMode, handleSelectMode]);
   const handleTogglePlan = useCallback(() => {
     void setComposerMode(executionMode, !planMode);
   }, [setComposerMode, executionMode, planMode]);
@@ -1495,6 +1607,24 @@ export function ChatPane({
         );
     },
     [actions, reportError],
+  );
+  const handleWorkflowModeChange = useCallback(
+    (requested: boolean) => {
+      if (connection.loadingTranscript || connection.catchingUp) return;
+      const owner = sessionOwnerGuard.capture();
+      void actions.setWorkflowMode(requested).catch((error: unknown) => {
+        if (owner.isCurrent())
+          reportError(error, getWorkflowModeMessages(language).updateFailed);
+      });
+    },
+    [
+      actions,
+      connection.loadingTranscript,
+      connection.catchingUp,
+      sessionOwnerGuard,
+      reportError,
+      language,
+    ],
   );
   const handleSelectReasoningEffort = useCallback(
     (value: ReasoningSelection) =>
@@ -1729,55 +1859,59 @@ export function ChatPane({
                 : undefined
             }
           >
-            <WorkflowDetailsProvider tasks={sessionTasks}>
-              <TranscriptViewport
-                ref={transcriptViewportRef}
-                messages={messages}
-                sourceSessionId={connection.sessionId}
-                pendingApproval={pendingToolApproval}
-                loadingTranscript={connection.loadingTranscript}
-                catchingUp={connection.catchingUp}
-                hasOlderHistory={transcriptHistory.hasMore}
-                loadingOlderHistory={transcriptHistory.loading}
-                historyCapacityReached={transcriptHistory.capacityReached}
-                historyPaginationError={transcriptHistory.paginationError}
-                onLoadOlderHistory={transcriptHistory.loadMore}
-                transcriptBlockCount={blocks.length}
-                transcriptActivity={store}
-                onReloadTranscript={
-                  transcriptReloadSupported ? reloadTranscript : undefined
-                }
-                isResponding={isResponding}
-                workspaceCwd={connection.workspaceCwd || ''}
-                hideSessionTimeline
-                turnFileChanges={
-                  visibleTurnOutputKinds.has('file')
-                    ? fileChangesByTurn
-                    : undefined
-                }
-                turnArtifacts={
-                  visibleTurnOutputKinds.has('artifact')
-                    ? artifactsByTurn
-                    : undefined
-                }
-                turnScheduledTasks={
-                  visibleTurnOutputKinds.has('scheduled_task')
-                    ? scheduledTasksByTurn
-                    : undefined
-                }
-                onTurnOutputOpen={handleRightPanelOpen}
-                onImagePreview={handleImagePreview}
-                onAttachmentPreview={handleAttachmentPreview}
-                onError={reportError}
-                generateContent={
-                  connection.capabilities?.features.includes(
-                    'session_generation',
-                  )
-                    ? actions.generateSessionContent
-                    : undefined
-                }
-              />
-            </WorkflowDetailsProvider>
+            <McpAppVisibilityContext.Provider
+              value={parentSurfaceVisible && !hidden}
+            >
+              <WorkflowDetailsProvider tasks={sessionTasks}>
+                <TranscriptViewport
+                  ref={transcriptViewportRef}
+                  messages={messages}
+                  sourceSessionId={connection.sessionId}
+                  pendingApproval={pendingToolApproval}
+                  loadingTranscript={connection.loadingTranscript}
+                  catchingUp={connection.catchingUp}
+                  hasOlderHistory={transcriptHistory.hasMore}
+                  loadingOlderHistory={transcriptHistory.loading}
+                  historyCapacityReached={transcriptHistory.capacityReached}
+                  historyPaginationError={transcriptHistory.paginationError}
+                  onLoadOlderHistory={transcriptHistory.loadMore}
+                  transcriptBlockCount={blocks.length}
+                  transcriptActivity={store}
+                  onReloadTranscript={
+                    transcriptReloadSupported ? reloadTranscript : undefined
+                  }
+                  isResponding={isResponding}
+                  workspaceCwd={connection.workspaceCwd || ''}
+                  hideSessionTimeline
+                  turnFileChanges={
+                    visibleTurnOutputKinds.has('file')
+                      ? fileChangesByTurn
+                      : undefined
+                  }
+                  turnArtifacts={
+                    visibleTurnOutputKinds.has('artifact')
+                      ? artifactsByTurn
+                      : undefined
+                  }
+                  turnScheduledTasks={
+                    visibleTurnOutputKinds.has('scheduled_task')
+                      ? scheduledTasksByTurn
+                      : undefined
+                  }
+                  onTurnOutputOpen={handleRightPanelOpen}
+                  onImagePreview={handleImagePreview}
+                  onAttachmentPreview={handleAttachmentPreview}
+                  onError={reportError}
+                  generateContent={
+                    connection.capabilities?.features.includes(
+                      'session_generation',
+                    )
+                      ? actions.generateSessionContent
+                      : undefined
+                  }
+                />
+              </WorkflowDetailsProvider>
+            </McpAppVisibilityContext.Provider>
           </SubagentDetailsProvider>
         </OptionalMonitorDetailsProvider>
       </div>
@@ -1956,14 +2090,29 @@ export function ChatPane({
             workspaceTitle={paneWorkspaceCwd}
             workspaceColor={workspaceAccent}
             currentMode={executionMode}
+            availableModes={availableApprovalModes}
+            onCycleMode={handleCycleMode}
             modeControlsDisabled={modeControlsBusy}
             planMode={planMode}
             onTogglePlan={handleTogglePlan}
             sessionWorkflowEnabled={sessionWorkflowEnabled}
             currentModel={connection.currentModel ?? ''}
+            modelRefresh={modelRefresh}
             availableModels={availableModels}
+            unavailableModels={unavailableModels}
+            mountUnavailableModelTooltip={mountUnavailableModelTooltip}
             onSelectMode={handleSelectMode}
             onSelectModel={handleSelectModel}
+            workflowMode={connection.workflowMode}
+            workflowModeStatus={
+              connection.loadingTranscript ||
+              connection.catchingUp ||
+              connection.status !== 'connected'
+                ? 'syncing'
+                : (connection.workflowModeStatus ?? 'unknown')
+            }
+            workflowModePending={connection.workflowModePending}
+            onWorkflowModeChange={handleWorkflowModeChange}
             reasoning={connection.reasoning}
             onSelectReasoningEffort={handleSelectReasoningEffort}
             dialogOpen={approvalActive}

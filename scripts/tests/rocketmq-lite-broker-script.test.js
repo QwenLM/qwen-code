@@ -13,12 +13,14 @@
 // lines — plus a stand-in mqadmin, so no RocketMQ download is needed.
 
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -28,6 +30,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 const script = resolve('scripts/rocketmq-lite-broker.sh');
+const chooser = resolve('.github/scripts/choose-rocketmq-ports.mjs');
 const version = '5.5.1';
 const portLookup =
   spawnSync('sh', ['-c', 'command -v lsof || command -v ss']).status === 0;
@@ -96,6 +99,30 @@ async function isFree(port) {
   });
 }
 
+// The holder binds 0.0.0.0, and a bind probe on 127.0.0.1 still succeeds
+// against a wildcard listener (macOS lets the specific address through), so
+// freeing a held port has to be checked the way the script checks it: by the
+// port's listener. A killed holder also closes its socket when it exits, not
+// when the kill returns.
+const listenerOf = (port) =>
+  spawnSync(
+    'sh',
+    [
+      '-c',
+      `lsof -nP -iTCP:${port} -sTCP:LISTEN -t 2> /dev/null || ` +
+        `ss -ltnpH "sport = :${port}" 2> /dev/null | sed -n 's/.*pid=\\([0-9]*\\).*/\\1/p'`,
+    ],
+    { encoding: 'utf8' },
+  ).stdout.trim();
+
+async function waitForNoListener(port) {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (!listenerOf(port)) return true;
+    await new Promise((done) => setTimeout(done, 20));
+  }
+  return false;
+}
+
 // A listener this test owns, in a process of its own like any other user's.
 async function foreignListener(port) {
   const child = spawn(
@@ -119,9 +146,12 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
   let work;
   let ports;
   let env;
+  let holderDir;
+  const holderPids = [];
   const foreign = [];
 
   beforeEach(async () => {
+    holderDir = undefined;
     work = mkdtempSync(join(tmpdir(), 'rmq-lite-script-'));
     const bin = join(work, `rocketmq-all-${version}-bin-release`, 'bin');
     mkdirSync(bin, { recursive: true });
@@ -165,6 +195,19 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
     // names this test's own work dir, so nothing else matches.
     spawnSync('pkill', ['-f', work]);
     for (const child of foreign.splice(0)) child.kill();
+    // Holders are tracked by pid, not by their records: a regression that
+    // drops the records without killing them would otherwise leave Node
+    // processes parked on this machine after a red run.
+    for (const pid of holderPids.splice(0)) {
+      try {
+        process.kill(pid);
+      } catch {
+        // Holder already gone.
+      }
+    }
+    if (holderDir && existsSync(holderDir)) {
+      rmSync(holderDir, { recursive: true, force: true });
+    }
     rmSync(work, { recursive: true, force: true });
   });
 
@@ -178,6 +221,33 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
     ['namesrv', 'broker', 'proxy'].filter((name) =>
       existsSync(join(work, `${name}.pid`)),
     );
+  // Runs the real chooser the workflow lane runs and returns its NAME=VALUE
+  // output, remembering the holder directory so a failed case cannot leak it.
+  const choosePorts = () => {
+    const picked = spawnSync(process.execPath, [chooser], {
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    expect(picked.status).toBe(0);
+    const chosen = Object.fromEntries(
+      picked.stdout
+        .trim()
+        .split('\n')
+        .map((line) => line.split('=')),
+    );
+    holderDir = chosen.RMQ_HOLDER_DIR;
+    for (const file of readdirSync(holderDir)) {
+      holderPids.push(Number(readFileSync(join(holderDir, file), 'utf8')));
+    }
+    return chosen;
+  };
+  const parkedPorts = (chosen) =>
+    [
+      'RMQ_NAMESRV_PORT',
+      'RMQ_BROKER_PORT',
+      'RMQ_PROXY_GRPC_PORT',
+      'RMQ_PROXY_REMOTING_PORT',
+    ].map((name) => Number(chosen[name]));
 
   it('stops what a failed start launched and leaves a foreign listener', async () => {
     const holder = await foreignListener(ports[1]);
@@ -236,4 +306,201 @@ describe.skipIf(!portLookup)('rocketmq-lite-broker.sh process handling', () => {
     for (const port of ports) expect(await isFree(port)).toBe(true);
     expect(pidFiles()).toEqual([]);
   }, 200_000);
+
+  it('takes over the ports the chooser parked and releases the rest', async () => {
+    const chosen = choosePorts();
+    const parked = parkedPorts(chosen);
+    expect(existsSync(chosen.RMQ_HOLDER_DIR)).toBe(true);
+
+    // start consumes the chooser's holder records exactly as the workflow
+    // lane does; a record its `read` cannot parse aborts the start here.
+    const started = run('start', chosen);
+
+    expect(started.status).toBe(0);
+    // Every holder this job owned is gone, including the broker companions,
+    // and each parked port now belongs to the component that took it over.
+    expect(existsSync(chosen.RMQ_HOLDER_DIR)).toBe(false);
+    for (const port of parked) expect(await isFree(port)).toBe(false);
+
+    expect(run('stop', chosen).status).toBe(0);
+    // As with the holders below, check the port's listener the way the
+    // script does: a bind probe on this shared host can fail for a socket
+    // this job does not own.
+    for (const port of parked) {
+      expect(await waitForNoListener(port)).toBe(true);
+    }
+    expect(pidFiles()).toEqual([]);
+  }, 200_000);
+
+  it('releases the ports the chooser parked on stop', async () => {
+    const chosen = choosePorts();
+
+    // stop reads the same holder records, for the rollback and stop paths the
+    // chooser's holders are meant to survive.
+    expect(run('stop', chosen).status).toBe(0);
+
+    expect(existsSync(chosen.RMQ_HOLDER_DIR)).toBe(false);
+    for (const port of parkedPorts(chosen)) {
+      expect(await waitForNoListener(port)).toBe(true);
+    }
+  }, 200_000);
 });
+
+describe.skipIf(process.platform === 'win32')(
+  'RocketMQ release download',
+  () => {
+    let work;
+    let env;
+    const archive = Buffer.from(
+      'UEsDBBQAAAAAAO2JW13qftiREQAAABEAAAASAAAAZG93bmxvYWQtcHJvb2YudHh0dmVyaWZpZWQgcmVsZWFzZQpQSwECFAMUAAAAAADtiVtd6n7YkREAAAARAAAAEgAAAAAAAAAAAAAAgAEAAAAAZG93bmxvYWQtcHJvb2YudHh0UEsFBgAAAAABAAEAQAAAAEEAAAAAAA==',
+      'base64',
+    );
+    // Exercise the real downloader without starting Java or a broker.
+    const definitions = readFileSync(script, 'utf8').split(
+      '\nwrite_config() {',
+    )[0];
+
+    beforeEach(() => {
+      work = mkdtempSync(join(tmpdir(), 'rmq-download-'));
+      mkdirSync(join(work, 'bin'));
+      writeFileSync(join(work, 'release.zip'), archive);
+      writeFileSync(
+        join(work, 'curl.mjs'),
+        `import { appendFileSync, copyFileSync, writeFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+const url = args.at(-1);
+const output = args[args.indexOf('-o') + 1];
+appendFileSync(process.env.REQUESTS, JSON.stringify(args) + '\\n');
+for (const [flag, value] of [['--connect-timeout', '10'], ['--max-time', '45'], ['--retry', '1'], ['--retry-max-time', '45']]) {
+  if (args[args.indexOf(flag) + 1] !== value) process.exit(95);
+}
+if (process.env.FAIL_ALL || url.includes('dlcdn.apache.org') ||
+    (process.env.FAIL_MIRROR && url.includes('mirrors.aliyun.com'))) {
+  writeFileSync(output, 'partial response');
+  process.exit(28);
+}
+if (url.endsWith('.sha512')) writeFileSync(output, process.env.PUBLISHED_SUM);
+else copyFileSync(process.env.RELEASE, output);
+`,
+      );
+      writeFileSync(
+        join(work, 'bin', 'curl'),
+        `#!/usr/bin/env bash\nexec "${process.execPath}" "${join(work, 'curl.mjs')}" "$@"\n`,
+      );
+      chmodSync(join(work, 'bin', 'curl'), 0o755);
+      const hash = createHash('sha512').update(archive).digest('hex');
+      env = {
+        ...process.env,
+        PATH: `${join(work, 'bin')}:${process.env.PATH}`,
+        RMQ_VERSION: 'test-release',
+        RMQ_WORK_DIR: work,
+        RMQ_CACHE_DIR: join(work, 'cache'),
+        RELEASE: join(work, 'release.zip'),
+        REQUESTS: join(work, 'requests.jsonl'),
+        PUBLISHED_SUM: `${hash}  release.zip\n`,
+        FAIL_ALL: '',
+        FAIL_MIRROR: '',
+      };
+    });
+
+    afterEach(() => rmSync(work, { recursive: true, force: true }));
+
+    const run = (extra = {}) =>
+      spawnSync('bash', ['-c', `${definitions}\ndownload`], {
+        env: { ...env, ...extra },
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+    const requests = () =>
+      readFileSync(env.REQUESTS, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line).at(-1));
+
+    it.each(['sha512sum', 'gpg'])(
+      'falls back after timeout and verifies %s checksums',
+      (format) => {
+        if (format === 'gpg') {
+          const hash = createHash('sha512').update(archive).digest('hex');
+          env.PUBLISHED_SUM = `release.zip: ${hash
+            .toUpperCase()
+            .match(/.{1,16}/g)
+            .join(' ')}\n`;
+        }
+
+        const result = run();
+
+        expect(result.status, result.stderr).toBe(0);
+        expect(requests()).toEqual([
+          'https://dlcdn.apache.org/rocketmq/test-release/rocketmq-all-test-release-bin-release.zip',
+          'https://archive.apache.org/dist/rocketmq/test-release/rocketmq-all-test-release-bin-release.zip',
+          'https://archive.apache.org/dist/rocketmq/test-release/rocketmq-all-test-release-bin-release.zip.sha512',
+        ]);
+        expect(result.stderr).toContain(
+          'downloading https://archive.apache.org/',
+        );
+        expect(readFileSync(join(work, 'download-proof.txt'), 'utf8')).toBe(
+          'verified release\n',
+        );
+      },
+    );
+
+    it('rejects a downloaded archive with a mismatched checksum before extraction', () => {
+      const result = run({ PUBLISHED_SUM: '0'.repeat(128) });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('failed its SHA-512 check');
+      expect(existsSync(join(work, 'download-proof.txt'))).toBe(false);
+    });
+
+    it('cleans partial responses when both sources fail', () => {
+      const result = run({ FAIL_ALL: '1' });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('could not download');
+      expect(requests()).toHaveLength(2);
+      expect(readdirSync(env.RMQ_CACHE_DIR)).toEqual([]);
+      expect(existsSync(join(work, 'download-proof.txt'))).toBe(false);
+    });
+
+    it('does not fetch a redundant checksum for the pinned release', () => {
+      const result = run({ RMQ_VERSION: '5.5.1' });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('failed its SHA-512 check');
+      expect(requests()).toEqual([
+        'https://mirrors.aliyun.com/apache/rocketmq/5.5.1/rocketmq-all-5.5.1-bin-release.zip',
+      ]);
+      expect(requests().every((url) => url.endsWith('.zip'))).toBe(true);
+      expect(existsSync(join(work, 'download-proof.txt'))).toBe(false);
+    });
+
+    it('falls back to Apache when the pinned mirror fails', () => {
+      const result = run({ RMQ_VERSION: '5.5.1', FAIL_MIRROR: '1' });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('failed its SHA-512 check');
+      expect(requests()).toEqual([
+        'https://mirrors.aliyun.com/apache/rocketmq/5.5.1/rocketmq-all-5.5.1-bin-release.zip',
+        'https://dlcdn.apache.org/rocketmq/5.5.1/rocketmq-all-5.5.1-bin-release.zip',
+        'https://archive.apache.org/dist/rocketmq/5.5.1/rocketmq-all-5.5.1-bin-release.zip',
+      ]);
+      expect(existsSync(join(work, 'download-proof.txt'))).toBe(false);
+    });
+
+    it('checks a cached pinned archive without fetching a checksum', () => {
+      mkdirSync(env.RMQ_CACHE_DIR);
+      writeFileSync(
+        join(env.RMQ_CACHE_DIR, 'rocketmq-all-5.5.1-bin-release.zip'),
+        archive,
+      );
+
+      const result = run({ RMQ_VERSION: '5.5.1' });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('failed its SHA-512 check');
+      expect(existsSync(env.REQUESTS)).toBe(false);
+      expect(existsSync(join(work, 'download-proof.txt'))).toBe(false);
+    });
+  },
+);

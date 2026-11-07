@@ -127,8 +127,9 @@ export function isOwnerRepo(repo: string): boolean {
  * a dropped host silently reads from and posts to github.com's same-named
  * `owner/repo`.
  *
- * `undefined` (or `''`) restores the default: the child then inherits the
- * parent env untouched, so an operator-exported GH_HOST stays in effect.
+ * `undefined` (or `''`) restores the default: no `GH_HOST` key is added, so an
+ * operator-exported GH_HOST still reaches the child. {@link ghEnv} neutralises
+ * forced colour/TTY on every spawn regardless of the host.
  */
 export function setGhHost(host: string | undefined): void {
   // Trim once here so every caller is consistent — `resolveGhHost` trims
@@ -208,12 +209,31 @@ export function normalizeGhHostForUrl(host: string): string {
 }
 
 /**
- * Environment for `gh` child processes. `undefined` means "inherit the
- * parent env untouched"; with a host set, the inherited env is extended
- * with GH_HOST, which `gh` honours on every command.
+ * Environment for `gh` child processes: the inherited env with forced colour
+ * and TTY emulation turned off, plus GH_HOST when a host is set.
+ *
+ * Every `gh` read in this module is machine-read — `JSON.parse` in
+ * {@link ghApi}/{@link ghApiAll}, line-split NDJSON in {@link parseNdjson},
+ * byte-exact diff text in {@link ghRaw} — so an operator who exports
+ * `CLICOLOR_FORCE=1` or `GH_FORCE_TTY=1` corrupts the payload instead of
+ * decorating it. Measured on gh 2.97.0 with a piped stdout: forced colour
+ * interleaves SGR escapes BETWEEN tokens and switches `--jq '.[]'` from one
+ * JSON value per line to pretty-printed multi-line, so the per-line decode
+ * meets a bare `{` and either throws (strict) or drops the record, and
+ * `gh pr diff` carries the escapes into the bytes platform/github.ts stores.
+ * One rule at the spawn covers every read; stripping escapes afterwards could
+ * not, because the line framing is already gone.
+ *
+ * `NO_COLOR=1` is not sufficient — gh lets `CLICOLOR_FORCE=1` win over it —
+ * and `GH_FORCE_TTY=0` is not sufficient either, because gh reads ANY
+ * non-empty value as "pretend a TTY" (`GH_FORCE_TTY=0` still colourised). So
+ * the first is pinned to '0' and the second is deleted.
  */
-export function ghEnv(): NodeJS.ProcessEnv | undefined {
-  return ghHost ? { ...process.env, GH_HOST: ghHost } : undefined;
+export function ghEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, CLICOLOR_FORCE: '0' };
+  delete env['GH_FORCE_TTY'];
+  if (ghHost) env['GH_HOST'] = ghHost;
+  return env;
 }
 
 /**

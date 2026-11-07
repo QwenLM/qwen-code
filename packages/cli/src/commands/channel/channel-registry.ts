@@ -243,6 +243,25 @@ function assertManagementField(
       );
     }
   }
+  const maximum = (field as { maximum?: unknown }).maximum;
+  if (maximum !== undefined) {
+    if (field.kind !== 'number') {
+      throw new Error(
+        `Channel field "${path}" can only declare maximum on number fields.`,
+      );
+    }
+    if (typeof maximum !== 'number' || !Number.isFinite(maximum)) {
+      throw new Error(`Channel field "${path}" must declare a finite maximum.`);
+    }
+    if (
+      field.exclusiveMinimum !== undefined &&
+      maximum <= field.exclusiveMinimum
+    ) {
+      throw new Error(
+        `Channel field "${path}" declares a maximum that leaves no valid value.`,
+      );
+    }
+  }
   if (field.kind === 'enum') {
     if (!Array.isArray(field.options) || field.options.length === 0) {
       throw new Error(
@@ -344,6 +363,12 @@ function ensureBuiltins(): Promise<void> {
         { name: 'dws', promise: import('@qwen-code/channel-dws') },
         { name: 'email', promise: import('@qwen-code/channel-email') },
         { name: 'wecom', promise: import('@qwen-code/channel-wecom') },
+        {
+          name: 'wecom-callback',
+          promise: import('@qwen-code/channel-wecom').then(
+            ({ callbackPlugin }) => ({ plugin: callbackPlugin }),
+          ),
+        },
         { name: 'feishu', promise: import('@qwen-code/channel-feishu') },
         { name: 'qqbot', promise: import('@qwen-code/channel-qqbot') },
         { name: 'github', promise: import('@qwen-code/channel-github') },

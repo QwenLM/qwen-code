@@ -17,6 +17,10 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      '@qwen-code/channel-base/markdown-chunks': path.resolve(
+        __dirname,
+        '../base/src/markdown-chunks.ts',
+      ),
       '@qwen-code/channel-base': path.resolve(
         __dirname,
         '../base/src/index.ts',

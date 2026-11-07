@@ -7,6 +7,10 @@
 // Japanese translations for Qwen Code CLI
 
 export default {
+  'Generated UI': 'Generated UI（生成 UI）',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    '対応するローカルセッションで内蔵 Generated UI を有効にします。変更を適用するには対象のセッションを再起動してください。',
+
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -888,6 +892,8 @@ export default {
   'disabled (bare mode)': '無効（ベアモード）',
   'disabled (safe mode)': '無効（セーフモード）',
   'disabled (disableAllHooks)': '無効（disableAllHooks）',
+  'disabled (not approved)': '無効（未承認）',
+  'disabled (rejected)': '無効（拒否済み）',
   'disabled (folder not trusted)': '無効（フォルダーが信頼されていません）',
   'disabled (turned off for this session)': '無効（このセッションでオフ）',
   'Server:': 'サーバー:',
@@ -1403,6 +1409,8 @@ export default {
   'System prompt': 'システムプロンプト',
   'Built-in tools': '組み込みツール',
   'MCP tools': 'MCP tools',
+  'Instruction files': '指示ファイル',
+  'Auto memory': '自動メモリ',
   'Memory files': 'メモリファイル',
   Skills: 'スキル',
   Messages: 'メッセージ',
@@ -1979,6 +1987,8 @@ export default {
   out: '出力',
   'In/Out': '入力/出力',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    '指定バージョンへの更新にはスタンドアロン版が必要です。現在のインストール方法でバージョン {{version}} を手動インストールしてください。',
   'Check for Qwen Code updates and install if available':
     'Qwen Codeのアップデートを確認し、利用可能な場合はインストールします',
   'Qwen Code update available! {{current}} → {{latest}}':

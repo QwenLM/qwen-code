@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -23,6 +24,7 @@ import { TurnBudget } from '../core/turn-budget.js';
 import { uiTelemetryService, type UiEvent } from '../telemetry/uiTelemetry.js';
 import { ApiResponseEvent } from '../telemetry/types.js';
 import { EVENT_API_RESPONSE } from '../telemetry/constants.js';
+import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 
 const operation = {
   operationId: 'operation-1',
@@ -54,13 +56,6 @@ afterEach(async () => {
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hook-model-'));
   dirs.push(root);
-  const ref = {
-    resourceId: 'resource',
-    kind: 'managed-test',
-    schemaVersion: 1,
-    byteLength: 2,
-    digest: '9'.repeat(64),
-  };
   const options = {
     runtimeBaseDir: root,
     sessionId: '550e8400-e29b-41d4-a716-446655440000',
@@ -75,6 +70,8 @@ async function fixture() {
     workerId: 'worker-1',
     activationLeaseDurationMs: 60_000,
   };
+  const resources = LocalManagedSessionResourceStore.create(options);
+  const ref = await resources.publish('managed-test', Buffer.from('{}'));
   const session = await openManagedSession({
     ...options,
     create: { definitionRef: ref, rootSnapshotRef: ref, createdBy: 'test' },
@@ -89,6 +86,85 @@ async function fixture() {
 }
 
 describe('Managed Hook model activation', () => {
+  it('commits complete final Parts with its output marker after renewal and refuses changed replay', async () => {
+    const { session, controller, options } = await fixture();
+    await createManagedHarnessHandle(session).ensureRunnable();
+    const recoveryRef = await session.resources.publish(
+      'hosted-model-request',
+      Buffer.from('{}'),
+    );
+    const record = {
+      uuid: randomUUID(),
+      parentUuid: null,
+      sessionId: options.sessionId,
+      timestamp: new Date().toISOString(),
+      type: 'assistant' as const,
+      cwd: options.cwd,
+      version: 'test',
+      daemonPromptId: 'turn-1',
+      model: 'main',
+      message: {
+        role: 'model' as const,
+        parts: [
+          {
+            text: 'private thought',
+            thought: true,
+            thoughtSignature: 'original-signature',
+          },
+          { text: '原始输出'.repeat(20_000) },
+          { inlineData: { mimeType: 'image/png', data: 'AQID' } },
+        ],
+      },
+    };
+    await controller.runTurn('turn-1', async (scope) => {
+      await scope.bindBudget(new TurnBudget(), 'original');
+      const complete = await scope.beginMainAttempt('main', recoveryRef);
+      await Promise.all([
+        session.authority.renewActivation({ leaseDurationMs: 60_000 }),
+        complete(true, [{ candidatesTokenCount: 30 }], record),
+      ]);
+      const after = session.authority.committedSequence;
+      await complete(true, [{ candidatesTokenCount: 30 }], record);
+      expect(session.authority.committedSequence).toBe(after);
+      await expect(
+        complete(true, [{ candidatesTokenCount: 31 }], record),
+      ).rejects.toThrow('replay differs');
+      await expect(
+        complete(true, [{ candidatesTokenCount: 30 }], {
+          ...record,
+          message: {
+            ...record.message,
+            parts: [{ text: 'changed thought', thought: true }],
+          },
+        }),
+      ).rejects.toThrow('replay differs');
+      await expect(complete(false, [], record)).rejects.toThrow(
+        'Only successful',
+      );
+    });
+    expect(await session.sink.project()).toEqual([record]);
+    const rows = (await fs.readFile(options.transcriptPath, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    const markerIndex = rows.findIndex((row) =>
+      row.managedSession?.commandId?.endsWith(':output_committed'),
+    );
+    const marker = rows[markerIndex].managedSession;
+    const attempt = rows[markerIndex - 2].managedSession;
+    const message = rows[markerIndex - 1].managedSession;
+    expect(marker.eventCount).toBe(2);
+    expect(attempt.kind).toBe('model.attempt');
+    expect(attempt.payload.recoveryRef).toEqual(recoveryRef);
+    expect(message.kind).toBe('message.committed');
+    expect(message.sequence).toBe(attempt.sequence + 1);
+    expect(message.payload.modelAttemptId).toBe(attempt.payload.attemptId);
+    expect(message.payload.contentRef.kind).toBe('managed-message-chunks');
+    expect(rows[markerIndex - 3].managedSession.operation).toBe(
+      'renewActivation',
+    );
+  });
+
   it('shares the original turn budget and all model usage with lifecycle Hooks after cold restore', async () => {
     const { session, controller, options } = await fixture();
     await createManagedHarnessHandle(session).ensureRunnable();
