@@ -32,19 +32,21 @@ final class JournalWriterLifecycle {
     private final JdbcTemplate jdbc;
     private final WriterCredentialPolicy credentials;
     private final JdbcRuntimeBindingRepository csiBindings;
+    private final ManagedExtensionRecordStore extensionRecords;
 
     JournalWriterLifecycle(JournalFencing fencing,
             JournalStoreRows storeRows,
             com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion,
             JdbcTemplate jdbc,
             WriterCredentialPolicy credentials,
-            JdbcRuntimeBindingRepository csiBindings) {
+            JdbcRuntimeBindingRepository csiBindings, ManagedExtensionRecordStore extensionRecords) {
         this.fencing = fencing;
         this.storeRows = storeRows;
         this.readerVersion = readerVersion;
         this.jdbc = jdbc;
         this.credentials = credentials;
         this.csiBindings = csiBindings;
+        this.extensionRecords = extensionRecords;
     }
 
     void bindControlSessionStorage(String tenantId, String workspaceId, String sessionId) {
@@ -270,6 +272,9 @@ final class JournalWriterLifecycle {
                     || !JournalFencing.secureEquals(tokenHash, head.leaseTokenHash())) {
                 throw JournalFencing.writerConflict();
             }
+            if (!extensionRecords.rebuildActivityBatch(tenantId, request.workspaceId(), sessionId, head.storageVersion(), head.journalRevision(), head.committedSequence(), head.lastCommitDigest())) {
+                return null;
+            }
             Timestamp leaseUntil = laterOf(head.writerLeaseUntil(),
                     plusMillis(now, request.leaseMillis()));
             jdbc.update(
@@ -284,8 +289,12 @@ final class JournalWriterLifecycle {
         }
         long generation = JournalStoreRows.increment(head.writerGeneration(),
                 "writer generation");
+        if (!extensionRecords.rebuildActivityBatch(tenantId, request.workspaceId(), sessionId, head.storageVersion(), head.journalRevision(), head.committedSequence(), head.lastCommitDigest())) {
+            return null;
+        }
         if (csiOriginal != null) {
-            if (!"ACTIVE".equals(head.state()) || head.storageVersion() != JournalStoreRows.STORAGE_VERSION
+            if (!"ACTIVE".equals(head.state()) || !com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile.supportsStorage(
+                    csiOriginal.request().getScope(), head.storageVersion())
                     || head.compactedThroughRevision() != 0 || !"READY".equals(head.recoveryStatus())
                     || head.writerLeaseUntil() == null || head.journalRevision() < 2 || head.activationEpoch() < 1) {
                 throw JournalStoreRows.conflict("csi_original_writer_unavailable", "The original CSI writer cannot be replaced.");

@@ -441,6 +441,10 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                         + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", Integer.class)).isZero();
                 assertThat(jdbc.queryForObject("SELECT writer_generation FROM ma_session_head", Long.class))
                         .isEqualTo(coldRecovery ? 3 : 1);
+                assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head", Integer.class)).isEqualTo(4);
+                var diagnostics = new ManagedExtensionRecordStore(jdbc).findModelDiagnostics("tenant", sessionId);
+                assertThat(diagnostics.statistics()).isNotNull();
+                assertThat(diagnostics.statisticsSequence()).isPositive();
                 if (coldRecovery) {
                     assertThat(result.path("coldRecovery").asBoolean()).isTrue();
                     assertThat(result.path("coldRefusalChecks").asInt()).isEqualTo(9);

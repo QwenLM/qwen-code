@@ -23,6 +23,8 @@ import {
   publishManagedMessageBody,
 } from './managed-message-chunks.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
+import { getManagedSessionDiagnostics } from './managed-session-diagnostics.js';
+import type { ManagedInvocationObservation } from './managed-execution-diagnostics.js';
 
 /**
  * The record shapes the message projection can carry today.
@@ -144,7 +146,10 @@ export class ManagedSessionRecordSink {
    * would put content in the transcript that the authoritative log does not
    * account for, which is the divergence this layer exists to prevent.
    */
-  async write(record: ChatRecord): Promise<void> {
+  async write(
+    record: ChatRecord,
+    diagnostics?: readonly ManagedInvocationObservation[],
+  ): Promise<void> {
     if (!this.canCarry(record)) {
       throw new ManagedSessionUnmappedRecordError(record);
     }
@@ -183,7 +188,7 @@ export class ManagedSessionRecordSink {
         sessionKey: this.authority.sessionHeader.sessionKey,
         contentDigest: this.authority.sessionHeader.definitionRef.digest,
       },
-      { record },
+      { record, diagnostics },
       this.actor(),
     );
   }
@@ -316,6 +321,12 @@ export class ManagedSessionRecordSink {
    * carries beyond the fields the event indexes.
    */
   private async commitTurnSettled(record: ChatRecord): Promise<void> {
+    const diagnostics = getManagedSessionDiagnostics(this.authority);
+    const commit = () => this.commitTurnSettledOwned(record);
+    return diagnostics ? diagnostics.serialCommit(commit) : commit();
+  }
+
+  private async commitTurnSettledOwned(record: ChatRecord): Promise<void> {
     const payload = record.systemPayload as
       | { promptId?: unknown; state?: unknown; stopReason?: unknown }
       | undefined;
@@ -350,6 +361,10 @@ export class ManagedSessionRecordSink {
       occurredAt: Date.parse(record.timestamp) || Date.now(),
       eventId: `turn:${turnId}`,
     };
+    const usageRef =
+      (await getManagedSessionDiagnostics(this.authority)?.publishTurnFallback(
+        turnId,
+      )) ?? null;
     if (actor.class === 'harness' && held !== undefined) {
       const authorization = await this.authority.harnessRunAuthorization();
       if (
@@ -361,7 +376,7 @@ export class ManagedSessionRecordSink {
         await this.authority.commitTurnComplete(
           command,
           {
-            turn,
+            turn: { ...turn, usageRef },
             boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
             state: (identity, previous) =>
               createNextTurnReadyHarnessCheckpoint({
@@ -401,7 +416,7 @@ export class ManagedSessionRecordSink {
           outcome: turn.outcome,
           stopReason: turn.stopReason,
           resultRef,
-          usageRef: null,
+          usageRef,
           pendingOwnersRef: null,
         },
       }),

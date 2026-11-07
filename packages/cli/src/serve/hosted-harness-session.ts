@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { enableManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
+import {
+  enableManagedExecutionDiagnostics,
+  type ManagedInvocationObservation,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
 import {
   parsePublicChildModelRoute,
   type PublicChildExtensionAgent,
@@ -3923,13 +3928,14 @@ async function executeHostedTurn(
             ChatRecord,
             'uuid' | 'timestamp' | 'clientInitiatedSkills'
           >,
+          diagnostics?: readonly ManagedInvocationObservation[],
         ) => {
           const message = messageRecord(type, parts, model, identity);
           if (type === 'assistant' && deltas) {
             const streamed = deltas.takeMessageId();
             if (streamed !== undefined) message.uuid = streamed;
           }
-          await session.managed.sink.write(message);
+          await session.managed.sink.write(message, diagnostics);
           parentUuid = message.uuid;
           return message.uuid;
         };
@@ -6000,6 +6006,10 @@ export function registerHostedHarnessSessionRoutes(
           ? { create: refs, requireNew: true }
           : { retainVerifiedResources: true }),
       });
+      if (stores.supportsModelDiagnostics?.())
+        await enableManagedSessionDiagnostics(managed);
+      if (stores.supportsExecutionDiagnostics?.())
+        await enableManagedExecutionDiagnostics(managed);
       if (!acceptingWork()) {
         await managed.close();
         error(res, 409, 'hosted_harness_quiescing');
@@ -11089,13 +11099,14 @@ export function registerHostedHarnessSessionRoutes(
             ChatRecord,
             'uuid' | 'timestamp' | 'clientInitiatedSkills'
           >,
+          diagnostics?: readonly ManagedInvocationObservation[],
         ) => {
           const message = messageRecord(type, parts, model, identity);
           if (type === 'assistant') {
             const streamed = deltas.takeMessageId();
             if (streamed !== undefined) message.uuid = streamed;
           }
-          await session.managed.sink.write(message);
+          await session.managed.sink.write(message, diagnostics);
           parentUuid = message.uuid;
           return message.uuid;
         };

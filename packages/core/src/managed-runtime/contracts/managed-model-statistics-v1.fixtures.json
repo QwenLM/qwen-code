@@ -1,0 +1,2218 @@
+{
+  "valid": [
+    {
+      "name": "main-zero",
+      "kind": "managed-hosted-model-usage-v2",
+      "body": {
+        "version": 2,
+        "turnId": "turn-1",
+        "model": "qwen-test",
+        "budget": null,
+        "statistics": {
+          "version": 1,
+          "snapshotRevision": 1,
+          "observedAt": 0,
+          "rawOutputTokensTotal": 0,
+          "coverage": {
+            "gaps": []
+          },
+          "totals": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "sources": {
+            "main": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "hook": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "compression": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            }
+          },
+          "models": [],
+          "overflow": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "recent": [],
+          "modelBreakdownOmitted": false,
+          "samplesTruncated": false
+        },
+        "context": {
+          "version": 1,
+          "attemptId": "turn-1:main:00000000-0000-4000-8000-000000000001",
+          "turnId": "turn-1",
+          "model": "qwen-test",
+          "providerPin": "0000000000000000000000000000000000000000000000000000000000000000",
+          "observedAt": 1000,
+          "inputTokens": null,
+          "cachedTokens": null,
+          "contextWindowSize": 32768,
+          "breakdown": {
+            "systemPrompt": 10,
+            "builtinTools": 20,
+            "mcpTools": 0,
+            "instructionFiles": 0,
+            "memoryFiles": 0,
+            "skills": 0,
+            "startupContext": 0,
+            "messages": 5
+          },
+          "thresholds": {
+            "warn": 0.7,
+            "auto": 0.8,
+            "hard": 0.95
+          },
+          "details": [],
+          "attributionComplete": true,
+          "detailsTruncated": false
+        }
+      }
+    },
+    {
+      "name": "hook-outside-turn",
+      "kind": "managed-hook-model-usage-v2",
+      "body": {
+        "version": 2,
+        "operationId": "hook-op",
+        "occurrenceId": "hook-occ",
+        "originTurnId": null,
+        "eventName": "SessionStart",
+        "model": "qwen-test",
+        "budget": null,
+        "statistics": {
+          "version": 1,
+          "snapshotRevision": 1,
+          "observedAt": 0,
+          "rawOutputTokensTotal": 0,
+          "coverage": {
+            "gaps": []
+          },
+          "totals": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "sources": {
+            "main": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "hook": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "compression": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            }
+          },
+          "models": [],
+          "overflow": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "recent": [],
+          "modelBreakdownOmitted": false,
+          "samplesTruncated": false
+        },
+        "context": null
+      }
+    },
+    {
+      "name": "snapshot-zero",
+      "kind": "managed-session-model-stats",
+      "body": {
+        "version": 1,
+        "budget": null,
+        "statistics": {
+          "version": 1,
+          "snapshotRevision": 1,
+          "observedAt": 0,
+          "rawOutputTokensTotal": 0,
+          "coverage": {
+            "gaps": []
+          },
+          "totals": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "sources": {
+            "main": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "hook": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "compression": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            }
+          },
+          "models": [],
+          "overflow": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "recent": [],
+          "modelBreakdownOmitted": false,
+          "samplesTruncated": false
+        },
+        "context": null
+      }
+    },
+    {
+      "name": "main-without-context",
+      "kind": "managed-hosted-model-usage-v2",
+      "body": {
+        "version": 2,
+        "turnId": "turn-1",
+        "model": "qwen-test",
+        "budget": null,
+        "statistics": {
+          "version": 1,
+          "snapshotRevision": 1,
+          "observedAt": 0,
+          "rawOutputTokensTotal": 0,
+          "coverage": {
+            "gaps": []
+          },
+          "totals": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "sources": {
+            "main": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "hook": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "compression": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            }
+          },
+          "models": [],
+          "overflow": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "recent": [],
+          "modelBreakdownOmitted": false,
+          "samplesTruncated": false
+        },
+        "context": null
+      }
+    },
+    {
+      "name": "saturated-request-outcomes",
+      "kind": "managed-session-model-stats",
+      "body": {
+        "version": 1,
+        "budget": null,
+        "statistics": {
+          "version": 1,
+          "snapshotRevision": 1,
+          "observedAt": 0,
+          "rawOutputTokensTotal": 0,
+          "coverage": {
+            "gaps": []
+          },
+          "totals": {
+            "requests": {
+              "total": 9007199254740991,
+              "success": 9007199254740991,
+              "error": 1,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "sources": {
+            "main": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "hook": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "compression": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            }
+          },
+          "models": [],
+          "overflow": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "recent": [],
+          "modelBreakdownOmitted": false,
+          "samplesTruncated": false
+        },
+        "context": null
+      }
+    },
+    {
+      "name": "snapshot-fractional-raw-budget",
+      "kind": "managed-session-model-stats",
+      "body": {
+        "version": 1,
+        "budget": {
+          "sessionId": "session-1",
+          "promptId": "turn-1",
+          "budget": 5000,
+          "outputTokensAtTurnStart": 27.125
+        },
+        "statistics": {
+          "version": 1,
+          "snapshotRevision": 1,
+          "observedAt": 0,
+          "rawOutputTokensTotal": 38.25,
+          "coverage": {
+            "gaps": ["legacy_history"]
+          },
+          "totals": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "sources": {
+            "main": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "hook": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "compression": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            }
+          },
+          "models": [],
+          "overflow": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "recent": [],
+          "modelBreakdownOmitted": false,
+          "samplesTruncated": false
+        },
+        "context": null
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "old-kind-new-body",
+      "kind": "managed-hosted-model-usage",
+      "body": {
+        "version": 2,
+        "turnId": "turn-1",
+        "model": "qwen-test",
+        "budget": null,
+        "statistics": {
+          "version": 1,
+          "snapshotRevision": 1,
+          "observedAt": 0,
+          "rawOutputTokensTotal": 0,
+          "coverage": {
+            "gaps": []
+          },
+          "totals": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "sources": {
+            "main": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "hook": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "compression": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            }
+          },
+          "models": [],
+          "overflow": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "recent": [],
+          "modelBreakdownOmitted": false,
+          "samplesTruncated": false
+        },
+        "context": null
+      }
+    },
+    {
+      "name": "context-on-generic",
+      "kind": "managed-session-model-stats",
+      "body": {
+        "version": 1,
+        "budget": null,
+        "statistics": {
+          "version": 1,
+          "snapshotRevision": 1,
+          "observedAt": 0,
+          "rawOutputTokensTotal": 0,
+          "coverage": {
+            "gaps": []
+          },
+          "totals": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "sources": {
+            "main": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "hook": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "compression": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            }
+          },
+          "models": [],
+          "overflow": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "recent": [],
+          "modelBreakdownOmitted": false,
+          "samplesTruncated": false
+        },
+        "context": {
+          "version": 1,
+          "attemptId": "turn-1:main:00000000-0000-4000-8000-000000000001",
+          "turnId": "turn-1",
+          "model": "qwen-test",
+          "providerPin": "0000000000000000000000000000000000000000000000000000000000000000",
+          "observedAt": 1000,
+          "inputTokens": null,
+          "cachedTokens": null,
+          "contextWindowSize": 32768,
+          "breakdown": {
+            "systemPrompt": 10,
+            "builtinTools": 20,
+            "mcpTools": 0,
+            "instructionFiles": 0,
+            "memoryFiles": 0,
+            "skills": 0,
+            "startupContext": 0,
+            "messages": 5
+          },
+          "thresholds": {
+            "warn": 0.7,
+            "auto": 0.8,
+            "hard": 0.95
+          },
+          "details": [],
+          "attributionComplete": true,
+          "detailsTruncated": false
+        }
+      }
+    },
+    {
+      "name": "unknown-coverage",
+      "kind": "managed-session-model-stats",
+      "body": {
+        "version": 1,
+        "budget": null,
+        "statistics": {
+          "version": 1,
+          "snapshotRevision": 1,
+          "observedAt": 0,
+          "rawOutputTokensTotal": 0,
+          "coverage": {
+            "gaps": ["future"]
+          },
+          "totals": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "sources": {
+            "main": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "hook": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "compression": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            }
+          },
+          "models": [],
+          "overflow": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "recent": [],
+          "modelBreakdownOmitted": false,
+          "samplesTruncated": false
+        },
+        "context": null
+      }
+    },
+    {
+      "name": "request-outcome-total-mismatch",
+      "kind": "managed-session-model-stats",
+      "body": {
+        "version": 1,
+        "budget": null,
+        "statistics": {
+          "version": 1,
+          "snapshotRevision": 1,
+          "observedAt": 0,
+          "rawOutputTokensTotal": 0,
+          "coverage": {
+            "gaps": []
+          },
+          "totals": {
+            "requests": {
+              "total": 5,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "sources": {
+            "main": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "hook": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            },
+            "compression": {
+              "requests": {
+                "total": 0,
+                "success": 0,
+                "error": 0,
+                "cancelled": 0,
+                "interrupted": 0
+              },
+              "tokens": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "usageKnown": {
+                "prompt": 0,
+                "candidates": 0,
+                "total": 0,
+                "cached": 0,
+                "thoughts": 0
+              },
+              "latencyMs": 0,
+              "timing": {
+                "ttftCount": 0,
+                "totalTtftMs": 0,
+                "generationCount": 0,
+                "totalGenerationMs": 0,
+                "throughputOutputTokens": 0
+              },
+              "failures": {
+                "http": 0,
+                "transport": 0,
+                "timeout": 0,
+                "other": 0
+              },
+              "backoffRetries": 0
+            }
+          },
+          "models": [],
+          "overflow": {
+            "requests": {
+              "total": 0,
+              "success": 0,
+              "error": 0,
+              "cancelled": 0,
+              "interrupted": 0
+            },
+            "tokens": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "usageKnown": {
+              "prompt": 0,
+              "candidates": 0,
+              "total": 0,
+              "cached": 0,
+              "thoughts": 0
+            },
+            "latencyMs": 0,
+            "timing": {
+              "ttftCount": 0,
+              "totalTtftMs": 0,
+              "generationCount": 0,
+              "totalGenerationMs": 0,
+              "throughputOutputTokens": 0
+            },
+            "failures": {
+              "http": 0,
+              "transport": 0,
+              "timeout": 0,
+              "other": 0
+            },
+            "backoffRetries": 0
+          },
+          "recent": [],
+          "modelBreakdownOmitted": false,
+          "samplesTruncated": false
+        },
+        "context": null
+      }
+    }
+  ]
+}

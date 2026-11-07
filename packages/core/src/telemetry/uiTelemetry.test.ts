@@ -1591,6 +1591,25 @@ describe('UiTelemetryService.getTotalOutputTokens', () => {
     expect(service.getTotalOutputTokens('session-a')).toBe(0);
   });
 
+  it('restores fractional raw output without rounding or charging it twice', () => {
+    const service = new UiTelemetryService();
+    service.addEvent(response('main', 11.25), 'session-a');
+    service.restoreSessionOutputTokensBaseline('session-a', 38.25);
+    expect(service.getTotalOutputTokens('session-a')).toBe(38.25);
+    service.restoreSessionOutputTokensBaseline('session-a', 38.25);
+    expect(service.getTotalOutputTokens('session-a')).toBe(38.25);
+    service.addEvent(response('main', 0.5), 'session-a');
+    service.restoreSessionOutputTokensBaseline('session-a', 38.25);
+    expect(service.getTotalOutputTokens('session-a')).toBe(38.75);
+    expect(service.getMetrics().models['main'].tokens.candidates).toBe(11.75);
+    service.resetSession('session-a');
+    service.restoreSessionOutputTokensBaseline('session-a', 38.75);
+    expect(service.getTotalOutputTokens('session-a')).toBe(38.75);
+    for (const invalid of [-1, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])
+      service.restoreSessionOutputTokensBaseline('session-a', invalid);
+    expect(service.getTotalOutputTokens('session-a')).toBe(38.75);
+  });
+
   it('restores a durable Session model ledger once without resetting warm usage or charging process totals', () => {
     const service = new UiTelemetryService();
     service.addEvent(response('main', 120), 'session-a');

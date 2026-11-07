@@ -23,6 +23,30 @@ import java.util.Set;
  * exactly one rule class.
  */
 public enum SurfaceRegistry {
+    PUBLIC_SESSION_ACTIVITY_STATS(Method.GET, "/v1/agents/sessions/{sessionId}/activity-stats",
+            Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_ACTIVITY_STATS)),
+    WEBSHELL_SESSION_ACTIVITY_STATS(Method.POST, "/api/agent/web-shell/v1/session-activity-stats/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_ACTIVITY_STATS)),
+    PUBLIC_SESSION_ACTIVITY(Method.GET, "/v1/agents/sessions/{sessionId}/activity",
+            Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_ACTIVITY)),
+    WEBSHELL_SESSION_ACTIVITY(Method.POST, "/api/agent/web-shell/v1/session-activity/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_ACTIVITY)),
+    PUBLIC_SESSION_CONTEXT_USAGE(Method.GET, "/v1/agents/sessions/{sessionId}/context-usage",
+            Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_CONTEXT_USAGE)),
+    WEBSHELL_SESSION_CONTEXT_USAGE(Method.POST, "/api/agent/web-shell/v1/session-context-usage/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_CONTEXT_USAGE)),
+    PUBLIC_SESSION_MODEL_STATISTICS(Method.GET, "/v1/agents/sessions/{sessionId}/stats",
+            Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_MODEL_STATISTICS)),
+    WEBSHELL_SESSION_MODEL_STATISTICS(Method.POST, "/api/agent/web-shell/v1/session-stats/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_MODEL_STATISTICS)),
+    PUBLIC_SESSION_RESOURCES(Method.GET, "/v1/agents/sessions/{sessionId}/resources",
+            Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_RESOURCES)),
+    WEBSHELL_SESSION_RESOURCES(Method.POST, "/api/agent/web-shell/v1/session-resources/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_RESOURCES)),
+    PUBLIC_SESSION_AGENT_TRACE(Method.GET, "/v1/agents/sessions/{sessionId}/agent-trace",
+            Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_AGENT_TRACE)),
+    WEBSHELL_SESSION_AGENT_TRACE(Method.POST, "/api/agent/web-shell/v1/session-agent-trace/query",
+            Surface.WEBSHELL, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_AGENT_TRACE)),
     WEBSHELL_WORKTREE_OPTIONS(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/options",
             Surface.WEBSHELL, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
     WEBSHELL_WORKTREE_QUERY(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/query",
@@ -703,6 +727,7 @@ public enum SurfaceRegistry {
      * carries both {@link #TURN_SUBMIT} and {@link #TURN_CANCEL}.
      */
     public enum Capability {
+        SESSION_CONTEXT_USAGE, SESSION_MODEL_STATISTICS, SESSION_RESOURCES, SESSION_AGENT_TRACE, SESSION_ACTIVITY_STATS, SESSION_ACTIVITY,
         SESSION_WORKTREE,
         EXTERNAL_STORAGE_REGISTER,
         USER_MESSAGE_QUERY, USER_MESSAGE_COMMAND, STORE_USER_MESSAGE_CLAIM,

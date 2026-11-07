@@ -1513,6 +1513,9 @@ public class SurfaceAdmissionAcceptanceTest {
             }
         }
         List<String> query = new ArrayList<>();
+        if (entry.surface() == Surface.PUBLIC && entry.capabilities().contains(Capability.SESSION_ACTIVITY)) {
+            query.add("kind=tools");
+        }
         if (entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD)) {
             query.add("workspaceId=workspace");
             query.add("cwdRelative=.");
@@ -1708,7 +1711,10 @@ public class SurfaceAdmissionAcceptanceTest {
             case WORKSPACE_FILES_UPLOAD_QUERY -> "{\"uploadId\":\"11111111-1111-4111-8111-111111111111\"}";
             case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
-            case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS, SESSION_MCP -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS, SESSION_MCP,
+                    SESSION_CONTEXT_USAGE, SESSION_MODEL_STATISTICS, SESSION_RESOURCES, SESSION_AGENT_TRACE, SESSION_ACTIVITY_STATS ->
+                    "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_ACTIVITY -> "{\"sessionId\":\"" + session + "\",\"kind\":\"tools\"}";
             case MCP_MANAGEMENT -> {
                 if (entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT) {
                     yield "{\"sessionId\":\"" + session + "\"}";

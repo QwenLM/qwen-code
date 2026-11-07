@@ -263,6 +263,8 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellListRequest")),
                     entry(WebShellSessionRequest.class,
                             List.of("WebShellSessionRequest")),
+                    entry(ApiModels.WebShellActivityQueryRequest.class,
+                            List.of("WebShellActivityQueryRequest")),
                     entry(ApiModels.ManagedMcpServerPin.class,
                             List.of("ManagedMcpServerPin")),
                     entry(ApiModels.ManagedMcpManagementCommand.class,
@@ -329,6 +331,8 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellTaskEvent")),
                     entry(WebShellTaskQueryRequest.class,
                             List.of("WebShellTaskQueryRequest")),
+                    entry(ApiModels.WebShellDiagnosticTraceRequest.class,
+                            List.of("WebShellDiagnosticTraceRequest")),
                     entry(WebShellTaskGetRequest.class,
                             List.of("WebShellTaskGetRequest")),
                     entry(WebShellTaskEventQueryRequest.class,
@@ -1592,6 +1596,7 @@ class ManagedAgentApiContractTest {
                 "{\"sessionId\":\"" + webBoundId + "\",\"modelId\":\"model-a\",\"expectedRevision\":0,\"idempotencyKey\":\"model-key\"}");
         exchangeAutomations(drift, workspaceTenant, otherTenant, actor,
                 publicBoundId);
+        exchangeDiagnostics(drift, workspaceTenant, otherTenant, actor, publicBoundId);
         // This fixture keeps Workspace files disabled, so compression
         // admission reports workspace_unavailable for a bound Session.
         exchange(drift, "compressSessionContext", 400,
@@ -1729,6 +1734,61 @@ class ManagedAgentApiContractTest {
                                 operation.status()))
                         .map(Operation::operationId).toList());
         assertKnownGaps(drift, "request", "response");
+    }
+
+    private void exchangeDiagnostics(Map<String, String> drift, String tenant, String otherTenant,
+            java.security.Principal principal, String session) throws Exception {
+        String[][] routes = {
+                {"context-usage", "session-context-usage", "ContextUsage"},
+                {"stats", "session-stats", "ModelStatistics"},
+                {"resources", "session-resources", "Resources"},
+                {"agent-trace", "session-agent-trace", "AgentTrace"}
+        };
+        for (String[] route : routes) {
+            String path = "/v1/agents/sessions/{id}/" + route[0];
+            String operation = "getSessionDiagnostic" + route[2];
+            exchange(drift, operation, 200,
+                    get(path, session).header(TENANT, tenant).principal(principal), null);
+            exchange(drift, operation, 401, get(path, session).header(TENANT, tenant), null);
+            exchange(drift, operation, 404,
+                    get(path, session).header(TENANT, otherTenant).principal(actor(otherTenant)), null);
+            String webPath = WEB_SHELL + "/" + route[1] + "/query";
+            String webOperation = "querySessionDiagnostic" + route[2];
+            String body = "{\"sessionId\":\"" + session + "\"}";
+            exchange(drift, webOperation, 200,
+                    post(webPath).header(TENANT, tenant).principal(principal), body);
+            exchange(drift, webOperation, 401, post(webPath).header(TENANT, tenant), body);
+            exchange(drift, webOperation, 400,
+                    post(webPath).header(TENANT, tenant).principal(principal), "{}");
+            if ("AgentTrace".equals(route[2])) {
+                for (String extra : List.of("\"unexpected\":true", "\"limit\":0", "\"limit\":101",
+                        "\"cursor\":\"" + "a".repeat(257) + "\"")) {
+                    exchange(drift, webOperation, 400,
+                            post(webPath).header(TENANT, tenant).principal(principal),
+                            body.substring(0, body.length() - 1) + "," + extra + "}");
+                }
+            }
+        }
+        for (String suffix : List.of("activity-stats", "activity")) {
+            boolean statistics = "activity-stats".equals(suffix);
+            String operation = statistics ? "SessionActivityStatistics" : "SessionActivity";
+            String path = "/v1/agents/sessions/{id}/" + suffix;
+            var read = get(path, session).header(TENANT, tenant).principal(principal);
+            if (!statistics) {
+                read.param("kind", "tools");
+            }
+            exchange(drift, "get" + operation, 200, read, null);
+            var unauthorized = get(path, session).header(TENANT, tenant);
+            if (!statistics) {
+                unauthorized.param("kind", "tools");
+            }
+            exchange(drift, "get" + operation, 401, unauthorized, null);
+            String body = "{\"sessionId\":\"" + session + "\"" + (statistics ? "}" : ",\"kind\":\"tools\"}");
+            String web = WEB_SHELL + "/session-" + suffix + "/query";
+            exchange(drift, "query" + operation, 200, post(web).header(TENANT, tenant).principal(principal), body);
+            exchange(drift, "query" + operation, 401, post(web).header(TENANT, tenant), body);
+            exchange(drift, "query" + operation, 400, post(web).header(TENANT, tenant).principal(principal), "{}");
+        }
     }
 
     private void exchangeWorkspaceRegistration(Map<String, String> drift, String tenant) throws Exception {
@@ -2963,7 +3023,7 @@ class ManagedAgentApiContractTest {
                         .isEqualTo(session.get("last_event_id").asLong());
                 JsonNode webCapabilities = json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false}
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false,"diagnostics":true}
                                 """);
                 assertThat(other.get("capabilities")).isEqualTo(webCapabilities);
             }
@@ -3430,6 +3490,9 @@ class ManagedAgentApiContractTest {
         }
         MockHttpServletResponse response = target.perform(request).andReturn()
                 .getResponse();
+        if (expectedStatus == 200 && operationId.contains("SessionDiagnostic")) {
+            assertThat(response.getHeader("Cache-Control")).contains("no-store", "private");
+        }
         String content = response.getContentAsString(StandardCharsets.UTF_8);
         int status = response.getStatus();
         if (status != expectedStatus) {
