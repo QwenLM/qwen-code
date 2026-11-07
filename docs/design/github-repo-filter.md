@@ -108,16 +108,19 @@ Flat fields (not one object field) because the Web Shell editor cannot edit
 
 - `channel-editor-state.ts`:
   - `normalizeRepositoryFilterInput(value, baseUrl)` — splits on commas,
-    trims, lowercases, shortens GitHub web URLs
-    (`https://github.com/owner/repo`, with optional `.git`, trailing slash,
-    query, fragment, or `/pull/123`-style suffix) to `owner/repo`,
-    deduplicates, joins with `, `. Two gates decide whether a URL is
-    shortened at all. Structurally, only URLs whose host is the channel's
-    own GitHub host qualify: `github.com` plus the host derived from
-    `baseUrl` for GitHub Enterprise (an `api.` prefix is stripped); any
-    other host — `api.github.com`, `gist.github.com`, `gitlab.com`, an
-    arbitrary site — passes through unchanged for validation to reject,
-    which closes the "first two segments of any host" class. On a qualified
+    trims, strips trailing sentence punctuation a paste can carry, lowercases,
+    shortens GitHub web URLs (`https://github.com/owner/repo`, with optional
+    `.git`, trailing slash, query, fragment, or `/pull/123`-style suffix) to
+    `owner/repo`, deduplicates, joins with `, `. Two gates decide whether a
+    URL is shortened at all. Structurally, only URLs on the channel's own
+    GitHub WEB host qualify: `github.com` plus the web host derived from
+    `baseUrl` for GitHub Enterprise — an `api.`-prefixed baseUrl host
+    contributes only its stripped form, never the raw API host, and paths
+    under the baseUrl's own API prefix (e.g. `/api/v3/`) are excluded, so a
+    pasted REST URL cannot shorten to `repos/octo` or `api/v3`. Any other
+    host — `gist.github.com`, `gitlab.com`, an arbitrary site — passes
+    through unchanged for validation to reject, which closes the "first two
+    segments of any host" class. On a qualified
     host, a URL whose first path segment is a reserved GitHub area (`orgs`,
     `apps`, `settings`, `trending`, ...) still passes through unchanged so
     validation rejects it instead of silently filtering a nonexistent

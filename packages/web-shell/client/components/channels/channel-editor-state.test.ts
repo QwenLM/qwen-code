@@ -2963,6 +2963,12 @@ describe('GitHub repository event filter', () => {
     fields: [
       ...GITHUB.fields,
       {
+        key: 'baseUrl',
+        label: 'Base URL',
+        kind: 'string',
+        envResolvable: true,
+      },
+      {
         key: 'repoFilterMode',
         label: 'Repository Filter',
         kind: 'enum',
@@ -3048,6 +3054,76 @@ describe('GitHub repository event filter', () => {
       ).toBe('octo/repo');
     });
 
+    it('rejects REST-shaped URLs on the channel own API host', () => {
+      // The host gate must not re-admit the channel's own API host: with
+      // baseUrl set, a REST URL (the shape `gh api` prints) must pass through
+      // for validation to reject, not shorten to `repos/octo` or `api/v3`.
+      const cases = [
+        ['https://api.github.com/repos/octo/repo', 'https://api.github.com'],
+        [
+          'https://ghe.example.com/api/v3/repos/octo/repo',
+          'https://ghe.example.com/api/v3',
+        ],
+      ];
+      for (const [url, baseUrl] of cases) {
+        expect(normalizeRepositoryFilterInput(url!, baseUrl)).toBe(
+          url!.toLowerCase(),
+        );
+        const draft = filterDraft('allowlist', url!);
+        draft.values.baseUrl = baseUrl!;
+        expect(validateChannelEditorDraft(REPO_FILTER, draft, [])).toEqual({
+          repoFilter: 'invalidRepoId',
+        });
+      }
+    });
+
+    it('strips trailing sentence punctuation from a pasted URL', () => {
+      expect(
+        normalizeRepositoryFilterInput(
+          'https://github.com/octo/repo., https://github.com/octo/repo)',
+        ),
+      ).toBe('octo/repo');
+      expect(
+        validateChannelEditorDraft(
+          REPO_FILTER,
+          filterDraft('blocklist', 'https://github.com/octo/repo.'),
+          [],
+        ),
+      ).toEqual({});
+    });
+
+    it('binds the GHES host through both the validator and the save path', () => {
+      // Dropping either baseUrl argument must fail here: the validator would
+      // reject the paste while the save path still shortens it (or vice
+      // versa) — the editor/daemon divergence the shared normalizer prevents.
+      const instance: DaemonChannelInstanceSnapshot = {
+        name: 'my-bot',
+        config: {
+          type: 'github',
+          useLocalGh: true,
+          baseUrl: 'https://ghe.example.com/api/v3',
+        },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'stopped' },
+      };
+      const draft = filterDraft(
+        'blocklist',
+        'https://ghe.example.com/octo/repo',
+        instance,
+      );
+      expect(
+        validateChannelEditorDraft(REPO_FILTER, draft, [], instance),
+      ).toEqual({});
+      const request = buildChannelUpsertRequest(
+        REPO_FILTER,
+        draft,
+        'rev-1',
+        instance,
+      );
+      expect(request.config['repoFilter']).toEqual(['octo/repo']);
+    });
+
     it('does not shorten non-repository GitHub URLs', () => {
       // Regression pins for the measured verify-round shapes: each of these
       // once shortened to a plausible-but-nonexistent owner/repo that both
@@ -3094,6 +3170,7 @@ describe('GitHub repository event filter', () => {
           'customer-stories',
           'discussions',
           'enterprise',
+          'enterprises',
           'events',
           'explore',
           'features',

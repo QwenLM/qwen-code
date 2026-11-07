@@ -207,4 +207,34 @@ describe('repository filter rule parity (editor mirror vs daemon authority)', ()
     expect(config['repoFilter']).toEqual(['octo/repo']);
     expect(management.validateConfig?.(config)).toBeUndefined();
   });
+
+  it('binds a GHES paste through the editor and the daemon authority', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'parity',
+      config: {
+        type: 'github',
+        useLocalGh: true,
+        baseUrl: 'https://ghe.example.com/api/v3',
+      },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(descriptor, instance);
+    draft.name = 'parity';
+    draft.values['repoFilterMode'] = 'blocklist';
+    draft.values['repoFilter'] = 'https://ghe.example.com/octo/repo';
+
+    expect(validateChannelEditorDraft(descriptor, draft, [], instance)).toEqual(
+      {},
+    );
+    const { config } = buildChannelUpsertRequest(
+      descriptor,
+      draft,
+      'rev-1',
+      instance,
+    );
+    expect(config['repoFilter']).toEqual(['octo/repo']);
+    expect(management.validateConfig?.(config)).toBeUndefined();
+  });
 });

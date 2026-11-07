@@ -96,14 +96,17 @@ Allowed repositories」下面。没有黑名单，而且访问策略的框架让
 
 - `channel-editor-state.ts`：
   - `normalizeRepositoryFilterInput(value, baseUrl)` —— 按逗号拆分、trim、
-    小写，把 GitHub web URL（`https://github.com/owner/repo`，可带 `.git`、
-    尾斜杠、query、fragment 或 `/pull/123` 式后缀）缩短为 `owner/repo`，
-    去重后用 `, ` 连接。是否缩短由两道门决定。结构上，只有主机属于频道
-    自己的 GitHub 主机才可缩短：`github.com` 加上由 `baseUrl` 派生的
-    GitHub Enterprise 主机（剥掉 `api.` 前缀）；其他任何主机——
-    `api.github.com`、`gist.github.com`、`gitlab.com`、任意站点——原样
-    透传交给校验拒绝，从结构上关闭「任意主机的头两段路径」这一类隐患。
-    在合格主机上，首段路径是 GitHub 保留区域（`orgs`、`apps`、`settings`、
+    剥掉粘贴可能带上的句尾标点、小写，把 GitHub web URL
+    （`https://github.com/owner/repo`，可带 `.git`、尾斜杠、query、fragment
+    或 `/pull/123` 式后缀）缩短为 `owner/repo`，去重后用 `, ` 连接。是否
+    缩短由两道门决定。结构上，只有频道自己的 GitHub WEB 主机上的 URL 才
+    可缩短：`github.com` 加上由 `baseUrl` 派生的 GitHub Enterprise web
+    主机——带 `api.` 前缀的 baseUrl 主机只贡献去前缀后的形式，绝不加入
+    原始 API 主机；baseUrl 自身 API 前缀（如 `/api/v3/`）下的路径也被
+    排除，因此粘贴 REST URL 不会被缩短成 `repos/octo` 或 `api/v3`。其他
+    任何主机——`gist.github.com`、`gitlab.com`、任意站点——原样透传交给
+    校验拒绝，从结构上关闭「任意主机的头两段路径」这一类隐患。在合格
+    主机上，首段路径是 GitHub 保留区域（`orgs`、`apps`、`settings`、
     `trending` 等）的 URL 仍原样透传，让校验拒绝它，而不是静默地去过滤
     一个不存在的仓库。这份区域清单在构造上就是尽力而为——对 GitHub 顶层
     路径做黑名单不可能穷尽，未来新增的区域在被补进清单之前会重新引入该

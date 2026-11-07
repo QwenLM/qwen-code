@@ -124,6 +124,7 @@ export const GITHUB_RESERVED_URL_PATHS = new Set([
   'customer-stories',
   'discussions',
   'enterprise',
+  'enterprises',
   'events',
   'explore',
   'features',
@@ -161,60 +162,79 @@ export const GITHUB_RESERVED_URL_PATHS = new Set([
 
 /**
  * The hosts whose two-segment paths may be repository URLs: github.com, plus
- * the channel's own GitHub Enterprise host derived from baseUrl (the web host
- * equals the API host there, and an `api.` prefix is stripped the same way
- * githubEventWebUrl does). Any other host — api.github.com, gist.github.com,
- * gitlab.com, an arbitrary site — passes through unchanged for validation to
- * reject, which closes the "first two segments of any host" class structurally
- * instead of through the area denylist.
+ * the channel's own GitHub Enterprise WEB host derived from baseUrl. Only the
+ * web host qualifies: an `api.`-prefixed baseUrl host denotes the deployment's
+ * API, so the stripped form is added and the raw API host is NOT (pasting a
+ * REST URL like https://api.github.com/repos/octo/repo must not shorten to
+ * `repos/octo`). The baseUrl's own API path prefix (e.g. /api/v3) is returned
+ * alongside so REST-shaped paths on a shared web+API host are excluded too.
+ * Any other host — gist.github.com, gitlab.com, an arbitrary site — passes
+ * through unchanged for validation to reject.
  */
-function repositoryUrlHosts(baseUrl: string): Set<string> {
+function repositoryUrlContext(baseUrl: string): {
+  hosts: Set<string>;
+  apiPath: string;
+} {
   const hosts = new Set(['github.com', 'www.github.com']);
+  let apiPath = '';
   const trimmed = baseUrl.trim();
   if (trimmed) {
     try {
-      const host = new URL(trimmed).hostname.toLowerCase();
-      hosts.add(host);
-      if (host.startsWith('api.')) hosts.add(host.slice(4));
+      const url = new URL(trimmed);
+      const host = url.hostname.toLowerCase();
+      hosts.add(host.startsWith('api.') ? host.slice(4) : host);
+      const path = url.pathname.replace(/\/+$/, '').toLowerCase();
+      if (path) apiPath = path;
     } catch {
       // A malformed baseUrl is its own field's validation error; only
       // github.com remains shortenable here.
     }
   }
-  return hosts;
+  return { hosts, apiPath };
 }
 
 /**
- * Canonicalize the repository filter input: lowercase, deduplicate, and
- * shorten pasted GitHub web URLs (repository, PR, or issue pages, with an
- * optional `.git`, trailing path, query, or fragment) to `owner/repo` — only
- * when the URL's host is the channel's own GitHub host. Entries that are not
- * repository URLs on that host pass through unchanged so validation can name
- * them. Shared by the validator and the save path so the two cannot disagree.
+ * Canonicalize the repository filter input: lowercase, deduplicate, strip
+ * trailing sentence punctuation a paste can carry (`.`, `)`, …), and shorten
+ * GitHub web URLs (repository, PR, or issue pages, with an optional `.git`,
+ * trailing path, query, or fragment) to `owner/repo` — only when the URL's
+ * host is the channel's own GitHub web host and its path is not the baseUrl's
+ * API prefix. Entries that are not repository URLs on that host pass through
+ * unchanged so validation can name them. Shared by the validator and the save
+ * path so the two cannot disagree.
  */
 export function normalizeRepositoryFilterInput(
   value: string,
   baseUrl = '',
 ): string {
-  const hosts = repositoryUrlHosts(baseUrl);
-  const entries = toList(value).map((entry) => {
-    const match = GITHUB_REPOSITORY_URL_RE.exec(entry);
-    let host = '';
-    if (match) {
-      try {
-        host = new URL(entry).hostname.toLowerCase();
-      } catch {
-        host = '';
+  const { hosts, apiPath } = repositoryUrlContext(baseUrl);
+  const entries = toList(value)
+    .map((raw) => raw.replace(/[.,;:!?)\]]+$/, ''))
+    .filter(Boolean)
+    .map((entry) => {
+      const match = GITHUB_REPOSITORY_URL_RE.exec(entry);
+      let url: URL | undefined;
+      if (match) {
+        try {
+          url = new URL(entry);
+        } catch {
+          url = undefined;
+        }
       }
-    }
-    const shortened =
-      match &&
-      hosts.has(host) &&
-      !GITHUB_RESERVED_URL_PATHS.has(match[1].toLowerCase())
-        ? `${match[1]}/${match[2]}`
-        : entry;
-    return shortened.toLowerCase();
-  });
+      const onApiPath =
+        url !== undefined &&
+        apiPath !== '' &&
+        url.pathname.toLowerCase().startsWith(`${apiPath}/`);
+      const shortened =
+        match &&
+        url !== undefined &&
+        hosts.has(url.hostname.toLowerCase()) &&
+        !onApiPath &&
+        !GITHUB_RESERVED_URL_PATHS.has(match[1].toLowerCase())
+          ? `${match[1]}/${match[2]}`
+          : entry;
+      return shortened.toLowerCase();
+    });
   return [...new Set(entries)].join(', ');
 }
 

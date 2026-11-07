@@ -3998,6 +3998,37 @@ describe('GitHub repository event filter', () => {
     expect(request.config['repoFilter']).toEqual(['octo/repo']);
   });
 
+  it('hides the list while Off and restores it on re-enable', async () => {
+    await renderDialog({
+      descriptor: GITHUB_REPO_FILTER,
+      instance: {
+        ...FILTER_INSTANCE,
+        config: {
+          ...FILTER_INSTANCE.config,
+          repoFilterMode: 'blocklist',
+          repoFilter: ['octo/repo'],
+        },
+      },
+    });
+
+    expect(inputByLabel('Filtered Repositories')).toHaveProperty(
+      'value',
+      'octo/repo',
+    );
+
+    await selectOption('Repository Filter', 'Off — all repositories');
+    expect(inputByLabel('Filtered Repositories')).toBeNull();
+
+    await selectOption(
+      'Repository Filter',
+      'Blocklist — all except listed repositories',
+    );
+    expect(inputByLabel('Filtered Repositories')).toHaveProperty(
+      'value',
+      'octo/repo',
+    );
+  });
+
   it('rejects entries that are not owner/repo after normalization', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     await renderDialog({
