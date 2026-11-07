@@ -1688,6 +1688,10 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
     description: 'When an instruction or context file is loaded',
     matcherKind: 'filePath',
   },
+  FileChanged: {
+    description: 'When a watched file is added, changed, or deleted',
+    matcherKind: 'filePath',
+  },
 };
 
 // ---------------------------------------------------------------------------

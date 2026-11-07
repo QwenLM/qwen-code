@@ -1673,6 +1673,53 @@ describe('createDaemonSessionActions', () => {
     },
   );
 
+  it('only reports a missing context session for non-silent callers', async () => {
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({ addNotice });
+
+    await expect(actions.getContext({ silent: true })).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+
+    await expect(actions.getContext()).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: 'Load context failed: Daemon session is not connected',
+      }),
+    );
+  });
+
+  it('only reports an in-flight context disconnect for non-silent callers', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('session-a');
+    session.context.mockRejectedValue(new DaemonTransportClosedError());
+    const { actions, getConnection } = createActionsHarness({
+      addNotice,
+      session,
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        workflowModeStatus: 'ready',
+      },
+    });
+
+    await expect(actions.getContext({ silent: true })).rejects.toThrow(
+      'Transport connection closed',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+    expect(getConnection().workflowModeStatus).toBe('unknown');
+
+    await expect(actions.getContext()).rejects.toThrow(
+      'Transport connection closed',
+    );
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'load_context' }),
+    );
+  });
+
   it('does not report a context usage error while the session is disconnected', async () => {
     const addNotice = vi.fn();
     const { actions } = createActionsHarness({ addNotice });

@@ -242,6 +242,13 @@ class TestChannel extends ChannelBase {
     }
   }
 
+  preflightForTest(
+    envelope: Envelope,
+    options: { waiveGroupMention?: boolean } = {},
+  ): Promise<boolean> {
+    return Promise.resolve(this.preflightInbound(envelope, options));
+  }
+
   enableCancelCommand(): void {
     this.registerCancelCommand();
   }
@@ -260,6 +267,10 @@ class TestChannel extends ChannelBase {
 
   stateDirForTest(): string | undefined {
     return this.stateDir;
+  }
+
+  disableLoopJobsForChatForTest(chatId: string): Promise<number> {
+    return this.disableLoopJobsForChat(chatId);
   }
 
   formatMarkdownForTest(text: string, sourceLabel?: string): string {
@@ -937,6 +948,73 @@ describe('ChannelBase', () => {
           'result',
         ),
       ).rejects.toBe(error);
+    });
+  });
+
+  describe('waiving the group mention requirement', () => {
+    const groupMessage = (overrides: Partial<Envelope> = {}) =>
+      envelope({ isGroup: true, chatId: 'g1', ...overrides });
+
+    it('admits an unmentioned group message only on request', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        groups: { '*': { requireMention: true } },
+      });
+
+      expect(await ch.preflightForTest(groupMessage())).toBe(false);
+      expect(
+        await ch.preflightForTest(groupMessage(), { waiveGroupMention: true }),
+      ).toBe(true);
+    });
+
+    it.each([
+      ['a disabled group policy', { groupPolicy: 'disabled' as const }],
+      [
+        'a group missing from the allowlist',
+        { groupPolicy: 'allowlist' as const, groups: { other: {} } },
+      ],
+      [
+        'a sender outside the group allowlist',
+        {
+          groupPolicy: 'open' as const,
+          groups: {
+            '*': {
+              requireMention: true,
+              senders: 'allowlist' as const,
+              allowedUsers: ['someone-else'],
+            },
+          },
+        },
+      ],
+    ])('still rejects %s', async (_label, config) => {
+      const ch = createChannel(config);
+
+      expect(
+        await ch.preflightForTest(groupMessage(), { waiveGroupMention: true }),
+      ).toBe(false);
+    });
+
+    it('neither admits nor opens a pairing request for an unapproved paired group', async () => {
+      const previousQwenHome = process.env['QWEN_HOME'];
+      const qwenHome = mkdtempSync(join(tmpdir(), 'qwen-waive-pairing-'));
+      process.env['QWEN_HOME'] = qwenHome;
+      try {
+        const ch = createChannel({
+          groupPolicy: 'pairing',
+          groups: { '*': { requireMention: true } },
+        });
+
+        expect(
+          await ch.preflightForTest(groupMessage(), {
+            waiveGroupMention: true,
+          }),
+        ).toBe(false);
+        expect(new PairingStore('test-chan', '/tmp').listPending()).toEqual([]);
+      } finally {
+        if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+        else process.env['QWEN_HOME'] = previousQwenHome;
+        rmSync(qwenHome, { recursive: true, force: true });
+      }
     });
   });
 
@@ -16630,6 +16708,31 @@ describe('ChannelBase', () => {
   });
 
   describe('response delivery', () => {
+    it.each(['', 'Answer'])(
+      'delivers a turn notice separately from %j',
+      async (body) => {
+        const events = bridge as unknown as EventEmitter;
+        vi.mocked(bridge.prompt).mockImplementation(async (sid) => {
+          events.emit('turnNotice', 'another-session', 'Unrelated notice');
+          events.emit('turnNotice', sid, 'Overflow notice');
+          if (body) events.emit('textChunk', sid, body);
+          return body ? `Overflow notice\n\n${body}` : 'Overflow notice';
+        });
+        const ch = createChannel();
+
+        await ch.handleInbound(envelope());
+
+        expect(ch.responseChunks.map(({ chunk }) => chunk)).toEqual(
+          body ? [body] : [],
+        );
+        expect(ch.sent).toEqual([
+          ...(body ? [{ chatId: 'chat1', text: body }] : []),
+          { chatId: 'chat1', text: 'Overflow notice' },
+        ]);
+        expect(events.listenerCount('turnNotice')).toBe(0);
+      },
+    );
+
     it('keeps partial paragraphs in adapter updates until the final response', async () => {
       vi.useFakeTimers();
       try {
@@ -24485,6 +24588,87 @@ describe('ChannelBase', () => {
         expect(bridge.prompt).toHaveBeenCalledTimes(2);
       });
       expect(ch.preflightTexts).toEqual(['while loop runs']);
+    });
+
+    describe('disableLoopJobsForChat', () => {
+      const target: SessionTarget = {
+        channelName: 'test-chan',
+        chatId: 'chat1',
+        isGroup: true,
+      };
+      const job = (overrides: Partial<ChannelLoop>): ChannelLoop => ({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: { ...target, senderId: 'user1' },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+        ...overrides,
+      });
+
+      it('disables every enabled loop in the chat regardless of sender', async () => {
+        const disable = vi.fn(async () => true);
+        const listForChat = vi.fn(async () => [
+          job({ id: 'job-1' }),
+          job({ id: 'job-2', enabled: false }),
+          job({ id: 'job-3', target: { ...target, senderId: 'user2' } }),
+        ]);
+        const ch = createChannel(
+          {},
+          {
+            loopController: {
+              create: vi.fn(),
+              listForTarget: vi.fn(),
+              listForChat,
+              disable,
+              validateCron: vi.fn(),
+            },
+          },
+        );
+
+        await expect(ch.disableLoopJobsForChatForTest('chat1')).resolves.toBe(
+          2,
+        );
+        expect(listForChat).toHaveBeenCalledWith('test-chan', 'chat1');
+        expect(disable.mock.calls.map(([id]) => id)).toEqual([
+          'job-1',
+          'job-3',
+        ]);
+      });
+
+      it('does nothing when the controller has no chat-scoped lookup', async () => {
+        const listForTarget = vi.fn(async () => [job({})]);
+        const disable = vi.fn(async () => true);
+        const ch = createChannel(
+          {},
+          {
+            loopController: {
+              create: vi.fn(),
+              listForTarget,
+              disable,
+              validateCron: vi.fn(),
+            },
+          },
+        );
+
+        await expect(ch.disableLoopJobsForChatForTest('chat1')).resolves.toBe(
+          0,
+        );
+        expect(listForTarget).not.toHaveBeenCalled();
+        expect(disable).not.toHaveBeenCalled();
+      });
+
+      it('returns 0 when no loop controller is configured', async () => {
+        await expect(
+          createChannel({}).disableLoopJobsForChatForTest('chat1'),
+        ).resolves.toBe(0);
+      });
     });
   });
 
