@@ -22,7 +22,10 @@ import {
   normalizeHostedQuestionAnswers,
   hostedQuestionDecisionBytes,
 } from './hosted-user-question.js';
-import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
+import {
+  HostedToolRecoveryRequiredError,
+  HostedWorkspaceToolTurn,
+} from './hosted-workspace-tool-turn.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
@@ -151,7 +154,37 @@ const scenarios: Array<{
   planMode: boolean;
   terminal?: 'cancelled' | 'expired';
   mixed?: boolean;
+  local?: boolean;
+  child?: boolean;
+  cancelAfterAnswerAcquire?: boolean;
 }> = [
+  {
+    mode: 'yolo',
+    profile: 'hosted-workspace-files/1',
+    restart: 'none',
+    planMode: false,
+    local: true,
+    cancelAfterAnswerAcquire: true,
+  },
+  ...[false, true].flatMap((child) => [
+    ...['none', 'waiting', 'decided'].map((restart) => ({
+      mode: 'yolo' as const,
+      profile: child ? 'hosted-workspace-shell/1' : 'hosted-workspace-files/1',
+      restart,
+      planMode: false,
+      local: true,
+      child,
+    })),
+    ...(['cancelled', 'expired'] as const).map((terminal) => ({
+      mode: 'yolo' as const,
+      profile: child ? 'hosted-workspace-shell/1' : 'hosted-workspace-files/1',
+      restart: 'none',
+      planMode: false,
+      local: true,
+      child,
+      terminal,
+    })),
+  ]),
   ...(['yolo', 'auto', 'default', 'auto-edit'] as const).map((mode) => ({
     mode,
     profile: 'hosted-workspace-files/1',
@@ -198,8 +231,18 @@ const scenarios: Array<{
 ];
 
 it.each(scenarios)(
-  'handles the original question ($mode, $profile, restart=$restart, plan=$planMode, terminal=$terminal, mixed=$mixed)',
-  async ({ mode, profile, restart, planMode, terminal, mixed }) => {
+  'handles the original question ($mode, $profile, restart=$restart, plan=$planMode, terminal=$terminal, mixed=$mixed, local=$local, child=$child, cancelAfterAnswerAcquire=$cancelAfterAnswerAcquire)',
+  async ({
+    mode,
+    profile,
+    restart,
+    planMode,
+    terminal,
+    mixed,
+    local,
+    child,
+    cancelAfterAnswerAcquire,
+  }) => {
     const root = await mkdtemp(path.join(tmpdir(), 'managed-user-questions-'));
     const sessionKey = {
       tenantId: 'tenant',
@@ -207,6 +250,7 @@ it.each(scenarios)(
       sessionId: randomUUID(),
     };
     const promptId = randomUUID();
+    const parentSessionId = randomUUID();
     const sessionOptions = {
       runtimeBaseDir: root,
       cwd: root,
@@ -227,7 +271,21 @@ it.each(scenarios)(
         definitionRef: await resources.publish(
           'managed-definition',
           Buffer.from(
-            JSON.stringify({ engine: 'managed', toolProfile: profile }),
+            JSON.stringify({
+              engine: 'managed',
+              toolProfile: profile,
+              ...(child
+                ? {
+                    publicChildAgentsVersion: 1,
+                    lineage: {
+                      depth: 1,
+                      parentSessionId,
+                      rootSessionId: parentSessionId,
+                      parentChildRunId: 'child-run',
+                    },
+                  }
+                : {}),
+            }),
           ),
         ),
         rootSnapshotRef: await resources.publish(
@@ -288,9 +346,27 @@ it.each(scenarios)(
             generation: '1',
             workspaceGeneration: '1',
           };
+          this.provisionerKind = local ? 'local-process' : undefined;
         },
       );
-      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+      const claims = new WeakMap<HostedWorkspaceBroker, string>();
+      let acquisitions = 0;
+      const acquire = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+        .mockImplementation(async function (this: HostedWorkspaceBroker) {
+          claims.set(this, randomUUID());
+          if (++acquisitions === 2 && cancelAfterAnswerAcquire)
+            controller.abort();
+        });
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'mountClaim',
+      ).mockImplementation(function (this: HostedWorkspaceBroker) {
+        return claims.get(this);
+      });
+      const releaseMount = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+        .mockResolvedValue();
       vi.spyOn(
         HostedWorkspaceBroker.prototype,
         'fileHistory',
@@ -301,6 +377,12 @@ it.each(scenarios)(
       });
       const prepare = vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare');
       const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
+      let workspaceContext: string | undefined;
+      if (cancelAfterAnswerAcquire)
+        vi.spyOn(
+          HostedWorkspaceBroker.prototype,
+          'workspaceContext',
+        ).mockResolvedValue([]);
       const waiters = new HostedApprovalWaiters();
       if (restart !== 'none')
         vi.spyOn(waiters, 'wait').mockImplementation(
@@ -346,10 +428,28 @@ it.each(scenarios)(
             },
             waiters: ownerWaiters,
           },
-          { profile, publicPlanMode: planMode, ...extra },
+          {
+            profile,
+            publicPlanMode: planMode,
+            ...(cancelAfterAnswerAcquire
+              ? {
+                  context: {
+                    read: () => workspaceContext,
+                    write: (value: string) => {
+                      workspaceContext = value;
+                    },
+                    invalidate: () => {
+                      workspaceContext = undefined;
+                    },
+                  },
+                }
+              : {}),
+            ...(child ? { childDepth: 1 } : {}),
+            ...extra,
+          },
         );
       await createManagedHarnessHandle(session).ensureRunnable();
-      if (!planMode) {
+      if (!planMode && !child) {
         for (const extra of [{ childDepth: 1 }, { foregroundOnly: true }])
           expect(
             (
@@ -425,6 +525,21 @@ it.each(scenarios)(
         { timeout: 15000 },
       );
       const action = session.authority.action(actionId)!;
+      if (local) {
+        await vi.waitFor(() => expect(releaseMount).toHaveBeenCalledOnce());
+        expect(acquire).toHaveBeenCalledTimes(1);
+        const saved = await findHostedApprovalContinuation(session, promptId);
+        expect(saved?.plan.runtime.provisionerKind).toBe('local-process');
+        expect(
+          session.authority
+            .eventsInSequenceRange(1, session.authority.committedSequence)
+            .some(
+              (event) =>
+                event.kind === 'hosted.cleanup' &&
+                event.payload['state'] === 'owed',
+            ),
+        ).toBe(true);
+      }
       const options = await readHostedActionOptions(session, action);
       expect(options).toMatchObject({
         v: 4,
@@ -477,6 +592,7 @@ it.each(scenarios)(
         );
         expect(prepare).not.toHaveBeenCalled();
         expect(execute).not.toHaveBeenCalled();
+        if (local) expect(acquire).toHaveBeenCalledTimes(1);
         return;
       }
       if (restart === 'decided')
@@ -534,7 +650,27 @@ it.each(scenarios)(
           new HostedApprovalWaiters(),
         ).resumeSavedNativeBatch(saved!, 1, new AbortController().signal);
       }
+      if (cancelAfterAnswerAcquire) {
+        expect(acquire).toHaveBeenCalledTimes(2);
+        expect(acquire).toHaveBeenLastCalledWith({
+          runtimeBindingId: 'original-binding',
+          generation: '1',
+        });
+        expect(session.authority.action(actionId)?.state).toBe('decided');
+        expect(result).not.toBeInstanceOf(HostedToolRecoveryRequiredError);
+        expect(result).toBe(controller.signal.reason);
+        expect(prepare).not.toHaveBeenCalled();
+        expect(execute).not.toHaveBeenCalled();
+        return;
+      }
       expect(result).not.toBeInstanceOf(Error);
+      if (local) {
+        expect(acquire).toHaveBeenLastCalledWith({
+          runtimeBindingId: 'original-binding',
+          generation: '1',
+        });
+        expect(acquire).toHaveBeenCalledTimes(2);
+      }
       expect(JSON.stringify(result)).toContain('Selected q1o2: Read, write');
       expect(JSON.stringify(result)).toContain('Custom, with comma');
       expect(prepare).not.toHaveBeenCalled();

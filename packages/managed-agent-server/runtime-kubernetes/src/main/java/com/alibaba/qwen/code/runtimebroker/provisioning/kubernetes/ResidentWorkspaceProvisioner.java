@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker.provisioning.kubernetes;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceCsiReservations;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.RuntimeBroker.ResidentWorkspace;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -19,6 +20,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 public final class ResidentWorkspaceProvisioner implements RuntimeProvisioner {
@@ -63,7 +65,7 @@ public final class ResidentWorkspaceProvisioner implements RuntimeProvisioner {
         var mapping = residents.require(request.getScope());
         if (request.getIsolationKey() != null || !mapping.registration().storageId().equals(request.getStorageId())
                 || !kind().equals(request.getProvisionerKind())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return providers.get(mapping);
     }
@@ -75,7 +77,7 @@ public final class ResidentWorkspaceProvisioner implements RuntimeProvisioner {
     public RuntimeProvisionRequest createRequest(RuntimeScope scope, String isolationKey) {
         var mapping = residents.require(scope);
         if (isolationKey != null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return new RuntimeProvisionRequest(scope, null, kind(), mapping.registration().storageId());
     }
@@ -112,7 +114,7 @@ public final class ResidentWorkspaceProvisioner implements RuntimeProvisioner {
 
     @Override
     public CompletionStage<Void> release(RuntimeProvisionRequest request, RuntimeLease lease) {
-        return java.util.concurrent.CompletableFuture.failedFuture(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable());
+        return CompletableFuture.failedFuture(WorkspaceExecutionStore.unavailable());
     }
 
     @Override

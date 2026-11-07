@@ -6,6 +6,7 @@ import type {
   ManagedAgentSessionEvent,
 } from './managed-agent-provider';
 import { isNonRetryableClientError } from './managed-request-error';
+import type { ManagedQuestionDraft } from './ManagedQuestionForm';
 import {
   canonicalQuestionAnswers,
   questionResponseKey,
@@ -34,9 +35,20 @@ const ENDED_ACTION_CODES: ReadonlySet<string> = new Set([
   'action_already_resolved',
 ]);
 
-function actionKey(action: ManagedAgentPendingAction): string {
-  return `${action.sessionId}:${action.actionId}`;
+export function managedActionKey(action: ManagedAgentPendingAction): string {
+  return JSON.stringify([
+    action.sessionId,
+    action.actionId,
+    action.inputRevision,
+    action.policyRevision,
+  ]);
 }
+
+function actionSelectionKey(action: ManagedAgentPendingAction): string {
+  return JSON.stringify([action.sessionId, action.actionId]);
+}
+
+const EMPTY_QUESTION_DRAFT: ManagedQuestionDraft = {};
 
 function endedAction(failure: unknown): boolean {
   const code =
@@ -48,8 +60,15 @@ function endedAction(failure: unknown): boolean {
 
 export interface ManagedActionsState {
   actions: readonly ManagedAgentPendingAction[];
-  /** The approval to show; answered ones stay hidden while they settle. */
+  /** The selected pending request; answered ones stay hidden while they settle. */
   action?: ManagedAgentPendingAction;
+  select(action: ManagedAgentPendingAction): void;
+  questionDraft: ManagedQuestionDraft;
+  setQuestionDraft(
+    action: ManagedAgentPendingAction,
+    draft: ManagedQuestionDraft,
+  ): void;
+  submitting: boolean;
   /** Reading the pending approvals failed; retries run in the background. */
   loadError?: unknown;
   /**
@@ -69,7 +88,7 @@ export interface ManagedActionsState {
    */
   respondForbidden: boolean;
   respond(
-    actionId: string,
+    action: ManagedAgentPendingAction,
     response: ManagedAgentActionResponse,
   ): Promise<void>;
   /** Reads the pending approvals again now. */
@@ -114,7 +133,17 @@ export function useManagedActions(
   }>({ actions: [] });
   const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
   const [loadError, setLoadError] = useState<unknown>();
-  const [answerError, setAnswerError] = useState<unknown>();
+  const [answerErrors, setAnswerErrors] = useState<
+    ReadonlyMap<string, unknown>
+  >(new Map());
+  const [drafts, setDrafts] = useState<
+    ReadonlyMap<string, ManagedQuestionDraft>
+  >(new Map());
+  const [selection, setSelection] = useState<{
+    owner: typeof owner;
+    key: string;
+  }>();
+  const [submitting, setSubmitting] = useState<ReadonlySet<string>>(new Set());
   // The Sessions that refused this viewer under the owner-or-operator
   // rule, keyed by Session so that leaving a refused one and coming back
   // does not re-admit the 403 without an explicit retry.
@@ -123,9 +152,6 @@ export function useManagedActions(
   >(new Set());
   const [revision, setRevision] = useState(0);
   const loadFailures = useRef(0);
-  // The Action whose answer last failed, so the warning can be dropped once
-  // that Action is no longer pending instead of labelling the next one.
-  const answerFailure = useRef<string | undefined>(undefined);
   // Actions hidden because the service reported them ended when answered. A
   // read that still lists one shows it again, so a wrong report cannot hide
   // an approvable Action.
@@ -144,9 +170,11 @@ export function useManagedActions(
   useEffect(() => {
     setAnswered(new Set());
     setLoadError(undefined);
-    setAnswerError(undefined);
+    setAnswerErrors(new Map());
+    setDrafts(new Map());
+    setSelection(undefined);
+    setSubmitting(new Set());
     loadFailures.current = 0;
-    answerFailure.current = undefined;
     endedAnswers.current.clear();
   }, [owner]);
 
@@ -183,7 +211,7 @@ export function useManagedActions(
         setPending({ owner, actions });
         setLoadError(undefined);
         const stillListed = actions
-          .map(actionKey)
+          .map(managedActionKey)
           .filter((id) => endedAnswers.current.has(id));
         endedAnswers.current.clear();
         if (stillListed.length > 0) {
@@ -193,16 +221,13 @@ export function useManagedActions(
             return next;
           });
         }
-        // The Action whose answer failed is no longer pending, so the
-        // unconfirmed-answer warning has nothing left to describe; keeping it
-        // would announce a stale failure beside an unrelated card.
-        if (
-          answerFailure.current !== undefined &&
-          !actions.some((entry) => actionKey(entry) === answerFailure.current)
-        ) {
-          answerFailure.current = undefined;
-          setAnswerError(undefined);
-        }
+        const listed = new Set(actions.map(managedActionKey));
+        setAnswerErrors(
+          (current) => new Map([...current].filter(([key]) => listed.has(key))),
+        );
+        setDrafts(
+          (current) => new Map([...current].filter(([key]) => listed.has(key))),
+        );
         if (includeChildren) {
           retryTimer = setTimeout(
             () => setRevision((value) => value + 1),
@@ -261,25 +286,89 @@ export function useManagedActions(
     () => (pending.owner === owner ? pending.actions : []),
     [pending.owner, pending.actions, owner],
   );
-  // `pending.sessionId` is set by the success branch of a read only.
+  // `pending.owner` is set by the success branch of a read only.
   const loaded = pending.owner === owner;
-  const action = actions.find((entry) => !answered.has(actionKey(entry)));
-  const current = useRef({ owner, actions });
-  current.current = { owner, actions };
+  const available = useMemo(
+    () =>
+      actions
+        .filter((entry) => !answered.has(managedActionKey(entry)))
+        .sort(
+          (left, right) =>
+            (left.createdAt ?? Number.MAX_SAFE_INTEGER) -
+              (right.createdAt ?? Number.MAX_SAFE_INTEGER) ||
+            left.sessionId.localeCompare(right.sessionId) ||
+            left.actionId.localeCompare(right.actionId),
+        ),
+    [actions, answered],
+  );
+  const action =
+    available.find(
+      (entry) =>
+        selection?.owner === owner &&
+        actionSelectionKey(entry) === selection.key,
+    ) ?? available[0];
+  const selectedKey = action && managedActionKey(action);
+  const selectedIdentity = action && actionSelectionKey(action);
+  useEffect(() => {
+    if (
+      selectedIdentity &&
+      (selection?.owner !== owner || selection.key !== selectedIdentity)
+    )
+      setSelection({ owner, key: selectedIdentity });
+  }, [owner, selectedIdentity, selection]);
+  const current = useRef({ owner, actions, answered, reader });
+  current.current = { owner, actions, answered, reader };
+
+  const select = useCallback(
+    (target: ManagedAgentPendingAction) => {
+      const key = managedActionKey(target);
+      if (
+        current.current.owner === owner &&
+        !current.current.answered.has(key) &&
+        current.current.actions.some((entry) => managedActionKey(entry) === key)
+      )
+        setSelection({ owner, key: actionSelectionKey(target) });
+    },
+    [owner],
+  );
+
+  const setQuestionDraft = useCallback(
+    (target: ManagedAgentPendingAction, draft: ManagedQuestionDraft) => {
+      const key = managedActionKey(target);
+      if (
+        current.current.owner === owner &&
+        !current.current.answered.has(key) &&
+        current.current.actions.some(
+          (entry) =>
+            entry.kind === 'question' && managedActionKey(entry) === key,
+        )
+      )
+        setDrafts((current) => new Map(current).set(key, draft));
+    },
+    [owner],
+  );
 
   const respond = useCallback(
-    async (actionId: string, response: ManagedAgentActionResponse) => {
-      const target = actions.find(
+    async (
+      requested: ManagedAgentPendingAction,
+      response: ManagedAgentActionResponse,
+    ) => {
+      if (current.current.owner !== owner) return;
+      const key = managedActionKey(requested);
+      const target = current.current.actions.find(
         (entry) =>
-          entry.actionId === actionId && !answered.has(actionKey(entry)),
+          managedActionKey(entry) === key && !current.current.answered.has(key),
       );
-      if (!target || !reader) return;
-      const key = actionKey(target);
+      const actionReader = current.current.reader;
+      if (!target || !actionReader) return;
       if (inFlight.current.get(key) === owner) return;
       inFlight.current.set(key, owner);
+      setSubmitting((current) => new Set(current).add(key));
       const isPending = () =>
         current.current.owner === owner &&
-        current.current.actions.some((entry) => actionKey(entry) === key);
+        current.current.actions.some(
+          (entry) => managedActionKey(entry) === key,
+        );
       if (target.kind !== 'question')
         setAnswered((current) => new Set(current).add(key));
       try {
@@ -298,16 +387,22 @@ export function useManagedActions(
             ? await questionResponseKey(target, submitted.answers)
             : `${target.actionId}:${submitted}`;
         if (!isPending()) return;
-        await reader.respond(target, submitted, {
+        await actionReader.respond(target, submitted, {
           clientId,
           idempotencyKey,
         });
         if (!isPending()) return;
         setAnswered((current) => new Set(current).add(key));
-        if (answerFailure.current === key) {
-          setAnswerError(undefined);
-          answerFailure.current = undefined;
-        }
+        setAnswerErrors((current) => {
+          const next = new Map(current);
+          next.delete(key);
+          return next;
+        });
+        setDrafts((current) => {
+          const next = new Map(current);
+          next.delete(key);
+          return next;
+        });
         setRevision((value) => value + 1);
       } catch (failure) {
         if (
@@ -334,10 +429,16 @@ export function useManagedActions(
           // again instead of offering an answer the service will refuse.
           endedAnswers.current.add(key);
           setAnswered((current) => new Set(current).add(key));
-          if (answerFailure.current === key) {
-            answerFailure.current = undefined;
-            setAnswerError(undefined);
-          }
+          setAnswerErrors((current) => {
+            const next = new Map(current);
+            next.delete(key);
+            return next;
+          });
+          setDrafts((current) => {
+            const next = new Map(current);
+            next.delete(key);
+            return next;
+          });
           setRevision((value) => value + 1);
           return;
         }
@@ -346,14 +447,19 @@ export function useManagedActions(
           next.delete(key);
           return next;
         });
-        setAnswerError(failure);
-        answerFailure.current = key;
+        setAnswerErrors((current) => new Map(current).set(key, failure));
         throw failure;
       } finally {
         if (inFlight.current.get(key) === owner) inFlight.current.delete(key);
+        if (ownerRef.current === owner)
+          setSubmitting((current) => {
+            const next = new Set(current);
+            next.delete(key);
+            return next;
+          });
       }
     },
-    [actions, reader, clientId, owner, credentials, answered],
+    [clientId, owner, credentials],
   );
 
   const retry = useCallback(() => {
@@ -369,14 +475,17 @@ export function useManagedActions(
   }, []);
 
   return {
-    actions,
+    actions: available,
     action,
+    select,
+    questionDraft: selectedKey
+      ? (drafts.get(selectedKey) ?? EMPTY_QUESTION_DRAFT)
+      : EMPTY_QUESTION_DRAFT,
+    setQuestionDraft,
+    submitting: selectedKey !== undefined && submitting.has(selectedKey),
     loadError,
     loaded,
-    answerError:
-      action && answerFailure.current === actionKey(action)
-        ? answerError
-        : undefined,
+    answerError: selectedKey ? answerErrors.get(selectedKey) : undefined,
     respondForbidden: includeChildren
       ? action !== undefined && forbiddenSessions.has(action.sessionId)
       : sessionId !== undefined && forbiddenSessions.has(sessionId),
