@@ -1876,6 +1876,7 @@ export function ChatPane({
                   historyPaginationError={transcriptHistory.paginationError}
                   onLoadOlderHistory={transcriptHistory.loadMore}
                   transcriptBlockCount={blocks.length}
+                  pinnedPrompt
                   transcriptActivity={store}
                   onReloadTranscript={
                     transcriptReloadSupported ? reloadTranscript : undefined
