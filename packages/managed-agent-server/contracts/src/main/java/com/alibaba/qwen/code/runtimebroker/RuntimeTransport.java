@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -170,7 +171,7 @@ public interface RuntimeTransport {
     public default CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,
             Map<String, Object> payload) {
-        Map<String, Object> request = new java.util.LinkedHashMap<>(reference);
+        Map<String, Object> request = new LinkedHashMap<>(reference);
         request.remove("dispatchMode");
         request.putAll(payload);
         return execute(lease, session, Map.copyOf(request));
