@@ -273,7 +273,7 @@ describe('browser task notifications', () => {
       expect((open.mock.calls[0]![0] as CustomEvent).detail).toEqual(target);
       expect(notifications[0]?.close).toHaveBeenCalledOnce();
       await settle(capture);
-      expect(notifications).toHaveLength(2);
+      await vi.waitFor(() => expect(notifications).toHaveLength(2));
       expect(notifications[1]?.options.tag).not.toBe(
         notifications[0]?.options.tag,
       );
@@ -315,7 +315,7 @@ describe('browser task notifications', () => {
         });
       });
       await settle(capture, 'quiet-marker');
-      expect(notifications).toHaveLength(1);
+      await vi.waitFor(() => expect(notifications).toHaveLength(1));
       expect(notifications[0]?.options.body).toBe('This turn has completed.');
     },
   );
