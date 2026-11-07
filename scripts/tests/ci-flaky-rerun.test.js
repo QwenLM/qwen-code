@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -260,6 +268,43 @@ describe('ci flaky rerun patrol', () => {
       expect(result.stderr).toContain('command must be scan, act, or reset');
     } finally {
       rmSync(dir, { recursive: true });
+    }
+  });
+
+  it('spawns the pinned gh, never a bare name from PATH', async () => {
+    // Every other GhClient test stubs api.gh, so none of them exercise the
+    // spawn. On the shared pool a bare `gh` resolves through a PATH whose
+    // directories the job uid can write, and this client runs with the bot PAT
+    // in its environment — a co-tenant's gh would receive it.
+    const dir = mkdtempSync(join(tmpdir(), 'patrol-gh-'));
+    const planted = join(dir, 'planted');
+    const trusted = join(dir, 'trusted');
+    mkdirSync(planted);
+    mkdirSync(trusted);
+    const leaked = join(dir, 'LEAKED');
+    writeFileSync(
+      join(planted, 'gh'),
+      `#!/bin/sh\nprintf '%s' "\${GH_TOKEN:-}" > '${leaked}'\necho planted\n`,
+    );
+    writeFileSync(join(trusted, 'gh'), '#!/bin/sh\necho trusted\n');
+    for (const d of [planted, trusted]) chmodSync(join(d, 'gh'), 0o755);
+    const prevPath = process.env.PATH;
+    const prevGh = process.env.PATROL_GH;
+    const prevToken = process.env.GH_TOKEN;
+    try {
+      process.env.PATH = `${planted}:${prevPath}`;
+      process.env.GH_TOKEN = 'SENTINEL-PAT-VALUE';
+      process.env.PATROL_GH = join(trusted, 'gh');
+      const api = new GhClient('QwenLM/qwen-code');
+      await expect(api.gh(['api', 'user'])).resolves.toBe('trusted\n');
+      expect(existsSync(leaked)).toBe(false);
+    } finally {
+      if (prevGh === undefined) delete process.env.PATROL_GH;
+      else process.env.PATROL_GH = prevGh;
+      if (prevToken === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = prevToken;
+      process.env.PATH = prevPath;
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

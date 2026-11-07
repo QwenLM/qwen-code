@@ -74,6 +74,11 @@ it.each(jobs)(
             GITHUB_WORKSPACE: workspace,
             RUNNER_TEMP: runnerTemp,
             GITHUB_ENV: githubEnv,
+            // Steps that use the guard's verified base need those binaries and
+            // an output file; a real runner always supplies GITHUB_OUTPUT.
+            GITHUB_OUTPUT: join(root, 'gh-output'),
+            RM_BIN: '/usr/bin/rm',
+            MKTEMP_BIN: '/usr/bin/mktemp',
           },
         });
 

@@ -599,7 +599,11 @@ export class GhClient {
   }
 
   async gh(args) {
-    const { stdout } = await execFile('gh', args, {
+    // The caller pins an absolute, verified gh. Resolving the bare name here
+    // would search PATH inside this child process, which on the shared pool
+    // can contain a co-tenant's gh in a uid-writable directory — and this
+    // client runs with the bot PAT in its environment.
+    const { stdout } = await execFile(process.env.PATROL_GH || 'gh', args, {
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
       timeout: 60_000,

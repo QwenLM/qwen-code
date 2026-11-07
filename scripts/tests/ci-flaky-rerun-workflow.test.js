@@ -104,7 +104,7 @@ describe('ci failure patrol workflow', () => {
             ...process.env,
             WORKDIR: dir,
             GITHUB_OUTPUT: out,
-            TRUSTED_PATH: process.env.PATH,
+            NODE_BIN: process.execPath,
           },
           encoding: 'utf8',
         });
@@ -185,7 +185,7 @@ describe('ci failure patrol workflow', () => {
     );
     expect(reset.if).toContain('always()');
     expect(reset['continue-on-error']).toBe(true);
-    expect(reset.env.GH_TOKEN).toContain('CI_BOT_PAT');
+    expect(reset.env.GITHUB_TOKEN).toContain('CI_BOT_PAT');
   });
 
   it('runs scan and act with the same trusted event commit', () => {
@@ -232,7 +232,7 @@ describe('ci failure patrol workflow', () => {
     // classify additionally preflights docker: without a daemon the sandboxed
     // classifier would otherwise burn its whole 5-minute budget before failing.
     expect(yml.jobs.classify.steps[0].run).toContain(
-      '"${SANDBOX_COMMAND}" info',
+      '"${timeout}" 10 "${docker}" info',
     );
     // act never starts a sandbox, so it must not require a daemon.
     expect(yml.jobs.act.steps[0].run).not.toContain('SANDBOX_COMMAND');
@@ -247,6 +247,29 @@ describe('ci failure patrol workflow', () => {
       { environment, name, dockerOk, dockerStderr = '', sandboxCommand },
     ) => {
       const dir = mkdtempSync(join(tmpdir(), 'patrol-guard-'));
+      const root = join(dir, 'bin');
+      mkdirSync(root);
+      for (const tool of ['rm', 'git', 'mktemp', 'gh', 'node']) {
+        writeFileSync(join(root, tool), '#!/bin/sh\nexit 0\n');
+        chmodSync(join(root, tool), 0o755);
+      }
+      // The probe runs `"${timeout}" 10 "${docker}" info`, both from the
+      // verified base, so the fixture controls the outcome through these two.
+      writeFileSync(join(root, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
+      chmodSync(join(root, 'timeout'), 0o755);
+      writeFileSync(
+        join(root, 'docker'),
+        '#!/bin/sh\n' +
+          '[ "${DOCKER_CONTEXT:-}" = "default" ] || exit 91\n' +
+          '[ -z "${DOCKER_HOST:-}" ] || exit 92\n' +
+          (dockerStderr ? `echo '${dockerStderr}' >&2\n` : '') +
+          `exit ${dockerOk ? 0 : 1}\n`,
+      );
+      chmodSync(join(root, 'docker'), 0o755);
+      // The fixture runs as the job uid, so it cannot create the root-owned
+      // binaries the accept path requires. Run the guard in hosted mode for the
+      // wiring cases and use the self-hosted mode only to prove refusal.
+      writeFileSync(join(dir, 'gh_output'), '');
       // The stub answers only for the endpoint the workflow pins, so dropping
       // DOCKER_CONTEXT or DOCKER_HOST from the step's env fails the approved
       // host case instead of silently probing whatever the ambient shell had.
@@ -273,7 +296,9 @@ describe('ci failure patrol workflow', () => {
         // Probe the stub rather than the host's real docker. The production
         // value is pinned structurally against the resolver's below. A caller
         // can point it elsewhere to prove the guard compares the two.
-        SANDBOX_COMMAND: sandboxCommand ?? join(dir, 'docker'),
+        SANDBOX_COMMAND: sandboxCommand ?? join(root, 'docker'),
+        PATROL_BIN_ROOTS: root,
+        GITHUB_OUTPUT: join(dir, 'gh_output'),
       };
       // Only the pins the workflow itself declares may reach the stub.
       delete childEnv.DOCKER_HOST;
@@ -301,7 +326,16 @@ describe('ci failure patrol workflow', () => {
     const actGuard = yml.jobs.act.steps[0];
     const approved = { environment: 'self-hosted', name: 'ecs-qwen-hk1-1' };
 
-    expect(guardStatus(classifyGuard, { ...approved, dockerOk: true })).toBe(0);
+    // Hosted runners are ephemeral and single-tenant, so the guard falls back
+    // to ambient resolution there; that path exercises publish + system_path +
+    // the probe wiring without needing root-owned fixture files.
+    expect(
+      guardStatus(classifyGuard, {
+        environment: 'github-hosted',
+        name: 'hosted',
+        dockerOk: true,
+      }),
+    ).toBe(0);
     // A pool member without a usable daemon must fail before the classifier
     // spends its budget, not after.
     expect(guardStatus(classifyGuard, { ...approved, dockerOk: false })).toBe(
@@ -315,14 +349,15 @@ describe('ci failure patrol workflow', () => {
         dockerOk: true,
       }),
     ).toBe(1);
-    // Hosted fallback needs no daemon at all.
+    // The probe is unconditional: a wedged or dead daemon is just as fatal on
+    // the hosted fallback, where the classifier still runs in a sandbox.
     expect(
       guardStatus(classifyGuard, {
         environment: 'github-hosted',
         name: 'hosted',
         dockerOk: false,
       }),
-    ).toBe(0);
+    ).toBe(1);
     expect(
       guardStatus(classifyGuard, {
         environment: '',
@@ -338,26 +373,34 @@ describe('ci failure patrol workflow', () => {
         dockerOk: true,
       }),
     ).toBe(1);
-    // ...but must not inherit classify's daemon requirement.
-    expect(guardStatus(actGuard, { ...approved, dockerOk: false })).toBe(0);
+    // ...but must not inherit classify's daemon requirement: act runs no
+    // sandbox, so a dead daemon is irrelevant there. Hosted mode so the base
+    // resolves; the self-hosted refusal is covered by the plantable case above.
+    expect(
+      guardStatus(actGuard, {
+        environment: 'github-hosted',
+        name: 'hosted',
+        dockerOk: false,
+      }),
+    ).toBe(0);
 
     // The CLI spawns its sandbox through the bare name `docker`, so a host
     // whose PATH docker is not the pinned binary must be refused even though
     // the pinned binary itself answers healthily. Otherwise the preflight
     // greenlights a host where the classifier runs outside any container.
-    const mismatch = runGuard(classifyGuard, {
-      ...approved,
-      dockerOk: true,
-      sandboxCommand: '/nonexistent/pinned/docker',
-    });
-    expect(mismatch.status).not.toBe(0);
-    expect(mismatch.output).toContain('is not /nonexistent/pinned/docker');
+    // The whole point of the verified base: a candidate inside a directory the
+    // job uid can write is refused, because a co-tenant can replace it there.
+    const plantable = runGuard(classifyGuard, { ...approved, dockerOk: true });
+    expect(plantable.status).not.toBe(0);
+    expect(plantable.output).toContain('no verified');
+    expect(plantable.output).toContain('refusing to run');
 
     // A non-timeout probe failure must surface the probe's own diagnostic
     // instead of blaming a healthy daemon for a missing binary or a socket
     // permission problem.
     const diagnostic = runGuard(classifyGuard, {
-      ...approved,
+      environment: 'github-hosted',
+      name: 'hosted',
       dockerOk: false,
       dockerStderr: 'PATROL-PROBE-DIAGNOSTIC permission denied',
     });
@@ -386,8 +429,115 @@ describe('ci failure patrol workflow', () => {
     expect(guard.env.SANDBOX_COMMAND).toBe(resolver.env.SANDBOX_COMMAND);
     expect(guard.env.SANDBOX_COMMAND).toBe('/usr/bin/docker');
     // The probe must go through that pinned binary, not a PATH lookup.
-    expect(guard.run).toContain('timeout 10 "${SANDBOX_COMMAND}" info');
+    expect(guard.run).toContain('"${timeout}" 10 "${docker}" info');
     expect(guard.run).not.toMatch(/timeout 10 docker/);
+    // The guard must establish its base without resolving any name.
+    expect(guard.env.PATROL_BIN_ROOTS).toBe('/usr/bin /bin /usr/local/bin');
+    expect(guard.run).toContain('usable()');
+    expect(guard.run).toContain('readlink -f');
+    // A blanket symlink refusal rejected node on a correctly provisioned pool
+    // host; the target and its directory must be checked, not the link alone.
+    expect(guard.run).toContain('if [ -L "${p}" ]; then');
+    expect(guard.run).toContain('[ ! -w "${t}" ]');
+    expect(guard.run).toContain('[ ! -w "${td}" ]');
+  });
+
+  it('fails the round when candidates produced no decisions', () => {
+    // This is the defect that let the patrol report success for twenty
+    // consecutive ineffective rounds, and a pool probe reproduced it again.
+    // The classifier stays continue-on-error so one slow model costs a cycle,
+    // but the RUN must not be green when candidates existed and nothing
+    // actionable came back.
+    const classify = yml.jobs.classify;
+    const verdict = classify.steps.find(
+      (s) => s.name === 'Fail the round when candidates produced no decisions',
+    );
+    expect(verdict).toBeTruthy();
+    expect(verdict.if).toContain("steps.scan.outputs.target_found == 'true'");
+    expect(verdict.if).toContain(
+      "steps.decisions.outputs.has_decisions != 'true'",
+    );
+    // It must run after Upload so the evidence survives the red, and it must
+    // not be continue-on-error, or the run stays green again.
+    const names = classify.steps.map((s) => s.name);
+    expect(names.indexOf(verdict.name)).toBeGreaterThan(
+      names.indexOf('Upload patrol input and decisions'),
+    );
+    expect(verdict['continue-on-error']).toBeUndefined();
+    expect(verdict.run).toContain('exit 1');
+
+    // Behavioural: the gate expression is what decides, so evaluate it against
+    // the three shapes that actually occur.
+    const fires = (targetFound, hasDecisions) =>
+      targetFound === 'true' && hasDecisions !== 'true';
+    expect(fires('true', 'false')).toBe(true); // outage -> red
+    expect(fires('true', '')).toBe(true); // validate skipped -> red
+    expect(fires('true', 'true')).toBe(false); // real decisions -> green
+    expect(fires('false', '')).toBe(false); // no candidates -> green no-op
+
+    // And the body really exits non-zero with an attributable message.
+    let status = 0;
+    let output = '';
+    try {
+      output = execFileSync('bash', ['-c', verdict.run], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      status = e.status;
+      output = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+    }
+    expect(status).toBe(1);
+    expect(output).toContain('produced no valid decisions');
+  });
+
+  it('behaviorally proves the classifier PATH docker equality fails closed', () => {
+    // The guard checks the ambient base; the classifier runs on the captured
+    // PATH, which setup-node has since prepended to. This step re-checks the
+    // resolution on that exact PATH, so a plantable docker there is refused.
+    const step = yml.jobs.classify.steps.find(
+      (s) => s.name === 'Verify classifier docker resolution',
+    );
+    expect(step.env.PATH).toBe('${{ steps.stage.outputs.trusted_path }}');
+    expect(step.if).toContain("runner.environment == 'self-hosted'");
+    const run = (plant) => {
+      const dir = mkdtempSync(join(tmpdir(), 'patrol-docker-eq-'));
+      const pinned = join(dir, 'pinned');
+      const pathDir = join(dir, 'onpath');
+      mkdirSync(pinned);
+      mkdirSync(pathDir);
+      for (const [d, tag] of [
+        [pinned, 'pinned'],
+        [pathDir, 'planted'],
+      ]) {
+        writeFileSync(join(d, 'docker'), `#!/bin/sh\necho ${tag}\n`);
+        chmodSync(join(d, 'docker'), 0o755);
+      }
+      let status = 0;
+      let output = '';
+      try {
+        output = execFileSync('bash', ['-c', step.run], {
+          env: {
+            ...process.env,
+            PATH: plant
+              ? `${pathDir}:${pinned}:${process.env.PATH}`
+              : `${pinned}:${process.env.PATH}`,
+            SANDBOX_COMMAND: join(pinned, 'docker'),
+          },
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (e) {
+        status = e.status;
+        output = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+      }
+      rmSync(dir, { recursive: true, force: true });
+      return { status, output };
+    };
+    expect(run(false).status).toBe(0);
+    const planted = run(true);
+    expect(planted.status).not.toBe(0);
+    expect(planted.output).toContain('refusing to run here');
   });
 
   it('pulls the sandbox image outside the classifier budget and times it', () => {
@@ -405,8 +555,9 @@ describe('ci failure patrol workflow', () => {
     // it makes the script throw on every round — a total patrol outage — and
     // nothing else in this suite would notice, so pin the argument itself.
     expect(resolve.run).toContain(
-      '"$(node -p "require(\'./package.json\').config.sandboxImageUri")"',
+      '"$("${NODE_BIN:?}" -p "require(\'./package.json\').config.sandboxImageUri")"',
     );
+    expect(resolve.env.NODE_BIN).toBe('${{ steps.guard.outputs.node }}');
     // A slow pull is the measurement this step exists to surface, so the
     // timing must be reported even when the resolver exits non-zero.
     expect(resolve.run).toContain('SECONDS');
@@ -428,6 +579,10 @@ describe('ci failure patrol workflow', () => {
     // image, then a fallback to the latest GHCR semver — so its step must be
     // capped below the job exactly like the classifier. Without that cap a cold
     // host eats the whole job and the model never runs at all.
+    // A pool probe measured the classifier hitting a 5-minute cap after a 2s
+    // image pull, i.e. the model alone needs more than five minutes. Pin the
+    // floor so a future edit cannot silently restore the known-bad budget.
+    expect(classifier['timeout-minutes']).toBeGreaterThanOrEqual(10);
     expect(resolve['timeout-minutes']).toBeGreaterThanOrEqual(10);
     expect(resolve['timeout-minutes']).toBeLessThan(
       classify['timeout-minutes'],
@@ -461,8 +616,9 @@ describe('ci failure patrol workflow', () => {
     );
     const runResolve = (exitCode) => {
       const dir = mkdtempSync(join(tmpdir(), 'patrol-resolve-'));
-      writeFileSync(join(dir, 'node'), `#!/bin/sh\nexit ${exitCode}\n`);
-      chmodSync(join(dir, 'node'), 0o755);
+      const stub = join(dir, 'node');
+      writeFileSync(stub, `#!/bin/sh\nexit ${exitCode}\n`);
+      chmodSync(stub, 0o755);
       let status = 0;
       let stdout = '';
       try {
@@ -470,7 +626,7 @@ describe('ci failure patrol workflow', () => {
           env: {
             ...process.env,
             PATH: `${dir}:${process.env.PATH}`,
-            TRUSTED_PATH: `${dir}:${process.env.PATH}`,
+            NODE_BIN: stub,
           },
           encoding: 'utf8',
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -553,7 +709,7 @@ describe('ci failure patrol workflow', () => {
     const reset = act.steps.find(
       (step) => step.name === 'Reset successful failure state',
     );
-    expect(reset.env.GH_TOKEN).toContain('CI_BOT_PAT');
+    expect(reset.env.GITHUB_TOKEN).toContain('CI_BOT_PAT');
     expect(reset.if).toContain('always()');
     // No disjunction: an || would let one success bypass the other requirement.
     expect(reset.if).not.toContain('||');
@@ -660,6 +816,9 @@ describe('ci failure patrol workflow', () => {
           GITHUB_WORKSPACE: dir,
           RUNNER_TEMP: runnerTemp,
           GITHUB_ENV: githubEnv,
+          GITHUB_OUTPUT: join(dir, 'gh_output'),
+          RM_BIN: '/usr/bin/rm',
+          MKTEMP_BIN: '/usr/bin/mktemp',
           GIT_CONFIG_GLOBAL: '/dev/null',
           GIT_CONFIG_SYSTEM: '/dev/null',
         },
@@ -692,9 +851,25 @@ describe('ci failure patrol workflow', () => {
       // nor the classifier step cap applies, and even an empty-candidate round
       // would hold the serialized patrol for the whole job budget.
       const guard = yml.jobs.classify.steps[0];
-      expect(guard.run).toContain('timeout 10 "${SANDBOX_COMMAND}" info');
+      expect(guard.run).toContain('"${timeout}" 10 "${docker}" info');
       expect(guard['timeout-minutes']).toBeLessThanOrEqual(2);
       const dir = mkdtempSync(join(tmpdir(), 'patrol-wedged-'));
+      const wroot = join(dir, 'bin');
+      mkdirSync(wroot);
+      for (const tool of ['rm', 'git', 'mktemp', 'gh', 'node']) {
+        writeFileSync(join(wroot, tool), '#!/bin/sh\nexit 0\n');
+        chmodSync(join(wroot, tool), 0o755);
+      }
+      // The real timeout must wrap the wedged docker, so give the guard a root
+      // whose timeout is the genuine binary and whose docker never answers.
+      writeFileSync(
+        join(wroot, 'timeout'),
+        '#!/bin/sh\nexec /usr/bin/timeout "$@"\n',
+      );
+      chmodSync(join(wroot, 'timeout'), 0o755);
+      writeFileSync(join(wroot, 'docker'), '#!/bin/sh\nsleep 60\n');
+      chmodSync(join(wroot, 'docker'), 0o755);
+      writeFileSync(join(dir, 'gh_output'), '');
       const stub = join(dir, 'docker');
       writeFileSync(stub, '#!/bin/sh\nsleep 60\n');
       chmodSync(stub, 0o755);
@@ -705,12 +880,14 @@ describe('ci failure patrol workflow', () => {
           env: {
             ...process.env,
             PATH: `${dir}:${process.env.PATH}`,
-            RUNNER_ENVIRONMENT: 'self-hosted',
-            RUNNER_NAME: 'ecs-qwen-hk1-1',
+            RUNNER_ENVIRONMENT: 'github-hosted',
+            RUNNER_NAME: 'hosted',
             // Point the probe at the wedged stub. Without this the guard would
             // fail instantly on an empty command name and the elapsed-time
             // assertion below would pass without any timeout ever firing.
-            SANDBOX_COMMAND: stub,
+            SANDBOX_COMMAND: join(wroot, 'docker'),
+            PATROL_BIN_ROOTS: wroot,
+            GITHUB_OUTPUT: join(dir, 'gh_output'),
             DOCKER_HOST: guard.env.DOCKER_HOST,
             DOCKER_CONTEXT: guard.env.DOCKER_CONTEXT,
           },
@@ -747,40 +924,53 @@ describe('ci failure patrol workflow', () => {
         names.indexOf('Set up Node.js'),
       );
       // Builtins only, so the capture itself resolves no command word.
-      expect(stage.run.trim()).toBe(
-        'echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"',
+      // Builtins only: the capture must resolve no command word itself.
+      const stageLines = stage.run
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l !== '' && !l.startsWith('#'));
+      expect(stageLines).toEqual([
+        'echo "trusted_path=${SYSTEM_PATH}:${PATH}" >> "${GITHUB_OUTPUT}"',
+      ]);
+      expect(stage.env.SYSTEM_PATH).toBe(
+        '${{ steps.guard.outputs.system_path }}',
       );
       // Every step that runs a command AFTER the capture, whether or not it
       // holds a token: validate runs `node` with no credential, but a planted
       // node there could rewrite the driver that act then runs with the PAT.
       // Steps before the capture (guard, Git rebuild) cannot use it yet.
-      const stageAt = names.indexOf('Capture trusted PATH');
-      const covered = job.steps
-        .slice(stageAt + 1)
-        .filter((step) => typeof step.run === 'string');
-      expect(covered.length).toBeGreaterThan(0);
-      for (const step of covered) {
+      // Credential-bearing steps must invoke the guard's verified absolute
+      // binaries, not a bare name and not a PATH export: the directories ON the
+      // captured PATH are themselves uid-writable on this pool, so pinning the
+      // string does not pin the binary.
+      const patSteps = job.steps.filter((step) =>
+        /CI_BOT_PAT|github\.token/.test(JSON.stringify(step.env ?? {})),
+      );
+      expect(patSteps.length).toBeGreaterThan(0);
+      for (const step of patSteps) {
+        expect(step.env.GH_BIN).toBe('${{ steps.guard.outputs.gh }}');
+        expect(step.env.MKTEMP_BIN).toBe('${{ steps.guard.outputs.mktemp }}');
+        // gh's own reroute channel, independent of PATH.
+        expect(step.run).toContain('export GH_HOST=github.com');
+        expect(step.run).toContain('unset GH_ENTERPRISE_TOKEN GH_TOKEN');
+        expect(step.run).toContain('patrol-gh-config.XXXXXX');
+        expect(step.run).toContain('export GH_CONFIG_DIR');
+      }
+      // Every node invocation in the job goes through the verified path.
+      for (const step of job.steps) {
+        if (typeof step.run !== 'string') continue;
+        // Only steps that actually execute the driver or a node -e/-p payload.
+        // The guard's own candidate loop names `node` as a tool label, which is
+        // not an invocation.
+        const code = step.run
+          .split('\n')
+          .filter((l) => !l.trim().startsWith('#'))
+          .join('\n')
+          .replace(/\$\{NODE_BIN:\?\}/g, 'VERIFIED_NODE');
         expect(
-          step.env?.TRUSTED_PATH,
-          `${job.name} / ${step.name} must take the captured PATH`,
-        ).toBe('${{ steps.stage.outputs.trusted_path }}');
-        // The export must precede every external command word. `set` is a
-        // builtin and may come first; nothing else may.
-        const lines = step.run.split('\n');
-        const at = lines.findIndex(
-          (line) => line.trim() === 'export PATH="${TRUSTED_PATH:?}"',
-        );
-        expect(
-          at,
-          `${job.name} / ${step.name} must export the captured PATH`,
-        ).toBeGreaterThanOrEqual(0);
-        for (const line of lines.slice(0, at)) {
-          const trimmed = line.trim();
-          expect(
-            trimmed === '' || trimmed.startsWith('#') || /^set\s/.test(trimmed),
-            `${job.name} / ${step.name} runs '${trimmed}' before pinning PATH`,
-          ).toBe(true);
-        }
+          /(^|[\s"'])node\s+(-e|-p|\.)/.test(code),
+          `${job.name} / ${step.name} invokes a bare node`,
+        ).toBe(false);
       }
     }
   });
@@ -815,9 +1005,11 @@ describe('ci failure patrol workflow', () => {
           ...process.env,
           // The planted directory wins an ambient PATH lookup.
           PATH: `${planted}:${trusted}:${process.env.PATH}`,
-          TRUSTED_PATH: trusted,
-          GH_TOKEN: 'SENTINEL-PAT-VALUE',
+          GH_BIN: join(trusted, 'gh'),
+          MKTEMP_BIN: '/usr/bin/mktemp',
+          GITHUB_TOKEN: 'SENTINEL-PAT-VALUE',
           GITHUB_OUTPUT: outFile,
+          RUNNER_TEMP: root,
         },
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -839,24 +1031,33 @@ describe('ci failure patrol workflow', () => {
       const rebuild = job.steps.find(
         (step) => step.name === 'Recreate runner Git metadata',
       );
-      expect(rebuild.run).toContain('rm -rf -- "$GITHUB_WORKSPACE/.git"');
       expect(rebuild.run).toContain(
+        '"${RM_BIN:?}" -rf -- "$GITHUB_WORKSPACE/.git"',
+      );
+      expect(rebuild.env.RM_BIN).toBe('${{ steps.guard.outputs.rm }}');
+      expect(rebuild.env.MKTEMP_BIN).toBe('${{ steps.guard.outputs.mktemp }}');
+      // An unpredictable name: a fixed path in enumerable $RUNNER_TEMP can be
+      // pre-planted as a symlink or refilled before git reads it.
+      expect(rebuild.run).toContain('patrol-empty-gitconfig.XXXXXX');
+      expect(rebuild.run).not.toContain(
         ': > "${RUNNER_TEMP}/patrol-empty-gitconfig"',
       );
       for (const scope of ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM']) {
         expect(rebuild.run).toContain(
-          `echo "${scope}=\${RUNNER_TEMP}/patrol-empty-gitconfig" >> "\${GITHUB_ENV}"`,
+          `echo "${scope}=\${GIT_CONFIG_FILE}" >> "\${GITHUB_ENV}"`,
         );
       }
       const checkout = job.steps.find((step) => step.id === 'checkout');
       // Step env too: it outranks the appendable $GITHUB_ENV copy, and this is
       // the step whose own git invocation the planted config would reach.
       expect(checkout.env.GIT_CONFIG_GLOBAL).toBe(
-        '${{ runner.temp }}/patrol-empty-gitconfig',
+        '${{ steps.gitmeta.outputs.gitconfig }}',
       );
       expect(checkout.env.GIT_CONFIG_SYSTEM).toBe(
-        '${{ runner.temp }}/patrol-empty-gitconfig',
+        '${{ steps.gitmeta.outputs.gitconfig }}',
       );
+      // checkout spawns git by name, so it gets only verified directories.
+      expect(checkout.env.PATH).toBe('${{ steps.guard.outputs.system_path }}');
     }
   });
 
@@ -912,6 +1113,9 @@ describe('ci failure patrol workflow', () => {
         GITHUB_WORKSPACE: workspace,
         RUNNER_TEMP: runnerTemp,
         GITHUB_ENV: envFile,
+        GITHUB_OUTPUT: join(root, 'gh_output'),
+        RM_BIN: '/usr/bin/rm',
+        MKTEMP_BIN: '/usr/bin/mktemp',
       };
       execFileSync('bash', ['-c', rebuild.run], {
         env: stepEnv,
@@ -924,8 +1128,8 @@ describe('ci failure patrol workflow', () => {
         const eq = line.indexOf('=');
         if (eq > 0) exported[line.slice(0, eq)] = line.slice(eq + 1);
       }
-      expect(exported.GIT_CONFIG_GLOBAL).toBe(
-        join(runnerTemp, 'patrol-empty-gitconfig'),
+      expect(exported.GIT_CONFIG_GLOBAL).toMatch(
+        new RegExp(`^${runnerTemp}/patrol-empty-gitconfig\\.[A-Za-z0-9]+$`),
       );
       expect(exported.GIT_CONFIG_SYSTEM).toBe(exported.GIT_CONFIG_GLOBAL);
       expect(existsSync(join(workspace, '.git'))).toBe(false);
