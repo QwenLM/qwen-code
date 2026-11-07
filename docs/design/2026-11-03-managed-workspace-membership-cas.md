@@ -2,6 +2,8 @@
 
 [English](2026-11-03-managed-workspace-membership-cas.md) | [简体中文](2026-11-03-managed-workspace-membership-cas.zh-CN.md)
 
+The rewind exclusion described below is superseded by [rewind without directory exclusion](2026-11-05-managed-rewind-concurrency.md). Shared membership and physical maintenance protections remain.
+
 ## Status and scope
 
 Status: Implemented. Focused H2 and existing MySQL recovery and inventory cases

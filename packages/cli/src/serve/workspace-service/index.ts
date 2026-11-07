@@ -54,6 +54,13 @@ import {
 
 import { loadSettings } from '../../config/settings.js';
 import {
+  getProjectHooksApprovalState,
+  getProjectHooksForApprovalFromRawWorkspace,
+  hashProjectHooks,
+  loadHookApprovals,
+  summarizeProjectHooks,
+} from '../../config/hook-approvals.js';
+import {
   evaluateDaemonWorkspaceTrust,
   readDaemonTrustPolicySnapshot,
 } from '../../config/daemon-trust-policy.js';
@@ -86,6 +93,8 @@ import {
   WorkspaceSkillNotFoundError,
   WorkspaceSettingsPartialPersistError,
   WorkspaceTrustGrantIneffectiveError,
+  WorkspaceProjectHooksNotPendingError,
+  WorkspaceProjectHooksChangedError,
 } from './types.js';
 import type {
   DaemonWorkspaceService,
@@ -101,6 +110,7 @@ import type {
   WorkspaceSkillToggleResult,
   WorkspaceSkillToggleActivation,
   PersistDisabledSkillsBatchResult,
+  WorkspaceSkillInstallOptions,
   WorkspaceSkillInstallRequest,
   WorkspaceSkillMutationResult,
   WorkspaceSkillScope,
@@ -776,9 +786,41 @@ export function createDaemonWorkspaceService(
     },
 
     async getWorkspaceHooksStatus(_ctx: WorkspaceRequestContext) {
-      return queryWorkspaceStatus(SERVE_STATUS_EXT_METHODS.workspaceHooks, () =>
-        createIdleWorkspaceHooksStatus(boundWorkspace),
+      const status = await queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceHooks,
+        () => createIdleWorkspaceHooksStatus(boundWorkspace),
       );
+      // The approval prompt must appear on a cold daemon too: no live ACP
+      // child means the idle placeholder, which knows nothing about the
+      // workspace file. Read the same pending-decision truth locally.
+      if (status.pendingApproval) return status;
+      try {
+        // Same rule as the live child: explicit folder trust authorizes the
+        // block, so no card for hooks that would run.
+        if (isWorkspaceTrusted()) return status;
+        const settings = loadSettings(boundWorkspace, {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: false,
+          workspaceTrusted: true,
+          preserveInvalidWorkspaceSettings: true,
+        });
+        if (settings.merged.disableAllHooks) return status;
+        const approval = getProjectHooksForApprovalFromRawWorkspace(settings);
+        if (!approval || getProjectHooksApprovalState(approval) !== 'pending') {
+          return status;
+        }
+        return {
+          ...status,
+          pendingApproval: true,
+          pendingApprovalHooks: summarizeProjectHooks(
+            approval.resolved,
+            approval.hooks,
+          ),
+          pendingApprovalHash: hashProjectHooks(approval),
+        };
+      } catch {
+        return status;
+      }
     },
 
     async getWorkspaceExtensionsStatus(_ctx: WorkspaceRequestContext) {
@@ -786,6 +828,52 @@ export function createDaemonWorkspaceService(
         SERVE_STATUS_EXT_METHODS.workspaceExtensions,
         () => createIdleWorkspaceExtensionsStatus(boundWorkspace),
       );
+    },
+
+    async approveProjectHooks(
+      _ctx: WorkspaceRequestContext,
+      decision: 'approve' | 'reject',
+      expectedHash?: string,
+    ) {
+      assertActiveGeneration();
+      // Load the workspace file for review only; this never trusts the
+      // folder or feeds the execution accessors.
+      const settings = loadSettings(boundWorkspace, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: false,
+        workspaceTrusted: true,
+        preserveInvalidWorkspaceSettings: true,
+      });
+      const approval = getProjectHooksForApprovalFromRawWorkspace(settings);
+      if (!approval) {
+        throw new WorkspaceProjectHooksNotPendingError();
+      }
+      const approvalHash = hashProjectHooks(approval);
+      // The client echoes the hash it rendered; a block that changed since
+      // then must not be persisted as approved unseen — the user reviews the
+      // new block and decides again.
+      if (expectedHash !== undefined && expectedHash !== approvalHash) {
+        throw new WorkspaceProjectHooksChangedError();
+      }
+      await loadHookApprovals().setState(
+        approval,
+        decision === 'approve' ? 'approved' : 'rejected',
+      );
+      assertActiveGeneration();
+      // Best-effort live propagation: the persisted decision is
+      // authoritative, and every config re-reads the store on reload. A
+      // cold daemon (no ACP child) simply applies it on next start.
+      let reloaded = false;
+      try {
+        await invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.projectHooksApprove,
+          { decision, hash: approvalHash },
+        );
+        reloaded = true;
+      } catch {
+        // No live channel, or the child predates the control method.
+      }
+      return { decision, reloaded };
     },
 
     async getWorkspaceTrustStatus(_ctx: WorkspaceRequestContext) {
@@ -1221,7 +1309,7 @@ export function createDaemonWorkspaceService(
     async installWorkspaceSkill(
       _ctx: WorkspaceRequestContext,
       request: WorkspaceSkillInstallRequest,
-      opts?: { refreshRuntime?: boolean },
+      opts?: WorkspaceSkillInstallOptions & { refreshRuntime?: boolean },
     ): Promise<WorkspaceSkillMutationResult> {
       assertActiveGeneration();
       const result = await installWorkspaceSkill(
@@ -1229,6 +1317,7 @@ export function createDaemonWorkspaceService(
         request,
         skillInstallEnv?.['GH_TOKEN'] ?? skillInstallEnv?.['GITHUB_TOKEN'],
         assertGenerationOpen,
+        opts,
       );
       assertActiveGeneration();
       if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsInventory();
@@ -1676,12 +1765,16 @@ export function createDaemonWorkspaceService(
       };
     },
 
-    async reloadModelProviders(_ctx: WorkspaceRequestContext) {
+    async reloadModelProviders(_ctx: WorkspaceRequestContext, options) {
       assertActiveGeneration();
+      if (options?.subscriptionSignedOut) {
+        await deps.preheatAcpChild?.();
+        assertActiveGeneration();
+      }
       let failed = false;
       const reloadModelProvidersDaemonEnv =
         deps.reloadModelProvidersDaemonEnv ?? deps.reloadDaemonEnv;
-      if (reloadModelProvidersDaemonEnv) {
+      if (reloadModelProvidersDaemonEnv && !options?.subscriptionSignedOut) {
         try {
           const result = await reloadModelProvidersDaemonEnv(
             boundWorkspace,
@@ -1703,10 +1796,18 @@ export function createDaemonWorkspaceService(
           configsFailed?: number;
         }>(
           SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
-          { cwd: boundWorkspace },
+          {
+            cwd: boundWorkspace,
+            ...(options?.subscriptionSignedOut
+              ? { subscriptionSignedOut: true }
+              : {}),
+          },
           { timeoutMs: 30_000 },
         );
         if ((child.configsFailed ?? 0) > 0) failed = true;
+        if (options?.subscriptionSignedOut) {
+          assertActiveGeneration();
+        }
         return { status: failed ? 'failed' : 'applied' };
       } catch (err) {
         assertActiveGeneration();

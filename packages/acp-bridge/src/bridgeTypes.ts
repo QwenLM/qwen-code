@@ -1776,6 +1776,7 @@ export interface BridgeDaemonStatusLimits {
   maxSessions: number | null;
   maxPendingPromptsPerSession: number | null;
   eventRingSize: number;
+  eventRingMaxBytes: number;
   compactedReplayMaxBytes: number;
   /**
    * Per-session BASELINE journal caps. A session's effective caps can be
@@ -1813,6 +1814,12 @@ export interface BridgeDaemonSessionDiagnostic {
   backgroundTurn?: BackgroundNotificationTurn;
   hasRunningBackgroundTasks?: boolean;
   lastEventId: number;
+  eventRingCount: number;
+  eventRingBytes: number;
+  eventRingEarliestEventId?: number;
+  eventRingEvictedEvents: number;
+  eventRingEvictedBytes: number;
+  availableCommandsSnapshotBytes: number;
   lastSeenAt?: number;
   currentModelId?: string;
   currentApprovalMode?: string;
@@ -2813,6 +2820,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   setUserLanguage(params: {
     language: string;
     syncOutputLanguage: boolean;
+    /** Reload workspace settings too after a workspace-owned UI language write. */
+    scope?: 'workspace';
   }): Promise<{
     language: string;
     sessions: number;

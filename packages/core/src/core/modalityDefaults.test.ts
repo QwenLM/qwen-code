@@ -135,6 +135,9 @@ describe('defaultModalities', () => {
       ['qwen-vl-max', ONLY_IMAGE_VIDEO],
       ['qwen3-vl-plus', has({ image: true, video: true })],
       ['qwen2.5-vl-32b-instruct', ONLY_IMAGE_VIDEO],
+      ['Ollama qwen3-vl tags', ONLY_IMAGE_VIDEO, 'qwen3-vl:8b'],
+      ['Ollama qwen2.5vl tags', ONLY_IMAGE_VIDEO, 'qwen2.5vl:7b'],
+      ['qwen2.5-vl without a size', ONLY_IMAGE_VIDEO, 'qwen2.5-vl'],
       [
         'quantized Qwen2.5-VL builds',
         ONLY_IMAGE_VIDEO,
@@ -272,6 +275,42 @@ describe('defaultModalities', () => {
       ],
       ['doubao-pro-32k', TEXT_ONLY],
       ['doubao-lite-4k', TEXT_ONLY],
+    ]);
+  });
+
+  describe('other open-weight vision models', () => {
+    casesFor('returns image for', [
+      ['llama3.2-vision (Ollama)', IMAGE, 'llama3.2-vision:11b'],
+      [
+        'Llama-3.2-11B-Vision-Instruct',
+        IMAGE,
+        'meta-llama/Llama-3.2-11B-Vision-Instruct',
+      ],
+      [
+        'Llama-4-Scout-17B-16E-Instruct',
+        IMAGE,
+        'meta-llama/Llama-4-Scout-17B-16E-Instruct',
+      ],
+      ['llama4 (Ollama)', IMAGE, 'llama4:16x17b'],
+      ['llava', IMAGE, 'llava:13b'],
+      ['pixtral-12b', IMAGE],
+      ['pixtral-large-latest', IMAGE],
+      [
+        'Mistral-Small-3.1-24B-Instruct',
+        IMAGE,
+        'mistralai/Mistral-Small-3.1-24B-Instruct-2503',
+      ],
+      ['mistral-small3.2 (Ollama)', IMAGE, 'mistral-small3.2:24b'],
+    ]);
+
+    casesFor('returns text-only for', [
+      ['llama3.2 (text model)', TEXT_ONLY, 'llama3.2:3b'],
+      ['llama3.1', TEXT_ONLY, 'llama3.1:8b'],
+      [
+        'Mistral Small 3 (text model)',
+        TEXT_ONLY,
+        'mistralai/Mistral-Small-24B-Instruct-2501',
+      ],
     ]);
   });
 

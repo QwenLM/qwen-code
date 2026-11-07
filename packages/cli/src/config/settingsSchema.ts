@@ -4380,6 +4380,18 @@ const SETTINGS_SCHEMA = {
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,
       },
+      FileChanged: {
+        type: 'array',
+        label: 'File Changed Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when a watched file is added, changed, or deleted in a local session.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
     },
   },
 
@@ -4558,7 +4570,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI sends its model requests through it, while its tool runs, OpenTUI and subagents keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.',
+          'Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI sends its model requests and runs its tool batches through it, while its turn continuation, OpenTUI and subagents keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.',
         showInDialog: true,
       },
       agentCollaboration: {

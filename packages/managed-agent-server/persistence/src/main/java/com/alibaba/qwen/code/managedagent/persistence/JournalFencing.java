@@ -164,8 +164,8 @@ final class JournalFencing {
                 WorkspaceMigrationAdmission.sessionStorage(jdbc, tenantId, sessionId, workspaceId));
     }
 
-    void requireSessionStorageOpenForAdmission(String tenantId, String workspaceId, String sessionId) {
-        WorkspaceMigrationAdmission.requirePhysicalOpenForAdmission(jdbc, tenantId,
+    void requireSessionStorageOpenForRead(String tenantId, String workspaceId, String sessionId) {
+        WorkspaceMigrationAdmission.requirePhysicalOpenForRead(jdbc, tenantId,
                 WorkspaceMigrationAdmission.sessionStorage(jdbc, tenantId, sessionId, workspaceId));
     }
 
