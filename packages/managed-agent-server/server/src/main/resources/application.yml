@@ -90,7 +90,7 @@ qwen:
     artifacts:
       read-revalidation-interval: '5s'
     automation:
-      enabled: '${QWEN_MANAGED_AGENT_AUTOMATION_ENABLED:false}'
+      enabled: '${QWEN_MANAGED_AGENT_AUTOMATION_ENABLED:true}'
       scan-delay: '${QWEN_MANAGED_AGENT_AUTOMATION_SCAN_DELAY:10s}'
       lease: '${QWEN_MANAGED_AGENT_AUTOMATION_LEASE:60s}'
       late-tolerance: '${QWEN_MANAGED_AGENT_AUTOMATION_LATE_TOLERANCE:5m}'

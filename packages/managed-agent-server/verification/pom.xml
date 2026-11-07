@@ -13,8 +13,37 @@
         <qwen.cli.entry>${managed.module.root}/../../dist/cli.js</qwen.cli.entry>
         <maven.install.skip>true</maven.install.skip>
         <maven.deploy.skip>true</maven.deploy.skip>
+        <argLine></argLine>
     </properties>
     <dependencies>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-http</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-host</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-local</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-external</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-kubernetes</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-ssh</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-static</artifactId>
+        </dependency>
         <dependency>
             <groupId>com.alibaba</groupId>
             <artifactId>qwen-managed-agent-contracts</artifactId>
@@ -107,6 +136,21 @@
         </dependency>
     </dependencies>
     <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-failsafe-plugin</artifactId>
+                    <version>${maven-failsafe-plugin.version}</version>
+                    <configuration>
+                        <systemPropertyVariables>
+                            <managed.module.root>${managed.module.root}</managed.module.root>
+                            <qwen.cli.entry>${qwen.cli.entry}</qwen.cli.entry>
+                        </systemPropertyVariables>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
         <testResources>
             <testResource>
                 <directory>src/test/resources</directory>
@@ -127,8 +171,13 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
+                    <!-- The suite's single fork outgrows the default quarter of a 16 GB hosted runner. -->
+                    <argLine>@{argLine} -XX:MaxRAMPercentage=40</argLine>
                     <failIfNoTests>true</failIfNoTests>
                     <excludedGroups>fault-gate</excludedGroups>
+                    <!-- H2 fixtures retain named databases for the JVM's lifetime.
+                         Keep those catalogs scoped to a test class, not the whole suite. -->
+                    <reuseForks>false</reuseForks>
                     <systemPropertyVariables>
                         <managed.module.root>${managed.module.root}</managed.module.root>
                         <qwen.cli.entry>${qwen.cli.entry}</qwen.cli.entry>
@@ -162,17 +211,6 @@
                         </configuration>
                     </execution>
                 </executions>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-failsafe-plugin</artifactId>
-                <version>${maven-failsafe-plugin.version}</version>
-                <configuration>
-                    <systemPropertyVariables>
-                        <managed.module.root>${managed.module.root}</managed.module.root>
-                        <qwen.cli.entry>${qwen.cli.entry}</qwen.cli.entry>
-                    </systemPropertyVariables>
-                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.jacoco</groupId>
@@ -284,7 +322,7 @@
                                     qwen.hosted.mysql.isolation = true
                                 </configurationParameters>
                             </properties>
-                            <forkedProcessTimeoutInSeconds>11591</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>11658</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

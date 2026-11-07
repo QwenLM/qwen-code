@@ -141,13 +141,14 @@ function renderToolLine(
   tool: ACPToolCall,
   props: Partial<Parameters<typeof ToolLine>[0]> = {},
   customization = {},
+  language: 'en' | 'zh-CN' = 'en',
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <WebShellCustomizationProvider value={customization}>
           <ToolLine tool={tool} {...props} />
         </WebShellCustomizationProvider>
@@ -905,6 +906,30 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
+  it.each(['Shell', 'ReadFile'])(
+    'preserves literal successful %s output under Chinese',
+    (toolName) => {
+      const literal =
+        "You've used up your weekly credits. Please try again after the reset.";
+      const container = renderToolLine(
+        makeTool({
+          toolName,
+          status: 'completed',
+          args:
+            toolName === 'Shell'
+              ? { command: 'cat literal.txt' }
+              : { path: '/tmp/literal.txt' },
+          rawOutput: literal,
+        }),
+        { forceExpanded: toolName === 'ReadFile' },
+        {},
+        'zh-CN',
+      );
+      expect(container.textContent).toContain(literal);
+      expect(container.textContent).not.toContain('周额度已用完');
+    },
+  );
+
   it('shows the Advisor verdict and expands the full review', () => {
     const container = renderToolGroup([
       makeTool({

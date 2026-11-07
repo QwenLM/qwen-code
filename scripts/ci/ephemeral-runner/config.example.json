@@ -1,0 +1,16 @@
+{
+  "repo": "QwenLM/qwen-code",
+  "runnerGroupId": 1,
+  "poolId": "external-ci-host-1",
+  "image": "registry.example.invalid/qwen-runner@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "labels": ["self-hosted", "linux", "x64", "ecs-qwen-ephemeral"],
+  "slots": 1,
+  "cpus": 4,
+  "memory": "8g",
+  "pidsLimit": 1024,
+  "ttlSeconds": 10800,
+  "shutdownGraceSeconds": 60,
+  "minDiskBytes": 10737418240,
+  "stateDir": "/var/lib/qwen-ephemeral-runner",
+  "logDir": "/var/log/qwen-ephemeral-runner"
+}

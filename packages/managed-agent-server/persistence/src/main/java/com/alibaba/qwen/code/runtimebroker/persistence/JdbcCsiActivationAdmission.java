@@ -24,6 +24,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
+import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.statement;
+
 /** Shared native CSI journal semantics for live admission and read-only historical inspection. */
 public final class JdbcCsiActivationAdmission {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -67,7 +69,7 @@ public final class JdbcCsiActivationAdmission {
     static JdbcCsiFilesRetirementGuard.Original lockForExecution(Connection connection, String bindingId,
             JdbcRuntimeBindingRepository bindings)
             throws SQLException {
-        var original = lockOriginal(connection, bindingId);
+        var original = JdbcCsiFilesRetirementGuard.lockExecutionControl(connection, bindingId);
         if (original != null) {
             original.requireAdmission();
             requireHistoryIdentity(connection, original, requireLive(connection, original), bindings);
@@ -945,12 +947,6 @@ public final class JdbcCsiActivationAdmission {
         }
     }
 
-    private static PreparedStatement statement(Connection connection, String sql) throws SQLException {
-        PreparedStatement statement = connection.prepareStatement(sql);
-        statement.setQueryTimeout(10);
-        return statement;
-    }
-
     record JournalRead(long started) {
         static final JournalRead LIVE = new JournalRead(0);
 
@@ -962,7 +958,7 @@ public final class JdbcCsiActivationAdmission {
 
         PreparedStatement statement(Connection connection, String sql) throws SQLException {
             if (started == 0) {
-                return JdbcCsiActivationAdmission.statement(connection, sql + " FOR UPDATE");
+                return JdbcRepositorySupport.statement(connection, sql + " FOR UPDATE");
             }
             requireHistorical(connection);
             var result = connection.prepareStatement(sql);

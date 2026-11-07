@@ -10,6 +10,7 @@ import {
 } from '../config/execution-sandbox-settings.js';
 import type { RunHandle } from './run-qwen-serve.js';
 import { MAX_COMPACTED_REPLAY_MAX_BYTES } from '@qwen-code/acp-bridge/replayWindowLimits';
+import { normalizeMaxRingBytes } from '@qwen-code/acp-bridge/eventBus';
 import {
   isValidMemoryBudgetMb,
   memoryBudgetRangeError,
@@ -49,6 +50,7 @@ const NUMBER_OPTIONS = new Map<
   ['maxPendingPromptsPerSession', 'max-pending-prompts-per-session'],
   ['maxConnections', 'max-connections'],
   ['eventRingSize', 'event-ring-size'],
+  ['eventRingMaxBytes', 'event-ring-max-bytes'],
   ['compactedReplayMaxBytes', 'compacted-replay-max-bytes'],
   ['maxJournalEvents', 'max-journal-events'],
   ['maxJournalBytes', 'max-journal-bytes'],
@@ -75,6 +77,7 @@ const STRING_OPTION_BY_FLAG = new Map<string, keyof ServeOptions>([
   ['hostname', 'hostname'],
   ['token', 'token'],
   ['workspace', 'workspace'],
+  ['conversations-dir', 'conversationsDir'],
   ['memory-project-scope', 'memoryProjectScope'],
   ['tls-cert', 'tlsCert'],
   ['tls-key', 'tlsKey'],
@@ -212,6 +215,12 @@ function getServeFastPathValidationError(
       maxPendingPromptsPerSession < 0)
   ) {
     return 'qwen serve: --max-pending-prompts-per-session must be a non-negative integer (0 / Infinity = unlimited).';
+  }
+
+  try {
+    normalizeMaxRingBytes(parsed.options.eventRingMaxBytes);
+  } catch (error) {
+    return `qwen serve: ${error instanceof Error ? error.message : String(error)}`;
   }
 
   const compactedReplayMaxBytes = parsed.options.compactedReplayMaxBytes;
@@ -409,8 +418,8 @@ export function parseServeFastPathArgs(
       if (!read) return { kind: 'fallback' };
       i = read.nextIndex;
       if (
-        stringTarget === 'workspace' &&
-        (options.workspace !== undefined || read.value === '')
+        (stringTarget === 'workspace' || stringTarget === 'conversationsDir') &&
+        (options[stringTarget] !== undefined || read.value === '')
       ) {
         return { kind: 'fallback' };
       }

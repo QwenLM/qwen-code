@@ -9,10 +9,13 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 
 import java.time.Duration;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -209,8 +212,46 @@ final class RuntimeBrokerSupport {
         }
     }
 
+    static boolean sameReceipt(Map<String, Object> expected,
+            Map<String, Object> actual) {
+        if (actual == null || !actual.keySet().equals(Set.of("executionCallId", "manifest",
+                "deliveryStatus", "historyRevision"))
+                || !Objects.equals(expected.get("executionCallId"), actual.get("executionCallId"))
+                || !Objects.equals(expected.get("deliveryStatus"), actual.get("deliveryStatus"))) {
+            return false;
+        }
+        Object leftRevision = expected.get("historyRevision");
+        Object rightRevision = actual.get("historyRevision");
+        if (leftRevision == null ? rightRevision != null
+                : !(rightRevision instanceof Number number)
+                        || ((Number) leftRevision).longValue() != number.longValue()) {
+            return false;
+        }
+        Object left = expected.get("manifest");
+        Object right = actual.get("manifest");
+        if (left == null || right == null) {
+            return left == right;
+        }
+        if (!(left instanceof Map<?, ?> saved) || !(right instanceof Map<?, ?> received)
+                || !saved.keySet().equals(received.keySet())) {
+            return false;
+        }
+        for (String field : List.of("resourceId", "kind", "digest")) {
+            if (!Objects.equals(saved.get(field), received.get(field))) {
+                return false;
+            }
+        }
+        for (String field : List.of("schemaVersion", "byteLength")) {
+            if (!(saved.get(field) instanceof Number a) || !(received.get(field) instanceof Number b)
+                    || a.longValue() != b.longValue()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     static Map<String, Object> sshNoStartReceipt(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
-        if (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
+        if (!RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
                 || !execution.isSettled() || !"not_started".equals(execution.getExecutionStatus())
                 || execution.getResult() == null || !execution.getResult().containsKey("capture")
                 || execution.getResult().get("capture") != null
