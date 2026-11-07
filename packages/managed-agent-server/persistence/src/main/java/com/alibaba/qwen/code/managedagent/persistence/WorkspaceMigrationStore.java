@@ -112,8 +112,7 @@ public final class WorkspaceMigrationStore {
         transaction.executeWithoutResult(status -> {
             lockAuthority();
             guard.migrationSource(tenant, storage, revision, fence);
-            requireCommittedIdle();
-            requireFilesProfiles();
+            requireCommittedAdmissionState();
             var raced = row(true);
             if (raced != null) {
                 check(hash(bytes).equals(raced.get("request_digest")), "operation_conflict");
@@ -305,17 +304,17 @@ public final class WorkspaceMigrationStore {
         });
     }
 
-    private void requireFilesProfiles() {
+    private void requireFilesProfiles(JdbcTemplate current) {
         String after = "";
-        var reader = new WorkspaceRecoveryReader(jdbc, null);
+        var reader = new WorkspaceRecoveryReader(current, null);
         while (true) {
-            var page = jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id = ?"
+            var page = current.queryForList("SELECT session_id FROM ma_session WHERE tenant_id = ?"
                     + " AND workspace_storage_id = ? AND session_id > ? ORDER BY session_id LIMIT 32",
                     String.class, tenant, storage, after);
             for (String session : page) {
-                jdbc.query("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                current.query("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                         (row, index) -> ManagedAgentStore.readBinding(row), tenant, session);
-                JsonNode source = WorkspaceRecoveryStore.currentSource(jdbc, tenant, storage, session, true);
+                JsonNode source = WorkspaceRecoveryStore.currentSource(current, tenant, storage, session, false);
                 after = session;
                 if (source.path("head").isNull() && !source.path("retirement").isNull()) {
                     continue;
@@ -348,19 +347,21 @@ public final class WorkspaceMigrationStore {
         requireIdle(jdbc);
     }
 
-    // Turn admission does not take the tenant guard; it locks this storage's alias (fence) row
-    // through requireOpen. migrationSource has already locked that row here, so an admission
-    // either committed before this point or waits and then sees the fence. This transaction's
-    // REPEATABLE READ snapshot can predate that lock, so read committed work on a separate
-    // autocommit connection, as LocalStorageOwners.lockCovered does for its inventory.
-    private void requireCommittedIdle() {
+    // Turn and Session creation admission lock this storage's alias before inserting.
+    // migrationSource holds that lock now, but this transaction's RR snapshot may predate it.
+    // Check both work and profiles on a fresh connection. The alias and publication authority
+    // protect genesis and definition resources; locking Session/head rows on this connection
+    // would reverse hot paths' Session-before-alias order.
+    private void requireCommittedAdmissionState() {
         try (var connection = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
             connection.setAutoCommit(true);
             connection.setReadOnly(true);
-            requireIdle(new ManagedSchemaJdbcTemplate(
-                    new org.springframework.jdbc.datasource.SingleConnectionDataSource(connection, true)));
+            var current = new ManagedSchemaJdbcTemplate(
+                    new org.springframework.jdbc.datasource.SingleConnectionDataSource(connection, true));
+            requireIdle(current);
+            requireFilesProfiles(current);
         } catch (java.sql.SQLException error) {
-            throw new IllegalStateException("Migration idle check is unavailable", error);
+            throw new IllegalStateException("Migration admission check is unavailable", error);
         }
     }
 
@@ -453,8 +454,10 @@ public final class WorkspaceMigrationStore {
     }
 
     private void clearFence() {
-        check(jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", fence_operation_id = NULL WHERE tenant_key = ? AND storage_key = ? AND fence_operation_id = ?", JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                JdbcRuntimeBindingRepository.storageFenceKey(storage), id) == 1, "migration_conflict");
+        // The same index as owner(), which already locked this row.
+        check(jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", fence_operation_id = NULL"
+                + " WHERE alias_key = ? AND fence_operation_id = ?", JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+                id) == 1, "migration_conflict");
     }
 
     private Map<String, Object> requireRow(boolean lock) {

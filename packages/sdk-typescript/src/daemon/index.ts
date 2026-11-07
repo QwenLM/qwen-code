@@ -10,6 +10,7 @@ export type {
   ManagedPackagePreparation,
 } from './managed-extension-package-types.js';
 export { DaemonAttachmentUploadError } from './DaemonAttachmentUploadError.js';
+export { DaemonSkillInstallError } from './DaemonSkillInstallError.js';
 export {
   DaemonClient,
   DaemonHttpError,
@@ -461,6 +462,7 @@ export type {
   DaemonChannelsSnapshot,
   DaemonChannelEvent,
   DaemonChannelEventsSnapshot,
+  DaemonChannelLinkMeta,
   DaemonChannelEventsQuery,
   DaemonChannelEventType,
   DaemonChannelSecretUpdate,
@@ -504,6 +506,8 @@ export type {
   DaemonSkillBatchToggleErrorCode,
   DaemonSkillBatchToggleItem,
   DaemonSkillBatchToggleResult,
+  DaemonUserSkillActivation,
+  DaemonUserSkillsActivationResult,
   DaemonSkillToggleActivation,
   DaemonSkillToggleMutation,
   DaemonSkillToggleMutationSkill,
@@ -512,6 +516,11 @@ export type {
   DaemonSkillScope,
   DaemonSkillInstallSource,
   DaemonSkillInstallRequest,
+  DaemonSkillConfigInstallRequest,
+  DaemonSkillArchiveInstallRequest,
+  DaemonSkillArchiveInstallResult,
+  DaemonSkillInstallAttempt,
+  DaemonSkillInstallOptions,
   DaemonSkillMutationResult,
   DaemonSettingDescriptor,
   DaemonPermissionRuleSet,
@@ -656,6 +665,10 @@ export type {
   DaemonAuthDeviceFlowSdkErrorKind,
   DaemonAuthProviderStatus,
   DaemonAuthStatusSnapshot,
+  DaemonSubscriptionActivation,
+  DaemonSubscriptionConfig,
+  DaemonSubscriptionUserInfo,
+  DaemonSubscriptionFlow,
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
   DaemonSessionContextStatus,

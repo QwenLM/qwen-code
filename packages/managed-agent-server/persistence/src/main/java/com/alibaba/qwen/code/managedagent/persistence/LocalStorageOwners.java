@@ -56,7 +56,11 @@ final class LocalStorageOwners {
     }
 
     static Map<String, Object> alias(JdbcTemplate jdbc, String tenant, String storage, boolean lock) {
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.STORAGE.columns() + " FROM ma_storage WHERE alias_key = ?" + (lock ? " FOR UPDATE" : ""),
+        return alias(jdbc, tenant, storage, lock ? " FOR UPDATE" : "");
+    }
+
+    private static Map<String, Object> alias(JdbcTemplate jdbc, String tenant, String storage, String lock) {
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.STORAGE.columns() + " FROM ma_storage WHERE alias_key = ?" + lock,
                 JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
         if (rows.isEmpty()) {
             return null;
@@ -70,20 +74,29 @@ final class LocalStorageOwners {
     }
 
     static String key(JdbcTemplate jdbc, String tenant, String storage) {
-        boolean lock = TransactionSynchronizationManager.isActualTransactionActive();
-        var alias = alias(jdbc, tenant, storage, lock);
+        return key(jdbc, tenant, storage, TransactionSynchronizationManager.isActualTransactionActive());
+    }
+
+    static String key(JdbcTemplate jdbc, String tenant, String storage, boolean lock) {
+        String clause = lock ? " FOR UPDATE" : "";
+        var alias = alias(jdbc, tenant, storage, clause);
+        requireOwner(jdbc, alias, clause);
+        return (String) alias.get("physical_key");
+    }
+
+    static Map<String, Object> requireOwner(JdbcTemplate jdbc, Map<String, Object> alias, String lock) {
         if (alias == null || !"LOCAL".equals(alias.get("storage_kind"))
                 || !java.util.Set.of("REGISTERED", "RETIRING").contains(alias.get("registration_state"))
                 || !(alias.get("physical_key") instanceof String physical)) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
-        var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_key, physical_key, storage_kind FROM ma_storage_owner WHERE storage_key = ?"
-                + (lock ? " FOR UPDATE" : ""), physical);
+        var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_key, physical_key, storage_kind, mount_state FROM ma_storage_owner WHERE storage_key = ?"
+                + lock, physical);
         if (owners.size() != 1 || !physical.equals(owners.getFirst().get("physical_key"))
                 || !"LOCAL".equals(owners.getFirst().get("storage_kind"))) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
-        return physical;
+        return owners.getFirst();
     }
     static String lockCovered(JdbcTemplate jdbc, String tenant, String storage) {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
@@ -93,9 +106,37 @@ final class LocalStorageOwners {
         if (source == null || !(source.get("physical_key") instanceof String physical)) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
-        var aliases = jdbc.query("SELECT alias_key, tenant_id, storage_id, storage_kind FROM ma_storage WHERE physical_key = ? ORDER BY alias_key LIMIT 129 FOR UPDATE",
-                (row, index) -> new String[] {row.getString("alias_key"), row.getString("tenant_id"), row.getString("storage_id"), row.getString("storage_kind")}, physical);
         String sourceAlias = JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage);
+        // Lock the aliases through alias_key, in alias_key order, before the
+        // scan below reaches their primary records: storage admission locks an
+        // alias record before its primary record (WorkspaceMigrationAdmission
+        // .owner), and two recoveries of aliases sharing this storage take
+        // them in one order. On a pooled DataSource the list comes from a
+        // committed read (committedRead) rather than this transaction's
+        // snapshot; on the single-connection offline entry it is that
+        // transaction's first snapshot instead. An alias registered after that
+        // read is locked by the scan alone, which never locks its alias record;
+        // a recovery of another alias that already saw it can then deadlock
+        // with this one.
+        java.util.List<String> listed = committedRead(jdbc, current -> current.queryForList(
+                "SELECT alias_key FROM ma_storage WHERE physical_key = ? ORDER BY alias_key LIMIT 129", String.class, physical),
+                "Physical recovery alias list is unavailable");
+        var known = new java.util.TreeSet<String>(listed);
+        known.add(sourceAlias);
+        // A range read of the alias index, which yields alias_key order. The
+        // index is forced so this is never a table scan, and physical_key is
+        // read so it is never a scan of the whole alias index either, which a
+        // covering read becomes once the list is as long as the estimated row
+        // count, locking every gap of the index.
+        jdbc.queryForList("SELECT alias_key, physical_key FROM ma_storage /*! FORCE INDEX (uk_ma_storage_business_key) */"
+                + " WHERE alias_key IN (" + String.join(", ", java.util.Collections.nCopies(known.size(), "?"))
+                + ") ORDER BY alias_key FOR UPDATE", known.toArray());
+        // Through the physical index: a table scan, which the optimizer picks
+        // when one storage holds most rows, would lock other storages' primary
+        // records in id order and cross another recovery's alias locks.
+        var aliases = jdbc.query("SELECT alias_key, tenant_id, storage_id, storage_kind FROM ma_storage"
+                + " /*! FORCE INDEX (idx_ma_storage_physical) */ WHERE physical_key = ? ORDER BY alias_key LIMIT 129 FOR UPDATE",
+                (row, index) -> new String[] {row.getString("alias_key"), row.getString("tenant_id"), row.getString("storage_id"), row.getString("storage_kind")}, physical);
         if (aliases.size() > 128 || aliases.stream().noneMatch(candidate -> sourceAlias.equals(candidate[0]))) {
             throw new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(409, "storage_alias_inventory_limit",
                     "Physical recovery alias inventory is incomplete or exceeds 128 aliases.", false);
@@ -110,11 +151,8 @@ final class LocalStorageOwners {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
         // The caller may already hold a RR snapshot. Admissions wait on the locked aliases;
-        // an independent, nonlocking read sees committed authorities without reversing binding locks.
-        try (var connection = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
-            connection.setAutoCommit(true);
-            connection.setReadOnly(true);
-            var current = new ManagedSchemaJdbcTemplate(new org.springframework.jdbc.datasource.SingleConnectionDataSource(connection, true));
+        // a committed, nonlocking read (committedRead) sees authorities without reversing binding locks.
+        committedRead(jdbc, current -> {
             for (var candidate : aliases) {
                 if (sourceAlias.equals(candidate[0])) {
                     continue;
@@ -129,10 +167,33 @@ final class LocalStorageOwners {
                     throw uncovered();
                 }
             }
-        } catch (java.sql.SQLException error) {
-            throw new IllegalStateException("Physical recovery inventory is unavailable", error);
-        }
+            return null;
+        }, "Physical recovery inventory is unavailable");
         return physical;
+    }
+
+    /**
+     * Runs a nonlocking read on a connection of its own, so it sees what is committed rather than
+     * the caller's REPEATABLE READ snapshot. The offline recovery entry (WorkspaceRecoveryMain)
+     * runs on one SingleConnectionDataSource, whose every connection is the transaction's own:
+     * setting it to autocommit would commit the caller's work, and the read-only flag would then
+     * refuse the locking reads that follow. There the read runs on the caller's connection and
+     * sees the transaction's first consistent snapshot instead. With the server stopped, only
+     * another maintenance entry on a sibling alias can commit beside it, and the later
+     * transactions of the recovery recheck its boundary on fresh snapshots.
+     */
+    private static <T> T committedRead(JdbcTemplate jdbc, java.util.function.Function<JdbcTemplate, T> read, String failure) {
+        var source = java.util.Objects.requireNonNull(jdbc.getDataSource());
+        if (source instanceof org.springframework.jdbc.datasource.SingleConnectionDataSource) {
+            return read.apply(jdbc);
+        }
+        try (var connection = source.getConnection()) {
+            connection.setAutoCommit(true);
+            connection.setReadOnly(true);
+            return read.apply(new ManagedSchemaJdbcTemplate(new org.springframework.jdbc.datasource.SingleConnectionDataSource(connection, true)));
+        } catch (java.sql.SQLException error) {
+            throw new IllegalStateException(failure, error);
+        }
     }
 
     private static boolean exists(JdbcTemplate jdbc, String sql, Object... arguments) {

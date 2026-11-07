@@ -61,7 +61,9 @@ them rather than at the end of the document.
   coordinates: fetch the snapshot with the field list the lane uses, verify both
   OIDs exist in this clone, refuse a tree that is not a clean checkout of the
   PR head, create the artifact directory with its `evidence/` subdirectory,
-  and report the isolation signals the process can observe. It
+  snapshot the PR's review threads and standing change requests the way the
+  lane does (best-effort: a failed fetch leaves no file, which the round reads
+  as unknown), and report the isolation signals the process can observe. It
   does not gate on them: resolving metadata needs `gh`, and `gh` and the
   boundary are mutually exclusive, so this path always runs on the host. The
   gate is `--require-isolation`, meant to run inside the boundary before the

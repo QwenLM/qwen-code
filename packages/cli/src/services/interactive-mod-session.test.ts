@@ -134,6 +134,37 @@ describe('interactive Mod owner', () => {
     expect(getInteractiveModSession(config)).toBe(owner);
   });
 
+  it('reports startup until the Mods load, fail or close, and a failed load', async () => {
+    const loaded = setup();
+    expect(loaded.owner.starting).toBe(true);
+    await loaded.owner.initialize();
+    expect(loaded.owner.starting).toBe(false);
+    expect(loaded.owner.failed).toBe(false);
+
+    const failed = setup();
+    failed.runtime.initialize.mockRejectedValue(new Error('Bad Mod'));
+    expect(failed.owner.failed).toBe(false);
+    const initialization = failed.owner.initialize();
+    await expect(initialization).rejects.toThrow('Bad Mod');
+    // Set as the load settles, not a tick later.
+    expect(failed.owner.starting).toBe(false);
+    expect(failed.owner.failed).toBe(true);
+    void failed.owner.close();
+    expect(failed.owner.failed).toBe(false);
+
+    // A session that failed to start before loading the Mods is not a failed
+    // Mod load, so its own error is the one reported.
+    const session = setup();
+    session.owner.failStartup(new Error('Config failed'));
+    expect(session.owner.starting).toBe(false);
+    expect(session.owner.failed).toBe(false);
+    await expect(session.owner.ready).rejects.toThrow('Config failed');
+
+    const closed = setup();
+    void closed.owner.close();
+    expect(closed.owner.starting).toBe(false);
+  });
+
   it('leaves Mod readiness intact when later host recovery fails', async () => {
     const { owner, runtime } = setup();
     let release!: () => void;
@@ -247,6 +278,48 @@ describe('interactive Mod owner', () => {
       text: 'Fix it',
     });
     expect(runtime.submitPrompt).toHaveBeenCalledOnce();
+  });
+
+  it('runs the Mods’ prompts only when its first initialize says so, until it closes', async () => {
+    const { owner, host, runtime } = setup();
+    const queued = { plugin: 'lint', text: 'Fix it' };
+    const queue = {
+      hasSubmittedPrompts: true,
+      takeSubmittedPrompt: vi.fn(() => queued),
+      returnSubmittedPrompt: vi.fn(),
+      notePersonPrompt: vi.fn(),
+      stopSubmittedPrompts: vi.fn(),
+    };
+    Object.assign(runtime, queue);
+    expect(host.runsPrompts!()).toBe(false);
+    await owner.initialize(['AbovePrompt'], {
+      prompts: true,
+      runsPrompts: true,
+    });
+    await owner.initialize(['AbovePrompt']);
+    expect(host.runsPrompts!()).toBe(true);
+    const listener = vi.fn();
+    const unsubscribe = owner.subscribePrompts(listener);
+    host.promptQueued!();
+    expect(listener).toHaveBeenCalledOnce();
+    unsubscribe();
+    host.promptQueued!();
+    expect(listener).toHaveBeenCalledOnce();
+    expect(owner.hasSubmittedPrompts).toBe(true);
+    expect(owner.takeSubmittedPrompt()).toBe(queued);
+    owner.returnSubmittedPrompt(queued);
+    expect(queue.returnSubmittedPrompt).toHaveBeenCalledWith(queued);
+    owner.notePersonPrompt();
+    owner.stopSubmittedPrompts();
+    expect(queue.notePersonPrompt).toHaveBeenCalledOnce();
+    expect(queue.stopSubmittedPrompts).toHaveBeenCalledOnce();
+    owner.subscribePrompts(listener);
+    await owner.close();
+    // A closed owner runs none, and its listeners hear no more.
+    expect(owner.hasSubmittedPrompts).toBe(false);
+    expect(owner.takeSubmittedPrompt()).toBeUndefined();
+    host.promptQueued!();
+    expect(listener).toHaveBeenCalledOnce();
   });
 
   it('closing before startup releases pending command loaders and removes the owner', async () => {

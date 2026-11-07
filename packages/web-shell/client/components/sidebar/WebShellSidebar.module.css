@@ -226,6 +226,39 @@
   min-width: 0;
 }
 
+.topRowActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.topRowActionsSearching {
+  flex: 1 1 auto;
+}
+
+.topRowSearchRow {
+  flex: 0 0 auto;
+  padding: 0 4px 12px;
+}
+
+.searchToggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.searchToggle:hover,
+.searchToggle:focus-visible {
+  background: var(--accent);
+}
+
 .brandLogo {
   flex: 0 0 28px;
   width: 28px;
@@ -509,6 +542,13 @@ button.livePendingSession:hover {
 .projectSearch input {
   width: 100%;
   padding-left: 32px;
+}
+
+/* After `.projectSearch`: the top row width is the search field's budget, so
+   it must be able to shrink instead of pushing the icon buttons out. */
+.topRowSearchField {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .addWorkspaceButton {

@@ -115,6 +115,12 @@ import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getInterruptedWorkflowRunsNotice } from './utils/interrupted-workflow-runs.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
+import {
+  getProjectHooksApprovalState,
+  getProjectHooksForApproval,
+  getProjectHooksHeadlessWarning,
+  getSeparatedHookSettings,
+} from './config/hook-approvals.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
@@ -744,11 +750,7 @@ export async function main() {
         undefined,
         [],
         // Pass separated hooks for proper source attribution
-        {
-          systemHooks: settings.getSystemHooks(),
-          userHooks: settings.getUserHooks(),
-          projectHooks: settings.getProjectHooks(),
-        },
+        getSeparatedHookSettings(settings),
         buildDisabledSkillNamesProvider(settings),
         undefined,
         undefined,
@@ -1104,11 +1106,7 @@ export async function main() {
       process.cwd(),
       argv.extensions,
       // Pass separated hooks for proper source attribution
-      {
-        systemHooks: settings.getSystemHooks(),
-        userHooks: settings.getUserHooks(),
-        projectHooks: settings.getProjectHooks(),
-      },
+      getSeparatedHookSettings(settings),
       buildDisabledSkillNamesProvider(settings),
       undefined,
       settingsWatcher,
@@ -1122,6 +1120,9 @@ export async function main() {
           }
         : undefined,
       buildEnabledSkillNamesProvider(settings),
+      // Close over the live LoadedSettings: the YOLO-exit re-gate must see
+      // blocks a `/hooks` reload replaced, not the startup snapshot.
+      () => getProjectHooksForApproval(settings),
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
@@ -1438,6 +1439,9 @@ export async function main() {
 
     if (config.isInteractive()) {
       // Shown in the TUI only: a headless run's stderr is someone's pipeline.
+      if (initializationResult.authNotice) {
+        startupWarnings.push(initializationResult.authNotice);
+      }
       const interruptedWorkflowsNotice =
         await getInterruptedWorkflowRunsNotice(config);
       if (interruptedWorkflowsNotice) {
@@ -1587,6 +1591,13 @@ export async function main() {
     if (!config.isInteractive()) {
       const yoloWarning = getHeadlessYoloSafetyWarning(config);
       if (yoloWarning) writeStderrLine(yoloWarning);
+      if (config.isProjectHooksPendingApproval()) {
+        writeStderrLine(
+          getProjectHooksHeadlessWarning(
+            getProjectHooksApprovalState(getProjectHooksForApproval(settings)),
+          ),
+        );
+      }
     }
 
     // For non-stream-json mode, initialize config here. Stream-json defers
@@ -1666,6 +1677,35 @@ export async function main() {
       config,
       settings,
     );
+
+    // The TUI shows a startup warning when the trust gate withholds project
+    // hooks; a headless run gets one stderr line so the failure is not silent.
+    // Mirror the TUI predicate: raw workspace hooks non-empty, trust absent,
+    // and no mode/switch that withholds hooks for a different reason. The
+    // Config accessor cannot see the feature-on case (the settings layer
+    // already dropped the workspace scope), so read the raw file like the
+    // TUI does.
+    const rawWorkspaceHooks = settings.workspace?.settings?.hooks;
+    if (
+      !nonInteractiveConfig.isInteractive?.() &&
+      // The approval-gate warning above already covers a pending/rejected
+      // block; this line is only for the trust-withheld case it cannot see.
+      !nonInteractiveConfig.isProjectHooksPendingApproval?.() &&
+      // Same guard as the TUI warning: an approved (or trust-authorized)
+      // block the execution accessor actually serves is not "not loaded".
+      nonInteractiveConfig.getProjectHooks?.() === undefined &&
+      !nonInteractiveConfig.isExplicitlyTrustedFolder?.() &&
+      !nonInteractiveConfig.getBareMode?.() &&
+      !nonInteractiveConfig.isSafeMode?.() &&
+      !nonInteractiveConfig.getDisableAllHooks?.() &&
+      rawWorkspaceHooks &&
+      typeof rawWorkspaceHooks === 'object' &&
+      Object.keys(rawWorkspaceHooks).length > 0
+    ) {
+      writeStderrLine(
+        'Project hooks in .qwen/settings.json were not loaded: the folder is not explicitly trusted. Enable security.folderTrust.enabled and trust the folder to run them.',
+      );
+    }
 
     const prompt_id = createNonInteractivePromptId(
       config.getSessionId(),

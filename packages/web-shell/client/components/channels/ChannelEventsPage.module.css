@@ -147,7 +147,8 @@
   white-space: nowrap;
 }
 
-.outcome[data-outcome='failed'] {
+.outcome[data-outcome='failed'],
+.outcome[data-outcome='failed_ambiguous'] {
   color: var(--destructive);
 }
 
@@ -160,6 +161,20 @@
   color: var(--foreground);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.targetLink {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--agent-blue-500);
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.targetLink:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .actor {
@@ -184,6 +199,17 @@
 
 .duration {
   color: var(--muted-foreground);
+}
+
+.sessionButton {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  color: var(--muted-foreground);
+}
+
+.sessionButton:hover {
+  color: var(--foreground);
 }
 
 .error {
