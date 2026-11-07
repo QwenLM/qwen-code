@@ -591,9 +591,18 @@ jobs:
           READLINK_BIN: '${{ steps.guard.outputs.readlink }}'
           # The pool uid owns $HOME/.npmrc; without this, a residue file points
           # the install at an attacker registry and its stdout becomes the
-          # version pin the classifier then installs.
-          npm_config_userconfig: '/dev/null'
-          npm_config_globalconfig: '/dev/null'
+          # version pin the classifier then installs. The two scopes must be
+          # DISTINCT paths: npm aborts with `double-loading config "/dev/null"
+          # as "global", previously loaded as "user"` when both are /dev/null,
+          # which killed the install branch and with it the whole hosted
+          # fallback. Same non-creatable-path construction as GH_CONFIG_DIR
+          # below — `/` is root-owned, so the job uid can neither plant nor
+          # refill either file, and npm reads a missing config as empty.
+          # Probed: with a residue $HOME/.npmrc naming an attacker registry,
+          # unpinned npm returns it, these pins return registry.npmjs.org, and
+          # the old double-/dev/null pins abort before resolving any config.
+          npm_config_userconfig: '/nonexistent/patrol-npm-user'
+          npm_config_globalconfig: '/nonexistent/patrol-npm-global'
         run: |-
           set -euo pipefail
           export PATH="${TRUSTED_PATH:?}"

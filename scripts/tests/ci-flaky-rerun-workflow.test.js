@@ -352,6 +352,10 @@ describe('ci failure patrol workflow', () => {
             ...process.env,
             WORKDIR: dir,
             GITHUB_OUTPUT: out,
+            // Same reason as runResolve: on the fleet the ambient value is
+            // 'self-hosted' and the recheck would refuse process.execPath
+            // whenever it is a uid-owned tool-cache node.
+            RUNNER_ENVIRONMENT: 'github-hosted',
             NODE_BIN: process.execPath,
           },
           encoding: 'utf8',
@@ -1021,6 +1025,12 @@ describe('ci failure patrol workflow', () => {
           env: {
             ...process.env,
             PATH: `${dir}:${process.env.PATH}`,
+            // scripts/tests runs on the ECS fleet for same-repo PRs, so the
+            // ambient RUNNER_ENVIRONMENT is 'self-hosted' there and the step's
+            // point-of-use recheck would refuse these uid-owned stubs. Pin the
+            // hosted policy: this fixture measures timing and exit propagation,
+            // not the ownership predicate (which has its own tests).
+            RUNNER_ENVIRONMENT: 'github-hosted',
             NODE_BIN: stub,
             TIMEOUT_BIN: timeoutStub,
           },
@@ -1061,8 +1071,24 @@ describe('ci failure patrol workflow', () => {
     const ensure = classify.steps.find((step) => step.id === 'ensure_qwen');
     // The pool uid owns $HOME/.npmrc; a residue file there redirects the
     // install, and its stdout becomes the version pin the classifier uses.
-    expect(ensure.env.npm_config_userconfig).toBe('/dev/null');
-    expect(ensure.env.npm_config_globalconfig).toBe('/dev/null');
+    // Both scopes must be neutral AND distinct: npm aborts with
+    // `double-loading config "/dev/null" as "global", previously loaded as
+    // "user"` when the two are the same path, which kills the install branch
+    // and with it the entire hosted fallback. The behavioural arm below runs
+    // npm under these pins; this pair only pins the shape.
+    expect(ensure.env.npm_config_userconfig).toBe(
+      '/nonexistent/patrol-npm-user',
+    );
+    expect(ensure.env.npm_config_globalconfig).toBe(
+      '/nonexistent/patrol-npm-global',
+    );
+    expect(ensure.env.npm_config_userconfig).not.toBe(
+      ensure.env.npm_config_globalconfig,
+    );
+    for (const key of ['npm_config_userconfig', 'npm_config_globalconfig']) {
+      // Away from HOME, and not creatable by the job uid: `/` is root-owned.
+      expect(ensure.env[key].startsWith('/nonexistent/'), key).toBe(true);
+    }
     expect(ensure.run).toContain('command -v qwen');
     // Neither tool may EXECUTE as a bare name: the tail of this PATH is
     // uid-writable, and a planted qwen would decide whether to install at all
@@ -2142,6 +2168,73 @@ describe('ci failure patrol workflow', () => {
       expect(step.run, `${step.name} unsets lowercase proxies`).toContain(
         'unset https_proxy http_proxy',
       );
+    }
+  });
+
+  it('behaviorally loads npm config under the ensure-step pins and ignores a residue npmrc', () => {
+    // R9-25: pinning BOTH npm scopes to /dev/null makes npm abort with
+    // `double-loading config "/dev/null" as "global", previously loaded as
+    // "user"` — even `npm --version` exits 1. The install branch is the whole
+    // hosted fallback, so the structural pin alone certified a dead path.
+    // This runs the real npm under the step's own env values.
+    const ensure = yml.jobs.classify.steps.find((s) => s.id === 'ensure_qwen');
+    let npmBin;
+    try {
+      npmBin = resolvedBin('npm');
+    } catch {
+      return; // no npm on this host; the structural pin still applies
+    }
+    const root = mkdtempSync(join(tmpdir(), 'patrol-npm-'));
+    const home = join(root, 'home');
+    mkdirSync(home);
+    writeFileSync(join(home, '.npmrc'), 'registry=https://attacker.invalid/\n');
+    // `npx vitest` runs under npm, which injects 13 npm_config_* variables into
+    // this process — including registry, userconfig and globalconfig. Spreading
+    // them overrides HOME-based resolution and makes the positive control pass
+    // vacuously. The runner injects none of them, so scrub them all and apply
+    // only what the step itself declares.
+    const base = Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => !/^npm_config/i.test(k)),
+    );
+    const npmRun = (extra) => {
+      try {
+        const out = execFileSync(
+          'bash',
+          ['-c', `"${npmBin}" config get registry`],
+          {
+            // Neutral cwd on purpose: this repository ships its own .npmrc
+            // pinning registry.npmjs.org, and npm layers PROJECT config above
+            // USER config — running from the repo would mask the residue and
+            // make the positive control pass for the wrong reason.
+            cwd: root,
+            env: { ...base, HOME: home, ...extra },
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        );
+        return { status: 0, out };
+      } catch (e) {
+        return { status: e.status, out: `${e.stdout ?? ''}${e.stderr ?? ''}` };
+      }
+    };
+    try {
+      // Positive control: without the pins the residue file IS honoured, so
+      // the threat this step pins against is real and the fixture reaches it.
+      const unpinned = npmRun({});
+      expect(unpinned.status, unpinned.out).toBe(0);
+      expect(unpinned.out).toContain('https://attacker.invalid/');
+
+      const pinned = npmRun({
+        npm_config_userconfig: ensure.env.npm_config_userconfig,
+        npm_config_globalconfig: ensure.env.npm_config_globalconfig,
+      });
+      // Exit 0 is the load-bearing half: the old pins abort here.
+      expect(pinned.status, pinned.out).toBe(0);
+      expect(pinned.out).not.toContain('attacker.invalid');
+      expect(pinned.out).not.toContain('double-loading config');
+      expect(pinned.out.trim()).toMatch(/^https:\/\/\S+$/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 
