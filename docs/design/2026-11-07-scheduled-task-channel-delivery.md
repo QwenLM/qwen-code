@@ -29,3 +29,7 @@ Focused action tests verify route scoping and error handling. Form and browser c
 ## Open questions and follow-up
 
 There are no blocking implementation questions. Raw IDs are displayed to resolve the identity ambiguity raised in triage. Maintainer issue housekeeping and actual Channel delivery/retry enhancements are separate work. Stop before publishing the prepared PR as requested.
+
+## Browser evidence
+
+Verified with the repository Playwright harness and intercepted daemon responses: [before](assets/scheduled-task-channel-delivery/before.png), [delivery form](assets/scheduled-task-channel-delivery/after-details.png), [saved task](assets/scheduled-task-channel-delivery/after-card.png), and [mobile restriction and long ID](assets/scheduled-task-channel-delivery/mobile.png). These screenshots demonstrate the UI, not real provider receipt.

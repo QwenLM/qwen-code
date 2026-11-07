@@ -29,3 +29,7 @@ Issue #16516 要求开放 daemon 已有能力：将成功完成的 persistent �
 ## 待定事项与后续工作
 
 没有阻塞实现的问题。通过展示原始 ID 解决分诊提出的身份歧义。维护者的 issue 整理及实际 Channel 投递/重试增强属于独立工作。按用户要求停止在发布准备好的 PR 之前。
+
+## 浏览器证据
+
+通过仓库 Playwright 测试环境及拦截的 daemon 响应验证：[修改前](assets/scheduled-task-channel-delivery/before.png)、[投递表单](assets/scheduled-task-channel-delivery/after-details.png)、[保存后的任务](assets/scheduled-task-channel-delivery/after-card.png)及[移动端限制和长 ID](assets/scheduled-task-channel-delivery/mobile.png)。这些截图展示 UI，不代表真实平台收件。
