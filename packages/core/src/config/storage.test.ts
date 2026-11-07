@@ -437,6 +437,25 @@ describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
     }
   });
 
+  it('getProjectDir renames an identifier at exactly one byte over the limit', () => {
+    // The keep side above stops at 255. This is the other fence post: 256 is
+    // the shortest identifier that must be renamed, and the long-path fixtures
+    // sit far past it, so a guard drifting to `> PROJECT_DIR_NAME_MAX + 1`
+    // would leave this file green while 256-byte roots kept a name mkdir
+    // refuses.
+    const base = path.resolve('w');
+    const prefix = sanitizeCwd(base).length + 1;
+    const overLimit = PROJECT_DIR_NAME_MAX + 1;
+    const root = path.join(base, 'a'.repeat(overLimit - prefix));
+    expect(Buffer.byteLength(sanitizeCwd(root), 'utf8')).toBe(overLimit);
+
+    const projectId = path.basename(new Storage(root).getProjectDir());
+    expect(projectId).not.toBe(sanitizeCwd(root));
+    expect(Buffer.byteLength(projectId, 'utf8')).toBeLessThanOrEqual(
+      PROJECT_DIR_NAME_MAX,
+    );
+  });
+
   it('getProjectDir gives distinct long project paths distinct directories', () => {
     const base = path.resolve('workspace');
     const first = new Storage(path.join(base, 'a'.repeat(200), 'one'));
