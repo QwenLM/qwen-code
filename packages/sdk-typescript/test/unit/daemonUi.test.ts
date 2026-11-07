@@ -3384,6 +3384,17 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(output).not.toContain('\x00');
   });
 
+  it('renders nothing for a lifecycle name-only tool event', () => {
+    expect(
+      daemonUiEventToTerminalText({
+        type: 'tool.update',
+        toolCallId: 'c',
+        toolName: 'read_file',
+        nameOnly: true,
+      }),
+    ).toBe('');
+  });
+
   it('renders managed memory events without a source fallback leak', () => {
     const output = daemonUiEventToTerminalText({
       type: 'workspace.memory.changed',
