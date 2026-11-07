@@ -186,7 +186,7 @@ jobs:
           # files. Mode bits alone reach both verdicts for a non-root uid: a
           # 0555 stub in a 0555 root is not writable by its owner, so the accept
           # path is testable without root-owned files.
-          for tool in rm git timeout mktemp gh node mkdir grep; do
+          for tool in rm git timeout gh node mkdir grep; do
             candidates=''
             for root in ${PATROL_BIN_ROOTS:?}; do
               candidates="${candidates} ${root}/${tool}"
@@ -345,7 +345,6 @@ jobs:
           # preamble below can unset GH_TOKEN without losing the credential.
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           GH_BIN: '${{ steps.guard.outputs.gh }}'
-          MKTEMP_BIN: '${{ steps.guard.outputs.mktemp }}'
         run: |-
           # gh has its own reroute channels, independent of PATH: on this pool
           # the shared ~/.config/gh is attacker-writable and a config.yml with
@@ -356,13 +355,15 @@ jobs:
           # qwen-autofix (af-112 / af-148).
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
-          # `export VAR="$(...)"` reports export's status, not the
-          # substitution's: a failing mktemp must abort, not continue with an
-          # empty GH_CONFIG_DIR that gh treats as unset.
-          if ! GH_CONFIG_DIR="$("${MKTEMP_BIN:?}" -d "${RUNNER_TEMP}/patrol-gh-config.XXXXXX")"; then
-            echo "::error::could not create a private gh config dir; refusing to run gh without reroute hardening."
-            exit 1
-          fi
+          # Not a minted directory. `mktemp -d` under $RUNNER_TEMP is 0700 but
+          # owned by the job uid, in a listable parent — the same construction
+          # this workflow rejects for the Git config, and the dir would be
+          # reused by every gh call in the step, so a config.yml written into it
+          # between calls captures the next call's Authorization header.
+          # `/` is root-owned and not writable, so this path cannot be created
+          # by the job uid: gh falls back to its defaults (http_unix_socket
+          # empty) and creates nothing. No pre-plant and no refill can land.
+          GH_CONFIG_DIR='/nonexistent/patrol-gh-config'
           export GH_CONFIG_DIR
           bot_login="$(GH_TOKEN="${GITHUB_TOKEN}" "${GH_BIN:?}" api user --jq .login)"
           test -n "${bot_login}"
@@ -379,7 +380,6 @@ jobs:
           GITHUB_TOKEN: '${{ github.token }}'
           NODE_BIN: '${{ steps.guard.outputs.node }}'
           GH_BIN: '${{ steps.guard.outputs.gh }}'
-          MKTEMP_BIN: '${{ steps.guard.outputs.mktemp }}'
           PATROL_GH: '${{ steps.guard.outputs.gh }}'
           # Every external command this step runs is the guard's verified
           # absolute, including the resets and the grep whose output becomes
@@ -398,10 +398,9 @@ jobs:
         run: |-
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
-          if ! GH_CONFIG_DIR="$("${MKTEMP_BIN:?}" -d "${RUNNER_TEMP}/patrol-gh-config.XXXXXX")"; then
-            echo "::error::could not create a private gh config dir; refusing to run gh without reroute hardening."
-            exit 1
-          fi
+          # See the identity step: a minted dir under the uid-writable
+          # $RUNNER_TEMP is plantable between calls. This path cannot be created.
+          GH_CONFIG_DIR='/nonexistent/patrol-gh-config'
           export GH_CONFIG_DIR
           "${MKDIR_BIN:?}" -p "${WORKDIR}"
           # The ECS workspace persists across jobs. A decisions file left by an
@@ -739,7 +738,7 @@ jobs:
           # files. Mode bits alone reach both verdicts for a non-root uid: a
           # 0555 stub in a 0555 root is not writable by its owner, so the accept
           # path is testable without root-owned files.
-          for tool in rm git timeout mktemp gh node mkdir grep; do
+          for tool in rm git timeout gh node mkdir grep; do
             candidates=''
             for root in ${PATROL_BIN_ROOTS:?}; do
               candidates="${candidates} ${root}/${tool}"
@@ -815,17 +814,15 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           NODE_BIN: '${{ steps.guard.outputs.node }}'
           GH_BIN: '${{ steps.guard.outputs.gh }}'
-          MKTEMP_BIN: '${{ steps.guard.outputs.mktemp }}'
           PATROL_GH: '${{ steps.guard.outputs.gh }}'
         run: |-
           # Same gh reroute preamble as identity: the driver spawns gh itself,
           # so it inherits this environment and the same planted-config risk.
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
-          if ! GH_CONFIG_DIR="$("${MKTEMP_BIN:?}" -d "${RUNNER_TEMP}/patrol-gh-config.XXXXXX")"; then
-            echo "::error::could not create a private gh config dir; refusing to run gh without reroute hardening."
-            exit 1
-          fi
+          # See the identity step: a minted dir under the uid-writable
+          # $RUNNER_TEMP is plantable between calls. This path cannot be created.
+          GH_CONFIG_DIR='/nonexistent/patrol-gh-config'
           export GH_CONFIG_DIR
           "${NODE_BIN:?}" .github/scripts/ci-flaky-rerun.mjs act \
             --repo "${{ github.repository }}" \
@@ -846,17 +843,15 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           NODE_BIN: '${{ steps.guard.outputs.node }}'
           GH_BIN: '${{ steps.guard.outputs.gh }}'
-          MKTEMP_BIN: '${{ steps.guard.outputs.mktemp }}'
           PATROL_GH: '${{ steps.guard.outputs.gh }}'
         run: |-
           # Same gh reroute preamble as identity: the driver spawns gh itself,
           # so it inherits this environment and the same planted-config risk.
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
-          if ! GH_CONFIG_DIR="$("${MKTEMP_BIN:?}" -d "${RUNNER_TEMP}/patrol-gh-config.XXXXXX")"; then
-            echo "::error::could not create a private gh config dir; refusing to run gh without reroute hardening."
-            exit 1
-          fi
+          # See the identity step: a minted dir under the uid-writable
+          # $RUNNER_TEMP is plantable between calls. This path cannot be created.
+          GH_CONFIG_DIR='/nonexistent/patrol-gh-config'
           export GH_CONFIG_DIR
           "${NODE_BIN:?}" .github/scripts/ci-flaky-rerun.mjs reset \
             --repo "${{ github.repository }}" \

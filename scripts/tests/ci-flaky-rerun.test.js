@@ -913,15 +913,42 @@ describe('ci flaky rerun patrol', () => {
     const c = client();
     await expect(
       actOnDecisions(c, [target()], [{ pr: 123, action: 'rerun' }]),
-    ).rejects.toThrow(/matched no scanned candidate/);
+    ).rejects.toThrow(/addressed no actionable candidate/);
     expect(c.calls).toEqual([]);
 
     // A mistyped headSha is the same failure, not a per-decision skip.
     const c2 = client();
     await expect(
       actOnDecisions(c2, [target()], [decision({ headSha: 'f'.repeat(40) })]),
-    ).rejects.toThrow(/matched no scanned candidate/);
+    ).rejects.toThrow(/addressed no actionable candidate/);
     expect(c2.calls).toEqual([]);
+
+    // Keys can all match while the schema rejects every entry. actOnDecision
+    // returns silently on that check, so counting key resolution would report
+    // success on a round that acted on nothing.
+    for (const invalid of [
+      decision({ action: 'rerun', confidence: 'low' }),
+      decision({ reason_en: 'x'.repeat(240) }),
+      decision({ runId: String(target().runId) }),
+    ]) {
+      const cx = client();
+      await expect(actOnDecisions(cx, [target()], [invalid])).rejects.toThrow(
+        /addressed no actionable candidate/,
+      );
+      expect(cx.calls).toEqual([]);
+    }
+
+    // no_action IS an act: it posts the "could not be confidently classified"
+    // marker, so it must not be counted as nothing done.
+    const cNoAction = client();
+    await expect(
+      actOnDecisions(
+        cNoAction,
+        [target()],
+        [decision({ action: 'no_action', confidence: 'low' })],
+      ),
+    ).resolves.toBeUndefined();
+    expect(cNoAction.calls.some((call) => call[0] === 'comment')).toBe(true);
 
     // An empty list is still a legitimate no-op: the workflow's verdict step
     // owns that case, and the consumer must not throw on it.

@@ -560,6 +560,17 @@ export async function actOnDecisions(client, targets, decisions) {
         );
         continue;
       }
+      // Schema BEFORE counting. actOnDecision opens with the same check and
+      // returns silently, so counting on key resolution alone would let a list
+      // that carries all five identity fields but fails validDecision (a
+      // 240-char reason, rerun at low confidence, string-typed ids) match every
+      // key, act on nothing, and still report success.
+      if (!validDecision(target, decision)) {
+        process.stderr.write(
+          `act: invalid decision for PR ${decision?.prNumber ?? 'unknown'}; it fails the action/confidence/reason schema.\n`,
+        );
+        continue;
+      }
       matched += 1;
       await actOnDecision(client, target, decision);
     } catch (error) {
@@ -568,15 +579,17 @@ export async function actOnDecisions(client, targets, decisions) {
       );
     }
   }
-  // A non-empty list that matched nothing is the hollow-green shape: the round
-  // uploads, runs act, prints "no candidate" per entry and exits 0, while the
-  // workflow's verdict step is skipped because has_decisions is true. Fail
+  // A non-empty list that addressed nothing is the hollow-green shape: the
+  // round uploads, runs act, prints a per-entry diagnostic and exits 0, while
+  // the workflow's verdict step is skipped because has_decisions is true. Fail
   // loudly instead. Per-decision failures stay swallowed above — a candidate
-  // superseded between scan and act must not fail the round, and it still
-  // counts as matched because the decision did address a real scanned target.
+  // superseded between scan and act, one already handled, or one at the action
+  // cap is a deliberate decline of a real target and still counts, as does a
+  // decision whose action threw after being attempted. `no_action` counts too:
+  // it posts the "could not be confidently classified" marker, so it is an act.
   if (decisions.length > 0 && matched === 0) {
     throw new Error(
-      `act: ${decisions.length} decision(s) matched no scanned candidate; this round acted on nothing.`,
+      `act: ${decisions.length} decision(s) addressed no actionable candidate; this round acted on nothing.`,
     );
   }
 }

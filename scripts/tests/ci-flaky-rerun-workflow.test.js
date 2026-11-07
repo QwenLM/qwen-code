@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -536,7 +537,6 @@ describe('ci failure patrol workflow', () => {
         'rm',
         'git',
         'timeout',
-        'mktemp',
         'gh',
         'node',
         'mkdir',
@@ -653,7 +653,7 @@ describe('ci failure patrol workflow', () => {
         '/usr/bin /bin /usr/local/bin',
       );
       expect(copy.run, job.name).toContain(
-        'for tool in rm git timeout mktemp gh node mkdir grep; do',
+        'for tool in rm git timeout gh node mkdir grep; do',
       );
       // Every guard output a later step consumes must be published by that
       // job's own loop (docker is verified separately, from SANDBOX_COMMAND).
@@ -1016,7 +1016,7 @@ describe('ci failure patrol workflow', () => {
     expect(scan.env.GREP_BIN).toBe('${{ steps.guard.outputs.grep }}');
     // The guard must actually verify the two tools this step newly binds.
     expect(classify.steps[0].run).toContain(
-      'for tool in rm git timeout mktemp gh node mkdir grep; do',
+      'for tool in rm git timeout gh node mkdir grep; do',
     );
     // The rm -rf target is pinned in the step's own env rather than inherited
     // from a job-level value: on the shared pool $GITHUB_ENV is writable by
@@ -1308,7 +1308,6 @@ describe('ci failure patrol workflow', () => {
       expect(patSteps.length).toBeGreaterThan(0);
       for (const step of patSteps) {
         expect(step.env.GH_BIN).toBe('${{ steps.guard.outputs.gh }}');
-        expect(step.env.MKTEMP_BIN).toBe('${{ steps.guard.outputs.mktemp }}');
         // Strip comments first, as the stage assertion above does: a
         // commented-out pin still contains the substring, so asserting against
         // the raw body would let someone disable the reroute channel and keep
@@ -1320,8 +1319,14 @@ describe('ci failure patrol workflow', () => {
         // gh's own reroute channel, independent of PATH.
         expect(code).toContain('export GH_HOST=github.com');
         expect(code).toContain('unset GH_ENTERPRISE_TOKEN GH_TOKEN');
-        expect(code).toContain('patrol-gh-config.XXXXXX');
+        // Not a minted dir: one under the uid-writable, listable $RUNNER_TEMP
+        // can be refilled between the step's gh calls, and each call re-reads
+        // config.yml. Pin the non-creatable path and forbid the mint.
+        expect(code).toContain("GH_CONFIG_DIR='/nonexistent/patrol-gh-config'");
         expect(code).toContain('export GH_CONFIG_DIR');
+        expect(code).not.toContain('mktemp');
+        expect(code).not.toContain('RUNNER_TEMP');
+        expect(step.env.MKTEMP_BIN).toBeUndefined();
         // Scoped to the steps that actually spawn the driver: GhClient falls
         // back to `process.env.PATROL_GH || 'gh'`, so dropping that pin makes
         // the spawn resolve a bare name on a PATH whose tail is plantable —
@@ -1381,6 +1386,11 @@ describe('ci failure patrol workflow', () => {
     for (const dir of [planted, trusted]) chmodSync(join(dir, 'gh'), 0o755);
     const outFile = join(root, 'gh_output');
     writeFileSync(outFile, '');
+    // RUNNER_TEMP gets its own scratch dir so the step's footprint in it is
+    // observable: a minted config dir would appear here, and a co-tenant could
+    // refill it between the step's gh calls.
+    const runnerTemp = join(root, 'runner-temp');
+    mkdirSync(runnerTemp);
     try {
       execFileSync('bash', ['-c', identity.run], {
         env: {
@@ -1388,10 +1398,14 @@ describe('ci failure patrol workflow', () => {
           // The planted directory wins an ambient PATH lookup.
           PATH: `${planted}:${trusted}:${process.env.PATH}`,
           GH_BIN: join(trusted, 'gh'),
+          // Deliberately still supplied even though the step no longer reads
+          // it: if the workflow regressed to minting a config dir, that mint
+          // must be able to SUCCEED here, or the footprint assertion below
+          // would pass for the wrong reason.
           MKTEMP_BIN: resolvedBin('mktemp'),
           GITHUB_TOKEN: 'SENTINEL-PAT-VALUE',
           GITHUB_OUTPUT: outFile,
-          RUNNER_TEMP: root,
+          RUNNER_TEMP: runnerTemp,
         },
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -1399,6 +1413,9 @@ describe('ci failure patrol workflow', () => {
       expect(existsSync(leaked)).toBe(false);
       expect(existsSync(invoked)).toBe(true);
       expect(readFileSync(outFile, 'utf8')).toContain('bot_login=real-bot');
+      // The step must leave nothing behind in the uid-writable temp dir: no
+      // minted config dir means no pre-plant and no post-mint refill target.
+      expect(readdirSync(runnerTemp)).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
