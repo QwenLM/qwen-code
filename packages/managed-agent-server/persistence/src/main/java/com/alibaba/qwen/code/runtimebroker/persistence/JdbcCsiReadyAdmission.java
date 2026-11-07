@@ -7,6 +7,8 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 
+import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.statement;
+
 public final class JdbcCsiReadyAdmission {
     private JdbcCsiReadyAdmission() {
     }
@@ -82,12 +84,6 @@ public final class JdbcCsiReadyAdmission {
                         && original.generation() == row.getLong("runtime_generation") && !row.next());
             }
         }
-    }
-
-    private static PreparedStatement statement(Connection connection, String sql) throws SQLException {
-        PreparedStatement statement = connection.prepareStatement(sql);
-        statement.setQueryTimeout(10);
-        return statement;
     }
 
     private static void require(boolean condition) {

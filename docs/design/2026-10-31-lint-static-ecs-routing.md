@@ -14,10 +14,10 @@ remains the reference for the pool's shared-HOME property.
 `classify_pr`'s `pick_runner` publishes two routings instead of one, both
 assigned from a single resolved fleet ladder:
 
-| Output          | Admits                                                                                            | Read by                                             |
-| --------------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| `ubuntu_runner` | same-repo heads, `OWNER` / `MEMBER` / `COLLABORATOR` authors, `merge_group`, `push` — else hosted | `test`, `integration_cli`, `web_shell_e2e_smoke`    |
-| `lint_runner`   | every `pull_request`, untrusted forks included; otherwise identical to `ubuntu_runner`            | `lint_and_static`, `integration_no_ak` (2026-11-02) |
+| Output          | Admits                                                                                            | Read by                                                                                                                                                                        |
+| --------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ubuntu_runner` | same-repo heads, `OWNER` / `MEMBER` / `COLLABORATOR` authors, `merge_group`, `push` — else hosted | `integration_cli`, `web_shell_e2e_smoke` (`test` moved to `pr_test_runner`; superseded by [2026-11-07-ephemeral-container-runners](2026-11-07-ephemeral-container-runners.md)) |
+| `lint_runner`   | every `pull_request`, untrusted forks included; otherwise identical to `ubuntu_runner`            | `lint_and_static`, `integration_no_ak` (2026-11-02)                                                                                                                            |
 
 `classify_pr`'s OWN runner is unconditional ECS (kill-switch excepted) for
 every event it accepts. The gate executes only trusted base-SHA code with a
