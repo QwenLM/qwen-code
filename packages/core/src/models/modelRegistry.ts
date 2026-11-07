@@ -9,6 +9,11 @@ import { defaultModalities } from '../core/modalityDefaults.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import { getDefaultBaseUrlForProtocol } from '../providers/provider-config.js';
+import { QWEN_SUBSCRIPTION_BASE_URL } from '../qwen/oauth-config.js';
+import {
+  readCachedSubscriptionModels,
+  subscriptionModelModalities,
+} from '../qwen/subscription-models.js';
 import {
   type ModelConfig,
   type ModelProvidersConfig,
@@ -531,6 +536,10 @@ export class ModelRegistry {
     if (!this.qwenOAuthBuiltinsDisabledFlag) {
       this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
     }
+    // Qwen Subscription models come from the server-side list (cached after
+    // sign-in); they register like any other models and are judged by the
+    // managed allowlist (their static endpoint can be listed).
+    this.setSubscriptionModels(readCachedSubscriptionModels());
 
     // Register user-configured models for other providers
     this.registerProvidersConfig(modelProvidersConfig);
@@ -573,9 +582,14 @@ export class ModelRegistry {
 
       // qwen-oauth uses hard-coded models: entries under a qwen-oauth id are
       // never registered (the built-ins are, unless the operator pins them
-      // off — see the constructor). The loop still validates wireApi so a
-      // malformed entry fails startup instead of vanishing.
-      if (protocol === AuthType.QWEN_OAUTH) {
+      // off — see the constructor). qwen-subscription is the same: its models
+      // come from setSubscriptionModels, not from user config. The loop still
+      // validates wireApi so a malformed entry fails startup instead of
+      // vanishing.
+      if (
+        protocol === AuthType.QWEN_OAUTH ||
+        protocol === AuthType.QWEN_SUBSCRIPTION
+      ) {
         if (Array.isArray(models)) {
           for (const model of models) {
             resolveModelProtocol(
@@ -847,6 +861,18 @@ export class ModelRegistry {
         `Model "${config.id}" in authType "${authType}" has multiple selector-only flags. It will be unreachable in at least one model selector.`,
       );
     }
+  }
+
+  setSubscriptionModels(ids: string[]): void {
+    this.modelsByAuthType.delete(AuthType.QWEN_SUBSCRIPTION);
+    this.registerAuthTypeModels(
+      AuthType.QWEN_SUBSCRIPTION,
+      ids.map((id) => ({
+        id,
+        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+        generationConfig: { modalities: subscriptionModelModalities(id) },
+      })),
+    );
   }
 
   /**

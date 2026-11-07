@@ -1,0 +1,23 @@
+name: 'Ephemeral runner smoke'
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: 'read'
+
+jobs:
+  smoke:
+    runs-on: ['ecs-qwen-ephemeral-smoke']
+    timeout-minutes: 10
+    steps:
+      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+      - name: 'Check tools and workspace'
+        run: |
+          node --version
+          git --version
+          printf 'Runner: %s\n' "$RUNNER_NAME" > runner-smoke.txt
+      - uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'ephemeral-runner-smoke'
+          path: 'runner-smoke.txt'

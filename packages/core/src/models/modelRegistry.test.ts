@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { readCachedSubscriptionModels } from '../qwen/subscription-models.js';
+
+import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   ModelRegistry,
   QWEN_OAUTH_MODELS,
@@ -16,6 +18,10 @@ import {
 import { AuthType } from '../core/contentGenerator.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import { getDefaultBaseUrlForProtocol } from '../providers/provider-config.js';
+import {
+  QWEN_SUBSCRIPTION_BASE_URL,
+  QWEN_SUBSCRIPTION_MODEL,
+} from '../qwen/oauth-config.js';
 import type {
   ModelConfig,
   ModelProvidersConfig,
@@ -1257,8 +1263,16 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
       true,
     );
     expectHardCodedQwenCount(registry);
-    // Exempt models are not recorded as drops.
-    expect(registry.getAllowlistDroppedModels()).toEqual([]);
+    // Exempt models are not recorded as drops; the exemption is qwen-oauth
+    // only, so the cached Qwen Subscription model (mocked at file level) is
+    // still judged against the list.
+    expect(registry.getAllowlistDroppedModels()).toEqual([
+      {
+        id: QWEN_SUBSCRIPTION_MODEL,
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+      },
+    ]);
 
     // The exemption is qwen-oauth-only: an external endpoint is still judged
     // against the same workspace list.
@@ -1272,6 +1286,11 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
     expect(narrowed.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
     expectHardCodedQwenCount(narrowed);
     expect(narrowed.getAllowlistDroppedModels()).toEqual([
+      {
+        id: QWEN_SUBSCRIPTION_MODEL,
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+      },
       {
         id: 'ext',
         authType: AuthType.USE_OPENAI,
@@ -1368,6 +1387,11 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
         authType: AuthType.QWEN_OAUTH,
         baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
       },
+      {
+        id: QWEN_SUBSCRIPTION_MODEL,
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+      },
     ]);
     registry.reloadModels(
       {
@@ -1386,6 +1410,11 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
         id: 'coder-model',
         authType: AuthType.QWEN_OAUTH,
         baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+      },
+      {
+        id: QWEN_SUBSCRIPTION_MODEL,
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
       },
       {
         id: 'off',
@@ -1574,12 +1603,19 @@ describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
       CORP,
     ]);
     // The off-list provider entry plus the built-in qwen-oauth model, whose
-    // dynamic endpoint can never match an allowlist entry.
+    // dynamic endpoint can never match an allowlist entry, plus the cached
+    // Qwen Subscription model (mocked at file level), which has no built-in
+    // exemption.
     expect(registry.getAllowlistDroppedModels()).toEqual([
       {
         id: 'coder-model',
         authType: AuthType.QWEN_OAUTH,
         baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+      },
+      {
+        id: QWEN_SUBSCRIPTION_MODEL,
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
       },
       {
         id: 'ext',
@@ -1735,3 +1771,106 @@ describe('scrubBaseUrlForMessage (R2-18)', () => {
     expect(scrubBaseUrlForMessage('corp.example/v1')).toBe('corp.example/v1');
   });
 });
+
+describe('Qwen Subscription model registry', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('keeps every server model and its order when refreshing', () => {
+    const registry = new ModelRegistry();
+    const ids = ['future-model', 'qwen3.8-flash', 'qwen3.8-max'];
+    registry.setSubscriptionModels(ids);
+    const models = registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION);
+    expect(models.map(({ id }) => id)).toEqual(ids);
+    expect(models.map(({ modalities }) => modalities)).toEqual([
+      {},
+      { image: true, video: true },
+      { image: true, video: true },
+    ]);
+  });
+
+  it.each([undefined, 'false', 'true'])(
+    'loads cached models when DEV=%s',
+    (dev) => {
+      vi.stubEnv('DEV', false);
+      if (dev === undefined) delete process.env['DEV'];
+      else process.env['DEV'] = dev;
+      const registry = new ModelRegistry({
+        'qwen-subscription': [{ id: QWEN_SUBSCRIPTION_MODEL }],
+      });
+      expect(registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)).toEqual(
+        [
+          expect.objectContaining({
+            id: QWEN_SUBSCRIPTION_MODEL,
+            baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+          }),
+        ],
+      );
+    },
+  );
+
+  it('loads cached models with confirmed modalities and preserves unknown IDs', () => {
+    vi.stubEnv('DEV', false);
+    delete process.env['DEV'];
+    vi.mocked(readCachedSubscriptionModels).mockReturnValueOnce([
+      'qwen3.8-max',
+      'qwen3.8-flash',
+      'future-model',
+    ]);
+    const registry = new ModelRegistry();
+    expect(registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)).toEqual([
+      expect.objectContaining({
+        id: QWEN_SUBSCRIPTION_MODEL,
+        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+        modalities: { image: true, video: true },
+        capabilities: {},
+      }),
+      expect.objectContaining({
+        id: 'qwen3.8-flash',
+        modalities: { image: true, video: true },
+      }),
+      expect.objectContaining({ id: 'future-model', modalities: {} }),
+    ]);
+    expect(
+      registry.getDefaultModelForAuthType(AuthType.QWEN_SUBSCRIPTION)?.id,
+    ).toBe(QWEN_SUBSCRIPTION_MODEL);
+  });
+
+  it('ignores direct and aliased configured overrides, including after a reload', () => {
+    vi.stubEnv('DEV', true);
+    process.env['DEV'] = 'true';
+    const malicious = {
+      id: QWEN_SUBSCRIPTION_MODEL,
+      baseUrl: 'https://other.example/v1',
+      envKey: 'OTHER_KEY',
+    };
+    const registry = new ModelRegistry(
+      {
+        'qwen-subscription': [malicious],
+        alias: [malicious, { id: 'unsupported-model' }],
+      },
+      { alias: 'qwen-subscription' },
+    );
+    registry.reloadModels({ 'qwen-subscription': [malicious] });
+    expect(
+      registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION),
+    ).toHaveLength(1);
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, QWEN_SUBSCRIPTION_MODEL),
+    ).toMatchObject({
+      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+      generationConfig: { modalities: { image: true, video: true } },
+    });
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, QWEN_SUBSCRIPTION_MODEL)
+        ?.envKey,
+    ).toBeUndefined();
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'unsupported-model'),
+    ).toBeUndefined();
+  });
+});
+
+vi.mock('../qwen/subscription-models.js', async (original) => ({
+  ...(await original<typeof import('../qwen/subscription-models.js')>()),
+  readCachedSubscriptionModels: vi.fn(() => ['qwen3.8-max']),
+}));

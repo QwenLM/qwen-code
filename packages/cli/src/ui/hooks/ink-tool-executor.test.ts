@@ -111,6 +111,91 @@ describe('createInkToolExecutor', () => {
     await expect(callbackResult).rejects.toThrow('Chat not initialized');
   });
 
+  it("settles the batch once onSettled's promise does, without holding the scheduler's callback", async () => {
+    let callbackResult: Promise<void> | undefined;
+    const schedule = vi.fn<ScheduleFn>(
+      (requests, _signal, _modelOverride, onBatchComplete) => {
+        const calls = requests as ToolCallRequestInfo[];
+        callbackResult = onBatchComplete?.([completed(calls[0], 'success')]);
+      },
+    );
+    let release!: () => void;
+    const executor = createInkToolExecutor(
+      schedule,
+      undefined,
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    let settled = false;
+    const run = executor
+      .run([request('a')], new AbortController().signal, hooks())
+      .then((calls) => {
+        settled = true;
+        return calls;
+      });
+
+    await callbackResult;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    release();
+    expect((await run).map(({ request }) => request.callId)).toEqual(['a']);
+  });
+
+  it("holds the scheduler's callback until the hold settles, without holding the batch", async () => {
+    let callbackResult: Promise<void> | undefined;
+    const schedule = vi.fn<ScheduleFn>(
+      (requests, _signal, _modelOverride, onBatchComplete) => {
+        const calls = requests as ToolCallRequestInfo[];
+        callbackResult = onBatchComplete?.([completed(calls[0], 'success')]);
+      },
+    );
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const executor = createInkToolExecutor(schedule, undefined, vi.fn(), hold);
+
+    const settled = await executor.run(
+      [request('a')],
+      new AbortController().signal,
+      hooks(),
+    );
+    let returned = false;
+    void callbackResult!.then(() => {
+      returned = true;
+    });
+    await Promise.resolve();
+    expect(settled.map(({ request }) => request.callId)).toEqual(['a']);
+    expect(returned).toBe(false);
+
+    release();
+    await callbackResult;
+    expect(returned).toBe(true);
+  });
+
+  it('settles the batch when the promise onSettled returns rejects', async () => {
+    const schedule = vi.fn<ScheduleFn>(
+      (requests, _signal, _modelOverride, onBatchComplete) => {
+        const calls = requests as ToolCallRequestInfo[];
+        void onBatchComplete?.([completed(calls[0], 'success')]);
+      },
+    );
+    const executor = createInkToolExecutor(schedule, undefined, () =>
+      Promise.reject(new Error('lost')),
+    );
+
+    const settled = await executor.run(
+      [request('a')],
+      new AbortController().signal,
+      hooks(),
+    );
+
+    expect(settled.map(({ request }) => request.callId)).toEqual(['a']);
+  });
+
   it('schedules nothing when every launch is refused', async () => {
     const schedule = vi.fn<ScheduleFn>();
     const executor = createInkToolExecutor(schedule, undefined, vi.fn());

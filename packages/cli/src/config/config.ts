@@ -161,6 +161,7 @@ import { detectSystemLanguage } from '../i18n/index.js';
 import { normalizeSkillNames, resolveSkillSettings } from './skill-settings.js';
 import { checkAdvisorModelAvailability } from './advisor-model.js';
 import { parseApprovalModeValue } from './approval-mode-value.js';
+import { formatAuxModelSelectorForDisplay } from '../utils/aux-model-selector.js';
 
 export { parseApprovalModeValue };
 
@@ -1382,7 +1383,7 @@ function formatUnavailableAdvisorModelMessage(
       : `Configured models: ${availableModelIds.join(', ')}.`;
   const allowlistLine = allowlistHint ? `${allowlistHint}\n` : '';
   return (
-    `Advisor model '${modelName}' is not configured.\n` +
+    `Advisor model '${formatAuxModelSelectorForDisplay(modelName)}' is not configured.\n` +
     `${availableModelsLine}\n` +
     allowlistLine +
     'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /advisor without arguments to choose from configured models.'

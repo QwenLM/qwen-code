@@ -8,8 +8,11 @@ import type {
   AgentLoopSettledCall,
   AgentLoopToolExecutor,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { InteractiveToolCall } from '../../services/interactive-mod-tool-scheduler.js';
 import type { ScheduleFn } from './useReactToolScheduler.js';
+
+const debugLogger = createDebugLogger('INK_TOOL_EXECUTOR');
 
 /**
  * Runs the shared loop's tool batches on the TUI's scheduler, so the tool
@@ -23,13 +26,18 @@ import type { ScheduleFn } from './useReactToolScheduler.js';
  * loop finalizes its results, with the calls as the scheduler reported them.
  * It runs inside the scheduler's completion callback, right after the
  * scheduler cleared its display list, so a tool group committed there lands
- * in the same render as the clear (#9420). The batch settles even if it
- * throws.
+ * in the same render as the clear (#9420). The batch settles once the
+ * promise `onSettled` returns does, or at once when it throws.
+ *
+ * The scheduler's completion callback returns once `schedulerHold` settles,
+ * so the scheduler starts no queued batch until the caller decided what
+ * follows this one. The batch does not wait for it.
  */
 export function createInkToolExecutor(
   schedule: ScheduleFn,
   modelOverride: string | undefined,
-  onSettled: (calls: InteractiveToolCall[]) => void,
+  onSettled: (calls: InteractiveToolCall[]) => void | Promise<void>,
+  schedulerHold?: Promise<void>,
 ): AgentLoopToolExecutor {
   return {
     run: (requests, signal, hooks) => {
@@ -39,34 +47,40 @@ export function createInkToolExecutor(
       if (launched.length === 0) return Promise.resolve([]);
       return new Promise<AgentLoopSettledCall[]>((resolve) => {
         schedule(launched, signal, modelOverride, async (calls) => {
-          // The batch settles even when `onSettled` throws, so the loop
-          // finalizes it and its caller releases what it holds.
+          const settledCalls = calls.flatMap((call): AgentLoopSettledCall[] =>
+            call.status === 'success' ||
+            call.status === 'error' ||
+            call.status === 'cancelled'
+              ? [
+                  {
+                    status: call.status,
+                    request: call.request,
+                    response: call.response,
+                    // The Mod tool middleware counts each native attempt,
+                    // and the TUI counts a cancelled call only where the
+                    // current path does (not when history answered it).
+                    recorded:
+                      call.nativeAttemptsObserved === true ||
+                      call.status === 'cancelled',
+                  },
+                ]
+              : [],
+          );
+          // The batch settles even when `onSettled` throws or rejects, so
+          // the loop finalizes it and its caller releases what it holds.
+          let pending: void | Promise<void>;
           try {
-            onSettled(calls);
-          } finally {
-            resolve(
-              calls.flatMap((call): AgentLoopSettledCall[] =>
-                call.status === 'success' ||
-                call.status === 'error' ||
-                call.status === 'cancelled'
-                  ? [
-                      {
-                        status: call.status,
-                        request: call.request,
-                        response: call.response,
-                        // The Mod tool middleware counts each native
-                        // attempt, and the TUI counts a cancelled call only
-                        // where the current path does (not when history
-                        // answered it).
-                        recorded:
-                          call.nativeAttemptsObserved === true ||
-                          call.status === 'cancelled',
-                      },
-                    ]
-                  : [],
-              ),
-            );
+            pending = onSettled(calls);
+          } catch (error) {
+            resolve(settledCalls);
+            throw error;
           }
+          void Promise.resolve(pending)
+            .catch((error: unknown) => {
+              debugLogger.error('Settling a shared tool batch failed:', error);
+            })
+            .then(() => resolve(settledCalls));
+          await schedulerHold?.catch(() => {});
         });
       });
     },
