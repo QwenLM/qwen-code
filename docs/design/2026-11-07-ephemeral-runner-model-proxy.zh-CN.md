@@ -18,14 +18,15 @@
 
 - `scripts/ci/ephemeral-runner/manager.mjs` 为固定槽位创建单 job JIT runner，
   每个容器使用单独的 bridge，回收完毕后再补充。当前没有模型代理集成。
-- `.github/workflows/qwen-triage.yml` 的 `tmux-testing` 与 `verify` 各有一份
+- `.github/workflows/qwen-triage.yml` 的 `triage`、`tmux-testing` 与 `verify` 各有一份
   内嵌的模型代理：监听本机 loopback，以随机 bearer 校验请求，替换为真实 AK，
   只转发 `POST .../chat/completions`，支持流式响应与空闲超时。它们是各自
   workflow 的临时进程，不是独立网关。
 - 使用从现有 `verify` workflow 提取的代理和假上游，验证了错误 token 返回
   401、其他路径返回 403、正确 token 转发且上游只收到假真实 AK，以及流式
   数据返回。两个正确请求都能成功：现有实现没有按请求数撤销 token 的行为。
-- 现有 triage 测试中选中的 5 项通过，包含认证、两条 lane 的流式空闲超时。
+- 现有 triage 测试中选中的 5 项通过，包含认证，以及 `tmux-testing` 与 `verify`
+  两条 lane 的流式空闲超时；`triage` lane 使用同一套代理形态，也纳入下述提取范围。
 - 在杭州 hz4 通过一个临时 Docker bridge 和单个受限测试容器验证：容器内
   `127.0.0.1` 不能访问宿主机的 loopback 服务。测试资源已清理。这**不证明**
   容器不能访问宿主机 bridge 地址或其他宿主机服务。
@@ -83,7 +84,7 @@ token 注入默认无 AK 的 runner 池。GitHub 侧 runner group 权限必须�
 
 ## 代理功能与预算
 
-从现有转发逻辑提取可测试的共享实现，保持已有两条 triage lane 行为；
+从现有转发逻辑提取可测试的共享实现，保持已有三条 triage lane 行为；
 新的独立服务另加凭证签发、吊销、持久状态、统计和限额，不直接修改既有
 workflow 的权限或触发方式。只允许配置好的上游目标、模型和确切 API 路径，
 不得让请求控制上游 URL 或传递上游授权头；限制请求体大小、超时和并发，
@@ -99,7 +100,7 @@ workflow 的权限或触发方式。只允许配置好的上游目标、模型�
 
 1. 确定哪些模型测试确实需要外部 PR 执行、上游模型及预算；默认只开放一条
    受控测试 workflow，先不要改变现有 `integration_no_ak` 或其他 CI 路由。
-2. 提取并测试现有 proxy 的 HTTP/流式核心，保留两个 triage lane 行为。实现
+2. 提取并测试现有 proxy 的 HTTP/流式核心，保留三个 triage lane 行为。实现
    独立代理的管理接口、独立凭证、权限、持久化、过期、撤销和预算。
 3. 为管理服务增加可选的模型池生命周期；签发或清理不确定时 fail closed。
    明确 token 注入、日志脱敏、异常恢复及旧 token 失效的测试。

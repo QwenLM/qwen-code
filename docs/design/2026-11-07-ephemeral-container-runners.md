@@ -54,8 +54,8 @@ Each container
 └── its own HOME, working directory, temporary directory and npm cache
 ```
 
-The manager keeps a configured number of slots, at most one container per slot;
-the single-machine trial run uses one slot. It takes no webhook, schedules no PR
+The manager keeps a configured number of slots, at most one container per slot.
+The Hangzhou trial ran ten slots at once; the hz4 deployment runs one slot. It takes no webhook, schedules no PR
 itself, and introduces neither Kubernetes nor a database. GitHub assigns work by
 runner label. Each ECS runs its own manager against its local Docker socket,
 with a unique `poolId` and a per-host `slots` count. Hosts share the scheduling

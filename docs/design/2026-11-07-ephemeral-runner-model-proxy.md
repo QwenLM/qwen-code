@@ -24,7 +24,7 @@ protection.
 - `scripts/ci/ephemeral-runner/manager.mjs` creates a single-job JIT runner for
   each fixed slot, gives every container its own bridge, and replenishes after
   reclamation. Model-proxy integration does not exist yet.
-- `tmux-testing` and `verify` in `.github/workflows/qwen-triage.yml` each embed
+- `triage`, `tmux-testing` and `verify` in `.github/workflows/qwen-triage.yml` each embed
   a model proxy: it listens on host loopback, validates requests with a random
   bearer, substitutes the real AK, forwards only `POST .../chat/completions`,
   and supports streaming responses and an idle timeout. These are per-workflow
@@ -35,7 +35,9 @@ protection.
   AK, and streamed data is returned. Two correct requests both succeed: the
   current implementation has no per-request revocation.
 - Five selected existing triage tests pass, covering authentication and the
-  streaming idle timeout on both lanes.
+  streaming idle timeout for the `tmux-testing` and `verify` lanes; the
+  `triage` lane embeds the same proxy pattern and is in the extraction scope
+  below.
 - On Hangzhou hz4, with a temporary Docker bridge and a single restricted test
   container, we verified that `127.0.0.1` inside the container cannot reach a
   loopback service on the host. Test resources were cleaned up. This does **not
@@ -114,7 +116,7 @@ and the whole model pool or proxy endpoint must be switchable off immediately.
 ## Proxy features and budget
 
 Extract a testable shared implementation from the existing forwarding logic and
-preserve the behaviour of the two triage lanes; the new standalone service adds
+preserve the behaviour of the three triage lanes; the new standalone service adds
 credential issuance, revocation, persistent state, statistics and limits
 separately, without changing the permissions or triggers of the existing
 workflows. Allow only configured upstream targets, models and exact API paths;
