@@ -2059,7 +2059,7 @@ export class ExtensionManager {
 
           try {
             const hooksContent = fs.readFileSync(hooksFilePath, 'utf-8');
-            const parsedHooks = JSON.parse(hooksContent);
+            const parsedHooks = JSON.parse(hooksContent.replace(/^\uFEFF/, ''));
 
             let hooksData;
             if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
@@ -2149,7 +2149,7 @@ export class ExtensionManager {
     }
     try {
       const configContent = fs.readFileSync(configFilePath, 'utf-8');
-      const parsedConfig = JSON.parse(configContent);
+      const parsedConfig = JSON.parse(configContent.replace(/^\uFEFF/, ''));
       const skillStates = parseSkillStates(parsedConfig?.skillStates);
       const rawConfig = recursivelyHydrateStrings(parsedConfig, {
         extensionPath: extensionDir,

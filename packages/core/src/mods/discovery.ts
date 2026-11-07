@@ -68,7 +68,10 @@ async function readManifest(
       throw new Error('Mod manifest path must be relative to the extension.');
     }
     const value: unknown = JSON.parse(
-      (await readModFile(root, path.resolve(root, relative))).source,
+      (await readModFile(root, path.resolve(root, relative))).source.replace(
+        /^\uFEFF/,
+        '',
+      ),
     );
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       throw new Error('Mod manifest must be a JSON object.');
