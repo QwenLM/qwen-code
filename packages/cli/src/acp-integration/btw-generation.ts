@@ -5,11 +5,8 @@
  */
 
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import {
-  buildBtwCacheSafeParams,
-  buildBtwPrompt,
-} from '@qwen-code/qwen-code-core/utils/btwUtils.js';
-import { runForkedAgent } from '@qwen-code/qwen-code-core/agents/forkedAgent.js';
+import { getBtwSession } from '@qwen-code/qwen-code-core/agents/btw-session.js';
+import { formatBtwToolCallNotice } from '../ui/utils/btw-view.js';
 import type { GenerationEvent, GenerationResult } from './generation.js';
 
 export const BTW_STREAM_TIMEOUT_MS = 305_000;
@@ -20,26 +17,42 @@ export async function executeBtwGeneration(
   signal: AbortSignal,
   emit: (event: GenerationEvent) => Promise<void>,
 ): Promise<GenerationResult> {
-  const cacheSafeParams = buildBtwCacheSafeParams(config);
-  const model = cacheSafeParams?.model ?? config.getModel() ?? '';
+  const model = config.getModel() ?? '';
   await emit({ type: 'started', model, modelSource: 'main' });
-  if (!cacheSafeParams) return { model, modelSource: 'main' };
   let seq = 0;
-  const result = await runForkedAgent({
-    config,
-    userMessage: buildBtwPrompt(question.trim()),
-    cacheSafeParams,
-    abortSignal: signal,
+  let emitted = '';
+  const { done } = getBtwSession(config).ask(question.trim(), {
+    signal,
     onText: async (text) => {
       signal.throwIfAborted();
+      emitted += text;
       await emit({ type: 'delta', seq: seq++, text });
     },
+    onReset: async () => {
+      signal.throwIfAborted();
+      emitted = '';
+      await emit({ type: 'reset' });
+    },
   });
+  const result = await done;
   signal.throwIfAborted();
+  if (result.kind === 'failed') throw result.cause;
+  // `seq` never rewinds on reset, so decide on text the client can still see.
+  if (result.kind === 'tool-call' && emitted.trim() === '') {
+    await emit({
+      type: 'delta',
+      seq: seq++,
+      text: formatBtwToolCallNotice(result.toolName),
+    });
+  }
   return {
-    model: result.model,
+    model: result.usage?.model ?? model,
     modelSource: 'main',
-    inputTokens: result.usage.inputTokens,
-    outputTokens: result.usage.outputTokens,
+    ...(result.usage
+      ? {
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens,
+        }
+      : {}),
   };
 }

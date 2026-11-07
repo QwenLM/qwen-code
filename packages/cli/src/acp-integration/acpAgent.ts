@@ -29,8 +29,6 @@ import {
   resolveModelSelectionAuthType,
   hasVertexProjectConfigured,
   BTW_MAX_INPUT_LENGTH,
-  buildBtwCacheSafeParams,
-  buildBtwPrompt,
   ALL_PROVIDERS,
   applyProviderInstallPlan,
   buildInstallPlan,
@@ -50,7 +48,6 @@ import {
   resolveBaseUrl,
   MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
-  runForkedAgent,
   SessionIdCaseConflictError,
   SessionService,
   SESSION_WRITER_RPC_CODES,
@@ -255,6 +252,8 @@ import {
 import { readBackgroundShellOutputTail } from '@qwen-code/qwen-code-core/services/backgroundShellRegistry.js';
 import { sampleProcessTreeRssBytes } from '@qwen-code/qwen-code-core/utils/process-resources.js';
 import { expandHomeDir } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { getBtwSession } from '@qwen-code/qwen-code-core/agents/btw-session.js';
+import { formatBtwToolCallNotice } from '../ui/utils/btw-view.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -13671,31 +13670,30 @@ class QwenAgent implements Agent {
           );
         }
         const session = this.sessionOrThrow(sessionId);
-        const config = session.getConfig();
-        const cacheSafeParams = buildBtwCacheSafeParams(config);
-        if (!cacheSafeParams) {
-          debugLogger.debug(`btw: no cacheSafeParams for session=${sessionId}`);
-          return { sessionId, answer: null };
-        }
         const childSignal = AbortSignal.timeout(BTW_CHILD_TIMEOUT_MS);
-        let result;
-        try {
-          result = await runForkedAgent({
-            config,
-            userMessage: buildBtwPrompt(question.trim()),
-            cacheSafeParams,
-            abortSignal: childSignal,
-          });
-        } catch (err) {
-          if (childSignal.aborted) {
-            throw RequestError.internalError(
-              undefined,
-              'Side question timed out after 55s',
-            );
-          }
-          throw err;
+        const result = await getBtwSession(session.getConfig()).ask(
+          question.trim(),
+          { signal: childSignal },
+        ).done;
+        if (result.kind === 'cancelled' && childSignal.aborted) {
+          throw RequestError.internalError(
+            undefined,
+            'Side question timed out after 55s',
+          );
         }
-        return { sessionId, answer: result.text || null };
+        if (result.kind === 'failed') throw result.cause;
+        if (result.kind === 'unavailable') {
+          debugLogger.debug(`btw: no cacheSafeParams for session=${sessionId}`);
+        }
+        return {
+          sessionId,
+          answer:
+            result.kind === 'answered'
+              ? result.response
+              : result.kind === 'tool-call'
+                ? formatBtwToolCallNotice(result.toolName)
+                : null,
+        };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionForkAgent: {
         if (
