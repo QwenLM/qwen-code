@@ -312,11 +312,12 @@ Parameters:
 Diagnostics use the LSP pull methods `textDocument/diagnostic` and
 `workspace/diagnostic`; servers must support the corresponding method. Qwen
 Code does not currently consume pushed `publishDiagnostics` notifications.
-If every relevant server fails, or no server can be confirmed to cover the
-queried file, the operation fails with an error instead of returning an empty
-result, so an empty result means a relevant server answered with no diagnostics.
-When several servers are ready, a server that fails is skipped as long as
-another returns diagnostics, so a non-empty result can be incomplete.
+If every relevant server fails, file diagnostics fail with an error instead of
+returning an empty result. A server that answers that it does not support the
+pull method is not treated as a failure, so workspace diagnostics can still
+return an empty result in that case. When several servers are ready, a server
+that fails is skipped as long as another returns diagnostics, so a non-empty
+result can be incomplete.
 
 ### Code Actions
 
@@ -536,8 +537,7 @@ is configured, otherwise the language key. A name that matches no configured or
 ready server fails the operation with an error instead of returning an empty
 result: `No LSP server named <name> is configured or running` for an unknown
 name, or `No LSP server is ready to provide <operation>` for a configured server
-that is not ready. Only a query that reaches ready servers and finds nothing
-returns an empty result. `incomingCalls` and `outgoingCalls` need exactly one
+that is not ready. `incomingCalls` and `outgoingCalls` need exactly one
 ready server (the named one, or the call hierarchy item's server) and otherwise
 report a stale call hierarchy item error. `workspaceSymbol` always searches all
 ready servers.
