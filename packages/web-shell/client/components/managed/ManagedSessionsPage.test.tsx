@@ -4487,8 +4487,9 @@ describe('ManagedSessionsPage', () => {
       },
     );
     // 宿主 override 优先于默认对齐文案；运行态也走同一解析，不停留在队列提示。
-    expect(container.querySelector('textarea')?.getAttribute('aria-label'))
-      .toBe('Working on it…');
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).toBe('Working on it…');
 
     await act(async () => root.unmount());
     container.remove();
@@ -4530,9 +4531,16 @@ describe('ManagedSessionsPage', () => {
     expect(container.textContent).not.toContain('Task s1');
     // Hiding the identity must not unmount the header itself: its action
     // cluster and panel toggles are the only surfaces that carry them.
+    const header = container.querySelector(
+      '[data-testid="chat-context-header"]',
+    );
+    expect(header).not.toBeNull();
+    // The option hides all three identity surfaces, not only the title:
+    // the workspace icon and the phase badge go with it.
     expect(
-      container.querySelector('[data-testid="chat-context-header"]'),
-    ).not.toBeNull();
+      header?.querySelector('[data-testid="chat-header-workspace"]'),
+    ).toBeNull();
+    expect(header?.textContent).not.toContain('completed');
   });
 
   it('keeps managed copy by default so the standalone page is unchanged', async () => {
@@ -4565,10 +4573,18 @@ describe('ManagedSessionsPage', () => {
     );
     const renderWelcomeHeader = vi.fn(() => <div>HOST-WELCOME</div>);
     const renderWelcomeFooter = vi.fn(() => <div>HOST-WELCOME-FOOTER</div>);
-    await render('s1', 'en', provider, null, true, {}, {
-      renderWelcomeHeader,
-      renderWelcomeFooter,
-    });
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        renderWelcomeHeader,
+        renderWelcomeFooter,
+      },
+    );
     expect(renderWelcomeHeader).toHaveBeenCalled();
     // Host renderers get real session values, not literal placeholders.
     expect(renderWelcomeHeader).toHaveBeenCalledWith(
@@ -4594,15 +4610,21 @@ describe('ManagedSessionsPage', () => {
       list: vi.fn(async () => []),
       get: vi.fn(),
       createEmpty: vi.fn(),
-      createSession: vi.fn(
-        async () => ({ sessionId: 's-created' }) as never,
-      ),
+      createSession: vi.fn(async () => ({ sessionId: 's-created' }) as never),
     };
     const renderWelcomeHeader = vi.fn(() => <div>HOST-CREATION-WELCOME</div>);
-    await render(undefined, 'en', provider, null, true, {}, {
-      renderWelcomeHeader,
-      alignManagedChatWithHost: true,
-    });
+    await render(
+      undefined,
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        renderWelcomeHeader,
+        alignManagedChatWithHost: true,
+      },
+    );
     expect(renderWelcomeHeader).toHaveBeenCalled();
     expect(container.textContent).toContain('HOST-CREATION-WELCOME');
     expect(container.textContent).not.toContain('Welcome to');
@@ -4610,6 +4632,69 @@ describe('ManagedSessionsPage', () => {
     expect(
       container.querySelector('textarea')?.getAttribute('aria-label'),
     ).toContain('Message this session');
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).not.toContain('Message the managed agent');
+  });
+
+  it('pairs the host welcome footer with the header on the creation screen', async () => {
+    provider.workspaceBinding = {
+      agentId: 'agent-a',
+      modelPresets: [{ agentId: 'agent-a', label: 'agent-a' }],
+      list: vi.fn(async () => []),
+      get: vi.fn(),
+      createEmpty: vi.fn(),
+      createSession: vi.fn(async () => ({ sessionId: 's-created' }) as never),
+    };
+    const renderWelcomeHeader = vi.fn(() => <div>HOST-CREATION-WELCOME</div>);
+    const renderWelcomeFooter = vi.fn(() => (
+      <div>HOST-CREATION-WELCOME-FOOTER</div>
+    ));
+    await render(
+      undefined,
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        renderWelcomeHeader,
+        renderWelcomeFooter,
+      },
+    );
+    expect(renderWelcomeHeader).toHaveBeenCalled();
+    expect(renderWelcomeFooter).toHaveBeenCalledWith(
+      expect.objectContaining({ currentModel: 'agent-a' }),
+    );
+    expect(container.textContent).toContain('HOST-CREATION-WELCOME');
+    expect(container.textContent).toContain('HOST-CREATION-WELCOME-FOOTER');
+  });
+
+  it('uses the host composerPlaceholders override on the creation screen', async () => {
+    provider.workspaceBinding = {
+      agentId: 'agent-a',
+      modelPresets: [{ agentId: 'agent-a', label: 'agent-a' }],
+      list: vi.fn(async () => []),
+      get: vi.fn(),
+      createEmpty: vi.fn(),
+      createSession: vi.fn(async () => ({ sessionId: 's-created' }) as never),
+    };
+    await render(
+      undefined,
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        alignManagedChatWithHost: true,
+        composerPlaceholders: { idle: 'Ask about this repo' },
+      },
+    );
+    // 创建屏同样走宿主 override，而不是退回内置默认。
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).toBe('Ask about this repo');
   });
 
   it('renders the host composer footer instead of managed fixed-model hints', async () => {

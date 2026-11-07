@@ -25,6 +25,7 @@ import { ChatEditor } from '../ChatEditor';
 import type { WorkspaceSelectorOption } from '../WorkspaceSelector';
 import { HostLabel } from '../workspaces/HostLabel';
 import { WelcomeHeader, type WelcomeHeaderProps } from '../WelcomeHeader';
+import { useWebShellCustomization } from '../../customization';
 import { AddWorkspaceDialog } from '../dialogs/AddWorkspaceDialog';
 import { WorkspaceExecutionSelect } from '../workspaces/WorkspaceExecutionSelect';
 import type {
@@ -232,6 +233,7 @@ export function WorkspaceBindingCreator({
   handoff,
   onOpenHandoffSource,
   renderWelcomeHeader,
+  renderWelcomeFooter,
   alignManagedChatWithHost = false,
 }: {
   provider: ManagedAgentProvider;
@@ -258,12 +260,18 @@ export function WorkspaceBindingCreator({
    */
   renderWelcomeHeader?: (props: WelcomeHeaderProps) => ReactNode;
   /**
+   * Pairs with `renderWelcomeHeader` on this surface, like the managed session
+   * empty state and App both keep: a host that supplies both slots gets both.
+   */
+  renderWelcomeFooter?: (props: WelcomeHeaderProps) => ReactNode;
+  /**
    * Mirrors the managed composer: aligned hosts get the ordinary placeholder,
    * not the managed-only prompt copy.
    */
   alignManagedChatWithHost?: boolean;
 }) {
   const { t } = useI18n();
+  const { composerPlaceholders } = useWebShellCustomization();
   const recoveryText = useManagedRecoveryText();
   const worktreeText = useManagedWorktreeText();
   const worktreeReason = useManagedWorktreeReason();
@@ -1738,21 +1746,24 @@ export function WorkspaceBindingCreator({
       {directInput && (
         <div className={shellStyles.chatPane} data-managed-standard-chat>
           <div className={shellStyles.content}>
-            {renderWelcomeHeader ? (
-              renderWelcomeHeader({
+            {(() => {
+              const welcomeProps = {
                 version: '',
                 cwd: '',
                 currentModel: agentId,
                 currentMode: '',
-              })
-            ) : (
-              <WelcomeHeader
-                version=""
-                cwd=""
-                currentModel={agentId}
-                currentMode=""
-              />
-            )}
+              };
+              return (
+                <>
+                  {renderWelcomeHeader ? (
+                    renderWelcomeHeader(welcomeProps)
+                  ) : (
+                    <WelcomeHeader {...welcomeProps} />
+                  )}
+                  {renderWelcomeFooter?.(welcomeProps)}
+                </>
+              );
+            })()}
           </div>
           <div className={shellStyles.footer}>
             {fileReferences.error && <p role="alert">{fileReferences.error}</p>}
@@ -2009,7 +2020,11 @@ export function WorkspaceBindingCreator({
               }
               placeholderText={
                 alignManagedChatWithHost
-                  ? t('splitView.composerPlaceholder')
+                  ? // The host override map wins, otherwise this surface keeps
+                    // its own aligned default. It only creates work, so it is
+                    // never "processing".
+                    composerPlaceholders?.idle?.trim() ||
+                    t('splitView.composerPlaceholder')
                   : t('managed.prompt')
               }
               onSubmit={(text, images, files, commit, metadata) => {

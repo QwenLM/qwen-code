@@ -2024,6 +2024,7 @@ function ManagedSessionsContent({
                 }}
                 onAbandoned={() => setListRevision((current) => current + 1)}
                 renderWelcomeHeader={renderWelcomeHeader}
+                renderWelcomeFooter={renderWelcomeFooter}
                 alignManagedChatWithHost={alignManagedChatWithHost}
               />
             )}
@@ -2872,12 +2873,7 @@ function ManagedSessionsContent({
                 )}
               {CustomComposerFooter && (
                 <CustomComposerFooter
-                  disabled={
-                    busy ||
-                    Boolean(
-                      sessionId && summary && !summary.capabilities.canSend,
-                    )
-                  }
+                  disabled={composerDisabled}
                   isRunning={Boolean(active)}
                   currentMode={summary?.approvalMode ?? 'default'}
                   currentModel={displayedModel ?? ''}
