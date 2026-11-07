@@ -156,27 +156,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
      */
     public RuntimeBindingRecord findLatestBindingByHarnessSession(
             String tenantId, String harnessSessionId) {
-        String after = null;
-        RuntimeBindingRecord best = null;
-        for (;;) {
-            List<RuntimeBindingRecord> page = bindingRepository
-                    .findByHarnessSession(tenantId, harnessSessionId, after,
-                            100);
-            if (page.isEmpty()) {
-                return best;
-            }
-            for (RuntimeBindingRecord candidate : page) {
-                if (candidate.getState() == RuntimeBindingRecord.State.READY
-                        && (best == null || candidate.getBindingId()
-                                .compareTo(best.getBindingId()) > 0)) {
-                    best = candidate;
-                }
-            }
-            if (page.size() < 100) {
-                return best;
-            }
-            after = page.get(page.size() - 1).getBindingId();
-        }
+        return bindingRegistry.findLatestBindingByHarnessSession(tenantId, harnessSessionId, true);
     }
 
     /**
@@ -189,26 +169,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
      */
     public RuntimeBindingRecord findLatestBindingByHarnessSessionAnyState(
             String tenantId, String harnessSessionId) {
-        String after = null;
-        RuntimeBindingRecord best = null;
-        for (;;) {
-            List<RuntimeBindingRecord> page = bindingRepository
-                    .findByHarnessSession(tenantId, harnessSessionId, after,
-                            100);
-            if (page.isEmpty()) {
-                return best;
-            }
-            for (RuntimeBindingRecord candidate : page) {
-                if (best == null || candidate.getBindingId()
-                        .compareTo(best.getBindingId()) > 0) {
-                    best = candidate;
-                }
-            }
-            if (page.size() < 100) {
-                return best;
-            }
-            after = page.get(page.size() - 1).getBindingId();
-        }
+        return bindingRegistry.findLatestBindingByHarnessSession(tenantId, harnessSessionId, false);
     }
 
     public RuntimeBrokerService(HarnessSessionResolver sessionResolver,
@@ -1125,6 +1086,10 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                 .thenCompose(scope -> ensureBinding(
                         provisionRequest(scope, harnessId)))
                 .thenApply(BindingContext::record);
+    }
+
+    public String runtimeProvisionerKind(RuntimeSessionRecord record) {
+        return bindingRegistry.runtimeProvisionerKind(record);
     }
 
     public CompletionStage<RuntimeSessionRecord> acquire(
