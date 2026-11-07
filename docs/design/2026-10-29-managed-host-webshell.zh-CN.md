@@ -15,7 +15,9 @@
 provider；省略 provider 时必须同时给 `baseUrl`，用它构造内置 Java provider，两者都
 缺时渲染出 shell 自己的错误回退界面，不会把请求解析到 `<origin>/undefined`。守卫的
 错误信息只进 `console.error`，不会抛给宿主：渲染回退界面的边界在守卫之上，宿主自己的
-`try/catch` 看到的是正常返回。
+`try/catch` 看到的是正常返回。恢复要求宿主重新提供 `baseUrl` 或新的 provider：该边界
+只通过 `resetKeys` 清除错误，回退界面自带的「重试」会用相同 props 重渲染并再次落到同一
+错误；以后新增的必需配置项同样要加入 `resetKeys`。
 
 host-only 仅打开显式的 `sessionId`。没有 ID 时渲染空对话区域，不查询、自动选择或
 创建会话。隐藏内部列表、New 与列表刷新。已有会话只通过 `getSession`、

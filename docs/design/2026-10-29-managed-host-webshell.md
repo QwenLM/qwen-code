@@ -18,7 +18,11 @@ together with `baseUrl`: the built-in Java provider is then constructed from it,
 and supplying neither renders the shell's own error fallback instead of resolving
 requests against `<origin>/undefined`. The guard's message reaches `console.error`,
 not the host: the boundary that renders the fallback sits above the guard, so a
-host's own `try/catch` around the mount sees a normal return.
+host's own `try/catch` around the mount sees a normal return. Recovery needs the
+host to re-supply `baseUrl` or a new provider, because the boundary clears only
+through its reset keys: the fallback's own retry re-renders the same props and
+lands on the same error. Any further required config input belongs in those reset
+keys for the same reason.
 
 Host-only mode opens only the explicit `sessionId`. Missing IDs render an empty
 conversation region, without listing, choosing or creating Sessions. The internal

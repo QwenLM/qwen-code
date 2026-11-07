@@ -95,6 +95,12 @@ describe('ManagedAgentWebShell', () => {
       root.render(<ManagedAgentWebShell baseUrl="" />);
     });
     expect(container.querySelector('[data-web-shell-root]')).not.toBeNull();
+    // Rendering the root alone would also pass with `<origin>/undefined` in the
+    // storage key, which is the failure mode this prop's guard exists to stop.
+    expect(
+      (captured.props as { managedAgentProvider: ManagedAgentProvider })
+        .managedAgentProvider.storageKey,
+    ).toBe(`${window.location.origin}:managed:default`);
   });
 
   it('clears the fallback once the config arrives (resetKeys)', async () => {
@@ -110,6 +116,28 @@ describe('ManagedAgentWebShell', () => {
 
       await act(async () => {
         root.render(<ManagedAgentWebShell baseUrl="https://product.example" />);
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(container.textContent).not.toContain('Something went wrong');
+    expect(container.querySelector('[data-web-shell-root]')).not.toBeNull();
+  });
+
+  it('clears the fallback when only the provider arrives (resetKeys)', async () => {
+    // A host whose async config is a provider re-renders with that provider and
+    // still no `baseUrl`; if the boundary keyed only on `baseUrl` it would keep
+    // the error until the host remounted.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const provider = { storageKey: 'tenant-a:actor-a' } as ManagedAgentProvider;
+    try {
+      await act(async () => {
+        root.render(<ManagedAgentWebShell />);
+      });
+      expect(container.textContent).toContain('Something went wrong');
+
+      await act(async () => {
+        root.render(<ManagedAgentWebShell managedAgentProvider={provider} />);
       });
     } finally {
       spy.mockRestore();
