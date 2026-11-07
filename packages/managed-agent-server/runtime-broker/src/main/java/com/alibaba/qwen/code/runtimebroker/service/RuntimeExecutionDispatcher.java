@@ -24,6 +24,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -236,6 +237,26 @@ final class RuntimeExecutionDispatcher {
                     com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport
                             .requireOpen(closed);
                     if (!clock.instant().isBefore(deadline)) {
+                        // The slot never freed. The conflict below feeds a
+                        // write-only future (dispatches is consumed solely by
+                        // cancelPendingOperations), so it can never surface to
+                        // the caller on its own. Settle the stranded PREPARED
+                        // execution first, so the record the caller polls
+                        // carries the refusal instead of hanging PREPARED with
+                        // no dispatch owner.
+                        ToolExecutionRecord stranded =
+                                executionRepository.findByExecutionCallId(
+                                        prepared.getExecutionCallId());
+                        if (stranded != null && stranded.sameIdentity(prepared)
+                                && stranded.getState()
+                                        == ToolExecutionRecord.State.PREPARED) {
+                            executionRepository.settlePrepared(stranded, Map.of(
+                                    "executionStatus", "not_started",
+                                    "responseParts", List.of(),
+                                    "error", Map.of("type", "dispatch_timeout",
+                                            "message", "Shared Workspace dispatch slot did not free in time")),
+                                    clock.instant());
+                        }
                         throw conflict("runtime_execution_conflict",
                                 "Shared Workspace dispatch slot did not free in time");
                     }

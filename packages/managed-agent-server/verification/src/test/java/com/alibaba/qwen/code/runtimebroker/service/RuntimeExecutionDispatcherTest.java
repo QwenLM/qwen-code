@@ -41,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -288,6 +289,17 @@ class RuntimeExecutionDispatcherTest {
                 () -> queued.get(1, TimeUnit.SECONDS));
         assertTrue(error.getCause() instanceof RuntimeBrokerException);
         assertEquals("runtime_execution_conflict", ((RuntimeBrokerException) error.getCause()).getCode());
+        // The dispatch future is write-only (consumed solely by
+        // cancelPendingOperations), so the conflict above never reaches the
+        // caller on its own. The refusal must also be written through the
+        // record: the stranded PREPARED execution is settled not_started with a
+        // dispatch_timeout error, so the record the caller polls carries the
+        // refusal instead of hanging PREPARED with no dispatch owner.
+        verify(executions).settlePrepared(eq(prepared), argThat(result ->
+                "not_started".equals(result.get("executionStatus"))
+                        && result.get("error") instanceof Map<?, ?> refusal
+                        && "dispatch_timeout".equals(refusal.get("type"))),
+                any(Instant.class));
     }
 
     private static final class Fixture {
