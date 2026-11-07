@@ -13,16 +13,14 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.spi.KubernetesRuntimeClient;
+import org.apache.commons.codec.digest.DigestUtils;
 
 import java.net.InetAddress;
 import java.net.URI;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,7 +47,8 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
     private final List<String> command;
     private final Duration startupTimeout;
     private final HttpRuntimeTransport transport = new HttpRuntimeTransport();
-    private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService executor = Executors.newThreadPerTaskExecutor(
+            Thread.ofVirtual().name("runtime-kubernetes-", 0).factory());
     private final Map<RuntimeProvisionSeed, Placement> placements = new ConcurrentHashMap<>();
     private final Map<List<Object>, Placement> placementsByLease = new ConcurrentHashMap<>();
 
@@ -301,10 +300,8 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
         if (lease == null) {
             return null;
         }
-        synchronized (placements) {
-            return placementsByLease.get(List.of(lease.getRuntimeInstanceId(), lease.getLeaseId(),
-                    lease.getEpoch(), lease.getToken()));
-        }
+        return placementsByLease.get(List.of(lease.getRuntimeInstanceId(), lease.getLeaseId(),
+                lease.getEpoch(), lease.getToken()));
     }
 
     private static List<Object> ownershipKey(RuntimeProvisionSeed seed) {
@@ -566,11 +563,7 @@ public final class KubernetesRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     private static String digest(Object value) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(JsonCodec.encode(canonical(value))));
-        } catch (NoSuchAlgorithmException error) {
-            throw new IllegalStateException(error);
-        }
+        return DigestUtils.sha256Hex(JsonCodec.encode(canonical(value)));
     }
 
     private static Object canonical(Object value) {

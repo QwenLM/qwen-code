@@ -466,6 +466,9 @@ describe('backfillWorkspaceSessionPrs', () => {
           createdAt: expect.any(String),
           state: 'open',
           source: 'review',
+          // The /review command stamps its role on every binding form it
+          // mints, the URL form included (role-aware bound delivery).
+          role: 'review',
         },
       ]);
     });
@@ -933,6 +936,7 @@ describe('backfillWorkspaceSessionPrs', () => {
           createdAt: expect.any(String),
           state: 'open',
           source: 'review',
+          role: 'review',
         },
       ]);
     });
@@ -1799,10 +1803,11 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(bridge.setSessionPrs).toHaveBeenCalledTimes(1);
     expect(bridge.setSessionPrs).toHaveBeenCalledWith(
       SESSION_A,
-      persisted?.map(({ number, url, state }) => ({
+      persisted?.map(({ number, url, state, role }) => ({
         number,
         url,
         ...(state ? { state } : {}),
+        ...(role ? { role } : {}),
       })),
     );
 
@@ -2628,6 +2633,60 @@ describe('backfillWorkspaceSessionPrs', () => {
         url: 'https://github.com/o/r/pull/77',
         source: 'review',
       },
+    ]);
+  });
+
+  it('stamps the command role: /review mints review, /verify-pr mints verify', async () => {
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77'), pr(78, 'fix/78')],
+    });
+
+    await bindSessionPrsFromPromptCommand(runtime, SESSION_A, '/review 77');
+    await bindSessionPrsFromPromptCommand(runtime, SESSION_A, '/verify-pr 78');
+
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toMatchObject([
+      { number: 77, role: 'review' },
+      { number: 78, role: 'verify' },
+    ]);
+  });
+
+  it('never overwrites an explicit role with a later command re-offer', async () => {
+    // The fix session bound PR 77 explicitly through the metadata route;
+    // a later /review of the same PR in the same session must not untype it.
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await fsp.mkdir(path.dirname(prPath), { recursive: true });
+    await fsp.writeFile(
+      prPath,
+      JSON.stringify({
+        prs: [
+          {
+            number: 77,
+            url: 'https://github.com/o/r/pull/77',
+            createdAt: '2026-08-01T00:00:00.000Z',
+            source: 'create',
+            role: 'fix',
+          },
+        ],
+      }),
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    await bindSessionPrsFromPromptCommand(runtime, SESSION_A, '/review 77');
+
+    expect(await readSessionPrs(prPath)).toMatchObject([
+      { number: 77, role: 'fix' },
     ]);
   });
 
@@ -5699,6 +5758,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       url: 'https://github.com/me/fork/pull/7',
       createdAt: expect.any(String),
       source: 'review',
+      role: 'review',
     });
   });
 

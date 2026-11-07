@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -20,6 +20,29 @@ function runGate({ dirs = [], env = {} } = {}) {
       ...env,
     },
   });
+}
+
+const HEADER = 'Filesystem 1024-blocks Used Available Capacity Mounted on';
+
+// The ratio arm has no deterministic real-filesystem trigger, so pin a canned
+// df line through PATH. Both the block and inode invocations return it.
+function runGateWithDf({ mountLine, env = {} }) {
+  const bin = mkdtempSync(join(tmpdir(), 'disk-floor-bin-'));
+  const dir = mkdtempSync(join(tmpdir(), 'disk-floor-dir-'));
+  writeFileSync(
+    join(bin, 'df'),
+    `#!/usr/bin/env bash\nprintf '%s\\n' '${HEADER}' '${mountLine}'\n`,
+    { mode: 0o755 },
+  );
+  try {
+    return runGate({
+      dirs: [dir],
+      env: { ...env, PATH: `${bin}:${process.env.PATH}` },
+    });
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 describe('check-disk-floor', () => {
@@ -211,5 +234,49 @@ describe('check-disk-floor', () => {
       rmSync(ws, { recursive: true, force: true });
       rmSync(temp, { recursive: true, force: true });
     }
+  });
+
+  it('fails at the used-percent ceiling even with free bytes to spare', () => {
+    // The #16003 incident: the volume had tens of GiB free, the broker refused
+    // writes because its own used ratio was 0.94.
+    const result = runGateWithDf({
+      mountLine: '/dev/sda1 1000000000 940000000 60000000 94% /',
+      env: { DISK_FLOOR_MIN_FREE_KB: '1', DISK_FLOOR_MAX_USED_PCT: '90' },
+    });
+
+    assert.equal(result.status, 1);
+    assert.ok(result.stdout.includes('94% used'));
+    assert.ok(result.stdout.includes('ceiling'));
+    assert.ok(result.stdout.includes('used_pct[94]'));
+  });
+
+  it('clears the used-percent ceiling below the threshold', () => {
+    const result = runGateWithDf({
+      mountLine: '/dev/sda1 1000000000 940000000 60000000 94% /',
+      env: { DISK_FLOOR_MIN_FREE_KB: '1', DISK_FLOOR_MAX_USED_PCT: '95' },
+    });
+
+    assert.equal(result.status, 0, result.stdout);
+    assert.ok(!result.stdout.includes('::error::'));
+  });
+
+  it('leaves the ratio arm disabled unless a job opts in', () => {
+    const result = runGateWithDf({
+      mountLine: '/dev/sda1 1000000000 940000000 60000000 94% /',
+      env: { DISK_FLOOR_MIN_FREE_KB: '1' },
+    });
+
+    assert.equal(result.status, 0, result.stdout);
+    assert.ok(result.stdout.includes('max_used_pct[unset]'));
+  });
+
+  it('rejects a used-percent ceiling outside 1-100', () => {
+    const result = runGateWithDf({
+      mountLine: '/dev/sda1 1000000000 940000000 60000000 94% /',
+      env: { DISK_FLOOR_MIN_FREE_KB: '1', DISK_FLOOR_MAX_USED_PCT: '0' },
+    });
+
+    assert.equal(result.status, 1);
+    assert.ok(result.stdout.includes('between 1 and 100'));
   });
 });

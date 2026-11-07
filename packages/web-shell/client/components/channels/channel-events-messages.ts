@@ -28,8 +28,13 @@ export const CHANNEL_EVENTS_MESSAGES_EN: Record<string, ChannelEventsMessage> =
     'channelEvents.outcome.suppressed': 'Suppressed',
     'channelEvents.outcome.posting': 'Posting',
     'channelEvents.outcome.failed': 'Failed',
+    'channelEvents.outcome.failed_ambiguous': 'Failed (may have posted)',
     'channelEvents.outcome.ok': 'OK',
+    'channelEvents.outcome.degraded': 'Degraded',
+    'channelEvents.outcome.recovered': 'Recovered',
     'channelEvents.outcome.running': 'Running',
+    'channelEvents.outcome.delivered': 'Delivered',
+    'channelEvents.outcome.retired': 'Retired',
     'channelEvents.outcome.reply_pending': 'Reply pending',
     'channelEvents.outcome.cancelled': 'Cancelled',
     'channelEvents.emptyTitle': 'No events yet',
@@ -45,6 +50,16 @@ export const CHANNEL_EVENTS_MESSAGES_EN: Record<string, ChannelEventsMessage> =
       `${v?.count ?? 0} notification${v?.count === 1 ? '' : 's'}`,
     'channelEvents.moreFiltered': (v) =>
       `${v?.count ?? 0} more filtered this poll`,
+    'channelEvents.session': (v) => `session ${v?.id ?? ''}`,
+    // The streak counts binding scans, not polls: a gone-session retry
+    // refreshes the bindings again inside the same poll, so one poll can
+    // advance it more than once.
+    'channelEvents.streak': (v) =>
+      `${v?.count ?? 0} consecutive binding scan${v?.count === 1 ? '' : 's'}`,
+    'channelEvents.sessions': (v) =>
+      `${v?.count ?? 0} session${v?.count === 1 ? '' : 's'} listed`,
+    'channelEvents.openTarget': (v) => `Open ${v?.target ?? ''} on GitHub`,
+    'channelEvents.openSession': 'Open session',
   };
 
 export const CHANNEL_EVENTS_MESSAGES_ZH: Record<string, ChannelEventsMessage> =
@@ -67,8 +82,13 @@ export const CHANNEL_EVENTS_MESSAGES_ZH: Record<string, ChannelEventsMessage> =
     'channelEvents.outcome.suppressed': '已抑制',
     'channelEvents.outcome.posting': '发表中',
     'channelEvents.outcome.failed': '失败',
+    'channelEvents.outcome.failed_ambiguous': '失败（可能已发表）',
     'channelEvents.outcome.ok': '正常',
+    'channelEvents.outcome.degraded': '降级',
+    'channelEvents.outcome.recovered': '已恢复',
     'channelEvents.outcome.running': '执行中',
+    'channelEvents.outcome.delivered': '已投递',
+    'channelEvents.outcome.retired': '已终止',
     'channelEvents.outcome.reply_pending': '等待发表',
     'channelEvents.outcome.cancelled': '已取消',
     'channelEvents.emptyTitle': '还没有事件',
@@ -81,4 +101,9 @@ export const CHANNEL_EVENTS_MESSAGES_ZH: Record<string, ChannelEventsMessage> =
     'channelEvents.duration': (v) => `${v?.ms ?? 0} 毫秒`,
     'channelEvents.notifications': (v) => `${v?.count ?? 0} 条通知`,
     'channelEvents.moreFiltered': (v) => `本轮另有 ${v?.count ?? 0} 条被过滤`,
+    'channelEvents.session': (v) => `会话 ${v?.id ?? ''}`,
+    'channelEvents.streak': (v) => `连续 ${v?.count ?? 0} 次绑定扫描`,
+    'channelEvents.sessions': (v) => `列出 ${v?.count ?? 0} 个会话`,
+    'channelEvents.openTarget': (v) => `在 GitHub 上打开 ${v?.target ?? ''}`,
+    'channelEvents.openSession': '打开会话',
   };

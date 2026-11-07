@@ -189,6 +189,80 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(scripts.bundle).toBeTruthy();
   });
 
+  it('gates every pool-capable Java job and calibrates its floor', () => {
+    const jobs = parse(workflow).jobs;
+    // Fail closed: only these two jobs are hosted by construction, so every
+    // other job — including one routed through a runs-on expression or a job
+    // output — must carry the gate. The allowlist is the thing a reviewer
+    // sees; rewording an expression can no longer walk a lane out of the
+    // corpus while the suite stays green.
+    const hostedOnly = new Set(['hosted-harness-mysql', 'hosted-failover-e2e']);
+    const gated = new Set();
+
+    for (const [name, definition] of Object.entries(jobs)) {
+      const steps = definition.steps ?? [];
+      const gateIndex = steps.findIndex(
+        (candidate) => candidate.name === 'Disk floor gate (self-hosted)',
+      );
+      if (hostedOnly.has(name)) {
+        // runner.environment is github-hosted there, so the step's `if:` is
+        // permanently false and a gate reads as protection without being any.
+        expect(gateIndex, name).toBe(-1);
+        continue;
+      }
+      expect(gateIndex, name).toBeGreaterThan(-1);
+      expect(steps[gateIndex - 1]?.uses, name).toMatch(/^actions\/checkout@/);
+      expect(steps[gateIndex].if, name).toBe(
+        "${{ runner.environment == 'self-hosted' }}",
+      );
+      expect(steps[gateIndex].run, name).toBe(
+        'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"',
+      );
+      // continue-on-error would neuter the gate while every other assertion
+      // stays true; the job must actually stop on a saturated host.
+      expect(steps[gateIndex]['continue-on-error'], name).toBeUndefined();
+      gated.add(name);
+    }
+
+    // A job that matches neither list fails here instead of shipping ungated.
+    expect(gated.size + hostedOnly.size).toBe(Object.keys(jobs).length);
+
+    // The shared 2 GiB default is a light-lane floor. These lanes install,
+    // build and fork JUnit, so they need the repo's build-sized figure; the
+    // broker lanes are refused by RocketMQ's own used-ratio rule long before
+    // free bytes run out, which no absolute floor can express (#16003).
+    const heavyFloors = {
+      test: 8388608,
+      'mysql-integration': 8388608,
+      'event-transport-broker': 8388608,
+      'event-transport-multi-node': 8388608,
+      'daemon-e2e': 8388608,
+    };
+    for (const [name, kib] of Object.entries(heavyFloors)) {
+      expect(
+        Number(jobs[name].env?.DISK_FLOOR_MIN_FREE_KB),
+        `${name}: DISK_FLOOR_MIN_FREE_KB`,
+      ).toBe(kib);
+    }
+    // Remaining on the shared default on purpose: its Maven run is a single
+    // migration pass, and raising the shared value would move every other
+    // lane's gate (run-release-docker-integration.sh depends on that split).
+    expect(
+      jobs['flyway-migrations'].env?.DISK_FLOOR_MIN_FREE_KB,
+    ).toBeUndefined();
+
+    for (const name of [
+      'event-transport-broker',
+      'event-transport-multi-node',
+    ]) {
+      expect(
+        Number(jobs[name].env?.DISK_FLOOR_MAX_USED_PCT),
+        `${name}: DISK_FLOOR_MAX_USED_PCT`,
+      ).toBe(90);
+    }
+    expect(jobs['test'].env?.DISK_FLOOR_MAX_USED_PCT).toBeUndefined();
+  });
+
   it('serializes the host-shared Maven cache write-back on each physical ECS host', () => {
     const block = job('test');
     expect(block).toContain(
@@ -1785,6 +1859,9 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(mysql.strategy).toBeUndefined();
     expect(JSON.stringify(mysql)).not.toMatch(/mariadb|matrix\./i);
     expect(mysql.env).toEqual({
+      // The lane writes a database, two Maven runs and the JUnit forks into
+      // the same host volume, so it carries the heavy floor (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608',
       MYSQL_CONTAINER:
         'qwen-code-sdk-java-mysql-${{ github.run_id }}-${{ github.run_attempt }}',
     });
@@ -2489,6 +2566,46 @@ describe('setup-java Maven cache stays on hosted runners', () => {
   });
   it.each(poolCapable)('%s caches Maven only on hosted runners', (_, step) => {
     expect(step.with?.cache).toBe(hostedOnly);
+  });
+});
+
+describe('SDK Java runner-local tool-cache repair', () => {
+  it('repairs only default local caches without gating Java installation', () => {
+    for (const [name, job] of Object.entries(parse(workflow).jobs)) {
+      const steps = job.steps ?? [];
+      const java = steps.findIndex((s) =>
+        String(s.uses ?? '').startsWith('actions/setup-java'),
+      );
+      const helper = '.github/scripts/restore-java-tool-cache.sh';
+      const repair = steps.findIndex((s) =>
+        String(s.run ?? '').includes(helper),
+      );
+      if (java < 0 || !String(job['runs-on']).includes('self-hosted')) {
+        expect(repair, name).toBe(-1);
+        continue;
+      }
+      // A resumed release checks out an older tag that predates this helper,
+      // so the step must probe for it before invoking bash.
+      expect(steps[repair].run, name).toContain(`[ -f ${helper} ]`);
+      const checkout = steps.findIndex((s) =>
+        String(s.uses ?? '').startsWith('actions/checkout'),
+      );
+      expect(repair, name).toBeGreaterThan(checkout);
+      if (name === 'daemon-e2e') {
+        expect(repair, name).toBe(java - 2);
+        expect(steps[repair + 1].name, name).toBe(
+          'Use pre-installed Node.js (self-hosted)',
+        );
+      } else {
+        expect(repair, name).toBe(java - 1);
+      }
+      expect(steps[repair].if, name).toBe(
+        "${{ runner.environment == 'self-hosted' && endsWith(runner.tool_cache, '/_tool') }}",
+      );
+      expect(steps[repair]['continue-on-error'], name).toBeUndefined();
+      expect(steps[java].if, name).toBeUndefined();
+      expect(steps[java].env?.RUNNER_TOOL_CACHE, name).toBeUndefined();
+    }
   });
 });
 

@@ -132,7 +132,7 @@ export {
   truncateCodePoints,
   truncateUtf16Units,
 } from './sanitize.js';
-export { isTerminalTaskLifecycleType } from './types.js';
+export { isTerminalTaskLifecycleType, PR_BINDING_ROLES } from './types.js';
 export {
   CHANNEL_OUTPUT_MODE_FIELD,
   DEFAULT_CHANNEL_OUTPUT_MODE,
@@ -154,6 +154,7 @@ export type {
   ChannelConfigEnumFieldDescriptor,
   ChannelConfigFieldDescriptor,
   ChannelConfigFieldKind,
+  ChannelConfigFieldOption,
   ChannelConfigNestedFieldDescriptor,
   ChannelConfigNumberFieldDescriptor,
   ChannelConfigObjectFieldDescriptor,
@@ -188,6 +189,7 @@ export type {
   GroupConfig,
   GroupPolicy,
   PrBindingEntry,
+  PrBindingRole,
   PrBindingsSnapshot,
   PrBindingSummary,
   PrivatePolicy,

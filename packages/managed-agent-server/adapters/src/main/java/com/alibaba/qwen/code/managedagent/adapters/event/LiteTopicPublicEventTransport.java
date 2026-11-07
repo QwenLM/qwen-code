@@ -55,7 +55,7 @@ public class LiteTopicPublicEventTransport implements EventTransport, Closeable 
     // looked up again, since its journal may appear later. Read and written
     // only by the executor's single thread.
     private final Map<String, String> workspaceCache = new LinkedHashMap<>(
-            16, 0.75f, true) {
+            16, 0.75F, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
             return size() > WORKSPACE_CACHE_SIZE;

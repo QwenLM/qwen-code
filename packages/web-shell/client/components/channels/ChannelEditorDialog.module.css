@@ -4,6 +4,17 @@
   gap: 12px;
 }
 
+.platformHeaderText {
+  min-width: 0;
+  flex: 1;
+}
+
+/* Clears the absolutely positioned dialog close button (top-2 right-2). */
+.fullscreenToggle {
+  margin-right: 2rem;
+  flex: 0 0 auto;
+}
+
 .platformMark {
   display: inline-flex;
   width: 42px;
@@ -25,6 +36,10 @@
   gap: 0;
 }
 
+.formFullscreen {
+  flex: 1;
+}
+
 .body {
   display: flex;
   max-height: min(66vh, 650px);
@@ -33,6 +48,11 @@
   overflow-y: auto;
   padding-block: 4px 8px;
   padding-inline: 1px;
+}
+
+.bodyFullscreen {
+  max-height: none;
+  flex: 1;
 }
 
 .section {
@@ -88,6 +108,47 @@
   color: var(--muted-foreground);
   font-size: 11px;
   line-height: 1.5;
+}
+
+.advancedTrigger {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.advancedChevron {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  transition: transform 120ms ease;
+}
+
+.advancedTrigger[data-state='open'] .advancedChevron {
+  transform: rotate(180deg);
+}
+
+.advancedBadge {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.advancedContent {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .field {
@@ -151,6 +212,21 @@
   background: color-mix(in srgb, var(--muted) 62%, transparent);
 }
 
+.optionRow[data-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* A checked-but-disabled row keeps the selected border; only unselected
+   disabled rows lose the hover emphasis. */
+.optionRow[data-disabled='true']:not([data-selected='true']):hover {
+  border-color: var(--border);
+}
+
+.optionCheckbox:disabled {
+  cursor: not-allowed;
+}
+
 .optionCheckbox {
   width: 14px;
   height: 14px;
@@ -177,10 +253,44 @@
   gap: 3px;
 }
 
+.recordRowHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .recordLabel {
   font-size: 12px;
   font-weight: 500;
+  font-family: ui-monospace, monospace;
   color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.recordDescription {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.recordEmpty {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.recordOption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.recordOptionDescription {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .secretState {
