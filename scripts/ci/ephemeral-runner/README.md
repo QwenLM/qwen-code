@@ -73,10 +73,12 @@ host credentials; ordinary container isolation does not change that boundary.
 Copy `config.example.json` to `/etc/qwen-ephemeral-runner/config.json` and
 replace the placeholders: repository, actual runner group ID, unique host/pool
 ID, immutable image reference, and matching architecture and labels. Use a
-unique test label and a controlled test repository for a trial. The supplied
-manual smoke workflow selects only `ecs-qwen-ephemeral-smoke`; a trial runner
-can register with just that label to avoid matching generic Linux jobs. The example runs
-one slot; increase only after measuring the host. Restrict configuration and
+label set matching the actual CI route. The current ARM64 pool registers only
+`self-hosted` and `ecs-qwen-ephemeral`. Omitting generic Linux/ARM64 labels keeps
+unrelated ARM64 jobs out of this pool. Validate the existing
+CI jobs with these formal labels rather than a separate smoke workflow. The
+example runs one slot; hz4 currently maintains ten fixed slots. Keep that
+capacity until real CI execution and resource use are stable. Restrict configuration and
 credential directories to the manager account.
 
 The `ttlSeconds` limit starts when the container starts, including idle time.
@@ -128,21 +130,19 @@ remove unrelated runners or run a global Docker prune.
 sudo systemctl stop qwen-ephemeral-runner.service
 ```
 
-After validating a single runner and its recovery paths, set the repository
-variable `EXTERNAL_PR_EPHEMERAL_RUNNER_ENABLED=true` to route untrusted fork PR
-build, test, lint and no-AK integration jobs to this pool. Unset, `false`, or any
-other value keeps those jobs on `ubuntu-latest`. Trusted and same-repository PRs
-retain their existing routing. The global kill-switch and hosted-fleet override
-still win. Leave the switch off until the host and GitHub access policies have
-been verified. Changing it affects newly evaluated jobs; cancel queued work and
-start a new workflow run when rolling back. It does not detect idle runners or
-migrate a queued job automatically.
-Set `EXTERNAL_PR_EPHEMERAL_ARCH=arm64` for an ARM64 pool; the default is x64.
+The existing CI routes untrusted fork PR build, Linux unit tests, lint and no-AK
+integration jobs directly to the formal ARM64 disposable label set. No
+repository-variable switch, configuration relay or manual smoke workflow is
+needed. Trusted and same-repository PRs retain their existing routes. GitHub
+queues excess jobs; the manager replaces completed runners within ten fixed
+slots, without demand-based autoscaling.
 
-Fork PR runs cannot read repository variables directly. The default-branch
-`ci-runner-routing.yml` controller reads them when CI enters `in_progress` and
-publishes only a destination bound to that CI run and attempt. The classifier
-reads that status with a read-only token; missing or invalid decisions retain
-hosted routing. Merge the controller and reader before enabling the switch.
-This also covers full CI reruns; changing a variable does not move jobs whose
-destination has already been selected. The controller never runs PR code.
+Repository variables are unavailable in fork-triggered CI. Existing global
+overrides still work in contexts where their values are available, but cannot
+be relied on to roll back these fork jobs. To roll back, change the fork branch
+of the CI selector to `pr_test_runner='["ubuntu-latest"]'` while retaining
+`lint_runner="${pr_test_runner}"`, and deploy that workflow change. Cancel
+already-selected work and trigger fresh CI using the updated workflow; reruns
+of saved older workflows retain their old routing. Jobs do not migrate
+automatically. Dedicated-host/network and runner-access-policy limitations
+remain tracked in #16514.

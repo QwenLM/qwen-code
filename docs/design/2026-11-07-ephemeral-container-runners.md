@@ -2,9 +2,9 @@
 
 [English](2026-11-07-ephemeral-container-runners.md) | [简体中文](2026-11-07-ephemeral-container-runners.zh-CN.md)
 
-Date: 2026-11-07. Status: runner lifecycle implemented; ten systemd-managed
-slots are deployed on hz4. The fork-variable routing fix below still needs
-default-branch deployment and real external-PR acceptance.
+Date: 2026-11-07. Status: runner lifecycle implemented; ten fixed slots are
+deployed on hz4. Direct external-PR routing still needs default-branch
+deployment and real CI acceptance.
 
 Ten slots registering and running ten keyless test jobs of a private repository
 at the same time on the Hangzhou shared test machine; containers, networks and
@@ -129,55 +129,38 @@ before accepting new work.
 
 ## Initial routing decision
 
-Repository configuration variables are unavailable in fork-triggered
-`pull_request` runs. Real run 42382582937, attempt 2, read both new and existing
-variables as empty despite their nonempty repository settings. Injecting values
-in the local selector matrix did not cover this platform boundary.
+Keep the existing `ubuntu_runner` output and all of its former semantics.
+For untrusted fork PRs, `pr_test_runner` directly selects
+`["self-hosted", "ecs-qwen-ephemeral"]` for `test_build` and
+`test`. `lint_runner` uses the same destination for `lint_and_static` and
+`integration_no_ak`. Trusted and same-repository PR routes stay unchanged.
 
-Keep the repository-variable switch. A separate `workflow_run: in_progress`
-controller executes the default-branch workflow, reads the variables, and
-publishes only `hosted`, `ephemeral-x64` or `ephemeral-arm64` as a commit status
-bound to the CI run ID and attempt. It never checks out PR code or downloads PR
-artifacts. Its token can write statuses; the fork classifier only reads them.
-Unlike the `requested` activity, `in_progress` also covers reruns.
+Real external PR run 42382582937, attempt 2, received empty repository variables
+even though the repository settings were populated. Direct routing removes that
+dependency. It requires no configuration relay or manual smoke workflow. The
+ten registered runners use the formal labels to validate actual CI. Keep the
+pool at ten slots until success rate, duration and resource use are stable;
+capacity changes are manual configuration changes, not queue-driven scaling.
 
-```text
-PR → existing unprivileged CI → classifier waits for its routing decision
-            │                                     │
-            └→ default-branch routing controller ─┘
-               reads repository variables; publishes only the destination
-```
-
-When variables are absent, the classifier accepts only a successful status from
-`github-actions[bot]` for the same source SHA, run and attempt. Missing, invalid
-or mismatched decisions fall back to hosted after bounded polling. The
-controller must be merged onto the default branch before automatic admission
-can work. No PAT, model key, secret inheritance or privileged PR build is added.
-This relay fixes configuration visibility; it does not close the separately
-recorded PR-editable-workflow or host/network isolation boundaries.
-
-Keep the existing `ubuntu_runner` output and all of its former semantics, and add
-a `pr_test_runner` output used by `test_build` and `test`. For an untrusted fork
-PR, `EXTERNAL_PR_EPHEMERAL_RUNNER_ENABLED=true` selects the disposable pool;
-unset, `false`, or any other value selects `ubuntu-latest`. `lint_runner` follows
-the same switch for `lint_and_static` and `integration_no_ak`, replacing the old
-shared-ECS fallback for these fork jobs. Trusted and same-repository PR routing
-stays unchanged. The global kill-switch and hosted setting take precedence.
-
-The switch selects a destination when a job is evaluated, without querying
-runner availability. It cannot move an already queued job; cancel queued work
-and start a new workflow run to apply a rollback. Verify unset/false/invalid,
-true for both architectures, and the global overrides against the actual shell
-selector before rollout.
+Existing global overrides still take precedence where their values are
+available. Fork-triggered runs cannot rely on those variables for rollback.
+Instead, change the fork selector to hosted, deploy the workflow change and
+trigger fresh CI using that revision. Cancel already-selected work as needed;
+rerunning a saved old workflow does not update its routing. No job migrates
+automatically. Verify the empty-variable fork case, trusted and non-PR routes,
+and available global overrides against the actual shell selector.
 
 `classify_pr`, `web_shell_e2e_smoke`, `integration_cli` and the other workflows
 keep their current routing. This avoids migrating browser system dependencies
 that the new image has not verified, and leaves the routing image relationship
 of the existing classifier job and the other workflows unchanged.
 
-The new pool label is `ecs-qwen-ephemeral`. Default routing uses x64; setting
-`EXTERNAL_PR_EPHEMERAL_ARCH=arm64` selects ARM64 instead. The toolchain of full
-PR CI on the new image still has to be verified.
+The pool label is `ecs-qwen-ephemeral`; all ten deployed runners are ARM64.
+Register only `self-hosted` and this dedicated label, omitting generic Linux and
+ARM64 labels so existing broad ARM64 selectors cannot admit unrelated jobs.
+Full PR CI on the new image still has to be verified. The recorded
+host/network and runner-authorization limitations remain open; changing labels
+does not resolve them.
 
 ## References
 

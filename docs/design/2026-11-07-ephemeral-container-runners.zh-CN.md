@@ -2,8 +2,8 @@
 
 [English](2026-11-07-ephemeral-container-runners.md) | [简体中文](2026-11-07-ephemeral-container-runners.zh-CN.md)
 
-日期：2026-11-07。状态：runner 生命周期已实现，hz4 已部署十个 systemd
-管理的槽位。下文的 fork 变量路由修复仍需部署到默认分支，并完成真实外部 PR 验收。
+日期：2026-11-07。状态：runner 生命周期已实现，hz4 已部署十个固定槽位。
+外部 PR 直接路由仍需部署默认分支，并完成真实 CI 验收。
 
 杭州共享测试机上已验证 10 个槽位同时注册，并执行同一个私有测试仓库的 10 个无密钥
 测试 job，容器、网络和注册均已回收。后续单槽位试运行使用真实 PAT，
@@ -104,47 +104,31 @@ JIT 提供正常协议下的单任务注册语义；宿主机管理程序负责�
 
 ## 首期路由决策
 
-外部 fork 触发的 `pull_request` 运行无法读取仓库配置变量。真实 run
-42382582937 的第二次尝试中，新旧变量都为空，而仓库设置里均有值。
-本地选择器矩阵直接注入变量，没有覆盖这个平台边界。
+保留现有 `ubuntu_runner` 输出及其所有旧语义。非可信作者的外部 fork PR 中，
+`pr_test_runner` 直接选择
+`["self-hosted", "ecs-qwen-ephemeral"]`，用于 `test_build`
+和 `test`。`lint_runner` 为 `lint_and_static` 和 `integration_no_ak` 选择
+相同目标。可信作者和同仓库 PR 路由保持不变。
 
-保留仓库变量开关。独立的 `workflow_run: in_progress` 控制流程运行默认分支
-上的 workflow，读取变量，仅将 `hosted`、`ephemeral-x64` 或
-`ephemeral-arm64` 发布为绑定 CI run ID 和 attempt 的 commit status。
-它不检出 PR 代码、不下载 PR 产物。控制流程 token 可以写 status；外部 PR
-分类任务只能读取。与 `requested` 活动不同，`in_progress` 也覆盖重跑。
+真实外部 PR run 42382582937 的第二次尝试中，仓库设置有值，运行收到的仓库
+变量却为空。直接路由移除这个依赖，不需要配置中继或手动 smoke workflow。
+十个已注册 runner 使用正式标签验收真实 CI。在成功率、耗时和资源占用稳定前，
+池子保持十个槽位；增加容量通过手动配置完成，不按队列自动扩缩容。
 
-```text
-PR → 现有非特权 CI → 分类任务等待属于本次运行的路由决定
-          │                           │
-          └→ 默认分支路由控制流程 ──────┘
-             读取仓库变量；仅发布执行目标
-```
-
-变量缺失时，分类任务只接受 `github-actions[bot]` 发布且属于同一个源 SHA、
-run 和 attempt 的成功 status。决定缺失、非法或不匹配时，有限轮询后回到托管
-机器。控制流程必须合并到默认分支后，自动导流才能工作。不增加 PAT、模型
-密钥、secret 继承或执行 PR 代码的特权构建。这个中继修复配置可见性，
-不解决已单独记录的 PR 可修改 workflow 以及宿主机、网络隔离边界。
-
-保留现有 `ubuntu_runner` 输出及其所有旧语义，新增 `pr_test_runner` 输出，
-用于 `test_build` 和 `test`。对于非可信作者的外部 fork PR，变量
-`EXTERNAL_PR_EPHEMERAL_RUNNER_ENABLED=true` 选择一次性池；未设置、`false`
-或其他值选择 `ubuntu-latest`。`lint_runner` 在 `lint_and_static` 和
-`integration_no_ak` 中遵循同一个开关，替代这些 fork 任务原有的共享 ECS
-回退行为。可信作者和同仓库 PR 路由不变。全局 kill-switch 和 hosted 设置优先。
-
-开关在 job 求值时选择目标，不查询 runner 是否空闲，也不能迁移已排队任务；
-回滚时取消已排队任务并启动新的 workflow run。上线前用实际 shell 选择器
-验证未设置/false/非法值、开启时的两种架构，以及全局覆盖开关。
+现有全局覆盖开关在能够读取其值的上下文中仍优先。fork 触发的运行不能依赖
+这些变量回滚；应将 fork 选择器改为托管机器，部署 workflow 变更，再用该版本
+触发全新 CI。按需取消已经选择执行目标的任务；重跑保存的旧 workflow 不会更新
+路由，任务也不会自动迁移。使用实际 shell 选择器验证变量为空的 fork 场景、
+可信和非 PR 事件的路由，以及可读取的全局覆盖开关。
 
 `classify_pr`、`web_shell_e2e_smoke`、`integration_cli`、其他 workflow
 保持当前路由。这样不把新镜像尚未验证的浏览器系统依赖一起迁入，也不改变
 现有分类 job 与其他 workflow 的路由镜像关系。
 
-新池标签为 `ecs-qwen-ephemeral`。默认路由使用 x64，设置变量
-`EXTERNAL_PR_EPHEMERAL_ARCH=arm64` 可改用 ARM64；完整 PR CI 在新镜像上的
-工具链仍须验证。
+池标签为 `ecs-qwen-ephemeral`，已部署的十个 runner 均为 ARM64。只注册
+`self-hosted` 和这个专用标签，不注册通用 Linux、ARM64 标签，避免其他宽泛
+ARM64 选择器将无关任务送入本池。完整 PR CI 在新镜像上仍需验证。
+已记录的宿主机、网络和 runner 授权限制仍待解决，更换标签不会消除它们。
 
 ## 依据
 
