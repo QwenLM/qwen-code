@@ -12,6 +12,8 @@ import {
   managedExtensionSourceDigest,
   parseManagedExtensionInstall,
   isManagedExtensionInstallActive,
+  queryManagedExtensionApplyReview,
+  reviewManagedExtensionInstall,
 } from './managed-extension-install';
 
 const pin = {
@@ -55,6 +57,7 @@ const missing = () =>
 
 function api() {
   return {
+    query: vi.fn(async () => snapshot),
     importPackage: vi.fn(async () => publication),
     lookupPackageOperation: vi.fn(missing),
     lookupApplyOperation: vi.fn(missing),
@@ -95,6 +98,178 @@ async function command(settingsKeys: string[] = []) {
 }
 
 describe('Managed installation receipts', () => {
+  it.each(['lookup', 'resume', 'apply'])(
+    're-reviews a definitively failed %s without republishing its frozen input',
+    async (path) => {
+      const input = await command();
+      input.value.pin = pin;
+      input.value.stage = 'apply';
+      input.value.applySubmitted = true;
+      const client = api();
+      const failed = {
+        ...active,
+        operation: { ...active.operation!, state: 'failed' },
+      };
+      if (path === 'lookup')
+        client.lookupApplyOperation.mockResolvedValue(failed as never);
+      else if (path === 'resume') {
+        client.lookupApplyOperation.mockResolvedValue({
+          ...failed,
+          operation: { ...failed.operation, state: 'recovery_required' },
+        } as never);
+        client.resume.mockResolvedValue(failed);
+      } else client.apply.mockResolvedValue(failed);
+      const progress = vi.fn();
+      await continueManagedExtensionInstall(
+        asManagement(client),
+        input.value,
+        undefined,
+        undefined,
+        { clientId: 'client' },
+        progress,
+      );
+      const saved = progress.mock.lastCall![0];
+      expect(saved.applySubmitted).toBe(false);
+      expect(client.importPackage).not.toHaveBeenCalled();
+      client.lookupApplyOperation.mockResolvedValue(failed as never);
+      client.query.mockResolvedValue({ ...snapshot, revision: 9 });
+      const reviewed = await reviewManagedExtensionInstall(
+        asManagement(client),
+        saved,
+        { clientId: 'client' },
+      );
+      expect(client.query).toHaveBeenCalledOnce();
+      expect(reviewed).toEqual({
+        ...saved,
+        expectedConfigRevision: 9,
+        extensions: snapshot.extensions,
+        applyKey: expect.any(String),
+      });
+      expect(reviewed!.applyKey).not.toBe(saved.applyKey);
+      expect(reviewed!.pin).toEqual(pin);
+      expect(reviewed!.publishKey).toBe(input.value.publishKey);
+      expect(reviewed!.settingsKey).toBe(input.value.settingsKey);
+    },
+  );
+
+  it.each([
+    [
+      new JavaManagedAgentHttpError(
+        409,
+        'extension_config_revision_conflict',
+        'Conflict',
+      ),
+      true,
+    ],
+    [
+      new JavaManagedAgentHttpError(
+        409,
+        'extension_selection_upgrade_required',
+        'Upgrade',
+      ),
+      true,
+    ],
+    [
+      new JavaManagedAgentHttpError(
+        409,
+        'hosted_extension_configuration_conflict',
+        'Unknown',
+      ),
+      false,
+    ],
+    [
+      new JavaManagedAgentHttpError(
+        409,
+        'session_config_outcome_unknown',
+        'Unknown',
+      ),
+      false,
+    ],
+    [new JavaManagedAgentHttpError(503, 'unavailable', 'Unavailable'), false],
+    [new TypeError('Network response lost'), false],
+  ] as const)(
+    'releases the review barrier only for an exact pre-admission rejection (%s)',
+    async (failure, rejected) => {
+      const input = await command();
+      input.value.pin = pin;
+      input.value.stage = 'apply';
+      const client = api();
+      client.apply.mockRejectedValue(failure);
+      const progress = vi.fn();
+      await expect(
+        continueManagedExtensionInstall(
+          asManagement(client),
+          input.value,
+          undefined,
+          undefined,
+          { clientId: 'client' },
+          progress,
+        ),
+      ).rejects.toBe(failure);
+      const saved = progress.mock.lastCall![0];
+      expect(saved.applySubmitted).toBe(!rejected);
+      const review = reviewManagedExtensionInstall(
+        asManagement(client),
+        saved,
+        { clientId: 'client' },
+      );
+      if (rejected) {
+        expect((await review)!.applyKey).not.toBe(saved.applyKey);
+        expect(client.query).toHaveBeenCalledOnce();
+      } else {
+        await expect(review).rejects.toThrow('outcome');
+        expect(client.query).not.toHaveBeenCalled();
+      }
+      expect(client.apply).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([
+    { state: 'recovery_required', mode: 'apply' },
+    { state: 'pending', mode: 'apply' },
+    { state: 'failed', mode: 'recoverPrevious' },
+  ])('preserves the original barrier for $mode/$state', async (operation) => {
+    const client = api();
+    client.lookupApplyOperation.mockResolvedValue({
+      ...active,
+      operation: { ...active.operation!, ...operation },
+    } as never);
+    await expect(
+      queryManagedExtensionApplyReview(
+        asManagement(client),
+        'session',
+        'original-key',
+        true,
+        { clientId: 'client' },
+      ),
+    ).rejects.toThrow('recovery');
+    expect(client.query).not.toHaveBeenCalled();
+    expect(client.apply).not.toHaveBeenCalled();
+  });
+
+  it('refuses a newly pending Session after proving the original apply failed', async () => {
+    const client = api();
+    client.lookupApplyOperation.mockResolvedValue({
+      ...active,
+      operation: { ...active.operation!, state: 'failed' },
+    } as never);
+    client.query.mockResolvedValue({
+      ...snapshot,
+      operation: { ...active.operation!, state: 'recovery_required' },
+    });
+    await expect(
+      queryManagedExtensionApplyReview(
+        asManagement(client),
+        'session',
+        'original-key',
+        true,
+        { clientId: 'client' },
+      ),
+    ).rejects.toThrow('pending');
+    expect(client.query).toHaveBeenCalledOnce();
+    expect(client.apply).not.toHaveBeenCalled();
+  });
+
   it('merges one package into the frozen selection and stores no input or credential values', async () => {
     const client = api();
     const input = await command(['API_TOKEN']);

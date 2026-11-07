@@ -30,6 +30,7 @@ let root: Root;
 const popup = { opener: null, location: { replace: vi.fn() }, close: vi.fn() };
 
 beforeEach(() => {
+  sessionStorage.clear();
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -54,7 +55,7 @@ function api() {
       authorizationUrl: 'https://auth.example/authorize?state=opaque',
       state: 'pending',
     })),
-    status: vi.fn(async () => ({
+    status: vi.fn(async (..._args: unknown[]) => ({
       attemptId: 'attempt',
       state: 'code_received',
     })),
@@ -117,6 +118,70 @@ it('completes the initiating browser flow with an in-memory nonce and returns on
     credentialGeneration: 2,
   });
   expect(popup.close).toHaveBeenCalled();
+});
+
+it('discards a completed A response that becomes ready immediately before starting flow B', async () => {
+  vi.useFakeTimers();
+  const client = api();
+  const second = {
+    ...server,
+    serverId: `${pin.extensionId}:other`,
+    serverName: 'other',
+  };
+  client.query.mockResolvedValue({
+    supported: true,
+    canAuthorize: true,
+    servers: [server, second],
+  });
+  client.start.mockImplementation(async (...args: unknown[]) => ({
+    attemptId:
+      (args[1] as { serverId: string }).serverId === server.serverId
+        ? 'attempt-A'
+        : 'attempt-B',
+    authorizationUrl: 'https://auth.example/authorize',
+    state: 'pending',
+  }));
+  client.status.mockResolvedValue({
+    attemptId: 'attempt-A',
+    state: 'code_received',
+  });
+  let completeA!: (result: Awaited<ReturnType<typeof client.complete>>) => void;
+  client.complete.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        completeA = resolve;
+      }),
+  );
+  const callback = await render(client);
+  const authorize = () =>
+    [...container.querySelectorAll<HTMLButtonElement>('button')].filter(
+      (entry) => entry.textContent === 'Authorize and use in this session',
+    );
+  await act(async () => authorize()[0].click());
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(client.complete).toHaveBeenCalledOnce();
+  await act(async () => {
+    completeA({
+      attemptId: 'attempt-A',
+      state: 'completed',
+      credentialId: 'credential-A',
+      generation: 1,
+    });
+    authorize()[1].click();
+    await Promise.resolve();
+  });
+  expect(client.start).toHaveBeenCalledTimes(2);
+  expect(callback).not.toHaveBeenCalled();
+  client.status.mockResolvedValue({
+    attemptId: 'attempt-B',
+    state: 'code_received',
+  });
+  await act(async () => button('Check original authorization').click());
+  expect(callback).toHaveBeenCalledExactlyOnceWith({
+    serverId: second.serverId,
+    credentialId: 'credential',
+    credentialGeneration: 2,
+  });
 });
 
 it('does not offer another actor execution or bind controls when authorization is disallowed', async () => {
@@ -349,4 +414,156 @@ it('keeps explicit binding removal available after personal OAuth is disabled', 
   );
   expect(client.start).not.toHaveBeenCalled();
   expect(client.revoke).not.toHaveBeenCalled();
+});
+
+it.each(['failed', 'revision conflict'])(
+  'releases a definitive OAuth %s only after explicit review of the fresh snapshot',
+  async (failure) => {
+    const client = api();
+    const binding = {
+      serverId: server.serverId,
+      credentialId: 'credential',
+      credentialGeneration: 2,
+    };
+    const snapshot = {
+      sessionId: 'session',
+      supported: true,
+      revision: 4,
+      selectionVersion: 2 as const,
+      extensions: [pin],
+      requestedExtensions: [pin],
+      mcpAuthBindings: [binding],
+      selfService: { supported: true, canApply: true },
+    };
+    const failed = {
+      ...snapshot,
+      operation: {
+        operationId: '00000000-0000-4000-8000-000000000003',
+        state: 'failed',
+        mode: 'apply',
+        revision: 5,
+      },
+    };
+    const management = {
+      storageScope: 'scope',
+      query: vi.fn(async () => ({ ...snapshot, revision: 6 })),
+      lookupApplyOperation: vi.fn(async (..._args: unknown[]) => {
+        throw new JavaManagedAgentHttpError(404, 'not_found', 'Missing');
+      }),
+      apply: vi.fn(async (..._args: unknown[]) => ({
+        ...failed,
+        revision: 7,
+        mcpAuthBindings: [],
+        operation: { ...failed.operation, state: 'active', revision: 7 },
+      })),
+    };
+    if (failure === 'failed') management.apply.mockResolvedValueOnce(failed);
+    else
+      management.apply.mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(
+          409,
+          'extension_config_revision_conflict',
+          'Conflict',
+        ),
+      );
+    await act(async () =>
+      root.render(
+        <I18nProvider language="en">
+          <ManagedMcpOAuthManager
+            provider={
+              {
+                storageKey: 'oauth-test',
+                mcpOAuth: client,
+                extensions: management,
+              } as unknown as ManagedAgentProvider
+            }
+            workspaceId="workspace"
+            sessionId="session"
+            snapshot={snapshot}
+            onChanged={vi.fn()}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await act(async () =>
+      button('Remove authorization from this session').click(),
+    );
+    const storageKey = 'managed-mcp-oauth-binding:scope:workspace:session';
+    const original = JSON.parse(sessionStorage.getItem(storageKey)!);
+    expect(original.applySubmitted).toBe(false);
+    if (failure === 'failed')
+      management.lookupApplyOperation.mockResolvedValueOnce(failed as never);
+    await act(async () => button('Review current selection').click());
+    expect(sessionStorage.getItem(storageKey)).toBeNull();
+    await act(async () =>
+      button('Remove authorization from this session').click(),
+    );
+    expect(management.apply).toHaveBeenCalledTimes(2);
+    const [_, selection, options] = management.apply.mock.calls[1] as [
+      string,
+      { expectedConfigRevision: number },
+      { idempotencyKey: string },
+    ];
+    expect(selection.expectedConfigRevision).toBe(6);
+    expect(options.idempotencyKey).not.toBe(original.key);
+  },
+);
+
+it('treats an old OAuth journal without a submitted flag as an unknown outcome', async () => {
+  const client = api();
+  const snapshot = {
+    sessionId: 'session',
+    supported: true,
+    revision: 4,
+    extensions: [pin],
+    requestedExtensions: [pin],
+    selfService: { supported: true, canApply: true },
+  };
+  const storageKey = 'managed-mcp-oauth-binding:scope:workspace:session';
+  const original = JSON.stringify({
+    key: 'old-key',
+    selection: {
+      selectionVersion: 2,
+      expectedConfigRevision: 2,
+      extensions: [pin],
+      mcpAuthBindings: [],
+    },
+  });
+  sessionStorage.setItem(storageKey, original);
+  const query = vi.fn();
+  const apply = vi.fn();
+  await act(async () =>
+    root.render(
+      <I18nProvider language="en">
+        <ManagedMcpOAuthManager
+          provider={
+            {
+              storageKey: 'oauth-test',
+              mcpOAuth: client,
+              extensions: {
+                storageScope: 'scope',
+                query,
+                apply,
+                lookupApplyOperation: vi.fn(async () => {
+                  throw new JavaManagedAgentHttpError(
+                    404,
+                    'not_found',
+                    'Missing',
+                  );
+                }),
+              },
+            } as unknown as ManagedAgentProvider
+          }
+          workspaceId="workspace"
+          sessionId="session"
+          snapshot={snapshot}
+          onChanged={vi.fn()}
+        />
+      </I18nProvider>,
+    ),
+  );
+  await act(async () => button('Review current selection').click());
+  expect(sessionStorage.getItem(storageKey)).toBe(original);
+  expect(query).not.toHaveBeenCalled();
+  expect(apply).not.toHaveBeenCalled();
 });

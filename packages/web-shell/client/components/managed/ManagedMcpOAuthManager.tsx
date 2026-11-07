@@ -15,6 +15,11 @@ import {
 import { ManagedMcpOAuthPanel } from './ManagedMcpOAuthPanel';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import {
+  isManagedExtensionApplyRejected,
+  isManagedExtensionConfigurationPending,
+  queryManagedExtensionApplyReview,
+} from './managed-extension-install';
+import {
   getManagedClientId,
   managedRequestId,
 } from './managed-session-storage';
@@ -22,6 +27,7 @@ import {
 interface PendingBinding {
   key: string;
   selection: ManagedExtensionSelection;
+  applySubmitted?: boolean;
 }
 
 export function ManagedMcpOAuthManager({
@@ -44,6 +50,7 @@ export function ManagedMcpOAuthManager({
     ? `managed-mcp-oauth-binding:${api.storageScope}:${workspaceId}:${sessionId}`
     : undefined;
   const [pending, setPending] = useState<PendingBinding>();
+  const [configuration, setConfiguration] = useState(snapshot);
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const request = useRef<AbortController | undefined>(undefined);
@@ -59,6 +66,7 @@ export function ManagedMcpOAuthManager({
         /* Storage is optional. */
       }
   };
+  useEffect(() => setConfiguration(snapshot), [snapshot]);
   useEffect(() => {
     mounted.current = true;
     setPending(undefined);
@@ -70,7 +78,11 @@ export function ManagedMcpOAuthManager({
         if (raw) {
           const value = JSON.parse(raw) as PendingBinding;
           if (
-            Object.keys(value).sort().join(',') !== 'key,selection' ||
+            Object.keys(value).some(
+              (key) => !['key', 'selection', 'applySubmitted'].includes(key),
+            ) ||
+            (value.applySubmitted !== undefined &&
+              typeof value.applySubmitted !== 'boolean') ||
             typeof value.key !== 'string' ||
             !/^[\w:-]{1,512}$/.test(value.key) ||
             !('selectionVersion' in value.selection) ||
@@ -83,7 +95,11 @@ export function ManagedMcpOAuthManager({
             !isManagedMcpAuthBindings(value.selection.mcpAuthBindings)
           )
             sessionStorage.removeItem(storageKey);
-          else setPending(value);
+          else
+            setPending({
+              ...value,
+              applySubmitted: value.applySubmitted ?? true,
+            });
         }
       } catch {
         /* Storage is optional. */
@@ -102,6 +118,7 @@ export function ManagedMcpOAuthManager({
     setFailed(false);
     save(input);
     const options = { clientId, signal: abort.signal };
+    let applying = false;
     try {
       let current: ManagedExtensionSnapshot | undefined;
       try {
@@ -113,39 +130,57 @@ export function ManagedMcpOAuthManager({
           throw cause;
       }
       abort.signal.throwIfAborted();
-      const result = current?.operation
-        ? ['active', 'failed'].includes(current.operation.state)
+      let result: ManagedExtensionSnapshot;
+      if (current?.operation) {
+        result = ['active', 'failed'].includes(current.operation.state)
           ? current
           : await api.resume(
               sessionId,
               current.operation.operationId,
               false,
               options,
-            )
-        : await api.apply(sessionId, input.selection, {
-            ...options,
-            idempotencyKey: input.key,
-          });
+            );
+      } else {
+        applying = true;
+        save({ ...input, applySubmitted: true });
+        result = await api.apply(sessionId, input.selection, {
+          ...options,
+          idempotencyKey: input.key,
+        });
+      }
       if (abort.signal.aborted) return;
-      if (result.operation?.state === 'active') save(undefined);
-      else setFailed(true);
+      if (
+        result.operation?.state === 'active' &&
+        result.operation.mode === 'apply'
+      )
+        save(undefined);
+      else {
+        if (result.operation && !isManagedExtensionConfigurationPending(result))
+          save({ ...input, applySubmitted: false });
+        setFailed(true);
+      }
       onChanged();
-    } catch {
-      if (!abort.signal.aborted && mounted.current) setFailed(true);
+    } catch (cause) {
+      if (!abort.signal.aborted && mounted.current) {
+        if (applying && isManagedExtensionApplyRejected(cause))
+          save({ ...input, applySubmitted: false });
+        setFailed(true);
+      }
     } finally {
       if (mounted.current) setBusy(false);
     }
   };
   const bind = (binding: ManagedMcpAuthBinding) => {
-    if (pending || !snapshot.selfService?.canApply) return;
+    if (pending || !configuration.selfService?.canApply) return;
     void apply({
       key: managedRequestId(),
+      applySubmitted: false,
       selection: {
         selectionVersion: 2,
-        expectedConfigRevision: snapshot.revision,
-        extensions: snapshot.extensions,
+        expectedConfigRevision: configuration.revision,
+        extensions: configuration.extensions,
         mcpAuthBindings: [
-          ...(snapshot.mcpAuthBindings ?? []).filter(
+          ...(configuration.mcpAuthBindings ?? []).filter(
             (entry) => entry.serverId !== binding.serverId,
           ),
           binding,
@@ -164,23 +199,60 @@ export function ManagedMcpOAuthManager({
         </Alert>
       )}
       {pending ? (
-        <Button
-          variant="outline"
-          disabled={busy}
-          onClick={() => void apply(pending)}
-        >
-          {t('managed.extensions.retry')}
-        </Button>
+        <>
+          <Button
+            variant="outline"
+            disabled={busy}
+            onClick={() => void apply(pending)}
+          >
+            {t('managed.extensions.retry')}
+          </Button>
+          <Button
+            variant="outline"
+            disabled={busy}
+            onClick={() => {
+              const abort = new AbortController();
+              request.current?.abort();
+              request.current = abort;
+              setBusy(true);
+              void queryManagedExtensionApplyReview(
+                api,
+                sessionId,
+                pending.key,
+                pending.applySubmitted ?? true,
+                {
+                  clientId,
+                  signal: abort.signal,
+                },
+              )
+                .then((current) => {
+                  if (abort.signal.aborted || !mounted.current) return;
+                  setConfiguration(current);
+                  save(undefined);
+                  setFailed(false);
+                  onChanged();
+                })
+                .catch(() => {
+                  if (!abort.signal.aborted && mounted.current) setFailed(true);
+                })
+                .finally(() => {
+                  if (!abort.signal.aborted && mounted.current) setBusy(false);
+                });
+            }}
+          >
+            {t('managed.install.reviewAgain')}
+          </Button>
+        </>
       ) : (
         <>
           <ManagedMcpOAuthPanel
             provider={provider}
             sessionId={sessionId}
-            extensions={snapshot.extensions}
+            extensions={configuration.extensions}
             onAuthorized={bind}
             onRevoked={onChanged}
           />
-          {(snapshot.mcpAuthBindings ?? []).map((binding) => (
+          {(configuration.mcpAuthBindings ?? []).map((binding) => (
             <div
               key={binding.serverId}
               className="grid gap-2 rounded-md border p-3 text-sm"
@@ -191,17 +263,18 @@ export function ManagedMcpOAuthManager({
               </p>
               <Button
                 variant="outline"
-                disabled={busy || !snapshot.selfService?.canApply}
+                disabled={busy || !configuration.selfService?.canApply}
                 onClick={() =>
                   void apply({
                     key: managedRequestId(),
+                    applySubmitted: false,
                     selection: {
                       selectionVersion: 2,
-                      expectedConfigRevision: snapshot.revision,
-                      extensions: snapshot.extensions,
-                      mcpAuthBindings: (snapshot.mcpAuthBindings ?? []).filter(
-                        (entry) => entry.serverId !== binding.serverId,
-                      ),
+                      expectedConfigRevision: configuration.revision,
+                      extensions: configuration.extensions,
+                      mcpAuthBindings: (
+                        configuration.mcpAuthBindings ?? []
+                      ).filter((entry) => entry.serverId !== binding.serverId),
                     },
                   })
                 }

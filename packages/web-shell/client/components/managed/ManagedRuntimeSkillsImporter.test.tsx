@@ -208,3 +208,78 @@ it('does not expose or invoke discovery for an unqualified execution profile', a
   expect(container.querySelector('[data-managed-runtime-skills]')).toBeNull();
   expect(client.runtimeSkillCandidates).not.toHaveBeenCalled();
 });
+
+it.each(['failed', 'revision conflict'])(
+  're-reviews %s with a fresh apply key without republishing the Runtime snapshot',
+  async (failure) => {
+    const client = api();
+    const failed = {
+      ...snapshot,
+      operation: {
+        operationId: '00000000-0000-4000-8000-000000000002',
+        state: 'failed',
+        mode: 'apply',
+        revision: 5,
+      },
+    };
+    if (failure === 'failed')
+      client.apply.mockResolvedValueOnce(failed as never);
+    else
+      client.apply.mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(
+          409,
+          'extension_config_revision_conflict',
+          'Conflict',
+        ),
+      );
+    await render(client);
+    await scan();
+    await act(async () => button('Review package').click());
+    await act(async () => button('Install into current session').click());
+    const key = 'managed-runtime-skill-install:scope:workspace:session';
+    const original = JSON.parse(sessionStorage.getItem(key)!);
+    expect(original.applySubmitted).toBe(false);
+    client.query.mockResolvedValue({ ...snapshot, revision: 6 });
+    client.lookupApplyOperation.mockImplementation(
+      async (...args: unknown[]) => {
+        if (failure === 'failed' && args[1] === original.applyKey)
+          return failed as never;
+        return missing();
+      },
+    );
+    await act(async () => button('Review current selection').click());
+    const reviewed = JSON.parse(sessionStorage.getItem(key)!);
+    expect(reviewed.expectedConfigRevision).toBe(6);
+    expect(reviewed.applyKey).not.toBe(original.applyKey);
+    for (const field of ['publishKey', 'settingsKey', 'pin', 'runtimeSnapshot'])
+      expect(reviewed[field]).toEqual(original[field]);
+    client.apply.mockImplementation(async (_session, selection) => ({
+      ...snapshot,
+      revision: 7,
+      extensions: selection.extensions,
+      requestedExtensions: selection.extensions,
+      operation: { ...failed.operation, state: 'active', revision: 7 },
+    }));
+    await act(async () => button('Retry original request').click());
+    expect(client.apply.mock.calls[1][1].expectedConfigRevision).toBe(6);
+    expect(client.importRuntimeSkill).toHaveBeenCalledOnce();
+    expect(sessionStorage.getItem(key)).toBeNull();
+  },
+);
+
+it('keeps an unknown submitted Runtime apply on its original key when lookup returns 404', async () => {
+  const client = api();
+  client.apply.mockRejectedValueOnce(new TypeError('Response lost'));
+  await render(client);
+  await scan();
+  await act(async () => button('Review package').click());
+  await act(async () => button('Install into current session').click());
+  const key = 'managed-runtime-skill-install:scope:workspace:session';
+  const original = sessionStorage.getItem(key)!;
+  expect(JSON.parse(original).applySubmitted).toBe(true);
+  client.query.mockClear();
+  await act(async () => button('Review current selection').click());
+  expect(sessionStorage.getItem(key)).toBe(original);
+  expect(client.query).not.toHaveBeenCalled();
+  expect(client.apply).toHaveBeenCalledOnce();
+});

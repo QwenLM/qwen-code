@@ -97,6 +97,13 @@ final class RuntimeBrokerSupport {
         });
     }
 
+    static boolean workerRefusedRelease(Throwable error) {
+        Throwable cause = unwrap(error);
+        return cause instanceof RuntimeBrokerException failure
+                && ("managed_runtime_owner_hold_pending".equals(failure.getCode())
+                        || "managed_runtime_release_timeout".equals(failure.getCode()));
+    }
+
     static Throwable unwrap(Throwable error) {
         Throwable current = error;
         while ((current instanceof CompletionException)

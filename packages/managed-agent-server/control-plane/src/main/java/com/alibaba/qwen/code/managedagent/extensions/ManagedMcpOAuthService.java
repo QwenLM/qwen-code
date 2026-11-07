@@ -71,7 +71,7 @@ public class ManagedMcpOAuthService {
     }
 
     public JsonNode query(String tenant, String actor, String sessionId, List<Pin> requested) {
-        SessionRecord session = sessions.requireReadableSession(tenant, actor, sessionId);
+        SessionRecord session = requireCredentialManagement(tenant, actor, sessionId);
         ObjectNode result =
                 json.createObjectNode()
                         .put("supported", supported(session))
@@ -100,7 +100,6 @@ public class ManagedMcpOAuthService {
             }
             return result;
         }
-        packages.requireExecutionAccess(tenant, actor, session.workspace().getWorkspaceId());
         result.put("canAuthorize", true);
         for (var entry : settings.getProviders().entrySet()) {
             providers

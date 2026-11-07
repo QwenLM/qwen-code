@@ -96,31 +96,34 @@ export function ManagedMcpOAuthPanel({
     };
   }, [load]);
 
-  const accept = useCallback((result: ManagedMcpOAuthAttempt) => {
-    if (result.authorizationUrl) {
-      const url = new URL(result.authorizationUrl);
-      if (
-        !['http:', 'https:'].includes(url.protocol) ||
-        url.username ||
-        url.password
-      )
-        throw new Error('Invalid authorization URL.');
-    }
-    setAttempt(result);
-    const current = flow.current;
-    if (result.state === 'completed' && current && !current.notified) {
-      const binding = {
-        serverId: current.server.serverId,
-        credentialId: result.credentialId,
-        credentialGeneration: result.generation,
-      };
-      if (!isManagedMcpAuthBindings([binding]))
-        throw new Error('Invalid authorization result.');
-      current.notified = true;
-      popup.current?.close();
-      callback.current(binding as ManagedMcpAuthBinding);
-    }
-  }, []);
+  const accept = useCallback(
+    (result: ManagedMcpOAuthAttempt, current: typeof flow.current) => {
+      if (!current || flow.current !== current) return;
+      if (result.authorizationUrl) {
+        const url = new URL(result.authorizationUrl);
+        if (
+          !['http:', 'https:'].includes(url.protocol) ||
+          url.username ||
+          url.password
+        )
+          throw new Error('Invalid authorization URL.');
+      }
+      setAttempt(result);
+      if (result.state === 'completed' && !current.notified) {
+        const binding = {
+          serverId: current.server.serverId,
+          credentialId: result.credentialId,
+          credentialGeneration: result.generation,
+        };
+        if (!isManagedMcpAuthBindings([binding]))
+          throw new Error('Invalid authorization result.');
+        current.notified = true;
+        popup.current?.close();
+        callback.current(binding as ManagedMcpAuthBinding);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (
@@ -140,7 +143,7 @@ export function ManagedMcpOAuthPanel({
           signal: abort.signal,
         });
         if (abort.signal.aborted || flow.current !== expectedFlow) return;
-        const current = flow.current;
+        const current = expectedFlow;
         if (result.state === 'code_received' && current && !current.completed) {
           current.completed = true;
           const completed = await api.complete(
@@ -148,15 +151,17 @@ export function ManagedMcpOAuthPanel({
             { attemptId: result.attemptId, browserNonce: current.nonce },
             { clientId, signal: abort.signal },
           );
-          if (!abort.signal.aborted) accept(completed);
-        } else accept(result);
+          if (abort.signal.aborted || flow.current !== expectedFlow) return;
+          accept(completed, expectedFlow);
+        } else accept(result, expectedFlow);
         if (
           !abort.signal.aborted &&
           !['completed', 'failed', 'expired'].includes(result.state)
         )
           timer = setTimeout(() => void poll(), 1500);
       } catch {
-        if (!abort.signal.aborted) setFailed(true);
+        if (!abort.signal.aborted && flow.current === expectedFlow)
+          setFailed(true);
       }
     };
     timer = setTimeout(() => void poll(), 1500);
@@ -199,7 +204,7 @@ export function ManagedMcpOAuthPanel({
         },
         { clientId, signal: abort.signal, idempotencyKey: current.key },
       );
-      if (abort.signal.aborted) return;
+      if (abort.signal.aborted || flow.current !== current) return;
       if (!result.authorizationUrl)
         throw new Error('Missing authorization URL.');
       const url = new URL(result.authorizationUrl);
@@ -210,7 +215,7 @@ export function ManagedMcpOAuthPanel({
       )
         throw new Error('Invalid authorization URL.');
       if (popup.current) popup.current.location.replace(url.href);
-      accept({ ...result, state: 'pending' });
+      accept({ ...result, state: 'pending' }, current);
     } catch {
       if (!abort.signal.aborted) {
         setFailed(true);
@@ -257,6 +262,7 @@ export function ManagedMcpOAuthPanel({
             disabled={busy}
             onClick={() => {
               const abort = new AbortController();
+              const expectedFlow = flow.current;
               request.current?.abort();
               request.current = abort;
               setBusy(true);
@@ -266,25 +272,27 @@ export function ManagedMcpOAuthPanel({
                   signal: abort.signal,
                 })
                 .then(async (result) => {
-                  if (abort.signal.aborted) return;
-                  if (result.state === 'code_received' && flow.current) {
-                    flow.current.completed = true;
+                  if (abort.signal.aborted || flow.current !== expectedFlow)
+                    return;
+                  if (result.state === 'code_received' && expectedFlow) {
+                    expectedFlow.completed = true;
                     result = await api.complete(
                       sessionId,
                       {
                         attemptId: result.attemptId,
-                        browserNonce: flow.current.nonce,
+                        browserNonce: expectedFlow.nonce,
                       },
                       { clientId, signal: abort.signal },
                     );
                   }
-                  if (!abort.signal.aborted) {
-                    accept(result);
+                  if (!abort.signal.aborted && flow.current === expectedFlow) {
+                    accept(result, expectedFlow);
                     setFailed(false);
                   }
                 })
                 .catch(() => {
-                  if (!abort.signal.aborted) setFailed(true);
+                  if (!abort.signal.aborted && flow.current === expectedFlow)
+                    setFailed(true);
                 })
                 .finally(() => {
                   if (!abort.signal.aborted) setBusy(false);
