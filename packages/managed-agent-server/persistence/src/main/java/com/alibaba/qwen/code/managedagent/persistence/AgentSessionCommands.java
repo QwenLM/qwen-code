@@ -761,18 +761,30 @@ final class AgentSessionCommands {
     private void requireMutationReceiptGrant(String tenantId,
             SessionRecord requested, CommandRecord command, String actorId,
             SessionPrincipal principal) {
-        SessionRecord recorded = command.sessionId()
-                .equals(requested.sessionId()) ? requested
-                : storeRows.requireSession(tenantId, command.sessionId());
-        if (recorded.workspace() == null) {
-            ManagedSessionPrincipal.requireOwnership(jdbc, tenantId,
-                    recorded.sessionId(), principal);
-        } else if (!recorded.sessionId().equals(requested.sessionId())
-                && !workspaces.canRead(tenantId, actorId,
-                        recorded.workspace().getWorkspaceId())) {
-            throw new ManagedAgentException(404, "session_not_found",
-                    "The Session was not found.");
+        if (command.sessionId().equals(requested.sessionId())) {
+            if (requested.workspace() == null) {
+                ManagedSessionPrincipal.requireOwnership(jdbc, tenantId,
+                        requested.sessionId(), principal);
+            }
+            return;
         }
+        // Cross-Session reuse of a tenant-global key: gate on the caller's own
+        // requested Session (the creator gate, matching the service pre-read),
+        // never the recorded Session's grant — that would answer 404 for a
+        // Session the caller owns. The collision then answers
+        // idempotency_conflict, the same refusal requireSameMutation gives on
+        // the DuplicateKey arm, so the answer does not depend on whether the
+        // receipt was visible before the insert.
+        if (requested.workspace() == null) {
+            ManagedSessionPrincipal.requireOwnership(jdbc, tenantId,
+                    requested.sessionId(), principal);
+        } else if (!workspaces.createdSession(tenantId, actorId,
+                requested.sessionId())) {
+            throw new ManagedAgentException(409, "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
+        }
+        throw new ManagedAgentException(409, "idempotency_conflict",
+                "The idempotency key was reused with different content.");
     }
 
     private static void requireSameMutation(CommandRecord command, String requestDigest, String sessionId) {

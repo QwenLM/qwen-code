@@ -1068,8 +1068,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // A recorded rename answers before the shape and availability gates
         // a deleted Session can no longer pass, but only when the recorded
         // command IS this request — the key is tenant-global, so a key
-        // another Session consumed falls through to beginSessionRename,
-        // which answers idempotency_conflict. The actor gates stay ahead
+        // another Session consumed is answered idempotency_conflict by the
+        // cross-Session pre-guard below, gating on the caller's own Session
+        // rather than the recorded one. The actor gates stay ahead
         // of the outcome, exactly as the fresh path applies them — the
         // OPERATOR role, whose 404 arm covers the read grant, and the
         // creator half, because the recorded outcome stays creator-scoped —
@@ -2594,12 +2595,19 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private SessionRecord requireRecordedSessionGrant(
             StoreModels.CommandRecord command, SessionRecord requested,
             SessionPrincipal principal) {
-        SessionRecord recorded = command.sessionId()
-                .equals(requested.sessionId()) ? requested
-                : store.requireSession(requested.tenantId(),
-                        command.sessionId());
-        requireReadGrant(recorded, principal);
-        return recorded;
+        if (command.sessionId().equals(requested.sessionId())) {
+            requireReadGrant(requested, principal);
+            return requested;
+        }
+        // Cross-Session reuse of a tenant-global key: gate on the caller's own
+        // requested Session, never the recorded Session's read grant (which
+        // would answer 404 for a Session the caller owns). The key collision
+        // then answers idempotency_conflict exactly as the in-store receipt
+        // probe (requireSameMutation) does, so the refusal does not depend on
+        // whether the receipt was visible before the insert.
+        requireReplayCreator(requested, principal);
+        throw new ManagedAgentException(409, "idempotency_conflict",
+                "The idempotency key was reused with different content.");
     }
 
     // The recorder half of the replay admission: a command receipt names

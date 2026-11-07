@@ -1366,6 +1366,68 @@ class ManagedWorkspaceAdmissionTest {
                 String.class, tenant, sessionY)).isNull();
     }
 
+    // The submit and cancel arms of the same tenant-global collision: a key
+    // consumed on Session A, reused by a principal who owns Session B but has
+    // no grant on A, must answer idempotency_conflict — never the recorded
+    // Session's read-grant 404 that would name a Session the caller owns.
+    @Test
+    void aKeyConsumedByAnotherSessionAnswersIdempotencyConflictForSubmitAndCancel() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        register(tenant, "ws-b", "storage-b",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        grant(tenant, "ws-b", "actor-b", true);
+        String sessionX = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create-x")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build()).sessionId();
+        String sessionY = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-b")
+                .idempotencyKey("create-y")
+                .requestDigest("sha256:" + "b".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-b", "."))
+                .build()).sessionId();
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+        // actor-a consumes "k1" under SUBMIT and under CANCEL on X.
+        var turn = transaction.execute(status ->
+                service.submitTurn(tenant, "actor-a", "k1", sessionX, input));
+        transaction.executeWithoutResult(status ->
+                service.cancelTurn(tenant, "actor-a", "k1", sessionX,
+                        turn.turnId()));
+        // actor-b owns Y, has no grant on X: each reuse is a collision.
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.submitTurn(tenant, "actor-b",
+                        "k1", sessionY, input))
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                            assertThat(error.getCode())
+                                    .isEqualTo("idempotency_conflict");
+                            assertThat(error.getStatus())
+                                    .isEqualTo(HttpStatus.CONFLICT.value());
+                        }));
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.cancelTurn(tenant, "actor-b",
+                        "k1", sessionY, turn.turnId()))
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                            assertThat(error.getCode())
+                                    .isEqualTo("idempotency_conflict");
+                            assertThat(error.getStatus())
+                                    .isEqualTo(HttpStatus.CONFLICT.value());
+                        }));
+    }
+
     // The recorded rename's actor gate covers the UNFINISHED row too, not
     // only the completed outcome: beginSessionRename compares key, Session
     // and digest, never the actor, so without the gate a non-recorder
