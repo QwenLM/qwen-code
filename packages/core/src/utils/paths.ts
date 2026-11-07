@@ -359,6 +359,41 @@ export function unescapePath(filePath: string): string {
 }
 
 /**
+ * Converts a POSIX-style path produced by an MSYS shell (Git Bash) on Windows
+ * into the real Windows path. A file the shell wrote as `/tmp/report.json`
+ * lives in the OS temp directory, and `/c/temp` is `C:\temp`; without this
+ * conversion the file tools answer "not found" for a file that exists.
+ *
+ * No-op on other platforms and for paths that are not POSIX-absolute.
+ */
+export function toWindowsPath(filePath: string): string {
+  if (os.platform() !== 'win32' || !filePath.startsWith('/')) {
+    return filePath;
+  }
+  if (filePath === '/tmp') {
+    return os.tmpdir();
+  }
+  if (filePath.startsWith('/tmp/')) {
+    return path.join(os.tmpdir(), filePath.slice('/tmp/'.length));
+  }
+  const drive = /^\/([a-zA-Z])(\/|$)/.exec(filePath);
+  if (drive) {
+    const rest = filePath.slice(2).replace(/\//g, '\\');
+    return `${drive[1].toUpperCase()}:${rest || '\\'}`;
+  }
+  return filePath;
+}
+
+/**
+ * Normalization applied by the file tools to every incoming path: shell
+ * unescaping, then the MSYS-to-Windows conversion, so a path that came from
+ * a shell command resolves to the place the shell actually wrote it.
+ */
+export function normalizeFilePath(filePath: string): string {
+  return toWindowsPath(unescapePath(filePath));
+}
+
+/**
  * Generates a unique hash for a project based on its root path.
  * On Windows, paths are case-insensitive, so we normalize to lowercase
  * to ensure the same physical path always produces the same hash.
