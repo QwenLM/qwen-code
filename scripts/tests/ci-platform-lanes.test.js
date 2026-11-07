@@ -391,8 +391,11 @@ it('reports the required Linux check only when the build and every shard pass', 
   const gate = ci.jobs.test_ubuntu;
   expect(gate.name).toBe('Test (ubuntu-latest, Node 22.x)');
   expect(gate.needs).toEqual(['classify_pr', 'test_build', 'test']);
-  // On the shards' runners, not a hosted one that can queue it for minutes.
-  expect(gate['runs-on']).toBe(ci.jobs.test['runs-on']);
+  // The gate remains on the original association-gated runner, while test
+  // shards can opt into the disposable pool for untrusted forks.
+  expect(gate['runs-on']).toBe(
+    '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+  );
   expect(condOf('test_ubuntu')).toBe(condOf('test'));
   expect(gate.steps[0].run).toBe(
     'test "$BUILD_RESULT" = success && test "$SHARDS_RESULT" = success',
@@ -862,15 +865,11 @@ describe('post-merge push lane', () => {
     ).toContain('classify_pr');
   });
 
-  it('keeps test on the association-gated output', () => {
-    // Nothing else reads test's runs-on: switching it to lint_runner would
-    // hand every untrusted fork the pool while the timeout pins above stayed
-    // green — timeoutMinutesOn derives each lane's output from its own
-    // runs-on, so it cannot catch a lane pointed at the wrong output. Pin the
-    // expression, not an equality with lint_and_static — the two are meant
-    // to differ.
+  it('keeps test on the opt-in disposable output', () => {
+    // The classifier defaults this output to ubuntu_runner, but selects the
+    // disposable pool for untrusted forks only when explicitly enabled.
     expect(String(ci.jobs.test['runs-on'])).toBe(
-      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+      '${{ fromJSON(needs.classify_pr.outputs.pr_test_runner || \'["ubuntu-latest"]\') }}',
     );
   });
 
