@@ -249,12 +249,12 @@ vi.mock('./config/sandboxConfig.js', () => ({
 }));
 
 vi.mock('./core/initializer.js', () => ({
-  initializeApp: vi.fn().mockResolvedValue({
+  initializeApp: vi.fn(async () => ({
     authError: null,
     themeError: null,
     shouldOpenAuthDialog: false,
     memoryFileCount: 0,
-  }),
+  })),
 }));
 
 vi.mock('./startup/startup-prefetch.js', () => ({
@@ -2310,6 +2310,7 @@ describe('llm.tsx main function', () => {
         workspace: {
           path: join(root, '.qwen', 'settings.json'),
           originalSettings: { hooks },
+          settings: { hooks },
         },
       };
       if (state !== 'pending') {
@@ -2351,6 +2352,9 @@ describe('llm.tsx main function', () => {
       const configStub = {
         isInteractive: () => false,
         isProjectHooksPendingApproval: () => pending,
+        // The execution accessor serves the block exactly when the gate
+        // is not pending; the trust warning must stay quiet for it.
+        getProjectHooks: () => (pending ? undefined : hooks),
         getQuestion: () => 'hello',
         getSandbox: () => false,
         getApprovalMode: () => ApprovalMode.DEFAULT,

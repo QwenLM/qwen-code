@@ -566,6 +566,7 @@ export interface DaemonSessionActions {
       workspaceCwd: string;
       sessionId?: string;
     }) => void | Promise<void>,
+    options?: { reloadProviders?: boolean },
   ): Promise<void>;
 
   setWorkflowMode(requested: boolean): Promise<void>;
@@ -646,7 +647,10 @@ export interface DaemonSessionActions {
   releaseSession(sessionId: string): Promise<void>;
   closeSession(): Promise<void>;
   refreshCommands(): Promise<void>;
-  getContext(): Promise<DaemonSessionContextStatus>;
+  getContext(opts?: {
+    /** Rethrow transient failures without recording a notice. */
+    silent?: boolean;
+  }): Promise<DaemonSessionContextStatus>;
   getContextUsage(opts?: {
     detail?: boolean;
     /** Reconcile composer counters after compression, without changing billing usage. */

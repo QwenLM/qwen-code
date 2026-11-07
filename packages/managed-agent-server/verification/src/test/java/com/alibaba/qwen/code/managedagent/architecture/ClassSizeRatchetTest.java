@@ -42,7 +42,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class ClassSizeRatchetTest {
     private static final int LARGE_CLASS_THRESHOLD = 800;
-    private static final int GLOBAL_MAX_LINES = 4270;
+    private static final int GLOBAL_MAX_LINES = 3328;
     private static final String PIN_RESOURCE = "/class-size-ratchet.properties";
     private static final List<String> SOURCE_ROOTS =
             List.of("persistence/src/main/java", "runtime-broker/src/main/java");
