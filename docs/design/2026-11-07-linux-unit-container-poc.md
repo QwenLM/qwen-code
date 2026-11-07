@@ -4,77 +4,90 @@
 
 ## Problem and current state
 
-External-contributor pull requests currently use GitHub-hosted Linux runners for the unit-test build and its eight shards. The existing ECS pool has spare capacity, but a persistent self-hosted runner must not execute unisolated code from an unknown fork. The hosted queue then delays the whole CI chain even though the unit tests already run successfully on ECS for trusted inputs.
+External-contributor pull requests currently use GitHub-hosted Linux runners for the unit-test build and its eight shards. The ECS pool has spare capacity, but an unknown fork must not get host filesystem or credential access through a persistent self-hosted runner. This creates a capacity-isolation trade-off.
 
-The goal of this change is a minimal runnable proof of container execution, not an automatic change to external-PR routing.
+This change is limited to a minimal, manually dispatched proof that an independently selected public SHA can be built and fully tested inside a disposable Docker container on ECS. It does not change external-PR routing.
+
+## Runtime finding that changed the approach
+
+The first attempt put the existing build and shard jobs into a GitHub Actions job `container:`. Run [`42340903564`](https://github.com/QwenLM/qwen-code/actions/runs/42340903564) initialized that container and checked out `2SinceJuly/qwen-code@2905dccbe45ed2917b28c7de6a935d031546ee43`, but the runner's `Starting job container` log included:
+
+```text
+-v "/var/run/docker.sock":"/var/run/docker.sock"
+```
+
+That mount appears automatically for this runner version together with `/__w`, `/__e` and runner-temp directories, despite no socket volume being requested in YAML. Code inside such a job container can control the Docker daemon and therefore the host. A job `container:` is consequently not an acceptable untrusted-code boundary here.
+
+That attempt stopped at its isolation probe; **it did not run the dependency install, build, or unit tests**. Its checkout cleanup and runner-driven container removal did succeed. Ordinary `test_build`, `test`, and `lint_and_static` have now returned to their exact pre-PoC shape.
 
 ## Scope
 
 In scope:
 
-- Extend the existing `workflow_dispatch` entry in `.github/workflows/ci.yml` with an opt-in Linux unit container mode.
-- Allow that manually dispatched run to select a public source repository and an exact 40-character commit SHA independently of the workflow revision.
-- Put `test_build` and every `test` matrix shard into `node:22-bookworm` when, and only when, this mode is selected.
-- Reuse the existing checkout, dependency installation, build-cache archive, artifact transfer, and `run-unit-test-lanes.sh` test paths.
-- Add workflow-local source validation, container-isolation probes, and explicit cleanup for the PoC.
-- Add regression coverage to the existing workflow-routing meta-test.
+- An opt-in `linux_unit_container` input on the existing trusted `workflow_dispatch` entry.
+- A public `owner/repository` and lowercase full 40-character commit SHA as the independently tested source.
+- One new `linux_unit_poc` job, with no `container:` key and only `contents: read`.
+- A dedicated checkout using a pinned actions checkout SHA, `persist-credentials: false`, and an exact local `HEAD` verification.
+- A trusted inline driver that creates a disposable container explicitly instead of asking the runner for a job container.
+- A single build plus the complete `run-unit-test-lanes.sh` test payload in that one container, avoiding an untrusted build archive crossing between containers.
+- Regression guards for the opt-in behavior, unchanged existing jobs, source validation, isolation checks, and cleanup.
 
 Out of scope:
 
-- Enabling container mode for `pull_request`, `push`, `merge_group`, or scheduled runs.
-- Changing the default runner policy for external-contributor PRs.
-- A disposable self-hosted-runner autoscaler.
-- A claim that a GitHub Actions job container alone is a complete hostile-code security boundary.
-- Privileged containers, Docker-socket access, host-network access, or a `pull_request_target` checkout of untrusted code.
+- Automatic use by `pull_request`, `push`, `merge_group`, or scheduled runs.
+- A new default route for external PRs or any change to the existing eight-shard path outside the opt-in run.
+- `pull_request_target`, privileged containers, host networking, Docker socket access, or shared credentials/cache mounts.
+- A disposable-runner autoscaler, a production admission service, or a claim that Docker alone proves full isolation against kernel escapes and all denial-of-service attacks.
+- Production sharding. The initial closed loop deliberately keeps one container so archive provenance and trust boundaries cannot be mistaken for harmless transport.
 
 ## Execution model
 
-The workflow definition and container settings are selected by the trusted manual-dispatch revision before the source tree is checked out. The tested repository and commit are data inputs; they do not supply the dispatch workflow definition.
+The dispatch revision supplies the workflow definition before the tested checkout exists. Repository and SHA are data inputs and cannot rewrite that definition or its isolation probes.
 
-When `linux_unit_container` is false (the default), both jobs emit their existing `null` container value and follow the unchanged host/ECS execution path. When it is true:
+When `linux_unit_container=true`:
 
-1. Validate the source repository as a GitHub `owner/repository` name and `branch_ref` as a full commit SHA.
-2. Select `node:22-bookworm` with init and `no-new-privileges` for `test_build` and all eight `test` shards.
-3. Check out the selected source revision without persisting checkout credentials and verify the resulting `HEAD` exactly.
-4. Prove the steps are inside a container and check the limited PoC invariants: no Docker socket, no effective `SYS_ADMIN`, `SYS_PTRACE`, or `NET_ADMIN` capabilities, `NoNewPrivs=1`, and unreachable or explicitly denied AWS/Alibaba Cloud metadata endpoints.
-5. Reuse the existing build-tree archive and all eight unit-test shards unchanged.
-6. Remove checkout contents after all result uploads. Normal GitHub runner container teardown supplies the final container-removal evidence in the live validation report.
+1. The trusted classifier selects `docs_only` for the ordinary full-CI payload, so the unrelated existing jobs do not execute their full test bodies.
+2. `linux_unit_poc` validates the repository format and exact SHA, checks out into a unique run/attempt subdirectory, disables credential persistence, and verifies the actual checked-out commit and absence of a local GitHub authentication header.
+3. A trusted inline Dockerfile extends `node:22-bookworm` with the required tmux/zip/util-linux tools. It does not read any context or instructions from the tested checkout.
+4. The driver uses `docker create` with `--init`, `--user node`, `--cap-drop ALL`, `--security-opt=no-new-privileges`, and a single read-only source mount. It supplies no privileged mode, no host network, no Docker socket, no base workspace mount, and no secret-bearing environment.
+5. Before executing source scripts, the container checks `NoNewPrivs=1`, absence of effective `SYS_ADMIN`, `SYS_PTRACE`, `NET_ADMIN`, and `DAC_OVERRIDE`, absence of the Docker socket, Node 22, and blocked or explicitly denied AWS/Alibaba Cloud metadata endpoints.
+6. The source is copied from `/source:ro` to `/tmp/repository`. Frozen pnpm installation, `npm run build`, `npm run bundle`, and the complete test-lane script execute as UID 1000 with a fresh HOME/Corepack cache and empty model credentials. Only the expected SHA is forwarded explicitly to the test container.
+7. An `EXIT` trap force-removes the container and its volumes. A subsequent `docker ps --all` check proves it is gone, and a guarded final step removes the dedicated checkout.
 
-The source validator, isolation probes, and cleanup remain inline in the trusted workflow. Loading them from the tested checkout would allow that checkout to weaken its own checks.
+The probe script, driver, Dockerfile and cleanup are inline in the trusted dispatch workflow. The tested repository cannot replace them with a safer-looking implementation of its own.
 
 ## Security boundary and known limits
 
-This PoC deliberately tests a narrow boundary. It does not introduce `pull_request_target` or another privileged event. The manual run uses public source code and disables checkout credential persistence; it does not add repository secrets.
+This proof tests concrete isolation mechanisms; it is not an unconditional claim that Docker is a sandbox for all hostile inputs.
 
-The following remain production concerns, not properties asserted by this PoC:
+- The ECS host kernel is shared. Container escapes, kernel vulnerabilities, and malicious resource consumption remain possible. Resource ceilings beyond the job timeout require a production decision.
+- The metadata checks cover only `169.254.169.254` and `100.100.100.200`. Other internal-network egress is unproven.
+- The image uses the same mutable `node:22-bookworm` tag already used by this repository's container jobs. A production boundary needs a pinned trusted image digest and a supply-chain review.
+- Reused runner state outside the dedicated checkout is not sanitized by this PoC. No claim is made for other runner mounts, credentials or co-resident jobs.
+- Normal returns, probe failures and test failures remove the container and checkout. A hard job cancellation or host failure may leave residue and needs watchdog cleanup.
+- The PoC removes the cross-container build archive; it does not yet provide a production-scale sharded design with that same provenance guarantee.
+- The opt-in profile deliberately suppresses unrelated full CI bodies during the manual run. The new job's success is the evidence; a green aggregate job that skipped its own tests is not.
 
-- Self-hosted runner state and runner-managed bind mounts outside the cleaned checkout.
-- Unexpected container escapes, kernel vulnerabilities, and denial-of-service beyond the normal job limits.
-- Internal-network egress other than the explicit metadata probes.
-- Untrusted build-archive contents crossing into other containers.
-- Cleanup after a hard job cancellation or a lost runner.
-- Enforcing container configuration when an external PR can modify its own `pull_request` workflow YAML.
-
-A production rollout therefore still needs a trusted, PR-independent admission path, an untrusted-only execution pool, bounded egress, and preferably one-job ephemeral runners with clean execution environments. Official GitHub guidance recommends Just-in-Time runners with automation that guarantees a clean environment; reusing hardware without that guarantee is insufficient.
+Production rollout therefore still requires a trusted PR-independent admission path, an untrusted-only execution pool, bounded egress, per-job resource limits, cleanup/watchdog behavior, and preferably one-job ephemeral runners with guaranteed-clean execution environments. Official GitHub guidance recommends Just-in-Time runners plus automation guaranteeing a clean environment; recycled hardware alone is insufficient.
 
 ## Files
 
-- `.github/workflows/ci.yml`: opt-in mode, source inputs, container selection, validation/probes, and cleanup.
-- `.github/scripts/ci-runner-routing.test.mjs`: structural and executable regression guards for the opt-in behavior.
-- `docs/design/2026-11-07-linux-unit-container-poc.md` and `.zh-CN.md`: this design and its verification boundary.
-- `.qwen/e2e-tests/linux-unit-container-poc.md`: working validation plan and observed results; not a tracked deliverable.
+- `.github/workflows/ci.yml`: opt-in mode, source validation, explicit container driver, isolation probes, and cleanup.
+- `.github/scripts/ci-runner-routing.test.mjs`: regression coverage for scope, inputs and unchanged existing routes.
+- `docs/design/2026-11-07-linux-unit-container-poc.md` and `.zh-CN.md`: design, observed runtime constraint, and limits.
+- `.qwen/e2e-tests/linux-unit-container-poc.md`: validation plan and observed results; not a tracked deliverable.
 
 ## Validation and acceptance
 
-Static checks must prove that ordinary events get no container, the PoC is restricted to manual dispatch, both execution jobs use the same trusted configuration, and external-PR routing is unchanged.
+Static checks must prove that ordinary events retain their existing paths, the new job runs only for the opt-in dispatch, no job `container:` is used, and raw container creation cannot grant Docker socket or privilege-escalation access.
 
-A real dispatched run must use an exact public source SHA and demonstrate:
+A real dispatched run must bind its workflow head and independently tested public SHA to the same run and demonstrate:
 
-- all isolation probes pass;
-- the build tree is built once and consumed by all eight shards;
-- every unit-test shard succeeds;
-- PoC workspaces are empty after their cleanup steps;
-- action-runner logs show container teardown;
-- timings and any remaining warnings are recorded against the run URL.
+- the initial source and isolation probes succeed;
+- the source is installed, built, and completely tested as UID 1000 inside the explicit container;
+- the normal eight-shard path remains untouched outside the opt-in run;
+- the container and its volumes are removed, and the dedicated source checkout is removed;
+- any remaining network, runtime and security warnings are preserved in the report.
+- input validation rejects malformed repositories, branch names, short SHA values, and credential persistence.
 
-The PoC is not accepted as evidence for automatic external-PR routing unless every remaining security limitation is either closed or explicitly accepted in a subsequent design decision.
+No green run may be reported if metadata access is open, the socket is present, any unit-test command fails, or cleanup is unproven. This PoC is not sufficient authorization for automatic external-PR routing without a later review of the remaining threats and production architecture.

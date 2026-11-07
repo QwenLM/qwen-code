@@ -618,7 +618,7 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
 // Any context term the substitutions do not model throws rather than reading
 // as false, so a gate that grows a new input is re-read here instead of
 // silently degrading this guard.
-const gateRunsOn = (cond, event) => {
+const gateRunsOn = (cond, event, linuxUnitContainer = false) => {
   if (String(cond ?? '').trim() === '') return true;
   let e = String(cond)
     .replace(/\$\{\{/g, ' ')
@@ -630,6 +630,10 @@ const gateRunsOn = (cond, event) => {
     [/cancelled\(\)/g, 'false'],
     [/always\(\)/g, 'true'],
     [/github\.event_name/g, `"${event}"`],
+    [
+      /github\.event\.inputs\.linux_unit_container/g,
+      JSON.stringify(String(linuxUnitContainer)),
+    ],
     // These pins model a normal run: a gate keyed on any other value of a
     // modeled output (e.g. `ci_profile != 'full'`, `skip_ci == 'true'`)
     // evaluates here at the pin and may mis-report its reachability —
@@ -673,6 +677,15 @@ const assertEventReachesOnly = (event, allowedJobs) => {
     ).toBe(allowedJobs.includes(name));
   }
 };
+
+it('keeps the container PoC restricted to an explicit dispatch input', () => {
+  const condition = ci.jobs.linux_unit_poc.if;
+  expect(gateRunsOn(condition, 'workflow_dispatch')).toBe(false);
+  expect(gateRunsOn(condition, 'workflow_dispatch', true)).toBe(true);
+  for (const event of ['schedule', 'push', 'pull_request', 'merge_group']) {
+    expect(gateRunsOn(condition, event, true)).toBe(false);
+  }
+});
 
 describe('platform lanes — triggers', () => {
   it('gives the workflow a scheduled trigger', () => {

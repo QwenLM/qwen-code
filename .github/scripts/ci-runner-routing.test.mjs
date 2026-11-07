@@ -1622,161 +1622,131 @@ describe('credential-free release fanout routing (#15465)', () => {
 });
 
 describe('manual Linux unit container PoC', () => {
-  const jobs = ['test_build', 'test'].map((name) => [name, ciDoc.jobs[name]]);
+  const job = ciDoc.jobs.linux_unit_poc;
+  const steps = Object.fromEntries(job.steps.map((step) => [step.name, step]));
+  const driver = steps['Build and test the source in a disposable container'];
   const inputs = ciDoc.on.workflow_dispatch.inputs;
-  const containerExpression = String(jobs[0][1].container);
 
-  function selectContainer(eventName, enabled) {
-    let expression = containerExpression
-      .replace(/^\$\{\{\s*/, '')
-      .replace(/\s*\}\}$/, '')
-      .replace(
-        "github.event_name == 'workflow_dispatch'",
-        String(eventName === 'workflow_dispatch'),
-      )
-      .replace(
-        "github.event.inputs.linux_unit_container == 'true'",
-        String(enabled),
-      );
-    let unresolved = false;
-    expression = expression.replace(/fromJSON\('([^']+)'\)/g, (_, json) => {
-      try {
-        return `(${JSON.stringify(JSON.parse(json))})`;
-      } catch {
-        unresolved = true;
-        return 'undefined';
-      }
-    });
-    assert.equal(unresolved, false, expression);
-    assert.doesNotMatch(expression, /github\.|fromJSON\(/);
-    return new Function(`return (${expression});`)();
-  }
-
-  it('selects a hardened container only for the opt-in dispatch', () => {
+  it('uses an explicit container only for the opt-in dispatch', () => {
     assert.equal(inputs.linux_unit_container.default, 'false');
     assert.deepEqual(inputs.linux_unit_container.options, ['false', 'true']);
     assert.equal(inputs.source_repository.default, '');
-    for (const [name, job] of jobs) {
-      assert.equal(String(job.container), containerExpression, name);
-      assert.equal(selectContainer('pull_request', false), null, name);
-      assert.equal(selectContainer('workflow_dispatch', false), null, name);
-      assert.deepEqual(selectContainer('workflow_dispatch', true), {
-        image: 'node:22-bookworm',
-        options: '--init --security-opt=no-new-privileges',
-      });
+    assert.equal(
+      job.if,
+      "${{ !cancelled() && github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true' }}",
+    );
+    assert.equal(job.container, undefined);
+    for (const existing of ['test_build', 'test', 'lint_and_static']) {
+      const job = ciDoc.jobs[existing];
+      assert.equal(job.container, undefined, existing);
+      const checkout = job.steps.find((step) => step.name === 'Checkout');
+      assert.equal(checkout.with.repository, undefined, existing);
+      assert.equal(checkout.with['persist-credentials'], undefined, existing);
     }
-    assert.equal(ciDoc.jobs.lint_and_static.container, undefined);
-    assert.equal(ciDoc.jobs.integration_no_ak.container, undefined);
+    const classifier = ciDoc.jobs.classify_pr.steps.find(
+      (step) => step.name === 'Classify CI profile from trusted base',
+    );
+    assert.match(
+      classifier.run,
+      /workflow_dispatch.*linux_unit_container.*\n\s*profile=docs_only/,
+    );
   });
 
   it('validates a public repository and exact SHA before checkout', () => {
-    for (const [name, job] of jobs) {
-      const step = job.steps[0];
-      assert.equal(step.name, 'Validate the container PoC source', name);
-      assert.equal(
-        step.if,
-        "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true' }}",
-      );
-      const run = spawnSync('bash', ['-c', step.run], {
+    const step = job.steps[0];
+    assert.equal(step.name, 'Validate the container PoC source');
+    const run = spawnSync('bash', ['-c', step.run], {
+      env: {
+        POC_REPOSITORY: '2SinceJuly/qwen-code',
+        POC_SHA: '2905dccbe45ed2917b28c7de6a935d031546ee43',
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(run.status, 0, run.stderr);
+    for (const [key, value] of [
+      ['POC_REPOSITORY', 'owner/repo; exit 1'],
+      ['POC_REPOSITORY', 'https://example.test/owner/repo'],
+      ['POC_REPOSITORY', ''],
+      ['POC_SHA', 'main'],
+      ['POC_SHA', '2905dcc'],
+      ['POC_SHA', '2905DCCBE45ED2917B28C7DE6A935D031546EE43'],
+    ]) {
+      const invalid = spawnSync('bash', ['-c', step.run], {
         env: {
           POC_REPOSITORY: '2SinceJuly/qwen-code',
           POC_SHA: '2905dccbe45ed2917b28c7de6a935d031546ee43',
+          [key]: value,
         },
         encoding: 'utf8',
       });
-      assert.equal(run.status, 0, `${name}: ${run.stderr}`);
-      for (const [key, value] of [
-        ['POC_REPOSITORY', 'owner/repo; exit 1'],
-        ['POC_REPOSITORY', 'https://example.test/owner/repo'],
-        ['POC_REPOSITORY', ''],
-        ['POC_SHA', 'main'],
-        ['POC_SHA', '2905dcc'],
-        ['POC_SHA', '2905DCCBE45ED2917B28C7DE6A935D031546EE43'],
-      ]) {
-        const invalid = spawnSync('bash', ['-c', step.run], {
-          env: {
-            POC_REPOSITORY: '2SinceJuly/qwen-code',
-            POC_SHA: '2905dccbe45ed2917b28c7de6a935d031546ee43',
-            [key]: value,
-          },
-          encoding: 'utf8',
-        });
-        assert.notEqual(invalid.status, 0, `${name}: accepted ${key}=${value}`);
-      }
+      assert.notEqual(invalid.status, 0, `accepted ${key}=${value}`);
     }
+    const checkout = steps['Checkout the container PoC source'];
+    assert.equal(
+      checkout.with.repository,
+      '${{ github.event.inputs.source_repository }}',
+    );
+    assert.equal(checkout.with.ref, '${{ github.event.inputs.branch_ref }}');
+    assert.equal(checkout.with['persist-credentials'], false);
   });
 
-  it('scopes the external checkout and isolation probes to the two contained jobs', () => {
-    const probeCount = Object.values(ciDoc.jobs)
-      .flatMap((job) => job.steps)
-      .filter(
-        (step) =>
-          step.name === 'Verify the container PoC checkout and isolation',
-      ).length;
-    assert.equal(probeCount, 2);
-    for (const [name, job] of jobs) {
-      const checkout = job.steps.find((step) => step.name === 'Checkout');
-      assert.ok(checkout, name);
-      assert.match(
-        checkout.with.repository,
-        /github\.event\.inputs\.linux_unit_container == 'true'/,
-      );
-      assert.match(checkout.with.repository, /github\.job == 'test_build'/);
-      assert.match(checkout.with.repository, /github\.job == 'test'/);
-      assert.equal(
-        checkout.with['persist-credentials'],
-        "${{ !((github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true') && (github.job == 'test_build' || github.job == 'test')) }}",
-      );
-      const probe = job.steps.find(
-        (step) =>
-          step.name === 'Verify the container PoC checkout and isolation',
-      );
-      assert.ok(probe, name);
-      assert.ok(job.steps.indexOf(checkout) < job.steps.indexOf(probe), name);
-      assert.match(probe.if, /github\.job == 'test_build'/);
-      assert.match(probe.if, /github\.job == 'test'/);
-      for (const fragment of [
-        'git rev-parse --verify',
-        'http.https://github.com/.extraheader',
-        '/.dockerenv',
-        '/var/run/docker.sock',
-        '^NoNewPrivs:',
-        'SYS_ADMIN',
-        'SYS_PTRACE',
-        'NET_ADMIN',
-        '169.254.169.254',
-        '100.100.100.200',
-        '000|403',
-      ]) {
-        assert.ok(probe.run.includes(fragment), `${name}: missing ${fragment}`);
-      }
+  it('keeps the Docker socket and privilege escalation outside the untrusted-code container', () => {
+    const create = driver.run
+      .split('docker create')[1]
+      .split('docker start')[0];
+    for (const fragment of [
+      '--user node',
+      '--cap-drop ALL',
+      '--security-opt=no-new-privileges',
+      '/source:ro',
+      'tail -f /dev/null',
+    ]) {
+      assert.ok(create.includes(fragment), fragment);
     }
+    assert.doesNotMatch(create, /docker\.sock|--privileged|--network[ =]host/);
+    assert.match(driver.run, /^FROM node:22-bookworm$/m);
+    assert.equal(driver.env.POC_SHA, '${{ github.event.inputs.branch_ref }}');
+    assert.doesNotMatch(driver.run, /2905dccbe45ed2917b28c7de6a935d031546ee43/);
+    for (const fragment of [
+      'test ! -S /var/run/docker.sock',
+      'test ! -S /run/docker.sock',
+      '^NoNewPrivs:',
+      'SYS_ADMIN',
+      'SYS_PTRACE',
+      'NET_ADMIN',
+      'DAC_OVERRIDE',
+      '169.254.169.254',
+      '100.100.100.200',
+      '000|403',
+      'cp -a /source/. /tmp/repository/',
+      '.github/scripts/ci/run-unit-test-lanes.sh --retry=2',
+      'docker exec -i --user node',
+      '--env "POC_SHA=${POC_SHA}"',
+    ]) {
+      assert.ok(driver.run.includes(fragment), fragment);
+    }
+    assert.deepEqual(job.permissions, { contents: 'read' });
+    assert.equal(
+      steps['Verify the container PoC checkout'].env.POC_SHA,
+      '${{ github.event.inputs.branch_ref }}',
+    );
   });
 
-  it('cleans the checkout only after every result-upload step', () => {
-    for (const [name, job] of jobs) {
-      const cleanup = job.steps.at(-1);
-      assert.equal(cleanup.name, 'Clean the container PoC workspace', name);
-      assert.match(
-        cleanup.if,
-        /always\(\) && github\.event_name == 'workflow_dispatch'/,
-      );
-      for (const fragment of [
-        '/__w/*/*',
-        'pwd -P',
-        '-mindepth 1 -maxdepth 1',
-        '-print -quit',
-      ]) {
-        assert.ok(cleanup.run.includes(fragment), `${name}: ${fragment}`);
-      }
-      for (const [index, step] of job.steps.entries()) {
-        if (String(step.uses).includes('actions/upload-artifact')) {
-          assert.ok(
-            index < job.steps.length - 1,
-            `${name}: upload moved after cleanup`,
-          );
-        }
-      }
+  it('destroys the disposable container and the dedicated checkout', () => {
+    assert.match(driver.run, /trap cleanup EXIT/);
+    assert.match(driver.run, /docker rm --volumes --force/);
+    assert.match(driver.run, /docker ps --all --filter/);
+    const cleanup = job.steps.at(-1);
+    assert.equal(cleanup.name, 'Clean the PoC checkout');
+    assert.equal(cleanup.if, '${{ always() }}');
+    for (const fragment of [
+      'dirname --',
+      'basename --',
+      '^linux-unit-poc-[0-9]+-[0-9]+$',
+      'rm -rf --',
+      '[[ ! -e "${POC_SOURCE}" ]]',
+    ]) {
+      assert.ok(cleanup.run.includes(fragment), fragment);
     }
   });
 });
