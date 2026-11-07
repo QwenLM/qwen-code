@@ -1679,6 +1679,28 @@ describe('handleGroupAll', () => {
     stderr.mockRestore();
   });
 
+  it('logs the forwarded notice for a delivered group-all message', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const ch = makeChannel({ groupAllPolicy: 'all', forwardBotMessages: true });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroupAll'](
+      makeGroupAllEvent({
+        content: 'auto reply',
+        mentions: [{ is_you: true }],
+        author: { member_openid: 'bot-1', bot: true },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(
+      stderr.mock.calls.filter(([line]) =>
+        String(line).includes('forwardBotMessages: bot-authored message'),
+      ),
+    ).toHaveLength(1);
+    stderr.mockRestore();
+  });
+
   it('group-all routed bot messages keep route matching and carry the marker', async () => {
     const ch = makeChannel({
       groupAllPolicy: 'all',

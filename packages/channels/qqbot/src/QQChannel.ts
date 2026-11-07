@@ -6012,16 +6012,21 @@ export class QQChannel extends ChannelBase {
 
   /**
    * One rate-limited stderr line per chat per minute when a forwarded bot
-   * message is accepted. Forwarding is the one enabled path whose only brake is
-   * the model's own judgement, so an operator needs to see it is live; the line
-   * carries no sender name or payload, only the sanitized chat id.
+   * message is handed to the base channel. Forwarding is the one enabled path
+   * whose only brake is the model's own judgement, so an operator needs to see
+   * it is live; the line carries no sender name or payload, only the sanitized
+   * chat id.
+   *
+   * Worded as "dispatched", not "forwarded": the base channel still runs its
+   * own gates (e.g. `requireMention`) after this point, so a dispatched message
+   * is not necessarily one the model saw.
    */
   private logForwardedBotMessage(chatId: string): void {
     const now = Date.now();
     if (now - (this._lastForwardedBotLog.get(chatId) ?? 0) < 60_000) return;
     this._lastForwardedBotLog.set(chatId, now);
     process.stderr.write(
-      `[QQ:${this.name}] forwardBotMessages: bot-authored message in ${sanitizeLogText(chatId, 64)} forwarded\n`,
+      `[QQ:${this.name}] forwardBotMessages: bot-authored message in ${sanitizeLogText(chatId, 64)} dispatched\n`,
     );
   }
 
