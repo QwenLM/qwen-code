@@ -179,14 +179,14 @@ class WorkspaceCsiReservationStoreTest {
         for (String change : new String[] {"operation_owner = 'another'",
                 "operation_generation = operation_generation + 1", "operation_lease_until = 946684800000",
                 "runtime_generation = runtime_generation + 1", "workspace_generation = '2'",
-                "provision_request_id = 'changed'", "drain_requested = TRUE", "binding_state = 'READY'"}) {
+                "provision_request_id = 'changed'", "is_drain_requested = TRUE", "binding_state = 'READY'"}) {
             var snapshot = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.RUNTIME_BINDING.columns() + " FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId());
             jdbc.update("UPDATE ma_runtime_binding SET " + change + " WHERE binding_id = ?", original.getBindingId());
             assertUnavailable(() -> store.reserve(registration, bindings, original, reservationId));
             assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner")).isEqualTo(before);
             for (String field : new String[] {"record_version", "operation_owner", "operation_generation",
                     "operation_lease_until", "runtime_generation", "workspace_generation", "provision_request_id",
-                    "drain_requested", "binding_state"}) {
+                    "is_drain_requested", "binding_state"}) {
                 jdbc.update("UPDATE ma_runtime_binding SET " + field + " = ? WHERE binding_id = ?",
                         snapshot.get(field), original.getBindingId());
             }

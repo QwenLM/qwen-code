@@ -62,6 +62,18 @@ export interface NdJsonStreamLimits {
   queueSaturationGraceMs?: number;
 }
 
+/**
+ * The daemon's ACP channel limits. Kept in this dependency-free module so a
+ * Managed Runtime worker can size media responses without loading the whole
+ * spawn channel; `spawnChannel` re-exports it.
+ */
+export const DAEMON_ACP_NDJSON_LIMITS: Readonly<NdJsonStreamLimits> =
+  Object.freeze({
+    maxFrameBytes: 64 * 1024 * 1024,
+    maxQueuedMessages: 256,
+    maxQueuedBytes: 64 * 1024 * 1024,
+  });
+
 export type NdJsonInboundMessageValidator = (message: AnyMessage) => boolean;
 
 export class NdJsonFrameTooLargeError extends Error {

@@ -5,12 +5,20 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.RuntimeBroker.ResidentWorkspace;
 import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
 
 /** Explicit administrator selection; a CSI registration alone never enables public execution. */
 public final class ResidentWorkspaces extends com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog {
+    private static final ObjectMapper REGISTRATION_JSON = new ObjectMapper()
+            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+
     public ResidentWorkspaces(List<? extends ResidentWorkspace> configured) { super(configured); }
 
     public void requireCreation(JdbcTemplate jdbc, ContextBinding binding, String profile) {
@@ -39,10 +47,7 @@ public final class ResidentWorkspaces extends com.alibaba.qwen.code.managedagent
                 String.class, registration.aliasKey(), registration.tenantId(), registration.storageId(),
                 registration.physicalKey(), registration.revision());
         try {
-            if (rows.size() != 1 || !registration.equals(new com.fasterxml.jackson.databind.ObjectMapper()
-                    .enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
-                    .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-                    .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            if (rows.size() != 1 || !registration.equals(REGISTRATION_JSON
                     .readValue(rows.getFirst(), WorkspaceCsiRegistration.class))) {
                 throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
             }
@@ -85,7 +90,7 @@ public final class ResidentWorkspaces extends com.alibaba.qwen.code.managedagent
                 + " AND b.canonical_cwd = ? AND b.storage_id = ? AND b.capability_digest = ?"
                 + " AND b.isolation_class = 'workspace' AND b.isolation_key IS NULL"
                 + " AND b.provisioner_kind = 'kubernetes-workspace' AND b.binding_state = 'READY'"
-                + " AND b.drain_requested = FALSE AND b.resource_handle_json IS NOT NULL"
+                + " AND b.is_drain_requested = FALSE AND b.resource_handle_json IS NOT NULL"
                 + " AND b.provision_seed_ciphertext IS NOT NULL AND b.attestation_generation > 0 FOR UPDATE",
                 (row, index) -> new Original(row.getString(1), row.getLong(2), row.getString(3)), request(binding).requestKey(), tenantId,
                 binding.getWorkspaceId(), Long.toString(binding.getWorkspaceGeneration()), selected.registration().mountRoot(),

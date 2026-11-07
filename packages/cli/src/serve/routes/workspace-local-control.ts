@@ -65,17 +65,37 @@ async function withUiData(status: LocalControlStatus) {
 }
 
 /**
+ * The pairing credential belongs to the Local Control listener, so only
+ * requests from that listener or from the primary one may see it.
+ *
+ * Being authenticated is not the same fact: the secondary listeners share one
+ * Express app, and each verifies only its own token. A remote-access bearer is
+ * authenticated on the `remote-access` listener, which must not reach the
+ * pairing secret of a different listener — nothing revokes `#pairing` when
+ * remote access is turned off.
+ */
+function ownsLocalControlListener(req: Request): boolean {
+  const kind = listenerIdentityOf(req).kind;
+  return kind === 'primary' || kind === 'local-control';
+}
+
+/**
  * `url` carries the pairing token in its fragment and `qrText` encodes it.
- * Return that material only to a request with operator authority: either a
- * listener credential was verified or the request arrived on the trusted
- * primary loopback listener. Everyone else gets a redacted status.
+ * Return that material only to a request that both arrived on a listener which
+ * owns it and holds operator authority there. Everyone else gets a redacted
+ * status.
  */
 function presentStatus(
   req: Request,
   ui: Awaited<ReturnType<typeof withUiData>>,
   trustedLoopbackMode: boolean,
 ) {
-  if (requestHasOperatorAuthority(req, trustedLoopbackMode)) return ui;
+  if (
+    ownsLocalControlListener(req) &&
+    requestHasOperatorAuthority(req, trustedLoopbackMode)
+  ) {
+    return ui;
+  }
   const { url: _url, qrText: _qrText, ...rest } = ui;
   return { ...rest, urlRedacted: ui.url !== undefined };
 }
@@ -90,10 +110,11 @@ function presentStatus(
  * machine can grant.
  *
  * Disabling stays open to every caller admitted by its listener policy,
- * including the trusted primary listener and a paired phone. Revoking your own
- * access is always safe, and a user who realizes they are on an untrusted
- * network needs to cut the connection from the device in their hand, not from
- * the laptop they walked away from.
+ * including a paired phone and a remote-access client. Revoking access is
+ * always safe, and a remote-access bearer already reaches every other route
+ * on this app, so denying it here would be security theatre while breaking
+ * remote management. What it must not get is the pairing secret —
+ * `presentStatus` scopes that to the listeners that own it.
  */
 function requirePrimaryListener(req: Request, res: Response): boolean {
   if (listenerIdentityOf(req).kind === 'primary') return true;
