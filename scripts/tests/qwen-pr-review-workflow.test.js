@@ -135,6 +135,9 @@ describe('qwen pr review runner routing', () => {
     // issue_comment and workflow_dispatch have no github.event.pull_request
     // payload: the old same-repo-only guard fell through to ubuntu-latest for
     // every command, parking the gate in the hosted queue for hours (#15286).
+    // This removes the GATE wait only: the saving lands where the downstream
+    // job is already pool-routed (/review, /triage, /tmux, /verify); /resolve
+    // end-to-end latency is unchanged because resolve-pr stays on ubuntu-latest.
     // Pin the exact expression so neither the new ECS disjuncts nor the fork
     // guard / hosted fallback can be dropped silently.
     const runsOn = String(parse(workflow).jobs['authorize']['runs-on']);
@@ -205,7 +208,7 @@ describe('qwen pr review runner routing', () => {
     // planted file with CI_BOT_PAT in the environment.
     expect(live).not.toMatch(/(^|[\s;&|(`'"])(\.{1,2}\/)/m);
     expect(live).not.toMatch(
-      /(^|[\s;&|(`])(source|bash|sh|node|python3?|npx|npm|pnpm|yarn)(\s|$)/m,
+      /(^|[\s;&|(`])(?:[^\s;&|()`'"]*\/)?(source|bash|sh|node|python[0-9.]*|npx|npm|pnpm|yarn)(\s|$)/m,
     );
   });
 });

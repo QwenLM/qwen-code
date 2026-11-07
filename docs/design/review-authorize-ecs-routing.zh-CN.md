@@ -6,17 +6,24 @@
 
 ## 问题陈述
 
-每一条 `@qwen-code /review` 与 `@qwen-code /resolve` 命令都先经过
-`.github/workflows/qwen-code-pr-review.yml` 里的 `authorize` job。该 job 是写权限
-门：从事件元数据读出触发主体，并调用一个只读 API
+每一条 bot 命令——`qwen-code-pr-review.yml` 里的 `/review`、`/resolve`，以及
+`qwen-triage.yml` 里的 `/triage`、`/tmux`、`/verify`——都先经过一个 `authorize`
+job。该 job 是写权限门：从事件元数据读出触发主体，并调用一个只读 API
 （`repos/{owner}/{repo}/collaborators/{principal}/permission`）。它不跑 agent、不
 checkout 任何代码、也不处理任何 pull-request 内容。
 
 尽管这是一个只需四秒的纯 API job，实测 `authorize` 曾在 GitHub 托管队列里等待
 **3 小时 10 分**才得以启动（PR #15286，run 42201221971，2026-11-06：创建于
 10:15:08Z，`authorize` 于 13:25:52Z 启动）。当时自建 ECS 池是空闲的。由于
-`authorize` 是硬门，它不结束，下游的任何 job——包括解冲突 agent——连队列都进不
-了，因此托管积压会把整条命令卡死在门口。
+`authorize` 是硬门，它不结束，下游的任何 job 连队列都进不了，因此托管积压会把每
+一条命令都卡死在门口。
+
+这份收益落在下游 job 本就已上池的命令上：`/review`、`/triage`、`/tmux`、
+`/verify`。它**并不**改变 `/resolve` 的端到端延迟。所引事故是一条 `/resolve`，其
+`resolve-pr` agent 出于设计仍留在 `ubuntu-latest`，因此门在几秒内返回后，
+`resolve-pr` 仍会并入同一托管队列：该 run 里它在 `authorize` 结束的那一刻启动，约
+29 分 36 秒后被取消，未能完成解冲突。本 PR 消除的是门口的等待，而非 `/resolve`
+agent 的排队。
 
 ## 现状
 

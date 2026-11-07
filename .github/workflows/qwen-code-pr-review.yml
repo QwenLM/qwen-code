@@ -410,6 +410,9 @@ jobs:
             exit 1
           fi
           export GH_CONFIG_DIR
+          # RUNNER_TEMP survives between jobs on the persistent pool; do not
+          # leave the minted config dir behind.
+          trap 'rm -rf "$GH_CONFIG_DIR"' EXIT
           # Select the principal whose permission gates this trigger.
           case "$EVENT_NAME" in
             pull_request_target)

@@ -831,7 +831,7 @@ describe('qwen-triage: runner routing under token isolation', () => {
       assert.doesNotMatch(live, /(^|[\s;&|(`'"])(\.{1,2}\/)/m, s.name);
       assert.doesNotMatch(
         live,
-        /(^|[\s;&|(`])(source|bash|sh|node|python3?|npx|npm|pnpm|yarn)(\s|$)/m,
+        /(^|[\s;&|(`])(?:[^\s;&|()`'"]*\/)?(source|bash|sh|node|python[0-9.]*|npx|npm|pnpm|yarn)(\s|$)/m,
         s.name,
       );
     }

@@ -6,10 +6,11 @@ Status: Implemented in the accompanying PR.
 
 ## Problem statement
 
-Every `@qwen-code /review` and `@qwen-code /resolve` command first passes through
-the `authorize` job in `.github/workflows/qwen-code-pr-review.yml`. That job is
-the write-permission gate: it reads the triggering principal from the event
-metadata and calls one read API
+Every bot command — `/review` and `/resolve` in
+`.github/workflows/qwen-code-pr-review.yml`, `/triage`, `/tmux` and `/verify` in
+`.github/workflows/qwen-triage.yml` — first passes through an `authorize` job.
+That job is the write-permission gate: it reads the triggering principal from
+the event metadata and calls one read API
 (`repos/{owner}/{repo}/collaborators/{principal}/permission`). It runs no agent,
 checks out nothing, and processes no pull-request content.
 
@@ -17,8 +18,16 @@ Despite being a four-second API-only job, `authorize` was observed waiting
 **3h10m** in the GitHub-hosted queue before it could start (PR #15286, run
 42201221971, 2026-11-06: created 10:15:08Z, `authorize` started 13:25:52Z). The
 self-hosted ECS pool was idle at the time. Because `authorize` is a hard gate,
-nothing downstream — including the conflict-resolution agent — even enters the
-queue until it finishes, so the hosted backlog stalls the whole command.
+nothing downstream even enters the queue until it finishes, so the hosted
+backlog stalls every command at the gate.
+
+The saving lands where the downstream job is already pool-routed: `/review`,
+`/triage`, `/tmux` and `/verify`. It does **not** change `/resolve` end-to-end
+latency. The cited incident is a `/resolve`, and its `resolve-pr` agent stays on
+`ubuntu-latest` by design, so once the gate returns in seconds `resolve-pr` still
+joins the same hosted backlog: in that run it started the instant `authorize`
+finished and was cancelled about 29m36s later, before completing a resolution.
+This PR removes the gate wait, not the `/resolve` agent's queue.
 
 ## Current state
 

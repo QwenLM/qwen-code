@@ -213,6 +213,8 @@ jobs:
             exit 1
           fi
           export GH_CONFIG_DIR
+          # RUNNER_TEMP survives between jobs on the pool; clean up the mint.
+          trap 'rm -rf "$GH_CONFIG_DIR"' EXIT
           IS_VERIFY=false
           # VERIFY_LANE is "run the verify job"; IS_VERIFY is "the commenter
           # typed /verify". They differ only for the piggybacked lane, where
@@ -412,6 +414,8 @@ jobs:
             exit 1
           fi
           export GH_CONFIG_DIR
+          # RUNNER_TEMP survives between jobs on the pool; clean up the mint.
+          trap 'rm -rf "$GH_CONFIG_DIR"' EXIT
           gh api \
             --method POST \
             "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
@@ -442,6 +446,8 @@ jobs:
             exit 1
           fi
           export GH_CONFIG_DIR
+          # RUNNER_TEMP survives between jobs on the pool; clean up the mint.
+          trap 'rm -rf "$GH_CONFIG_DIR"' EXIT
           printf -v BODY '%s\n\n%s' \
             '**Sandboxed verification unavailable** — the maintainer runner pool is currently disabled, so `/verify` cannot run. Try again once the pool is back, or use `@qwen-code /triage` for the static review.' \
             '**沙箱验证当前不可用** —— 维护者 runner 池已停用，`/verify` 无法运行。请待恢复后重试，或使用 `@qwen-code /triage` 进行静态评审。'
