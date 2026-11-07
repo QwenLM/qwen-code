@@ -88,6 +88,11 @@ workspace 创建失败时，`dispatchActionError` 现在把 `session_limit_excee
 客户端。这个回退是必要的：横幅最常出现在空白的新会话页，此时还没有创建任何
 会话客户端。
 
+对话框不能复用侧栏默认的 source 过滤：该过滤会排除 `sourceType: "channel"`，
+而这正是能占满名额的会话群体。恢复列表不带 source 过滤地查询工作区目录，再保留
+default、channel、qwen-live 三类行；这既保留原有 live 会话行为，也暴露出渠道
+会话。
+
 会话或工作区变化、或用户关闭横幅时，横幅清除。这条路径只作为剩余 503 场景的
 兜底（例如所有名额都被活跃工作占用），不替代自动回收。
 
@@ -122,15 +127,20 @@ workspace 创建失败时，`dispatchActionError` 现在把 `session_limit_excee
   释放时走工作区 daemon 客户端。
 - `packages/web-shell/client/components/SessionLimitBanner.test.tsx`：横幅暴露
   释放和关闭两个动作。
-- 在构建版 Web Shell 上对 `--max-sessions 1` 的 daemon 做真实浏览器验证：
-  提交 prompt 出现横幅、打开释放对话框、释放空闲会话、再次创建成功。
+- `packages/web-shell/client/hooks/useScopedSessions.test.tsx`：释放查询可以
+  省略 source 过滤；侧栏默认仍应用过滤。
+- `packages/web-shell/client/components/dialogs/ReleaseSessionDialog.test.tsx`：
+  渠道会话会被列出，qwen-live 保留原有位置，agent 会话被排除。
+- 在构建版 Web Shell 上对 `--max-sessions 1` 的 daemon 做真实浏览器验证：用
+  真实 `sourceType: "channel"` 会话占满名额，提交 prompt 出现横幅、释放该
+  渠道会话、再次创建成功。
 
 ## 9. 验收标准
 
 1. 渠道会话空闲超过 `sessionIdleTimeoutMs` 后，即使渠道事件泵仍订阅，也会被关闭。
 2. 带 live 订阅者的非渠道会话不会被 reaper 关闭。
 3. 因工作区上限被拒绝的创建会显示可见的释放入口。
-4. 释放一条空闲会话后名额释放，下一次创建成功。
+4. 释放一条空闲会话（包括工作区只被渠道会话占满的情况）后名额释放，下一次创建成功。
 5. 现有 reaper 测试和 web-shell 类型检查通过。
 
 ## 10. 后续工作

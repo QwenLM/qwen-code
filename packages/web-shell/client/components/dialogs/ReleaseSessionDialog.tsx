@@ -21,6 +21,11 @@ interface ReleaseSessionDialogProps {
 const LIST_ID = 'release-session-list';
 const optionId = (index: number) => `${LIST_ID}-opt-${index}`;
 
+// Channel sessions consume the workspace cap but are hidden from the normal
+// sidebar query; the release dialog must include them to free a slot. The
+// default sidebar filter also admits qwen-live, so preserve that here.
+const RELEASABLE_SOURCE_TYPES = new Set(['default', 'channel', 'qwen-live']);
+
 export function ReleaseSessionDialog({
   onReleased,
   onError,
@@ -37,6 +42,7 @@ export function ReleaseSessionDialog({
   } = useScopedSessions(workspaceCwd, {
     autoLoad: true,
     maxAgeMs: 1_000,
+    sourceType: null,
   });
   const currentSessionId = connection.sessionId;
   const [deleting, setDeleting] = useState(false);
@@ -57,8 +63,12 @@ export function ReleaseSessionDialog({
     if (sessionsError) setMessage(sessionsError.message);
   }, [sessionsError]);
 
+  const releaseCandidates = sessions.filter(
+    (s) =>
+      s.sourceType === undefined || RELEASABLE_SOURCE_TYPES.has(s.sourceType),
+  );
   const filtered = filterQuery
-    ? sessions.filter((s) => {
+    ? releaseCandidates.filter((s) => {
         const q = filterQuery.toLowerCase();
         return (
           (s.displayName || '').toLowerCase().includes(q) ||
@@ -66,7 +76,7 @@ export function ReleaseSessionDialog({
           sessionMatchesGitQuery(s, q)
         );
       })
-    : sessions;
+    : releaseCandidates;
 
   const confirmRow = (index: number) => {
     const session = filtered[index];
