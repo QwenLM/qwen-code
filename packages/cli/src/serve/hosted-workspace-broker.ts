@@ -133,6 +133,9 @@ export function isTerminalUnknownRejection(
  * Harness holds no resident Session Context, so it proves nothing was handed
  * back — name it recovery-required (attached/retryable), exactly as the close's
  * held-Runtime drain already tolerates it, never read it as a successful handback.
+ * The 409 admission_closed joins them (R15-2): a close, archive or delete racing
+ * the handback owns the mount release through its own drain, so the detach backs
+ * off attached/retryable instead of escaping as a generic close failure.
  */
 export function fencedMountHandback(
   cause: unknown,
@@ -142,7 +145,8 @@ export function fencedMountHandback(
     ((cause.status === 409 &&
       (cause.code === 'runtime_session_busy' ||
         cause.code === 'runtime_session_conflict' ||
-        cause.code === 'workspace_writer_unproven')) ||
+        cause.code === 'workspace_writer_unproven' ||
+        cause.code === 'runtime_admission_closed')) ||
       (cause.status === 503 &&
         cause.code === 'runtime_reconciliation_required'))
   );

@@ -3952,6 +3952,7 @@ it.each([
   'runtime_session_busy',
   'runtime_session_conflict',
   'workspace_writer_unproven',
+  'runtime_admission_closed',
 ])(
   'names a refused non-terminal mount handback as recovery-required (R14-2: %s)',
   async (code) => {

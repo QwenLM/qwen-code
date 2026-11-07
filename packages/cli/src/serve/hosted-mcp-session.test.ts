@@ -912,6 +912,35 @@ it('hands the mount back without tombstoning the owner on a non-terminal close (
   ).toBe(false);
 });
 
+it.each([
+  'runtime_session_busy',
+  'runtime_session_conflict',
+  'workspace_writer_unproven',
+  'runtime_admission_closed',
+])(
+  'names a refused non-terminal mount handback as recovery-required (R14-2/R15-2: %s)',
+  async (code) => {
+    // A bare closeResources is a detach: it hands the mount back without
+    // tombstoning the owner. The handback sweeps nothing, so live or unproven
+    // work — and a close/archive/delete racing it (admission_closed) — refuses
+    // it. Name that recovery-required (attached/retryable), never a raw Broker
+    // rejection, and never fall back to a terminal release.
+    await mcp.ensureReady();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'mcp-detach-claim',
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(409, code),
+    );
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    release.mockClear();
+    await expect(mcp.closeResources()).rejects.toBeInstanceOf(
+      HostedMcpRecoveryRequiredError,
+    );
+    expect(release).not.toHaveBeenCalled();
+  },
+);
+
 it('re-initializes an extensionView owner across repeated non-terminal close/reload cycles (R15-1 fix-induced)', async () => {
   vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
     'ext-claim',
