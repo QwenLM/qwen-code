@@ -158,6 +158,8 @@ export interface DaemonConnectionState {
   /** Authoritative Goal v2 state for the current session. */
   goalState?: GoalSnapshotV2;
   backgroundTurn?: DaemonBackgroundTurn;
+  /** Browser-owned send, including the gap before an authoritative user echo. */
+  localPrompt?: { sessionId: string; startedAt: number };
   /** Stops a lagging live-state snapshot from reviving the finished execution. */
   finishedBackgroundTurnId?: string;
   /** Local monotonic time; orders background events against live-state requests. */
