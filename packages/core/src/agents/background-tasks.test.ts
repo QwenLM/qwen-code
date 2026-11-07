@@ -522,7 +522,7 @@ describe('BackgroundTaskRegistry', () => {
 
       expect(() =>
         registry.restartCompletedAgent('resident-1', new AbortController()),
-      ).toThrow('maximum concurrent background agents (1) reached');
+      ).toThrow('the global concurrency cap (1) reached');
       expect(completed).toMatchObject({
         status: 'completed',
         abortController: completedController,
@@ -758,8 +758,10 @@ describe('BackgroundTaskRegistry', () => {
       reg('bg-2');
 
       expect(() => reg('bg-3')).toThrow(
-        'Cannot start background agent: maximum concurrent background agents ' +
-          '(2) reached. Stop an existing agent first.',
+        'Cannot start background agent: the global concurrency cap (2) ' +
+          'reached — it is already held by running agents. Wait for one to ' +
+          'finish or stop an agent first, or raise agents.maxParallelAgents ' +
+          'if the machine can serve more.',
       );
       expect(registry.get('bg-3')).toBeUndefined();
     });
@@ -782,13 +784,35 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.get('bg-1')?.status).toBe('running');
     });
 
+    it('words the global refusal by the foreground sub-agent that holds the cap', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+
+      // A foreground sub-agent holds the only global slot.
+      const fg = registry.tryReserveForegroundModelSlot('local-model', null);
+      expect(fg).toBeDefined();
+
+      // A background launch is refused, and told the occupant is a foreground
+      // sub-agent (there is no background agent to stop) with the setting that
+      // raises the ceiling.
+      expect(() =>
+        registry.register(makeRegistration('bg-1', { model: 'local-model' })),
+      ).toThrow(
+        'Cannot start background agent: the global concurrency cap (1) ' +
+          'reached — a running foreground sub-agent counts toward it. Stop ' +
+          'that sub-agent, or raise agents.maxParallelAgents if the machine ' +
+          'can serve more.',
+      );
+    });
+
     it('does not count paused or terminal entries toward the cap', () => {
       capped(1);
       reg('paused-1', { status: 'paused' });
 
       reg('bg-1');
       expect(() => reg('bg-2')).toThrow(
-        'maximum concurrent background agents (1) reached',
+        'the global concurrency cap (1) reached',
       );
 
       registry.complete('bg-1', 'done');
@@ -910,7 +934,7 @@ describe('BackgroundTaskRegistry', () => {
       expect(secondResolved).toBe(false);
       expect(registry.getQueuedCount()).toBe(1);
       expect(() => reg('racer')).toThrow(
-        'maximum concurrent background agents (1) reached',
+        'the global concurrency cap (1) reached',
       );
 
       regSlot('bg-2', firstReservation);
@@ -1015,7 +1039,7 @@ describe('BackgroundTaskRegistry', () => {
 
       // The global cap still bounds uncapped models.
       expect(() => reg('bg-3', { model: 'uncapped-model' })).toThrow(
-        'maximum concurrent background agents (2) reached',
+        'the global concurrency cap (2) reached',
       );
     });
 
@@ -1025,7 +1049,7 @@ describe('BackgroundTaskRegistry', () => {
       reg('bg-1', { model: 'other-model' });
 
       expect(() => reg('bg-2', { model: 'weak-model' })).toThrow(
-        'maximum concurrent background agents (1) reached',
+        'the global concurrency cap (1) reached',
       );
     });
 
@@ -1146,18 +1170,66 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.getForegroundQueuedCount()).toBe(0);
     });
 
-    it('leaves the global background budget untouched while a foreground claim is held', () => {
+    it('counts a foreground claim against the global cap on a model with no per-model cap', () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 1,
-        maxConcurrentBackgroundAgentsByModel: { 'weak-model': 1 },
       });
 
-      const fg = registry.tryReserveForegroundModelSlot('weak-model', null);
+      const fg = registry.tryReserveForegroundModelSlot('uncapped-model', null);
       expect(fg).toBeDefined();
-      // The foreground claim must not consume the single global background
-      // slot: a background reservation on another model still succeeds.
-      const bg = registry.tryReserveBackgroundSlot('other-model', null);
-      expect(bg).toBeDefined();
+      // The single global slot is held. Neither a background nor a foreground
+      // launch on any model may start: the ceiling must not depend on the
+      // model IDs a sub-agent happens to resolve, which is exactly how a local
+      // machine stayed protected before model renames made the per-model map
+      // inert.
+      expect(
+        registry.tryReserveBackgroundSlot('other-model', null),
+      ).toBeUndefined();
+      expect(
+        registry.tryReserveForegroundModelSlot('other-model', null),
+      ).toBeUndefined();
+
+      registry.releaseBackgroundSlot(fg!);
+      expect(
+        registry.tryReserveBackgroundSlot('other-model', null),
+      ).toBeDefined();
+    });
+
+    it('parks a foreground launch behind the global cap and admits it on release', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+
+      const first = registry.tryReserveForegroundModelSlot('model-a', null)!;
+      const waiter = registry.waitForForegroundModelSlot(
+        new AbortController().signal,
+        'model-a',
+        null,
+      );
+      expect(registry.getForegroundQueuedCount()).toBe(1);
+
+      registry.releaseBackgroundSlot(first);
+      const admitted = await waiter;
+      expect(admitted.model).toBe('model-a');
+      expect(registry.getForegroundQueuedCount()).toBe(0);
+    });
+
+    it('parks a background launch behind a held foreground claim', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+
+      const fg = registry.tryReserveForegroundModelSlot('model-a', null)!;
+      const waiter = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+        'model-b',
+        null,
+      );
+      expect(registry.getQueuedCount()).toBe(1);
+
+      registry.releaseBackgroundSlot(fg);
+      const admitted = await waiter;
+      expect(admitted.model).toBe('model-b');
     });
 
     it('excludes a foreground claim from owner-scoped outstanding-launch notifications', () => {

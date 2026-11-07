@@ -294,9 +294,9 @@ export interface AgentTask extends TaskBase {
    * Concrete model ID this agent runs with (resolved from the subagent's
    * model selector at launch time). Used to enforce per-model concurrency
    * caps (`agents.maxParallelAgentsByModel`); undefined when the model
-   * could not be resolved, in which case a background entry is bounded only
-   * by the global cap (foreground per-model claims are keyed by their own
-   * resolved model and excluded from the global budget).
+   * could not be resolved, in which case the entry is bounded only by the
+   * global cap. A foreground claim is keyed by its own resolved model but
+   * still counts toward that global budget.
    */
   model?: string;
   /**
@@ -487,15 +487,21 @@ export interface ResidentBackgroundAgent {
 type MessageWaiter = () => void;
 
 export interface BackgroundTaskRegistryOptions {
+  /**
+   * Maximum number of top-level sub-agents that may run at once, whatever
+   * model they use. Counts background and foreground launches in one budget:
+   * it is the ceiling that keeps a fan-out inside a machine's real capacity
+   * (e.g. a local LLM served by a single GPU slot) without depending on the
+   * model IDs a sub-agent happens to resolve.
+   */
   maxConcurrentBackgroundAgents?: number;
   /**
    * Per-model concurrency caps keyed by concrete model ID. Each value is the
    * maximum number of top-level sub-agents (background and foreground
    * alike) that may run concurrently on that model. A model not present here
-   * falls back to the global `maxConcurrentBackgroundAgents` cap for
-   * background launches and is uncapped for foreground launches — list a
-   * model here to bound its foreground fan-out. Useful when a model has a
-   * lower concurrency capacity than the rest of the fleet.
+   * is still bounded by the global cap above, which now covers foreground
+   * launches too. Useful when a model has a lower concurrency capacity than
+   * the rest of the fleet.
    */
   maxConcurrentBackgroundAgentsByModel?:
     | ReadonlyMap<string, number>
@@ -531,12 +537,10 @@ interface BackgroundSlotClaim {
   /** Undefined means the caller did not opt into owner tracking. */
   readonly ownerId: string | null | undefined;
   /**
-   * True for a top-level FOREGROUND launch that reserves only against the
-   * per-model cap. Foreground claims are counted in the per-model tally (so
-   * background and foreground share one model's cap) but excluded from the
-   * global background budget, owner-scoped outstanding-launch notifications,
-   * and headless liveness — none of which should treat a synchronous
-   * foreground run as a background launch.
+   * True for a top-level FOREGROUND launch. Foreground claims count in both
+   * budgets, like background ones, because they compete for the same model.
+   * They stay out of owner-scoped launch notifications and headless liveness,
+   * which only describe background launches.
    */
   readonly foreground?: boolean;
 }
@@ -557,10 +561,11 @@ export class BackgroundTaskRegistry {
     Set<(settled: boolean) => void>
   >();
   private readonly waitQueue: BackgroundSlotWaiter[] = [];
-  // Waiters for a foreground per-model slot. Kept separate from `waitQueue`
-  // because a foreground waiter is admitted on per-model headroom alone and
-  // must not be gated by the global background budget that `drainWaitQueue`
-  // enforces.
+  // Waiters for a foreground slot. Kept separate from `waitQueue` so a
+  // foreground waiter can be admitted ahead of a background one on the same
+  // model, but `drainForegroundWaitQueue` still stops at the global budget
+  // (its first break) and at the model's own cap, so a foreground launch
+  // never oversubscribes either limit.
   private readonly foregroundWaitQueue: BackgroundSlotWaiter[] = [];
   // Maps each outstanding slot reservation to the concrete model ID and the
   // owner that initiated it. A Map rather than a Set lets concurrency checks
@@ -572,9 +577,9 @@ export class BackgroundTaskRegistry {
   >();
   private readonly maxConcurrentBackgroundAgents: number;
   // Per-model concurrency caps keyed by concrete model ID. Empty when no
-  // `agents.maxParallelAgentsByModel` is configured, in which case
-  // background launches fall back to the global cap and foreground launches
-  // are uncapped.
+  // `agents.maxParallelAgentsByModel` is configured, in which case both
+  // background and foreground launches fall back to the global cap. A
+  // foreground claim counts toward the per-model cap and the global cap.
   private readonly maxConcurrentBackgroundAgentsByModel: Map<string, number>;
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
@@ -595,20 +600,18 @@ export class BackgroundTaskRegistry {
   }
 
   /**
-   * Whether a new background agent may start. Always bounded by the global
-   * cap; when `model` is given and a per-model cap is configured for it, the
-   * per-model cap must also have room.
+   * Whether a new agent may start. The global limit counts foreground and
+   * background launches together. A per-model limit, when one is configured,
+   * also has to have room.
    */
   canStartBackgroundAgent(model?: string): boolean {
-    if (
-      this.getClaimedBackgroundSlotCount() >= this.maxConcurrentBackgroundAgents
-    ) {
+    if (this.getClaimedSlotCount() >= this.maxConcurrentBackgroundAgents) {
       return false;
     }
     const perModelCap = this.resolvePerModelCap(model);
     if (
       perModelCap !== undefined &&
-      this.getClaimedBackgroundSlotCount(model) >= perModelCap
+      this.getClaimedSlotCount(model) >= perModelCap
     ) {
       return false;
     }
@@ -620,22 +623,34 @@ export class BackgroundTaskRegistry {
   }
 
   assertCanStartBackgroundAgent(model?: string): void {
-    const claimed = this.getClaimedBackgroundSlotCount();
+    const claimed = this.getClaimedSlotCount();
     if (claimed >= this.maxConcurrentBackgroundAgents) {
+      const foregroundClaims = this.countForegroundClaims();
       debugLogger.warn(
-        `Background agent concurrency cap reached: ` +
+        `Global background concurrency cap reached: ` +
           `${claimed}/${this.maxConcurrentBackgroundAgents}. ` +
           `Refusing new background agent.`,
       );
+      // The global budget counts foreground and background together, so the
+      // occupant may be a foreground sub-agent with no background agent to
+      // stop; word the reason by the real occupant and point at the setting
+      // that raises the ceiling, mirroring the per-model branch below.
+      const reason =
+        foregroundClaims > 0
+          ? `a running foreground sub-agent counts toward it. Stop that ` +
+            `sub-agent, or raise agents.maxParallelAgents if the machine can ` +
+            `serve more.`
+          : `it is already held by running agents. Wait for one to finish or ` +
+            `stop an agent first, or raise agents.maxParallelAgents if the ` +
+            `machine can serve more.`;
       throw new Error(
-        `Cannot start background agent: maximum concurrent background agents ` +
-          `(${this.maxConcurrentBackgroundAgents}) reached. Stop an existing ` +
-          `agent first.`,
+        `Cannot start background agent: the global concurrency cap ` +
+          `(${this.maxConcurrentBackgroundAgents}) reached — ${reason}`,
       );
     }
     const perModelCap = this.resolvePerModelCap(model);
     if (perModelCap !== undefined) {
-      const claimedForModel = this.getClaimedBackgroundSlotCount(model);
+      const claimedForModel = this.getClaimedSlotCount(model);
       if (claimedForModel >= perModelCap) {
         debugLogger.warn(
           `Background per-model concurrency cap reached for ` +
@@ -710,39 +725,40 @@ export class BackgroundTaskRegistry {
   }
 
   /**
-   * Reserve a per-model slot for a top-level FOREGROUND launch. Consults only
-   * the per-model cap — never the global background budget — so a foreground
-   * run is never blocked by background agents running on other models. Returns
-   * `undefined` when the model has no configured cap (the caller should not
-   * wait) or when the model's per-model cap is already full.
+   * Reserve a slot for a top-level FOREGROUND launch.
+   *
+   * A foreground agent counts in the same budget as a background one. Keep it
+   * that way: on a machine with a local model, more agents at once do not
+   * finish the work sooner. They share one GPU, so they only wait on each
+   * other and every one of them gets slower. If you add a new way to launch
+   * agents, give it this reservation too.
+   *
+   * The claim is held until the run ends. A foreground agent is not in the
+   * background list, so this claim is the only record that it is running.
    */
   tryReserveForegroundModelSlot(
     model: string,
     ownerId?: string | null,
   ): BackgroundSlotReservation | undefined {
-    const cap = this.resolvePerModelCap(model);
-    if (cap === undefined) {
+    if (this.getClaimedSlotCount() >= this.maxConcurrentBackgroundAgents) {
       return undefined;
     }
-    if (this.getClaimedBackgroundSlotCount(model) >= cap) {
+    const cap = this.resolvePerModelCap(model);
+    if (cap !== undefined && this.getClaimedSlotCount(model) >= cap) {
       return undefined;
     }
     return this.reserveBackgroundSlot(model, ownerId, true);
   }
 
   /**
-   * Reserve a foreground per-model slot, waiting if the model's cap is full.
-   * Returns `undefined` immediately when the model has no configured cap, so
-   * the caller can treat "no cap" and "reserved" uniformly.
+   * Reserve a foreground slot, waiting behind whatever occupies the global or
+   * per-model ceiling.
    */
   async reserveForegroundModelSlotOrWait(
     signal: AbortSignal | undefined,
     model: string,
     ownerId?: string | null,
-  ): Promise<BackgroundSlotReservation | undefined> {
-    if (this.resolvePerModelCap(model) === undefined) {
-      return undefined;
-    }
+  ): Promise<BackgroundSlotReservation> {
     const immediate = this.tryReserveForegroundModelSlot(model, ownerId);
     if (immediate) {
       return immediate;
@@ -751,7 +767,8 @@ export class BackgroundTaskRegistry {
   }
 
   /**
-   * Wait for a foreground per-model slot to free. Rejects with a
+   * Wait for a foreground slot to free: the model's own per-model cap, or,
+   * when that model has no per-model cap, the global budget. Rejects with a
    * foreground-specific cancellation message (not the background one) so an
    * aborted foreground launch is not reported as a background-subsystem
    * failure.
@@ -793,9 +810,19 @@ export class BackgroundTaskRegistry {
     return this.waitQueue.length;
   }
 
-  /** Number of foreground launches currently waiting on a per-model slot. */
+  /** Number of foreground launches currently waiting for a slot (per-model or global). */
   getForegroundQueuedCount(): number {
     return this.foregroundWaitQueue.length;
+  }
+
+  /** Number of slots claimed against the global budget (background plus foreground). */
+  getGlobalClaimedSlotCount(): number {
+    return this.getClaimedSlotCount();
+  }
+
+  /** The effective global concurrency cap (`agents.maxParallelAgents`). */
+  getGlobalCap(): number {
+    return this.maxConcurrentBackgroundAgents;
   }
 
   /**
@@ -806,7 +833,7 @@ export class BackgroundTaskRegistry {
    * text alone cannot describe.
    */
   getClaimedModelSlotCount(model: string): number {
-    return this.getClaimedBackgroundSlotCount(model);
+    return this.getClaimedSlotCount(model);
   }
 
   releaseBackgroundSlot(reservation: BackgroundSlotReservation): void {
@@ -1460,17 +1487,12 @@ export class BackgroundTaskRegistry {
     return count;
   }
 
-  private getReservedBackgroundSlotCount(model?: string): number {
+  private getReservedSlotCount(model?: string): number {
     if (model === undefined) {
-      // Global background budget: foreground per-model claims are excluded —
-      // a synchronous foreground run must not consume background capacity.
-      let count = 0;
-      for (const claim of this.reservedBackgroundSlots.values()) {
-        if (!claim.foreground) {
-          count++;
-        }
-      }
-      return count;
+      // The global budget counts every claim, foreground included. A
+      // foreground launch keeps its claim until it returns, so this is what
+      // stops a fan-out of foreground agents from all seeing a free slot.
+      return this.reservedBackgroundSlots.size;
     }
     // Per-model tally: foreground and background claims both count, so the
     // two paths share one model's cap.
@@ -1483,11 +1505,26 @@ export class BackgroundTaskRegistry {
     return count;
   }
 
-  private getClaimedBackgroundSlotCount(model?: string): number {
+  private getClaimedSlotCount(model?: string): number {
     return (
-      this.getRunningBackgroundCount(model) +
-      this.getReservedBackgroundSlotCount(model)
+      this.getRunningBackgroundCount(model) + this.getReservedSlotCount(model)
     );
+  }
+
+  /**
+   * Number of FOREGROUND claims currently held against the global budget,
+   * across every model. Used to word the global refusal message by the real
+   * occupant: when a foreground sub-agent holds the last global slot there is
+   * no background agent to stop.
+   */
+  private countForegroundClaims(): number {
+    let count = 0;
+    for (const claim of this.reservedBackgroundSlots.values()) {
+      if (claim.foreground) {
+        count++;
+      }
+    }
+    return count;
   }
 
   /**
@@ -1555,10 +1592,8 @@ export class BackgroundTaskRegistry {
    * synchronous turn, whereas a background waiter's caller already expects
    * its result later as a task-notification, so the blocking call must not
    * be starved by continuing background traffic on the same model. The
-   * background drain still runs afterward because queued background launches
-   * on other models depend on it, and a foreground-first drain cannot trip
-   * `drainWaitQueue`'s global-budget break (foreground claims are excluded
-   * from that count).
+   * background drain still runs afterward for queued launches on other
+   * models.
    */
   private drainQueues(): void {
     this.drainForegroundWaitQueue();
@@ -1569,10 +1604,7 @@ export class BackgroundTaskRegistry {
     for (let i = 0; i < this.waitQueue.length; ) {
       // Once the global cap is hit no remaining waiter can be served,
       // regardless of model — bail out instead of scanning the rest.
-      if (
-        this.getClaimedBackgroundSlotCount() >=
-        this.maxConcurrentBackgroundAgents
-      ) {
+      if (this.getClaimedSlotCount() >= this.maxConcurrentBackgroundAgents) {
         break;
       }
       const waiter = this.waitQueue[i]!;
@@ -1593,18 +1625,17 @@ export class BackgroundTaskRegistry {
   }
 
   /**
-   * Admit foreground waiters whose model now has per-model headroom. Unlike
-   * `drainWaitQueue`, this never consults the global background budget — a
-   * foreground launch is bounded only by its model's cap.
+   * Let queued foreground launches in when there is room. Both limits apply:
+   * the global one first, then the model's own limit.
    */
   private drainForegroundWaitQueue(): void {
     for (let i = 0; i < this.foregroundWaitQueue.length; ) {
+      if (this.getClaimedSlotCount() >= this.maxConcurrentBackgroundAgents) {
+        break;
+      }
       const waiter = this.foregroundWaitQueue[i]!;
       const cap = this.resolvePerModelCap(waiter.model);
-      if (
-        cap === undefined ||
-        this.getClaimedBackgroundSlotCount(waiter.model) >= cap
-      ) {
+      if (cap !== undefined && this.getClaimedSlotCount(waiter.model) >= cap) {
         i++;
         continue;
       }

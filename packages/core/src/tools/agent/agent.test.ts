@@ -344,6 +344,8 @@ describe('AgentTool', () => {
         .mockResolvedValue({ id: Symbol('background-slot') }),
       getForegroundQueuedCount: vi.fn().mockReturnValue(0),
       getClaimedModelSlotCount: vi.fn().mockReturnValue(0),
+      getGlobalClaimedSlotCount: vi.fn().mockReturnValue(0),
+      getGlobalCap: vi.fn().mockReturnValue(0),
       finalizeCancellationIfPending: vi.fn(),
       cancel: vi.fn(),
       getAll: vi.fn().mockReturnValue([]),
@@ -4887,6 +4889,8 @@ describe('AgentTool', () => {
           .mockResolvedValue({ id: Symbol('background-slot') }),
         getForegroundQueuedCount: vi.fn().mockReturnValue(0),
         getClaimedModelSlotCount: vi.fn().mockReturnValue(0),
+        getGlobalClaimedSlotCount: vi.fn().mockReturnValue(0),
+        getGlobalCap: vi.fn().mockReturnValue(0),
         get: vi.fn().mockReturnValue(restartedEntry),
         restartCompletedAgent: vi.fn().mockReturnValue(restartedEntry),
       };
@@ -5782,7 +5786,13 @@ describe('AgentTool', () => {
       );
       expect(mockRegistry.tryReserveBackgroundSlot).not.toHaveBeenCalled();
       expect(mockRegistry.waitForBackgroundSlot).not.toHaveBeenCalled();
-      expect(mockRegistry.releaseBackgroundSlot).not.toHaveBeenCalled();
+      // A foreground launch now takes (and returns) its own claim: the global
+      // `agents.maxParallelAgents` ceiling counts foreground agents too, so a
+      // fan-out cannot oversubscribe a local model that has no per-model cap.
+      expect(mockRegistry.tryReserveForegroundModelSlot).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(mockRegistry.releaseBackgroundSlot).toHaveBeenCalledTimes(1);
       for (const hook of [
         'setExternalMessageProvider',
         'setExternalMessageWaiter',
@@ -5909,6 +5919,70 @@ describe('AgentTool', () => {
       expect(
         (lastRunning as AgentResultDisplay).terminateReason,
       ).toBeUndefined();
+      expect(mockRegistry.releaseBackgroundSlot).toHaveBeenCalledWith(
+        reservation,
+      );
+    });
+
+    it('parks a foreground launch behind the global cap when the model has no per-model cap', async () => {
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+      // No per-model entry: only the global `agents.maxParallelAgents`
+      // ceiling applies, which is what protects a machine whose model IDs are
+      // not listed (e.g. a renamed local model).
+      mockRegistry.resolvePerModelCap.mockReturnValue(undefined);
+      mockRegistry.tryReserveForegroundModelSlot.mockReturnValue(undefined);
+      mockRegistry.getForegroundQueuedCount.mockReturnValue(0);
+      mockRegistry.getClaimedModelSlotCount.mockReturnValue(0);
+      // The global budget is full of a running agent even though nothing is
+      // queued ahead, so the message shows that occupancy rather than a
+      // misleading "no agents ahead".
+      mockRegistry.getGlobalClaimedSlotCount.mockReturnValue(1);
+      mockRegistry.getGlobalCap.mockReturnValue(1);
+      const reservation = { id: Symbol('fg-global-slot') };
+      let releaseSlot: ((r: unknown) => void) | undefined;
+      mockRegistry.waitForForegroundModelSlot.mockReturnValue(
+        new Promise((resolve) => {
+          releaseSlot = resolve;
+        }),
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        run_in_background: false,
+      });
+      const updates: ToolResultDisplay[] = [];
+      const executePromise = invocation.execute(undefined, (output) => {
+        updates.push(output);
+      });
+      await Promise.resolve();
+
+      expect(mockRegistry.waitForForegroundModelSlot).toHaveBeenCalledWith(
+        undefined,
+        'parent-model',
+        null,
+      );
+      // The message names the ceiling that parked it: without a per-model cap
+      // it shows the global occupancy (1/1 in use) so a full machine does not
+      // read as "no agents ahead".
+      expect(
+        updates.some(
+          (u) =>
+            (u as AgentResultDisplay).terminateReason ===
+            'Waiting for a sub-agent slot (1/1 in use, no agents ahead).',
+        ),
+      ).toBe(true);
+
+      releaseSlot?.(reservation);
+      await executePromise;
       expect(mockRegistry.releaseBackgroundSlot).toHaveBeenCalledWith(
         reservation,
       );
