@@ -4280,6 +4280,26 @@ describe('ManagedSessionsPage', () => {
     expect(container.textContent).not.toContain('model is fixed');
   });
 
+  it('hides the managed session header when the host already shows identity', async () => {
+    const target = document.createElement('div');
+    // Default: the header row carries the session identity.
+    await render('s1', 'en', provider, target);
+    expect(container.textContent).toContain('Task s1');
+    // Host-provided identity: no second header row.
+    await render(
+      's1',
+      'en',
+      provider,
+      target,
+      true,
+      {},
+      {
+        showManagedSessionHeader: false,
+      },
+    );
+    expect(container.textContent).not.toContain('Task s1');
+  });
+
   it('keeps managed copy by default so the standalone page is unchanged', async () => {
     mocks.client.getTranscript.mockResolvedValue({
       events: [],
