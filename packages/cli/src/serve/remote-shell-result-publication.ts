@@ -176,7 +176,7 @@ class PublicationClient {
         'Cache-Control': 'no-store',
         ...headers,
       },
-      ...(body ? { body } : {}),
+      ...(body ? { body: body as BodyInit } : {}),
       redirect: 'error',
       signal: AbortSignal.timeout(30_000),
     });

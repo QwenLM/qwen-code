@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaceRetiremen
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesHttpRuntimeClient;
 import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
@@ -51,6 +50,8 @@ public final class ResidentWorkspaceRetirementMain {
                 .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
                 .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
         var request = readRequest(Path.of(command.get(1)), json);
+        var support = Set.of("inspect", "begin").contains(command.getFirst()) ? null
+                : new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry().kubernetes();
         try (var context = new SpringApplicationBuilder(WorkspaceRecoveryApplication.class)
                 .web(WebApplicationType.NONE).logStartupInfo(false)
                 .properties("spring.main.banner-mode=off", "logging.level.root=OFF").run(args)) {
@@ -64,13 +65,13 @@ public final class ResidentWorkspaceRetirementMain {
             var result = switch (command.getFirst()) {
                 case "inspect" -> store.inspect(request);
                 case "begin" -> store.begin(request);
-                case "delete-pod" -> new com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentWorkspaceRetirementService(store).deletePod(request, command.get(2), new KubernetesHttpRuntimeClient(
+                case "delete-pod" -> new com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentWorkspaceRetirementService(store).deletePod(request, command.get(2), support.createClient(
                         URI.create(options.getResidentKubernetesApiUrl()), Path.of(options.getResidentKubernetesTokenFile()),
                         Path.of(options.getResidentKubernetesCaFile())));
-                case "prepare-reclamation" -> new com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentWorkspaceRetirementService(store).prepareReclamation(request, command.get(2), new KubernetesHttpRuntimeClient(
+                case "prepare-reclamation" -> new com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentWorkspaceRetirementService(store).prepareReclamation(request, command.get(2), support.createClient(
                         URI.create(options.getResidentKubernetesApiUrl()), Path.of(options.getResidentKubernetesTokenFile()),
                         Path.of(options.getResidentKubernetesCaFile())));
-                case "reclaim" -> new com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentWorkspaceRetirementService(store).reclaim(request, new KubernetesHttpRuntimeClient(
+                case "reclaim" -> new com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentWorkspaceRetirementService(store).reclaim(request, support.createClient(
                         URI.create(options.getResidentKubernetesApiUrl()), Path.of(options.getResidentKubernetesTokenFile()),
                         Path.of(options.getResidentKubernetesCaFile())));
                 default -> throw new IllegalArgumentException("Unknown maintenance action");

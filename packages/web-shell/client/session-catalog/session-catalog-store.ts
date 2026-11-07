@@ -124,6 +124,7 @@ export function getSessionCatalogQueryKey(query: SessionCatalogQuery): string {
     options?.parentSessionId ?? null,
     options?.sourceType ?? null,
     options?.sourceId ?? null,
+    options?.liveOnly ?? null,
   ]);
 }
 

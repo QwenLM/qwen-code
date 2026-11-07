@@ -46,6 +46,7 @@ class WorkspaceRecoveryStoreTest {
 
     @TempDir Path temporary;
     private JdbcTemplate jdbc;
+    private StoreLockTrace trace;
     private DataSourceTransactionManager manager;
     private WorkspaceStorageGuard guard;
     private ManagedAgentStore sessions;
@@ -55,7 +56,8 @@ class WorkspaceRecoveryStoreTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        var source = recoveryDataSource();
+        var source = new StoreLockTrace(recoveryDataSource());
+        trace = source;
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
@@ -67,8 +69,8 @@ class WorkspaceRecoveryStoreTest {
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount("tenant", "storage", root.toString())));
         guard = new WorkspaceStorageGuard(jdbc, manager, properties, path -> new StorageIdentityReader.Identity(
                 path.toRealPath().toString(), "test-host", "test-device", "test-inode", "2026-10-01T00:00:00Z"));
-        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         for (String workspace : List.of("workspace-a", "workspace-b")) {
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state) VALUES ('tenant', ?, 1, 'storage',"
@@ -229,7 +231,7 @@ class WorkspaceRecoveryStoreTest {
             request.put("mountRevision", revision);
         }
         long committedRevision = revision;
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "a".repeat(64);
         String records = "{\"subtype\":\"session_execution_engine\"}\n{\"subtype\":\"managed_session_header_v1\"}\n";
         byte[] bytes = records.getBytes(StandardCharsets.UTF_8);
@@ -269,8 +271,10 @@ class WorkspaceRecoveryStoreTest {
         head(session);
         String operation = retireSession(session);
         var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE session_id = ?", session);
-        var retirement = jdbc.queryForMap("SELECT retirement_operation_id, retirement_generation, retired_at, recovery_protected FROM ma_session WHERE session_id = ?", session);
+        var retirement = jdbc.queryForMap("SELECT retirement_operation_id, retirement_generation, retired_at, is_recovery_protected FROM ma_session WHERE session_id = ?", session);
+        trace.clear();
         JsonNode source = call(capture(), "sessions").path("sessions").get(0).path("source");
+        trace.assertSessionBeforeTurn("tenant", session);
         assertThat(source.path("retirement").path("operationId").asText()).isEqualTo(operation);
         assertThat(source.path("retirement").path("tenantId").asText()).isEqualTo("tenant");
         assertThat(source.path("retirement").path("sessionId").asText()).isEqualTo(session);
@@ -280,7 +284,7 @@ class WorkspaceRecoveryStoreTest {
         assertThat(source.path("head").path("latestCheckpointResourceId").isNull()).isTrue();
         assertThat(source.path("head").path("writerId").isNull()).isTrue();
         assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE session_id = ?", session)).isEqualTo(before);
-        assertThat(jdbc.queryForMap("SELECT retirement_operation_id, retirement_generation, retired_at, recovery_protected FROM ma_session WHERE session_id = ?", session)).isEqualTo(retirement);
+        assertThat(jdbc.queryForMap("SELECT retirement_operation_id, retirement_generation, retired_at, is_recovery_protected FROM ma_session WHERE session_id = ?", session)).isEqualTo(retirement);
     }
 
     @Test
@@ -324,7 +328,7 @@ class WorkspaceRecoveryStoreTest {
         String scope = ToolPublicationDataStore.scope("tenant", "private-key", session);
         jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
-                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, write_evidence, accepted_complete,"
+                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete,"
                 + " receipt_sequence, receipt_revision) VALUES (?, ?, 'tenant', 'private-key', ?, 'pub-1', ?,"
                 + " 'capture-1', '{}', ?, ?, 'FENCED', 0, 0, 0, 'REFERENCED', TRUE, TRUE, 1, 1)",
                 scope, com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.hash("tenant"), session, scope, scope, scope);
@@ -385,7 +389,7 @@ class WorkspaceRecoveryStoreTest {
         switch (damage) {
             case "owner" -> jdbc.update("UPDATE ma_session_head SET tenant_id = X'666f726569676e' WHERE session_id = ?", session);
             case "generation" -> jdbc.update("UPDATE ma_session SET retirement_generation = 2 WHERE session_id = ?", session);
-            case "protected" -> jdbc.update("UPDATE ma_session SET recovery_protected = TRUE WHERE session_id = ?", session);
+            case "protected" -> jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE WHERE session_id = ?", session);
             case "operation" -> jdbc.update("UPDATE ma_operation SET delivery_state = 'PENDING' WHERE session_id = ?", session);
             case "public" -> jdbc.update("UPDATE ma_session SET status = 'CLOSED' WHERE session_id = ?", session);
             case "head" -> jdbc.update("UPDATE ma_session_head SET latest_checkpoint_resource_id = X'72657461696e6564' WHERE session_id = ?", session);
@@ -406,13 +410,19 @@ class WorkspaceRecoveryStoreTest {
                 + "\"tools\":[{\"type\":\"hosted_profile\","
                 + "\"profile\":\"hosted-workspace-files/1\"}],"
                 + "\"permission_policy\":{\"approval_mode\":\"default\"}}";
-        sessions.setManagedAgentDefinitionStore(
-                new ManagedAgentDefinitionStore(jdbc, new RequestDigests()));
+        var definitionProperties = new ManagedAgentProperties();
+        definitionProperties.getHarness().setCapabilityDigest("a".repeat(64));
+        definitionProperties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+        definitionProperties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount("tenant", "storage", root.toString())));
+        var definitionSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
+                jdbc, JSON, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), definitionProperties,
+                new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(),
+                new ManagedAgentDefinitionStore(jdbc, new RequestDigests()), null);
         String pinned = new TransactionTemplate(manager).execute(status -> {
             new ManagedAgentDefinitionStore(jdbc, new RequestDigests()).create("tenant", "def",
                     "def-digest", agentId, definitionDigest, definitionJson,
                     1L);
-            return sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+            return definitionSessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                     .tenantId("tenant")
                     .actorId("actor")
                     .idempotencyKey(UUID.randomUUID().toString())
@@ -423,7 +433,7 @@ class WorkspaceRecoveryStoreTest {
                     .sessionId();
         });
         String deleted = new TransactionTemplate(manager).execute(status ->
-                sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                definitionSessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                         .tenantId("tenant")
                         .actorId("actor")
                         .idempotencyKey(UUID.randomUUID().toString())
@@ -440,11 +450,11 @@ class WorkspaceRecoveryStoreTest {
         head(pinned);
         jdbc.update("UPDATE ma_session_head SET workspace_id = X'776f726b73706163652d62'"
                 + " WHERE session_id = ?", pinned);
-        var instructions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).publishAgentInstructions(
+        var instructions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).publishAgentInstructions(
                 "tenant", "workspace-b", pinned, "Keep the agent instructions. 保留指令。");
         var skillCatalog = List.<Map<String, Object>>of(Map.of(
                 "name", "review", "description", "Review", "body", "Check the diff. 检查差异。"));
-        var skills = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).publishAgentSkills(
+        var skills = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).publishAgentSkills(
                 "tenant", "workspace-b", pinned, skillCatalog);
         JsonNode sources = call(capture(), "sessions").path("sessions");
         assertThat(sources).hasSize(3);

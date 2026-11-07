@@ -19,7 +19,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.local.LocalProcessRuntimeProvisioner;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.tools.Server;
@@ -289,6 +289,8 @@ class HostedWorkspaceConcurrencyIT {
                 String rival = UUID.randomUUID().toString();
                 assertOk(broker.acquire(secondSession, rival).get(20, TimeUnit.SECONDS));
                 assertThat(member(jdbc, rival)).isEqualTo(held.get("storage_key"));
+                held = row(jdbc, tenant);
+                assertThat(held).containsEntry("member_count", 2L);
 
                 // #13800: unfinished work keeps the mount honestly — the
                 // narrow release refuses while anything is unproven, never
@@ -333,6 +335,7 @@ class HostedWorkspaceConcurrencyIT {
                 assertThat(mount.body()).contains("\"mountReleased\":true");
 
                 var freed = row(jdbc, tenant);
+                assertThat(freed).containsEntry("member_count", 1L);
                 for (String field : List.of("holder_key", "binding_id", "runtime_generation", "runtime_session_id")) {
                     assertThat(freed.get(field)).as("%s", field).isNull();
                 }
@@ -353,7 +356,7 @@ class HostedWorkspaceConcurrencyIT {
                 assertThat(member(jdbc, holderRuntime)).isEqualTo(held.get("storage_key"));
                 assertOk(broker.postAsync("/tool-sessions/" + holderRuntime + ":release",
                         Map.of("harnessSessionId", firstSession)).get(20, TimeUnit.SECONDS));
-                assertThat(row(jdbc, tenant).get("holder_key")).isNull();
+                assertThat(row(jdbc, tenant)).containsEntry("holder_key", null).containsEntry("member_count", 0L);
                 assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session"
                         + " WHERE runtime_session_id = ?", String.class, holderRuntime)).isEqualTo("RELEASED");
                 // An unreconciled original identity keeps its member without excluding unrelated work.
@@ -446,8 +449,8 @@ class HostedWorkspaceConcurrencyIT {
 
     private static ManagedAgentStore store(DriverManagerDataSource source, ManagedAgentProperties properties) {
         var jdbc = new ManagedSchemaJdbcTemplate(source);
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     private static ManagedAgentProperties properties(String tenant, Path root, Path state) {

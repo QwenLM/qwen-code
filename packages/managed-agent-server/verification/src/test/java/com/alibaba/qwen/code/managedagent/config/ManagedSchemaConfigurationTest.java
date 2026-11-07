@@ -45,7 +45,7 @@ class ManagedSchemaConfigurationTest {
         assertThat(sessionListColumns(source)).containsExactly("tenant_id", "gmt_create", "session_id");
         assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session"))
                 .isEqualTo(session)
-                .containsEntry("csi_guard", false)
+                .containsEntry("is_csi_guard", false)
                 .containsEntry("runtime_request_key", null)
                 .containsEntry("model_id", null)
                 .containsEntry("model_revision", 0L)
@@ -103,7 +103,7 @@ class ManagedSchemaConfigurationTest {
                                 .getIndexInfo(null, null, "ma_session", false, false)) {
             var columns = new ArrayList<String>();
             while (rows.next()) {
-                if ("ix_ma_session_list".equalsIgnoreCase(rows.getString("INDEX_NAME"))) {
+                if ("idx_ma_session_list".equalsIgnoreCase(rows.getString("INDEX_NAME"))) {
                     columns.add(rows.getString("COLUMN_NAME").toLowerCase(java.util.Locale.ROOT));
                 }
             }

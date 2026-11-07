@@ -55,6 +55,8 @@ import {
   LocalControlService,
 } from './local-control/index.js';
 import { registerWorkspaceLocalControlRoutes } from './routes/workspace-local-control.js';
+import { RemoteAccessService } from './remote-access.js';
+import { registerRemoteAccessRoutes } from './routes/remote-access.js';
 import { registerWebShellPairingRoutes } from './routes/web-shell-pairing.js';
 import type {
   DeviceFlowProvider,
@@ -131,6 +133,8 @@ import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
 import { registerDaemonUpdateRoutes } from './routes/daemon-update.js';
 import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
+import { registerWorkspaceSubscriptionRoutes } from './routes/workspace-subscription.js';
+import { registerSubscriptionAuthRoutes } from './routes/subscription-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import {
@@ -153,6 +157,7 @@ import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
 import { registerSessionCatalogRoutes } from './routes/session-catalog.js';
 import { registerSessionPrBackfillRoutes } from './routes/session-pr-backfill.js';
+import { registerSessionPrBindingsRoutes } from './routes/session-pr-bindings.js';
 import { registerStandaloneSessionRoutes } from './routes/standalone-sessions.js';
 import {
   createRequestedSessionIdAdmission,
@@ -368,6 +373,7 @@ import {
   registerWorkspaceQualifiedSkillsRoutes,
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
+import { SkillInstallAttemptStore } from './skill-install-attempts.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
 import {
   AGENT_HOST_RATE_LIMIT,
@@ -697,6 +703,14 @@ export interface ServeAppDeps {
   ) => Promise<void>;
   persistDisabledSkills?: DaemonWorkspaceServiceDeps['persistDisabledSkills'];
   persistDisabledSkillsBatch?: DaemonWorkspaceServiceDeps['persistDisabledSkillsBatch'];
+  persistUserSkillsActivation?: (
+    workspace: string,
+    skillNames: readonly string[],
+    activation: import('../config/skill-settings.js').UserSkillActivation,
+    assertGenerationOpen?: () => void,
+  ) => Promise<
+    import('./workspace-service/types.js').PersistUserSkillsActivationResult
+  >;
   contextFilename?: string;
   persistSetting?: (
     workspace: string,
@@ -1102,12 +1116,18 @@ export function createServeApp(
   const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
   const trustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
     workspaceTrusted: true,
+    autoDiscover: true,
   });
   const untrustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
     workspaceTrusted: false,
     includeUntrustedSkills: true,
+    autoDiscover: true,
   });
   const getSkillsConfigStatus = (workspaceCwd: string, trusted: boolean) => {
+    const obsolete = trusted
+      ? untrustedSkillsConfigStatus
+      : trustedSkillsConfigStatus;
+    obsolete.invalidate?.(workspaceCwd);
     const provider = trusted
       ? trustedSkillsConfigStatus
       : untrustedSkillsConfigStatus;
@@ -1117,6 +1137,7 @@ export function createServeApp(
     trustedSkillsConfigStatus.invalidate?.(workspaceCwd);
     untrustedSkillsConfigStatus.invalidate?.(workspaceCwd);
   };
+  app.locals['invalidateSkillsConfigStatus'] = invalidateSkillsConfigStatus;
   const webTerminalRegistry = new WebTerminalRegistry();
   const webTerminalLocals = app.locals as {
     stopWebTerminalRegistry?: () => void;
@@ -1177,6 +1198,8 @@ export function createServeApp(
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
+      userSkillActivationAvailable:
+        deps.persistUserSkillsActivation !== undefined,
       sessionArtifactsPersistenceAvailable:
         deps.sessionArtifactsPersistenceAvailable !== false,
       sessionGenerationAvailable: () => {
@@ -1402,6 +1425,7 @@ export function createServeApp(
         : {}),
       maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
+      eventRingMaxBytes: opts.eventRingMaxBytes,
       compactedReplayMaxBytes: opts.compactedReplayMaxBytes,
       maxJournalEvents: opts.maxJournalEvents,
       maxJournalBytes: opts.maxJournalBytes,
@@ -2377,7 +2401,7 @@ export function createServeApp(
   });
   if (healthRoutes.exposeHealthPreAuth) {
     app.use('/health', (req, res, next) => {
-      if (listenerIdentityOf(req).kind === 'local-control') {
+      if (listenerIdentityOf(req).kind !== 'primary') {
         authenticate(req, res, next);
         return;
       }
@@ -2931,6 +2955,7 @@ export function createServeApp(
   });
   registerWorkspaceQualifiedStatusRoutes(app, {
     workspaceRegistry,
+    mutate,
     sendBridgeError,
   });
   registerWorkspaceRuntimeStopRoutes(app, {
@@ -3058,6 +3083,12 @@ export function createServeApp(
     sendBridgeError,
     mutate,
     archiveCoordinator,
+  });
+  // Read-only reverse lookup (PR bindings → sessions) for channel workers
+  // that deliver GitHub events into the session following a PR.
+  registerSessionPrBindingsRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
   });
 
   // Workspace memory + agents CRUD routes.
@@ -3546,6 +3577,38 @@ export function createServeApp(
     },
   });
 
+  registerWorkspaceSubscriptionRoutes(app, {
+    workspaceRegistry,
+    mutate,
+    persistSettings: deps.persistSettings,
+    sendBridgeError,
+  });
+  const stopSubscriptionAuth = registerSubscriptionAuthRoutes(
+    app,
+    mutate,
+    async () => {
+      let failed = false;
+      for (const runtime of workspaceRegistry.listAll()) {
+        if (runtime.generationGuard?.closed) continue;
+        try {
+          runtime.generationGuard?.assertOpen();
+          const result = await runtime.workspaceService.reloadModelProviders(
+            createBuildWorkspaceCtx(runtime.workspaceCwd)(
+              'POST /auth/subscription/revoke',
+            ),
+            { subscriptionSignedOut: true },
+          );
+          if (result.status !== 'applied') failed = true;
+        } catch {
+          failed = true;
+        }
+      }
+      if (failed)
+        throw new Error('Unable to restore model connections after sign-out.');
+    },
+  );
+  app.locals['stopSubscriptionAuth'] = stopSubscriptionAuth;
+
   registerWorkspaceAuthRoutes(app, {
     mutate,
     deviceFlowRegistry,
@@ -3684,6 +3747,7 @@ export function createServeApp(
       safeBody,
       parseAndValidateClientId: (req, res, runtime) =>
         parseAndValidateWorkspaceClientId(req, res, runtime.bridge),
+      daemonEnv: daemonEnvAtBoot,
       conversationRuntimeActivity,
     });
   }
@@ -3730,7 +3794,10 @@ export function createServeApp(
     safeBody,
     sendBridgeError,
   });
+  const archiveInstalls = new SkillInstallAttemptStore();
   registerWorkspaceSkillsRoutes(app, {
+    archiveInstalls,
+    getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
     workspaceRuntime: primaryRuntime,
     workspaceRegistry,
     mutate,
@@ -3738,7 +3805,18 @@ export function createServeApp(
     sendBridgeError,
     getSkillsConfigStatus,
     invalidateSkillsConfigStatus,
-    installSkillConfig: (workspaceCwd, request) =>
+    ...(deps.persistUserSkillsActivation
+      ? {
+          persistUserSkillsActivation: (skillNames, activation) =>
+            deps.persistUserSkillsActivation!(
+              primaryBoundWorkspace,
+              skillNames,
+              activation,
+              capturePrimaryGenerationAssertion(),
+            ),
+        }
+      : {}),
+    installSkillConfig: (workspaceCwd, request, options) =>
       installWorkspaceSkill(
         workspaceCwd,
         request,
@@ -3747,6 +3825,7 @@ export function createServeApp(
           daemonEnvAtBoot['GH_TOKEN'] ??
           daemonEnvAtBoot['GITHUB_TOKEN'],
         capturePrimaryGenerationAssertion(),
+        options,
       ),
     deleteSkillConfig: (workspaceCwd, scope, skillName, installedPath) =>
       deleteWorkspaceSkill(
@@ -3760,6 +3839,8 @@ export function createServeApp(
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceQualifiedSkillsRoutes(app, {
+    archiveInstalls,
+    getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
     getSkillsSnapshot: (workspaceCwd) =>
       trustedSkillsConfigStatus.snapshot(workspaceCwd),
     workspaceRegistry,
@@ -4338,6 +4419,26 @@ export function createServeApp(
   });
   app.locals['localControlService'] = localControlService;
 
+  const remoteAccessService = new RemoteAccessService({
+    app,
+    credentials,
+    getPort,
+    attachWebSocket: (server) => acpHandleRef.current?.attachServer(server),
+    detachWebSocket: (server) => acpHandleRef.current?.detachServer(server),
+    tlsPaths:
+      opts.tlsCert && opts.tlsKey
+        ? { cert: opts.tlsCert, key: opts.tlsKey }
+        : undefined,
+  });
+  app.locals['remoteAccessService'] = remoteAccessService;
+  registerRemoteAccessRoutes(app, {
+    service: remoteAccessService,
+    primaryHostname: opts.hostname,
+    trustedLoopbackMode,
+    mutate,
+    isDraining: deps.isChannelControlDraining,
+  });
+
   registerWorkspaceLocalControlRoutes(app, {
     service: localControlService,
     daemonLog,
@@ -4371,6 +4472,13 @@ export function createServeApp(
   }
 
   let appDrainComplete = false;
+  const disposeSkillsConfigStatus = async () => {
+    await Promise.all([
+      trustedSkillsConfigStatus.dispose?.(),
+      untrustedSkillsConfigStatus.dispose?.(),
+    ]);
+  };
+  serveAppLifecycle.addAppDrain(disposeSkillsConfigStatus);
   if (!deps.serveAppLifecycle)
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
@@ -4408,6 +4516,7 @@ export function createServeApp(
       stopAppResource(locals.stopExtensionGenerationReconciler);
       stopAppResource(locals.stopSessionAgentOrchestrators);
       stopAppResource(locals.stopHostedMountHandbacks);
+      stopAppResource(stopSubscriptionAuth);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());

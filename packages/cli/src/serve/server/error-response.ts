@@ -1039,6 +1039,10 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
+      if (kind === 'auth_type_enforced') {
+        res.status(403).json({ error: errorMessage(err), code: kind });
+        return;
+      }
       const workflowStatus = workflowRequestErrorStatus(kind);
       if (workflowStatus !== undefined) {
         res.status(workflowStatus).json({

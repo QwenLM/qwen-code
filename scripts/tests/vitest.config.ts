@@ -27,6 +27,10 @@ export default defineConfig({
             'scripts/tests/serve-ab-workflow.test.js',
             // Drives a bash script that manages process groups.
             'scripts/tests/rocketmq-lite-broker-script.test.js',
+            // Drives a fixture repository through extension-less `#!/bin/sh`
+            // stubs joined onto PATH with ':'; cmd.exe resolves through
+            // PATHEXT and would run the real corepack/node instead.
+            'scripts/tests/ci-build-cache.test.js',
           ]
         : [...configDefaults.exclude],
     setupFiles: ['scripts/tests/test-setup.ts'],
