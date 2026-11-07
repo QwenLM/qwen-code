@@ -63,6 +63,24 @@ describe('SessionRenameDialog', () => {
     expect(onSubmit).toHaveBeenCalledWith('New name');
   });
 
+  it('selects the current name when the dialog opens', async () => {
+    await render('Idle fixture');
+    expect(input().selectionStart).toBe(0);
+    expect(input().selectionEnd).toBe('Idle fixture'.length);
+  });
+
+  it('keeps a placed caret when focus returns to the field', async () => {
+    await render('Idle fixture');
+    await act(async () => {
+      input().setSelectionRange(4, 4);
+      // The dialog outlives focus: Tab to Cancel and back re-focuses the same
+      // mounted field, and that must not re-select the whole name.
+      input().dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    });
+    expect(input().selectionStart).toBe(4);
+    expect(input().selectionEnd).toBe(4);
+  });
+
   it.each(['   ', 'x'.repeat(257)])(
     'does not submit an invalid name',
     async (value) => {
