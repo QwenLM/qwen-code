@@ -34916,6 +34916,47 @@ describe('App session callbacks', () => {
     }
   });
 
+  it('shows the release banner after a session-limit create failure', async () => {
+    const previousSessionContext = mockConnection.sessionContext;
+    mockConnection.sessionContext = { kind: 'workspace', cwd: '/tmp/project' };
+    try {
+      testState.notices = [
+        {
+          id: 'limit',
+          severity: 'error',
+          category: 'user_action',
+          operation: 'create_session',
+          code: 'session_limit_exceeded',
+          message: 'Session limit reached (64)',
+          createdAt: 0,
+        },
+      ];
+      const { container } = renderApp();
+      await flush();
+
+      const banner = container.querySelector(
+        '[data-testid="session-limit-banner"]',
+      );
+      expect(banner).not.toBeNull();
+      expect(banner?.textContent).toContain('live-session limit');
+
+      const release = [...(banner?.querySelectorAll('button') ?? [])].find(
+        (button) => button.textContent === 'Release idle sessions',
+      );
+      expect(release).toBeDefined();
+      await act(async () => {
+        release?.click();
+      });
+      await flush();
+
+      expect(
+        container.querySelector('[data-dialog-title="Release Session"]'),
+      ).not.toBeNull();
+    } finally {
+      mockConnection.sessionContext = previousSessionContext;
+    }
+  });
+
   it('lets the host handle a slash command instead of forwarding it', async () => {
     const onSlashCommand = vi.fn(() => true);
     const { container } = renderApp({ onSlashCommand });
