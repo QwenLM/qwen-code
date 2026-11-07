@@ -60,6 +60,28 @@ const publisherPath = join(
   dirname(fileURLToPath(import.meta.url)),
   'triage-publish.mjs',
 );
+const scriptsDir = dirname(fileURLToPath(import.meta.url));
+// Hoisted so the scanner itself can be fixture-pinned: Prettier wraps
+// imports at 80 columns, and a layout-blind scanner silently misses both
+// wrapped bare specifiers (false green) and wrapped relative ones (false
+// red on the sparse-list comparison).
+const specifiersOf = (file) => {
+  const src = readFileSync(file, 'utf8');
+  const found = [];
+  // Span newlines: Prettier wraps `import { … } from '…'` at 80 columns, and
+  // a single-line pattern sees neither the wrapped bare specifier nor the
+  // wrapped relative one. The bounded [\s\S] keeps a stray `from` in prose
+  // from pairing with an unrelated quote further down the file.
+  const fromRe =
+    /(?:^|\n)\s*(?:import|export)[\s\S]{0,400}?\bfrom\s*['"]([^'"]+)['"]/g;
+  const sideEffectRe = /(?:^|\n)\s*import\s*['"]([^'"]+)['"]/g;
+  const dynamicRe = /\b(?:import|require)\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+  for (const re of [fromRe, sideEffectRe, dynamicRe]) {
+    let m;
+    while ((m = re.exec(src)) !== null) found.push(m[1]);
+  }
+  return found;
+};
 // The triage agent is a direct CLI launch now; its settings travel as the
 // heredoc the host writes into the fresh per-run QWEN_HOME. Extract and parse
 // them the same way the runtime will read them.
@@ -937,12 +959,24 @@ describe('qwen-triage: token isolation contract', () => {
     // other one. Without the sudo fallback a root-owned .git on the pool
     // survives the restore, the reset step then dies, and the job never
     // reaches the drafts download — silently.
+    const restore = publishTriageJob.steps.find(
+      (s) => s.name === 'Restore workspace ownership',
+    );
     assertUnconditional(
       publishTriageJob.steps,
-      publishTriageJob.steps.find(
-        (s) => s.name === 'Restore workspace ownership',
-      ),
+      restore,
       'qwen-triage publish-triage',
+    );
+    // assertUnconditional anchors the sudo CHOWN arm but matches chmod
+    // unanchored, so the non-sudo chmod alone satisfies it. Pin the sudo
+    // chmod arm here rather than in the shared helper (five other call
+    // sites): without it a root-owned workspace fails the plain chmod,
+    // the download step's continue-on-error swallows it, and the publish
+    // step exits 0 on "nothing to publish" — drafts silently never land.
+    assert.match(
+      restore.run,
+      /sudo -n chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
+      'publish-triage must keep the sudo chmod fallback that recovers root-owned files',
     );
   });
 });
@@ -955,20 +989,6 @@ describe('qwen-triage: publisher import closure', () => {
   // bare specifier (or a helper missing from the sparse list) would stay
   // green everywhere and die ERR_MODULE_NOT_FOUND in the real job, so the
   // closure is scanned here and matched against the sparse-checkout list.
-  const scriptsDir = dirname(fileURLToPath(import.meta.url));
-  const specifiersOf = (file) => {
-    const src = readFileSync(file, 'utf8');
-    const found = [];
-    const staticRe =
-      /(?:^|\n)\s*(?:import|export)\s+(?:[^'"\n]*?\sfrom\s+)?['"]([^'"]+)['"]/g;
-    const dynamicRe = /\b(?:import|require)\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
-    for (const re of [staticRe, dynamicRe]) {
-      let m;
-      while ((m = re.exec(src)) !== null) found.push(m[1]);
-    }
-    return found;
-  };
-
   it('imports only node builtins and relative helpers, all carried by the sparse checkout', () => {
     const entry = join(scriptsDir, 'triage-publish.mjs');
     const closure = new Set();
@@ -1014,6 +1034,54 @@ describe('qwen-triage: publisher import closure', () => {
       'the sparse checkout must carry exactly the import closure plus the owner policy',
     );
     assert.equal(checkout.with['sparse-checkout-cone-mode'], false);
+  });
+});
+
+describe('qwen-triage: import scanner is layout-independent', () => {
+  // Prettier wraps imports at this repo's 80-column width, so the scanner
+  // must not depend on statement layout. Both directions bite: a wrapped
+  // BARE specifier that goes unseen keeps the closure test green while the
+  // real pool job dies ERR_MODULE_NOT_FOUND, and a wrapped RELATIVE one that
+  // goes unseen drops a needed entry from `expected` and turns the exact
+  // sparse-list comparison falsely red. These fixtures pin the scanner
+  // itself so a future tightening cannot regress silently.
+  const scan = (source) => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-import-scan-'));
+    try {
+      const file = join(dir, 'fixture.mjs');
+      writeFileSync(file, source);
+      return specifiersOf(file);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('sees a wrapped relative specifier', () => {
+    const found = scan(
+      "import {\n  loadPolicy,\n  matchArea,\n} from './assign-issue-owner.mjs';\n",
+    );
+    assert.ok(
+      found.includes('./assign-issue-owner.mjs'),
+      `a wrapped relative import must be scanned; got ${JSON.stringify(found)}`,
+    );
+  });
+
+  it('sees a wrapped bare specifier', () => {
+    const found = scan("import {\n  stringify,\n} from 'yaml';\n");
+    assert.ok(
+      found.includes('yaml'),
+      `a wrapped bare import must be scanned so the closure test can reject it; got ${JSON.stringify(found)}`,
+    );
+  });
+
+  it('sees the publisher own wrapped node:fs import', () => {
+    // triage-publish.mjs already carries a multi-line `import { … } from
+    // 'node:fs'`; node: specifiers are skipped downstream, so only a direct
+    // scanner assertion can tell whether it is seen at all.
+    assert.ok(
+      specifiersOf(publisherPath).includes('node:fs'),
+      'the scanner must see the multi-line node:fs import in triage-publish.mjs',
+    );
   });
 });
 

@@ -32,6 +32,23 @@ const triagePoolCheckoutJobs = Object.entries(
   )
   .map(([name]) => ['qwen-triage', name]);
 
+// A floor, not an exact list: the derivation reads the UN-EVALUATED runs-on
+// expression, so rewriting one job's routing into a `vars.` lookup (or moving
+// its checkout behind a composite action) silently drops that row and the
+// guard stops covering it. Assert the jobs known to be pool-routed with a
+// checkout are present, so a filter that stops matching names the job it
+// lost; a NEW pool job still joins the matrix with no edit here.
+it('derives every known pool-routed checkout job in qwen-triage', () => {
+  expect(triagePoolCheckoutJobs.map(([, name]) => name)).toEqual(
+    expect.arrayContaining([
+      'triage',
+      'publish-triage',
+      'tmux-testing',
+      'verify',
+    ]),
+  );
+});
+
 const jobs = [
   ['desktop-release', 'prepare'],
   ...triagePoolCheckoutJobs,
