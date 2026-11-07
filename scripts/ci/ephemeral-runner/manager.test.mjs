@@ -27,13 +27,38 @@ async function fixture(t) {
     logDir: join(dir, 'logs'),
   };
   const calls = [];
-  let container = '';
-  let network = '';
+  const containers = new Map();
+  const networks = new Map();
   let runner;
   let counter = 0;
+  let foreignCounter = 0;
   let failRemove = false;
   let failNetworkRemove = false;
+  let keepContainerAfterRemove = false;
   let loseJit = false;
+  const labelsFromArgs = (args) => {
+    const labels = {};
+    for (let i = 0; i < args.length; i += 1) {
+      if (args[i] !== '--label' || typeof args[i + 1] !== 'string') continue;
+      const at = args[i + 1].indexOf('=');
+      if (at > 0) labels[args[i + 1].slice(0, at)] = args[i + 1].slice(at + 1);
+    }
+    return labels;
+  };
+  const filtersFromArgs = (args) => {
+    const filters = [];
+    for (let i = 0; i < args.length; i += 1) {
+      if (args[i] === '--filter' && typeof args[i + 1] === 'string')
+        filters.push(args[i + 1].replace(/^label=/, ''));
+    }
+    return filters;
+  };
+  const matchesFilters = (entry, args) =>
+    filtersFromArgs(args).every((filter) => {
+      const at = filter.indexOf('=');
+      if (at < 0) return true;
+      return entry.labels[filter.slice(0, at)] === filter.slice(at + 1);
+    });
   async function command(program, args, options = {}) {
     calls.push({ program, args, options });
     if (program === 'gh') {
@@ -50,34 +75,62 @@ async function fixture(t) {
       }
       return JSON.stringify(runner ? [runner] : []);
     }
-    if (args[0] === 'ps') return container ? `${container}\n` : '';
-    if (args[0] === 'network' && args[1] === 'ls')
-      return network ? `${network}\n` : '';
+    if (args[0] === 'ps') {
+      const matched = [...containers.entries()].filter(([, entry]) =>
+        matchesFilters(entry, args),
+      );
+      if (!matched.length) return '';
+      if (args.includes('--format'))
+        return `${matched.map(([, entry]) => entry.labels['qwen.slot'] ?? '').join('\n')}\n`;
+      return `${matched.map(([id]) => id).join('\n')}\n`;
+    }
+    if (args[0] === 'network' && args[1] === 'ls') {
+      const matched = [...networks.entries()].filter(([, entry]) =>
+        matchesFilters(entry, args),
+      );
+      return matched.length ? `${matched.map(([id]) => id).join('\n')}\n` : '';
+    }
     if (args[0] === 'network' && args[1] === 'create') {
-      network = `network-${counter}`;
-      return network;
+      const id = `network-${counter}`;
+      networks.set(id, { labels: labelsFromArgs(args) });
+      return id;
     }
     if (args[0] === 'network' && args[1] === 'rm') {
       if (failNetworkRemove) throw new Error('network removal failed');
-      network = '';
+      networks.delete(args[args.length - 1]);
       return '';
+    }
+    if (args[0] === 'network' && args[1] === 'inspect') {
+      const entry = networks.get(args[args.length - 1]);
+      return `${entry?.labels['qwen.slot'] ?? ''}\n`;
     }
     if (args[0] === 'info') return `${dir}\n`;
     if (args[0] === 'create') {
-      container = `container-${counter}`;
-      return container;
+      const id = `container-${counter}`;
+      containers.set(id, { labels: labelsFromArgs(args) });
+      return id;
     }
     if (args[0] === 'logs') return 'runner log';
     if (args[0] === 'rm') {
       if (failRemove) throw new Error('docker unavailable');
-      container = '';
+      if (!keepContainerAfterRemove) containers.delete(args[args.length - 1]);
+      return '';
     }
+    if (args[0] === 'wait') return '';
+    if (args[0] === 'start') return '';
     return '';
   }
   return {
     config,
     calls,
     command,
+    sleep: async () => {},
+    addForeignNetwork(labels) {
+      const id = `network-foreign-${++foreignCounter}`;
+      networks.set(id, { labels });
+      return id;
+    },
+    networkIds: () => [...networks.keys()],
     setFailRemove: (v) => {
       failRemove = v;
     },
@@ -86,6 +139,9 @@ async function fixture(t) {
     },
     setFailNetworkRemove: (v) => {
       failNetworkRemove = v;
+    },
+    setKeepContainerAfterRemove: (v) => {
+      keepContainerAfterRemove = v;
     },
   };
 }
@@ -533,4 +589,189 @@ test('network deletion is verified even when docker reports success', async (t) 
       .length,
     1,
   );
+});
+
+test('passes only the docker environment allowlist and the JIT config by name', async (t) => {
+  const sentinels = {
+    AWS_SECRET_ACCESS_KEY: 'sentinel-secret',
+    SOME_DEPLOY_TOKEN: 'sentinel-token',
+  };
+  const previous = {};
+  for (const key of Object.keys(sentinels)) {
+    previous[key] = process.env[key];
+    process.env[key] = sentinels[key];
+  }
+  t.after(() => {
+    for (const key of Object.keys(sentinels)) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  });
+  const f = await fixture(t);
+  await createManager(f.config, { command: f.command }).cycle(1);
+  const create = f.calls.find(
+    (c) => c.program === 'docker' && c.args[0] === 'create',
+  );
+  const allowed = [
+    'DOCKER_CONFIG',
+    'DOCKER_HOST',
+    'HOME',
+    'PATH',
+    'RUNNER_JIT_CONFIG',
+    'XDG_RUNTIME_DIR',
+  ];
+  assert.deepEqual(
+    Object.keys(create.options.env).filter((key) => !allowed.includes(key)),
+    [],
+  );
+  assert.ok(!JSON.stringify(create.options.env).includes('sentinel'));
+  assert.ok(!JSON.stringify(create.args).includes('sentinel'));
+  const at = create.args.indexOf('--env');
+  assert.equal(create.args[at + 1], 'RUNNER_JIT_CONFIG');
+});
+
+test('labels pool and slot on create and honours recovery filters', async (t) => {
+  const f = await fixture(t);
+  const foreign = f.addForeignNetwork({
+    'qwen.pool': 'other',
+    'qwen.slot': '9',
+  });
+  const command = async (program, args, options) => {
+    const result = await f.command(program, args, options);
+    if (program === 'docker' && args[0] === 'network' && args[1] === 'create')
+      throw new Error('network create response lost');
+    return result;
+  };
+  await assert.rejects(
+    createManager(f.config, { command }).cycle(1),
+    /network create response lost/,
+  );
+  const created = f.calls.find(
+    (c) =>
+      c.program === 'docker' &&
+      c.args[0] === 'network' &&
+      c.args[1] === 'create',
+  );
+  assert.ok(created.args.includes('qwen.pool=trial'));
+  assert.ok(created.args.includes('qwen.slot=1'));
+  const removed = f.calls
+    .filter(
+      (c) =>
+        c.program === 'docker' && c.args[0] === 'network' && c.args[1] === 'rm',
+    )
+    .map((c) => c.args[c.args.length - 1]);
+  assert.deepEqual(removed, ['network-1']);
+  assert.ok(f.networkIds().includes(foreign));
+});
+
+test('container cleanup failure blocks replenishment even when docker reports success', async (t) => {
+  const f = await fixture(t);
+  f.setKeepContainerAfterRemove(true);
+  const manager = createManager(f.config, { command: f.command });
+  await assert.rejects(manager.cycle(1), /Container cleanup failed/);
+  const state = JSON.parse(
+    await readFile(join(f.config.stateDir, 'slot-1.json'), 'utf8'),
+  );
+  assert.ok(state.name);
+  assert.equal(state.runnerId, 1);
+});
+
+test('rejects corrupted slot state without deleting a runner', async (t) => {
+  const validName = 'qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
+  const cases = [
+    {
+      label: 'foreign prefix',
+      state: {
+        name: 'qwen-other-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+        runnerId: 42,
+        uncertain: false,
+      },
+    },
+    {
+      label: 'non-UUID suffix',
+      state: {
+        name: 'qwen-trial-1-not-a-uuid',
+        runnerId: 42,
+        uncertain: false,
+      },
+    },
+    {
+      label: 'non-boolean uncertain',
+      state: { name: validName, runnerId: 42, uncertain: 'no' },
+    },
+    {
+      label: 'zero runner id',
+      state: { name: validName, runnerId: 0, uncertain: false },
+    },
+  ];
+  for (const item of cases) {
+    const f = await fixture(t);
+    await writeFile(
+      join(f.config.stateDir, 'slot-1.json'),
+      JSON.stringify(item.state),
+    );
+    await assert.rejects(
+      createManager(f.config, { command: f.command }).cycle(1),
+      /Invalid slot state/,
+      item.label,
+    );
+    assert.ok(
+      !f.calls.some((c) => c.program === 'gh' && c.args.includes('DELETE')),
+      item.label,
+    );
+  }
+});
+
+test('marks a cycle where the container exits before serving a job', async (t) => {
+  const f = await fixture(t);
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'wait')
+      return Promise.reject(
+        Object.assign(new Error('docker failed (exit 126)'), { exitCode: 126 }),
+      );
+    return f.command(program, args, options);
+  };
+  const result = await createManager(f.config, { command }).cycle(1);
+  assert.equal(result.earlyExit, true);
+});
+
+test('backs off before the next JIT request after an early exit', async (t) => {
+  const f = await fixture(t);
+  const previousPath = process.env.PATH;
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  const sleeps = [];
+  let manager;
+  let jitRequests = 0;
+  const command = async (program, args, options) => {
+    if (
+      program === 'gh' &&
+      args.includes('/repos/owner/repo/actions/runners/generate-jitconfig')
+    ) {
+      jitRequests += 1;
+      if (jitRequests > 1) manager.stop();
+    }
+    if (program === 'docker' && args[0] === 'wait')
+      return Promise.reject(
+        Object.assign(new Error('docker failed (exit 127)'), { exitCode: 127 }),
+      );
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+    },
+  });
+  await manager.start();
+  // The 1 s poll that races `docker wait` also goes through the injected sleep;
+  // the replenishment backoff is the 60 s entry.
+  assert.equal(sleeps.filter((ms) => ms === 60000).length, 1);
+  assert.equal(sleeps.at(-1), 60000);
+  assert.equal(jitRequests, 2);
 });
