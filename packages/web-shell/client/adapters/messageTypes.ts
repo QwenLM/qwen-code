@@ -65,6 +65,8 @@ export interface DaemonMessageToolCall {
   parentToolCallId?: string;
   /** The producer's own call ID when `callId` is keyed by something else. */
   toolCallId?: string;
+  /** Stable producer identity from the daemon tool-block projection only. */
+  generatedUiToolCallId?: string;
   title?: string;
   content?: readonly DaemonMessageToolCallContent[];
   rawOutput?: unknown;
@@ -76,6 +78,13 @@ export interface DaemonMessageToolCall {
   endTime?: number;
   wasCancelled?: boolean;
   subContent?: string;
+  /**
+   * Path-style identity of the agent that produced this call's sub-content,
+   * e.g. `/root/general-purpose`. Carried from the transcript block's `agent`
+   * field so the panel can name a subagent precisely instead of by type alone
+   * — two parallel subagents of the same type are otherwise indistinguishable.
+   */
+  agentPath?: string;
   subTools?: DaemonMessageToolCall[];
   /** Transcript blocks folded into this tool presentation. */
   sourceBlockIds?: string[];
@@ -105,6 +114,8 @@ export interface DaemonMessageAuthor {
  * cross-cutting field is declared once rather than on each role.
  */
 export interface DaemonMessageMeta {
+  sourceRecordIds?: string[];
+  localCommandId?: string;
   backgroundTurn?: DaemonBackgroundTurn;
   /**
    * Admitted prompt this message belongs to, copied from the daemon-stamped

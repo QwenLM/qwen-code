@@ -18,7 +18,6 @@ import {
   createModelOutputCommittedHarnessCheckpoint,
   createResultsReadyHarnessCheckpoint,
   createTurnSettledHarnessCheckpoint,
-  encodeHarnessCheckpointV1,
   HARNESS_DURABLE_WAIT_BOUNDARY,
   HARNESS_MODEL_START_PHASES,
   HARNESS_TURN_COMPLETE_BOUNDARY,
@@ -482,8 +481,17 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         const gate = managedRuntimeDispatchGate(
           this.authority.sessionHeader.sessionKey,
         );
+        // A settled binding needs no handoff: resolving it returns early, so
+        // handing it off would only re-insert an already-settled id that
+        // pruning may have evicted, as a handed-off entry that never settles.
+        const settled = new Set(
+          (authorization.checkpoint.tools?.items ?? [])
+            .filter((item) => item.state === 'settled')
+            .map((item) => item.executionCallId),
+        );
         for (const binding of authorization.checkpoint.runtime?.bindings ??
           []) {
+          if (settled.has(binding.executionCallId)) continue;
           gate.handoff(binding.executionCallId);
         }
       }
@@ -1684,7 +1692,6 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
     action?: ManagedDurableWaitCommit,
   ): Promise<void> {
     const header = this.authority.sessionHeader;
-    const state = encodeHarnessCheckpointV1(checkpoint);
     await this.authority.commitCheckpoint(
       (assignedState, coveredSequence) => ({
         operation: 'commitCheckpoint',
@@ -1693,7 +1700,7 @@ class LocalManagedHarnessHandle implements ManagedHarnessHandle {
         contentDigest: createHash('sha256').update(assignedState).digest('hex'),
       }),
       {
-        state,
+        state: checkpoint,
         boundary,
         ...(action
           ? {

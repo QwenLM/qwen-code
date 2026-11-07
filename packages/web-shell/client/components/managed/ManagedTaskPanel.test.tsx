@@ -18,12 +18,16 @@ describe('ManagedTaskPanel', () => {
   let cancel: ReturnType<typeof useManagedTaskCancel>;
   let onClose: ReturnType<typeof vi.fn>;
   let restore: ReturnType<typeof vi.fn>;
+  let onOpenChild: ReturnType<typeof vi.fn>;
+  let waitingSessions: ReadonlySet<string>;
   beforeEach(() => {
     container = document.createElement('div');
     document.body.append(container);
     root = createRoot(container);
     onClose = vi.fn();
     restore = vi.fn();
+    onOpenChild = vi.fn();
+    waitingSessions = new Set();
     tasks = {
       page: { data: [task], hasMore: false },
       events: [],
@@ -72,6 +76,8 @@ describe('ManagedTaskPanel', () => {
             onClose={onClose}
             restoreFocus={restore}
             reader={reader}
+            waitingSessions={waitingSessions}
+            onOpenChild={onOpenChild}
           />
         </I18nProvider>,
       ),
@@ -84,6 +90,35 @@ describe('ManagedTaskPanel', () => {
     expect(found).toBeDefined();
     return found!;
   }
+
+  it('keeps a stop request separate from termination and uses the full active child count', async () => {
+    const child = {
+      ...task,
+      childSessionId: 'child-1',
+      approvalMode: 'auto-edit' as const,
+      stopRequested: true,
+    };
+    tasks.page = { data: [child], hasMore: true, activeChildCount: 4 };
+    tasks.task = child;
+    tasks.selectedId = child.taskId;
+    waitingSessions = new Set(['child-1']);
+    await render();
+    expect(container.textContent).toContain('Active child Agents: 4');
+    expect(container.textContent).toContain('Awaiting approval');
+    expect(container.textContent).toContain(
+      'Stop requested. Waiting for the task to end.',
+    );
+    expect(container.textContent).toContain('Approval mode: auto-edit');
+    expect(container.textContent).toContain('Running');
+    expect(container.textContent).not.toContain('Cancelled');
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (item) => item.textContent === 'Request cancellation',
+      ),
+    ).toBe(false);
+    await act(async () => button('View child Session').click());
+    expect(onOpenChild).toHaveBeenCalledWith('child-1');
+  });
 
   it('lists every task kind with its label and offers cancel only where the task advertises it', async () => {
     tasks.page = {

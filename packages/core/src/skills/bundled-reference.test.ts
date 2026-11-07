@@ -25,7 +25,11 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { AGENT_DELEGATION_SKILL_NAME } from './agent-delegation-skill.js';
-import { readBundledReference } from './bundled-reference.js';
+import {
+  readBundledReference,
+  resolveBundledReferenceRoute,
+} from './bundled-reference.js';
+import { makeFakeConfig } from '../test-utils/config.js';
 import { WORKFLOW_AUTHORING_SKILL_NAME } from './workflow-authoring-skill.js';
 
 /** First body line of each reference, after the frontmatter is stripped. */
@@ -85,5 +89,18 @@ describe('readBundledReference', () => {
       expect(second).toBe(first);
       expect(second?.body).toContain(anchor);
     }
+  });
+});
+
+describe('Generated UI bundled reference gate', () => {
+  it('withholds an unavailable writer even when the reference would otherwise inline', () => {
+    const config = makeFakeConfig({
+      bundledGeneratedUi: { enabled: false },
+      enabledSkillNamesProvider: () => new Set(['generated-ui']),
+    });
+    expect(config.getSkillManager()).toBeNull();
+    expect(resolveBundledReferenceRoute(config, 'generated-ui')).toBe(
+      'withheld',
+    );
   });
 });

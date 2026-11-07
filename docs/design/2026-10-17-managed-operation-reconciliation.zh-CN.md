@@ -2,9 +2,9 @@
 
 [English](2026-10-17-managed-operation-reconciliation.md) | [简体中文](2026-10-17-managed-operation-reconciliation.zh-CN.md)
 
-状态：第一阶段已在 #14443 合入（契约 `1.59.0`），第二阶段（SSH Workspace 注册）已在 #14456 合入（契约 `1.60.0`），第三阶段（Session 标题）已在 #14475 合入。各阶段都不改 schema。决定 9 已在 #14669 合入、决定 10 已在 #14681 合入；`CANCELLING` 车道的取消在本次改动中实现。跨 Harness kill 的故障门禁仍留在 #14166。
+状态：第一阶段已在 #14443 合入（契约 `1.59.0`），第二阶段（SSH Workspace 注册）已在 #14456 合入（契约 `1.60.0`），第三阶段（Session 标题）已在 #14475 合入。各阶段都不改 schema。决定 9 已在 #14669 合入、决定 10 已在 #14681 合入、`CANCELLING` 车道的取消已在 #14694 合入、跨 Harness kill 的故障门禁已在 #14750 合入。
 
-这是 [#14122](https://github.com/QwenLM/qwen-code/issues/14122)（[#12380](https://github.com/QwenLM/qwen-code/issues/12380) Stage D 的 D7 总 issue）的 **D7-2** 切片，由 [#14166](https://github.com/QwenLM/qwen-code/issues/14166) 跟踪。#12380 规定，Stage D 只有同时具备持久命令投递（D7-1，[#14168](https://github.com/QwenLM/qwen-code/issues/14168)）和原命令对账（本切片），才能暴露 `java_durable`。D7-3（[#14167](https://github.com/QwenLM/qwen-code/issues/14167)，可选开启的 profile）要等这两者都完成。本切片涉及的每一处代码，都在 #14166 的设计说明里做了分类。
+这是 [#14122](https://github.com/QwenLM/qwen-code/issues/14122)（[#12380](https://github.com/QwenLM/qwen-code/issues/12380) Stage D 的 D7 总 issue）的 **D7-2** 切片，由 [#14166](https://github.com/QwenLM/qwen-code/issues/14166) 跟踪。#12380 规定，Stage D 只有同时具备持久命令投递（D7-1，[#14168](https://github.com/QwenLM/qwen-code/issues/14168)）和原命令对账（本切片），才能暴露 `java_durable`。D7-3（[#14167](https://github.com/QwenLM/qwen-code/issues/14167)，可选开启的 profile）已在两者之后以 #14470 合入。本切片涉及的每一处代码，都在 #14166 的设计说明里做了分类。
 
 ## 问题
 
@@ -32,7 +32,7 @@
 
 - ~~`WORKSPACE_CREATE`~~：见下文第二阶段。
 - ~~`RENAME` 的 `UNKNOWN` 状态及其读取器（Harness 的标题 revision）~~：见下文第三阶段。
-- ~~Turn 层的恢复读取与挂起~~：见下文决定 9 和 10。围绕 v2 执行 kill Harness 的故障门禁仍留在 #14166。
+- ~~Turn 层的恢复读取与挂起~~：见下文决定 9 和 10；围绕 v2 执行 kill Harness 的故障门禁已在 #14750 合入。
 - 为生命周期等待改名公开的 `recovery_blocked` token。这属于契约变更，放在本来就要暴露投递状态的 D7-3 更合适。
 - 删除只读不写的残留状态（`ma_turn.status = 'RECOVERY_BLOCKED'`、Session 种类的 `UNKNOWN`），以及把手写的 `INSERT INTO ma_operation` 语句收成一处。
 
@@ -134,6 +134,10 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 - **复查。** 现有的一秒扫描同时读取到期的挂起 Turn。每次复查认领 Turn，先通过连接器丢弃缓存的 takeover 快照，再重新驱动取消加载——绝不驱动继续加载，因为 Turn 正是因为继续无法证明安全才挂起的。已就绪：现有取消路由把观测到的结果记入 journal，并把 Turn 标为 `managed_runtime_recovery_blocked`。终态围栏走现有的 cancel-over-abandoned 路径。仍未知：再次挂起。复查抛错时也重新挂起，不在同一行上空转。
 - **快照。** `discardManagedRecovery` 丢弃缓存的 attachment 与 pending-recovery 标记，下一次加载会重新向 Broker 询问，而不是拿挂起时的报告作答。
 
+### 11. 未观察到执行的 cancel 停车
+
+一个已准入的 Turn 以 `managed_runtime_recovery_blocked` 失败时，挂起的 `CANCEL` 不能记为 `turn_already_settled`：取消可能已经到达那个结果未知的执行，也可能没有。`settleTurnCommands` 在 Turn 失败时、Session 行锁之下，把所有仍为 pending 的 cancel 记为 `recovery_blocked`，失败码 `cancel_unconfirmed`，保持 `java_durable`/`blocked`，且不再投递。Turn 结束后才提交的 cancel 在 CAS 落空后用 `requireTurnForUpdate` 重新读取当前行，并按终态结算为 `turn_already_settled`，因此陈旧快照不会让它停在 PENDING，副本时钟偏移也不会改变分类；从未尝试提交的 Turn 走同一路径。该停车行已属于 acceptance-unknown kind 集合，由 `CancelEvidence` 从原 prompt 保留的持久终态事件结算（#14763）：`cancelled` 记为完成，`completed`/`error` 以 `turn_already_settled` 失败，证据缺失或不可读则继续停车。
+
 ## 验证
 
 - `OperationReconcilerTest`：挂起的 cancel 只按任务记录结算（先未知，后已提交）；任务未收到停止就结束的 cancel 以 `task_already_settled` 失败；证据读不出来时挂起一整个复查周期；挂起的输入只按 store 返回的 journal 结论结算；已不在挂起状态的行不被处理；一种 kind 只能有一个证据源。所有用例都不发送、不认领，也不调用 Harness。
@@ -146,6 +150,7 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 - Turn 层读取：`hosted-workspace-broker.test.ts` 固定了恢复读取上的 reconcile 查询、每个未知记录恰好一次 reconcile 尝试、一次性决策（已结算才返回，仍在执行或仍未知都不轮询），以及终态围栏。`hosted-runtime-recovery.test.ts` 覆盖被动加载逐执行对账、证据读不出来时报未知，以及继续加载把已结算结果记入 journal、或报未知/abandoned 且不写 journal。
 - Turn 取消：`HarnessCoordinatorTest.workspaceRecoveryFailureUsesTheMatchingCancellationAuthority` 让待处理取消保留现有重试路径（退避有上限、预算豁免），且不会把 unknown-outcome 情况写成 `FAILED`；`managed_runtime_recovery_incomplete` 仍走终止路径。
 - Turn 挂起：`HarnessCoordinatorTest` 覆盖用挂起替代 budget-exempt 重试、复查丢弃快照并重新询问、仍未知时再次挂起，以及取消就绪后的终止。
+- 未观察到执行的 cancel：`ManagedTurnCommandOperationTest.aCancelOfAnUnknownExecutionParksInsteadOfFailingAlreadySettled` 覆盖已准入的 Turn 以 `managed_runtime_recovery_blocked` 失败时，cancel 停车为 `recovery_blocked`/`cancel_unconfirmed`；Turn 结束后才提交的 cancel，以及因其他错误码失败的已准入 Turn，仍以 `turn_already_settled` 失败。`ManagedTurnCommandOperationMySqlIT.aCancelAdmittedOnAStaleSnapshotOfAnEndedTurnSettlesAtAdmission` 覆盖 REPEATABLE READ 陈旧快照：CAS 被已提交的失败击败后，当前读结算 cancel，绝不停在 PENDING。
 
 ## 验收（来自 #14166）
 
@@ -155,3 +160,4 @@ Harness 接受一个 prompt 时，会往托管 Session journal 提交 `submitInp
 - Turn 层接管读取原命令的 Broker 记录（决定 9）：两个加载都会对账，已结算的答案被观测，仍无法证明的结果报为未知，而不是当作瞬时故障失败或再次派发。
 - 结果仍未知的 Turn 会挂起，并按对账器周期复查，而不是继续 budget-exempt 重试或再次派发（决定 10）。
 - `CANCELLING` Turn 上因未知 Runtime 结果而待处理的取消不会被写成 `FAILED`；取消车道重试，取消路由仍可能结算为 `CANCELLED`（决定 10）。`managed_runtime_recovery_incomplete` 仍走终止路径。
+- 已准入、或已尝试提交的 Turn 因未观察到的执行失败时，cancel 报 `recovery_blocked`/`cancel_unconfirmed`，而不是假的 `turn_already_settled`（决定 11）。

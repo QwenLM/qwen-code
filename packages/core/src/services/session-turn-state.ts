@@ -5,11 +5,14 @@
  */
 
 import type { ChatRecord } from './chatRecordingService.js';
+import { getRecordRewindId } from './session-api-history.js';
 import { readFileHistorySnapshotPayload } from './session-file-history-state.js';
 
 export interface SessionTurnState {
   initialTurn: number;
   turnParentUuids: Array<string | null>;
+  turnPromptIds: Array<string | undefined>;
+  turnDaemonPromptIds: Array<string | undefined>;
   backgroundNotificationTaskIds: string[];
 }
 
@@ -17,6 +20,8 @@ export interface SessionTurnRecordHint {
   promptTurn?: number;
   countsAsUserPrompt: boolean;
   turnParentUuid?: string | null;
+  turnPromptId?: string;
+  turnDaemonPromptId?: string;
   backgroundNotificationTaskId?: string;
 }
 
@@ -24,6 +29,8 @@ export class SessionTurnStateAccumulator {
   private maxPromptTurn = 0;
   private userMessageCount = 0;
   private readonly turnParentUuids: Array<string | null> = [];
+  private readonly turnPromptIds: Array<string | undefined> = [];
+  private readonly turnDaemonPromptIds: Array<string | undefined> = [];
   private readonly backgroundNotificationTaskIds = new Set<string>();
 
   constructor(private readonly sessionId: string) {}
@@ -41,6 +48,8 @@ export class SessionTurnStateAccumulator {
     }
     if (hint.turnParentUuid !== undefined) {
       this.turnParentUuids.push(hint.turnParentUuid);
+      this.turnPromptIds.push(hint.turnPromptId);
+      this.turnDaemonPromptIds.push(hint.turnDaemonPromptId);
     }
     if (hint.backgroundNotificationTaskId !== undefined) {
       this.backgroundNotificationTaskIds.add(hint.backgroundNotificationTaskId);
@@ -52,6 +61,8 @@ export class SessionTurnStateAccumulator {
       initialTurn:
         this.maxPromptTurn > 0 ? this.maxPromptTurn : this.userMessageCount,
       turnParentUuids: [...this.turnParentUuids],
+      turnPromptIds: [...this.turnPromptIds],
+      turnDaemonPromptIds: [...this.turnDaemonPromptIds],
       backgroundNotificationTaskIds: [...this.backgroundNotificationTaskIds],
     };
   }
@@ -91,7 +102,13 @@ export function getSessionTurnRecordHint(
     ...(promptTurn !== undefined ? { promptTurn } : {}),
     countsAsUserPrompt:
       record.sessionId === sessionId && isUserPromptRecord(record),
-    ...(turnParentUuid !== undefined ? { turnParentUuid } : {}),
+    ...(turnParentUuid !== undefined
+      ? {
+          turnParentUuid,
+          turnPromptId: getRecordRewindId(record),
+          turnDaemonPromptId: record.daemonPromptId,
+        }
+      : {}),
     ...(typeof backgroundTask?.taskId === 'string'
       ? { backgroundNotificationTaskId: backgroundTask.taskId }
       : {}),

@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
+  DaemonLoopStop,
   QwenAgentMessageMeta,
   DaemonTranscriptBlock,
   DaemonTextTranscriptBlock,
@@ -65,6 +66,8 @@ interface TranscriptMessageLabels {
   branchSuccess?: (name: string) => string;
   modelStreamInterrupted?: string;
   loopDetected?: string;
+  /** Text for a loop stop whose cause is known; undefined falls back. */
+  loopDetectedFor?: (loop: DaemonLoopStop) => string | undefined;
 }
 
 interface TranscriptMessageOptions {
@@ -264,7 +267,11 @@ function getErrorDisplayText(
   labels?: TranscriptMessageLabels,
 ): string {
   if (block.errorKind === 'loop_detected') {
-    return labels?.loopDetected ?? block.text;
+    return (
+      (block.loop ? labels?.loopDetectedFor?.(block.loop) : undefined) ??
+      labels?.loopDetected ??
+      block.text
+    );
   }
   if (
     block.errorKind === 'model_stream_interrupted' ||
@@ -1421,6 +1428,7 @@ export function transcriptBlocksToDaemonMessages(
 
   synchronizeToolGroupSourceIdentity(messages);
   attachTurnPromptIds(messages, blocks);
+  attachDeletionIdentity(messages, blocks);
   if (!retainSourceIdentity) stripSourceIdentity(messages);
   return messages;
 }
@@ -1449,6 +1457,34 @@ function attachTurnPromptIds(
       const promptId = promptIdByBlockId.get(id);
       if (promptId) {
         message.promptId = promptId;
+        break;
+      }
+    }
+  }
+}
+
+function attachDeletionIdentity(
+  messages: DaemonMessage[],
+  blocks: readonly DaemonTranscriptBlock[],
+): void {
+  const byId = new Map(blocks.map((block) => [block.id, block]));
+  for (const message of messages) {
+    const sources = [message.id, ...(message.sourceBlockIds ?? [])].flatMap(
+      (id) => (byId.get(id) ? [byId.get(id)!] : []),
+    );
+    const records = [
+      ...new Set(sources.flatMap((block) => block.sourceRecordIds ?? [])),
+    ];
+    if (records.length) message.sourceRecordIds = records;
+    for (const block of sources) {
+      const meta = 'meta' in block ? getRecord(block.meta) : undefined;
+      const local =
+        getString(meta, 'localCommandId') ??
+        (block.promptId?.startsWith('local-command:')
+          ? block.promptId
+          : undefined);
+      if (local) {
+        message.localCommandId = local;
         break;
       }
     }
@@ -1594,6 +1630,8 @@ function mergeToolCall(
   target.status = source.status ?? target.status;
   target.title = source.title ?? target.title;
   target.toolName = source.toolName ?? target.toolName;
+  target.generatedUiToolCallId =
+    source.generatedUiToolCallId ?? target.generatedUiToolCallId;
   target.kind = source.kind ?? target.kind;
   target.sourceBlockIds = unionMessageIds(
     target.sourceBlockIds,
@@ -1694,6 +1732,7 @@ export function daemonToolBlockToToolCall(
 
   return {
     callId: block.toolCallId,
+    generatedUiToolCallId: block.toolCallId,
     toolName,
     title: block.title === block.toolName ? toolName : block.title,
     status:
@@ -1708,6 +1747,10 @@ export function daemonToolBlockToToolCall(
       : undefined,
     subagentSessionReady: block.subagentSessionReady,
     parentToolCallId: block.parentToolCallId,
+    // Replay rebuilds the AgentTool block's identity from its persisted
+    // `task_execution` display; a live sub-content frame that already adopted
+    // a path via `appendSubContent` keeps first-wins there.
+    ...(block.agent ? { agentPath: block.agent.agentName } : {}),
     startTime: block.createdAt,
     endTime:
       isComplete && !forceBackgroundPending ? block.updatedAt : undefined,

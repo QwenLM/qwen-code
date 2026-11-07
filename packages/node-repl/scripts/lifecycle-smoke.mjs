@@ -53,7 +53,7 @@ send({
   jsonrpc: '2.0',
   id: 2,
   method: 'tools/call',
-  params: { name: 'node_repl', arguments: { code: 'nodeRepl.write("up");' } },
+  params: { name: 'js', arguments: { code: 'nodeRepl.write("up");' } },
 });
 
 await new Promise((resolve) => {

@@ -182,5 +182,7 @@ export function convertHostedCsiToolResult(
     executionStatus: result.executionStatus,
     ...(result.error ? { runtimeError: result.error } : {}),
   };
-  return converted;
+  // In-memory provenance is a symbol and cannot survive the hosted CSI
+  // boundary; return a plain part so the wire result stays serializable.
+  return [{ functionResponse: response }];
 }

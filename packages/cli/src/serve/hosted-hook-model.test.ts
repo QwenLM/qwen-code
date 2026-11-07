@@ -6,6 +6,7 @@
 
 import type { GenerateContentResponse } from '@google/genai';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { TurnBudget } from '@qwen-code/qwen-code-core/core/turn-budget.js';
 import {
   HookEventName,
@@ -119,11 +120,31 @@ describe('Hosted Hook model boundary', () => {
   it('authorizes an isolated prompt evaluation and attributes provider usage to its original operation', async () => {
     const { config, generateContent, evaluate, usage, scope } = fixture();
     const signal = new AbortController().signal;
+    const modelConfiguration = {
+      authType: AuthType.USE_OPENAI,
+      model: 'session-model',
+      apiKey: 'session-key',
+      baseUrl: 'https://session.example/v1',
+    };
     const result = await runHostedHookOperation(
-      { sessionId: 'session-1', cwd: '/workspace', signal, scope },
+      {
+        sessionId: 'session-1',
+        cwd: '/workspace',
+        signal,
+        scope,
+        modelConfig: async () => modelConfiguration,
+      },
       (runner) => runner(hook, HookEventName.SessionEnd, input, signal),
     );
     expect(result).toMatchObject({ success: true, outcome: 'success' });
+    expect(
+      vi.mocked(loadCliConfig).mock.calls[0]?.[9]?.modelConfiguration,
+    ).toEqual(modelConfiguration);
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[1]).toMatchObject({
+      sessionId: 'session-1',
+      sessionIdGenerated: true,
+      chatRecording: false,
+    });
     expect(config.initialize).toHaveBeenCalledWith(
       expect.objectContaining({
         skipHooks: true,

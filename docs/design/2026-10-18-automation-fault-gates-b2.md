@@ -75,26 +75,35 @@ attempt was the same commit and that at least three were made.
   re-drive. The case checks that a new writer generation holds the Session.
 - **Retry until accepted.** After the restart, the case retries the same
   request under the same key until it answers `202`. Before the lease
-  lapses, the cold Harness's load is refused, and the public route passes
-  that through as `409 managed_session_writer_conflict` (see Findings). Any
-  other refusal fails the case.
+  lapses, the cold Harness's load is refused, and the public route answers
+  that as the retryable `503 managed_session_writer_conflict` (see
+  Findings). Any other refusal, including a bare 409, fails the case.
 - **Teardown.** It drops each trigger on its own, so one failing drop
   leaves none of the others on the shared fork's schema. Then it drops the
   refusal table.
 
 ## Findings
 
-- **A transient writer conflict reaches the public caller as a 409.**
-  Right after a Harness restart, the public manual-run route answered
+- **A self-healing Harness conflict crosses as a retryable 503.** Right
+  after a Harness restart, the public manual-run route used to answer
   `409 managed_session_writer_conflict` until the dead writer's lease
   lapsed. The update route relays through the same translation
-  (`ManagedAutomationService.translate`, a Harness 409 stays a 409). The
-  scanner re-drives this, because the code is not one of its definitive
-  refusals, so a manual run is not lost. But the public answer is a 4xx
-  conflict that a client is unlikely to retry, and nothing else re-drives a
-  definition update. A retry under the same key does recover, because the
-  receipt stays claimed and unanswered. This slice records the behaviour,
-  and the gate retries through it rather than pinning it.
+  (`ManagedAutomationService.translate`). The scanner re-drives the code
+  because it is not one of its definitive refusals, so a manual run was
+  never lost, but a client reading the 409 as final stopped, and nothing
+  else re-drives a definition update. The public automation routes now
+  cross the Harness conflicts that heal on their own — a dead
+  predecessor's writer lease, a busy or briefly unavailable Workspace, a
+  closing Session — as the retryable 503 that keeps the code, the way the
+  channel routes answer them. Every other 409 keeps its class. The gate
+  pins the answer: it accepts only `202` or `503`.
+
+  A same-key manual-run retry inside the occurrence's defer window answers
+  the class the recorded failure implies — the retryable 503 for a
+  transient or lost answer, the same 409 for a final refusal — without
+  spending an attempt once the first re-drive has been spent; the scanner
+  owns the next fire. The first retry after a lost answer still re-drives,
+  so the gate's second send reaches `202`.
 
 ## Mutation witnesses
 
@@ -130,9 +139,6 @@ so no step or job ceiling moves.
 
 ## Open questions
 
-- Whether the public automation routes should answer a writer conflict as
-  a retryable `503`, the way they answer every other unobtained outcome.
-  See Findings.
 - A store transport failure before the store sees the commit, on every
   attempt, behaves like `revision-1`: nothing commits, and the Session
   latches. This slice gates only the answer-lost variant, which is the one

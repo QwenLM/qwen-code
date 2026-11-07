@@ -43,12 +43,14 @@ import {
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
+import { ideContextStore } from '../ide/ideContext.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { setMemoryFilename as mockSetMemoryFilename } from '../utils/memory-constants.js';
+import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
@@ -123,6 +125,7 @@ import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
+import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 
 /**
  * A settled registration for the shared record, the shape
@@ -314,6 +317,10 @@ vi.mock('../hooks/index.js', () => {
   const HookSystemMock = vi.fn();
   HookSystemMock.prototype.runtimeId = 'test-hook-runtime';
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.close = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.refreshFileWatchingForWorkingDirectory = vi
+    .fn()
+    .mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.isManaged = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
@@ -494,6 +501,9 @@ function mockAutoMemoryIndexRead(content: string) {
 vi.mock('../core/baseLlmClient.js');
 vi.mock('../core/toolHookTriggers.js', () => ({
   fireNotificationHook: vi.fn().mockResolvedValue({}),
+}));
+vi.mock('../models/model-catalog-refresh.js', () => ({
+  refreshModelCatalog: vi.fn().mockResolvedValue(undefined),
 }));
 
 type MemoryLoad = Awaited<ReturnType<typeof loadServerHierarchicalMemory>>;
@@ -1172,6 +1182,196 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('subscription model switching', () => {
+    beforeEach(() => {
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getIdentity',
+      ).mockReturnValue('account-a');
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getModels',
+      ).mockResolvedValue({
+        models: ['qwen3.8-max', 'qwen3.8-flash'],
+        cached: false,
+      });
+      stubContentGenerator();
+    });
+
+    afterEach(() => {
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockRestore();
+      vi.mocked(QwenSubscriptionSession.prototype.getModels).mockRestore();
+    });
+
+    const subscriptionConfig = async () => {
+      const config = makeConfig({
+        model: 'qwen3.8-max',
+        generationConfig: { reasoning: { effort: 'high' } },
+        modelProvidersConfig: { openai: [{ id: 'other-model' }] },
+      });
+      await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+      return config;
+    };
+
+    it('reuses the same account catalog while rebuilding model capabilities and reasoning', async () => {
+      const config = await subscriptionConfig();
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        model: 'qwen3.8-flash',
+        modalities: { image: true, video: true },
+        contextWindowSize: config
+          .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+          .find((model) => model.id === 'qwen3.8-flash')?.contextWindowSize,
+        reasoning: { effort: 'high' },
+      });
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max');
+
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(createContentGenerator).toHaveBeenCalledTimes(4);
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        model: 'qwen3.8-max',
+        modalities: { image: true, video: true },
+        contextWindowSize: config
+          .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+          .find((model) => model.id === 'qwen3.8-max')?.contextWindowSize,
+        reasoning: { effort: 'high' },
+      });
+    });
+
+    it('reloads the catalog after the login identity changes', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
+        'account-b',
+      );
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+
+    it('refuses a model unavailable to the replacement account', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
+        'account-b',
+      );
+      vi.mocked(QwenSubscriptionSession.prototype.getModels).mockResolvedValue({
+        models: ['qwen3.8-max'],
+        cached: false,
+      });
+      await expect(
+        config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash'),
+      ).rejects.toThrow('no longer available');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(config.getModel()).toBe('qwen3.8-max');
+    });
+
+    it('does not reuse the catalog after logout', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
+        undefined,
+      );
+      vi.mocked(QwenSubscriptionSession.prototype.getModels).mockRejectedValue(
+        new Error('session_changed'),
+      );
+      await expect(
+        config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash'),
+      ).rejects.toThrow('session_changed');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+
+    it('refreshes explicitly and when switching back from another provider', async () => {
+      const config = await subscriptionConfig();
+      await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+      await config.switchModel(AuthType.USE_OPENAI, 'other-model');
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        3,
+      );
+    });
+
+    it('invalidates reuse after a failed explicit catalog refresh', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(
+        QwenSubscriptionSession.prototype.getModels,
+      ).mockRejectedValueOnce(new Error('catalog rejected'));
+      await expect(config.refreshSubscriptionModels()).rejects.toThrow(
+        'catalog rejected',
+      );
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        3,
+      );
+    });
+
+    it('does not bind a catalog to a login that changed during refresh', async () => {
+      vi.mocked(
+        QwenSubscriptionSession.prototype.getModels,
+      ).mockImplementationOnce(async () => {
+        vi.mocked(
+          QwenSubscriptionSession.prototype.getIdentity,
+        ).mockReturnValue('account-b');
+        return { models: ['qwen3.8-max', 'qwen3.8-flash'], cached: false };
+      });
+      const config = await subscriptionConfig();
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+  });
+
+  it('clears active authentication and generators without erasing other providers', async () => {
+    const config = await initConfig({
+      modelProvidersConfig: {
+        openai: [
+          { id: 'saved-model', baseUrl: OPENAI_URL, envKey: 'SAVED_KEY' },
+        ],
+      },
+    });
+    stubContentGenerator();
+    await config.refreshAuth(AuthType.USE_GEMINI);
+    const providers = config
+      .getModelsConfig()
+      .getAvailableModelsForAuthType(AuthType.USE_OPENAI);
+    config.setSubscriptionPlan('pro');
+    const worker = backgroundTask('logout-worker', 'Active member worker');
+    config.getBackgroundTaskRegistry().register(worker);
+    const listener = vi.fn();
+    config.onModelChange(listener);
+
+    config.clearAuth();
+
+    expect(config.getAuthType()).toBeUndefined();
+    expect(config.getCurrentAuthType()).toBeUndefined();
+    expect(config.getSubscriptionPlan()).toBeUndefined();
+    expect(worker.abortController.signal.aborted).toBe(true);
+    expect(() => config.getContentGenerator()).toThrow('Run /auth');
+    expect(
+      config.getContentGenerator({ allowUninitialized: true }),
+    ).toBeUndefined();
+    expect(() => config.getBaseLlmClient()).toThrow('not initialized');
+    expect(
+      config
+        .getModelsConfig()
+        .getAvailableModelsForAuthType(AuthType.USE_OPENAI),
+    ).toEqual(providers);
+    expect(listener).toHaveBeenCalled();
+    await config.refreshAuth(AuthType.USE_GEMINI);
+    expect(config.getContentGenerator()).toBeDefined();
+    expect(config.getAuthType()).toBe(AuthType.USE_GEMINI);
+  });
+
   it('forwards usageStatisticsEnabled and proxy to the extension manager', () => {
     // installProxyDispatcher: false keeps this test from pinning a
     // process-global undici dispatcher; the wiring under test (the two
@@ -1223,6 +1423,205 @@ describe('Server Config (config.ts)', () => {
     }
   });
 
+  describe('project hooks approval gate', () => {
+    it('withholds project hooks while they await approval, never user hooks', () => {
+      const config = makeConfig({
+        userHooks,
+        projectHooks,
+        projectHooksPendingApproval: true,
+      });
+
+      expect(config.isProjectHooksPendingApproval()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getWithheldProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBe(userHooks);
+
+      config.setProjectHooksPendingApproval(false);
+
+      expect(config.isProjectHooksPendingApproval()).toBe(false);
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getWithheldProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['not gated', undefined, false, false],
+      ['gated and approved', false, true, false],
+      ['gated and pending', true, true, true],
+    ])(
+      'reports a session that is %s',
+      (_label, projectHooksPendingApproval, gated, pending) => {
+        const config = makeConfig({ projectHooksPendingApproval });
+        expect(config.isProjectHooksApprovalGated()).toBe(gated);
+        expect(config.isProjectHooksPendingApproval()).toBe(pending);
+      },
+    );
+
+    it('re-arms a --yolo session once it leaves YOLO', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksPendingApproval: false,
+        projectHooksYoloExempt: true,
+      });
+      expect(config.isProjectHooksApprovalGated()).toBe(false);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.isProjectHooksApprovalGated()).toBe(true);
+    });
+
+    it('a stored approval authorizes the block inside a --yolo session with trust off', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksYoloExempt: true,
+        projectHooksApproved: true,
+        projectHooks,
+      });
+
+      expect(config.isProjectHooksApprovalGated()).toBe(false);
+      expect(config.getProjectHooks()).toBe(projectHooks);
+    });
+
+    it('replacing the block under --yolo drops the old approval authority', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksYoloExempt: true,
+        projectHooksApproved: true,
+        projectHooks,
+      });
+      const edited = {
+        SessionStart: [{ hooks: [{ type: 'command', command: 'echo new' }] }],
+      };
+
+      config.setHooksFromSettings({ projectHooks: edited });
+
+      // The exemption suppresses asking, not the authority check: the
+      // edited block never carries the previous block's approval.
+      expect(config.getProjectHooks()).toBeUndefined();
+
+      // The caller re-applies a genuine decision for the new block.
+      config.setProjectHooksPendingApproval(false);
+      expect(config.getProjectHooks()).toBe(edited);
+    });
+
+    it('a --yolo session without approval or trust still withholds the block', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksYoloExempt: true,
+        projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('the display-only block surfaces in diagnostics but never executes', () => {
+      const config = makeConfig({
+        folderTrust: true,
+        trustedFolder: false,
+        projectHooksDisplayOnly: projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toEqual(projectHooks);
+    });
+
+    it('the display-only block surfaces even when the empty execution block reads the gate as cleared', () => {
+      // Feature on + untrusted: the settings layer passes no execution
+      // block and pending=false ("nothing to approve"). The listing must
+      // still show the configured hooks as trust-withheld.
+      const config = makeConfig({
+        folderTrust: true,
+        trustedFolder: false,
+        projectHooksPendingApproval: false,
+        projectHooksDisplayOnly: projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toEqual(projectHooks);
+    });
+
+    it('withholds the legacy merged hooks from both getters while pending', () => {
+      const config = makeConfig({
+        hooks: projectHooks,
+        projectHooksPendingApproval: true,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getUserHooks()).toBeUndefined();
+
+      config.setProjectHooksPendingApproval(false);
+
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBe(projectHooks);
+    });
+
+    it('keeps a mid-session gate after the hooks are replaced', () => {
+      const config = makeConfig({ projectHooks });
+      config.setProjectHooksPendingApproval(true);
+
+      config.setHooksFromSettings({ projectHooks });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['the trust feature is off (default)', {}],
+      [
+        'the feature is on but the folder is untrusted',
+        { folderTrust: true, trustedFolder: false },
+      ],
+    ] as Array<[string, Partial<ConfigParameters>]>)(
+      'an approved block runs in an interactive session when %s',
+      (_label, trust) => {
+        const config = makeConfig({
+          interactive: true,
+          ...trust,
+          projectHooks,
+          projectHooksPendingApproval: false,
+        });
+
+        expect(config.getProjectHooks()).toBe(projectHooks);
+        // The registry loads the approved block; the listing must not add
+        // a second, trust-disabled copy of the same hooks.
+        expect(config.getTrustWithheldProjectHooks()).toBeUndefined();
+      },
+    );
+
+    it('a pending block stays withheld in an interactive untrusted session', () => {
+      const config = makeConfig({
+        interactive: true,
+        projectHooks,
+        projectHooksPendingApproval: true,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toBe(projectHooks);
+      // The approval reason stays reachable even though trust also withholds.
+      expect(config.getWithheldProjectHooks()).toBe(projectHooks);
+
+      config.setProjectHooksPendingApproval(true, true);
+      expect(config.isProjectHooksRejected()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getWithheldProjectHooks()).toBe(projectHooks);
+    });
+
+    it('an ungated interactive session still needs explicit folder trust', () => {
+      const config = makeConfig({
+        interactive: true,
+        projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toBe(projectHooks);
+
+      const trusted = makeConfig({
+        interactive: true,
+        folderTrust: true,
+        trustedFolder: true,
+        projectHooks,
+      });
+      expect(trusted.getProjectHooks()).toBe(projectHooks);
+      expect(trusted.getTrustWithheldProjectHooks()).toBeUndefined();
+    });
+  });
+
   describe('setHooksFromSettings', () => {
     it.each([
       [
@@ -1234,7 +1633,7 @@ describe('Server Config (config.ts)', () => {
       ],
       [
         'replaces project hooks without leaking them into user hooks',
-        {},
+        { interactive: true, folderTrust: true, trustedFolder: true },
         { projectHooks },
         undefined,
         projectHooks,
@@ -1266,9 +1665,13 @@ describe('Server Config (config.ts)', () => {
     });
 
     it.each([false, undefined])(
-      'keeps the project hook gate when folder trust is %s',
+      'keeps the interactive project hook gate when folder trust is %s',
       (trustedFolder) => {
-        const config = makeConfig({ folderTrust: true, trustedFolder });
+        const config = makeConfig({
+          interactive: true,
+          folderTrust: true,
+          trustedFolder,
+        });
 
         config.setHooksFromSettings({ userHooks, projectHooks });
 
@@ -1289,23 +1692,24 @@ describe('Server Config (config.ts)', () => {
 
   describe('per-scope hooks and the legacy merged fallback', () => {
     const mergedHooks = { ...systemHooks, ...userHooks, ...projectHooks };
+    const explicitTrust = { folderTrust: true, trustedFolder: true };
 
     it.each([
       [
         'does not read the merged hooks as project hooks when only user hooks are supplied',
-        { userHooks },
+        { ...explicitTrust, userHooks },
         userHooks,
         undefined,
       ],
       [
         'does not read the merged hooks as user hooks when only project hooks are supplied',
-        { projectHooks },
+        { ...explicitTrust, projectHooks },
         undefined,
         projectHooks,
       ],
       [
         'still serves the merged hooks as user and project hooks when no scope is supplied',
-        {},
+        explicitTrust,
         mergedHooks,
         mergedHooks,
       ],
@@ -1387,7 +1791,11 @@ describe('Server Config (config.ts)', () => {
         // A Config built from merged settings alone still registers the hook
         // under both the user and project sources. The planner is what keeps
         // that from running it twice.
-        const registry = await registryFor({ hooks: lintHook });
+        const registry = await registryFor({
+          folderTrust: true,
+          trustedFolder: true,
+          hooks: lintHook,
+        });
         expect(registry.getAllHooks().map(({ source }) => source)).toEqual([
           'user',
           'project',
@@ -1404,6 +1812,7 @@ describe('Server Config (config.ts)', () => {
 
     it('loads system hooks in an untrusted folder, where project hooks are withheld', () => {
       const config = makeConfig({
+        interactive: true,
         trustedFolder: false,
         systemHooks,
         projectHooks,
@@ -1411,6 +1820,133 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getSystemHooks()).toBe(systemHooks);
       expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['the trust feature is off', {}, false],
+      [
+        'the feature is on but the folder is undecided',
+        { folderTrust: true },
+        false,
+      ],
+      [
+        'the feature is on and the folder is explicitly trusted',
+        { folderTrust: true, trustedFolder: true },
+        true,
+      ],
+    ] as Array<[string, Partial<ConfigParameters>, boolean]>)(
+      'gates interactive settings-file project hooks when %s',
+      (_label, trust, explicit) => {
+        const config = makeConfig({
+          interactive: true,
+          ...trust,
+          projectHooks,
+        });
+
+        expect(config.getProjectHooks()).toEqual(
+          explicit ? projectHooks : undefined,
+        );
+        expect(config.getTrustWithheldProjectHooks()).toEqual(
+          explicit ? undefined : projectHooks,
+        );
+        expect(config.getUserHooks()).toBeUndefined();
+      },
+    );
+
+    it.each([
+      [
+        'the feature is on but the folder is undecided',
+        { folderTrust: true },
+        false,
+      ],
+      [
+        'the folder is explicitly untrusted',
+        { folderTrust: true, trustedFolder: false },
+        false,
+      ],
+      ['the trust feature is off (default)', {}, false],
+      [
+        'the feature is off and a trust flag was passed without it',
+        { trustedFolder: true },
+        false,
+      ],
+      [
+        'the feature is on and the folder is explicitly trusted',
+        { folderTrust: true, trustedFolder: true },
+        true,
+      ],
+    ] as Array<[string, Partial<ConfigParameters>, boolean]>)(
+      'applies the same explicit-trust gate to non-interactive hooks when %s',
+      (_label, trust, loaded) => {
+        const config = makeConfig({
+          interactive: false,
+          ...trust,
+          projectHooks,
+        });
+
+        expect(config.getProjectHooks()).toEqual(
+          loaded ? projectHooks : undefined,
+        );
+      },
+    );
+
+    it('exposes the withheld block to diagnostics only while trust withholds it', () => {
+      const withheld = makeConfig({ projectHooks });
+      expect(withheld.getProjectHooks()).toBeUndefined();
+      expect(withheld.getTrustWithheldProjectHooks()).toEqual(projectHooks);
+
+      const trusted = makeConfig({
+        folderTrust: true,
+        trustedFolder: true,
+        projectHooks,
+      });
+      expect(trusted.getProjectHooks()).toEqual(projectHooks);
+      expect(trusted.getTrustWithheldProjectHooks()).toBeUndefined();
+
+      expect(
+        makeConfig({
+          safeMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({
+          bareMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+    });
+
+    it('keeps safe and bare modes withholding in non-interactive sessions', () => {
+      expect(
+        makeConfig({ safeMode: true, projectHooks }).getProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({ bareMode: true, projectHooks }).getProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({
+          safeMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({
+          bareMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+    });
+
+    it('loads project hooks with IDE-granted trust even while the feature is off', () => {
+      ideContextStore.clear();
+      ideContextStore.set({ workspaceState: { isTrusted: true } });
+      try {
+        const config = makeConfig({ interactive: true, projectHooks });
+        expect(config.getProjectHooks()).toEqual(projectHooks);
+      } finally {
+        ideContextStore.clear();
+      }
     });
   });
 
@@ -1754,6 +2290,35 @@ describe('Server Config (config.ts)', () => {
       const config = await initConfig({}, LEGACY_SKIP_ALL_INIT);
       expect(config.getGeminiClient()).toBe(config.getLlmClient());
       await config.shutdown();
+    });
+  });
+
+  describe('lsp client lifecycle', () => {
+    it('stops the session lsp client on shutdown (#14751)', async () => {
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const config = makeConfig({ lspClient: { stop } as never });
+      await config.initialize(SKIP_ALL_INIT);
+      await config.shutdown();
+      expect(stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops the client even when shutdown runs before initialize', async () => {
+      // loadCliConfig installs the client before initialization, so a session
+      // that dies during startup (e.g. daemon admission rejects it) still owns
+      // language servers; teardown must not skip them over `initialized`.
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const config = makeConfig({ lspClient: { stop } as never });
+      await config.shutdown();
+      expect(stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the remaining cleanup running when lsp stop rejects', async () => {
+      const stop = vi.fn().mockRejectedValue(new Error('stop failed'));
+      const config = makeConfig({ lspClient: { stop } as never });
+      await config.initialize({ ...SKIP_ALL_INIT, skipSkillManager: false });
+      await config.shutdown();
+      expect(stop).toHaveBeenCalledTimes(1);
+      expect(config.getSkillManager()?.stopWatching).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -2769,7 +3334,18 @@ describe('Server Config (config.ts)', () => {
         .spyOn(sandboxPolicy, 'probeShellSandbox')
         .mockResolvedValue(resolvedPolicy);
       try {
-        const config = new Config(parameters());
+        const config = new Config({
+          ...parameters(),
+          bundledGeneratedUi: {
+            enabled: true,
+            server: {
+              command: process.execPath,
+              args: ['/bundle/generated-ui/main.js'],
+            },
+            skillsDir: '/bundle/generated-ui/skills',
+          },
+        });
+        config.setMcpAppHostSupported(true);
         const admittedPolicy = config.getShellExecutionSandbox();
         const refreshExtensions = vi.spyOn(
           config.getExtensionManager(),
@@ -2778,6 +3354,12 @@ describe('Server Config (config.ts)', () => {
         await config.initialize();
         expect(probe).toHaveBeenCalledWith(admittedPolicy, undefined);
         expect(config.getShellExecutionSandbox()).toBe(resolvedPolicy);
+        expect(config.getBundledGeneratedUiStatus()).toEqual({
+          version: 1,
+          enabled: false,
+          reason: 'unsupported-runtime',
+        });
+        expect(config.getBundledGeneratedUiSkillsDir()).toBeUndefined();
         expect(HookSystem).not.toHaveBeenCalled();
         expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
         expect(refreshExtensions).not.toHaveBeenCalled();
@@ -2974,6 +3556,23 @@ describe('Server Config (config.ts)', () => {
       expectRebound(child, parent, worktreeDir);
     });
 
+    it.each([undefined, 'CLI', 'desktop'])(
+      'preserves runtime channel %s through nested agent configs',
+      (channel) => {
+        const parent = makeConfig({ channel });
+        const { config: child } = deriveAgentConfig(
+          parent,
+          path.resolve('/tmp/agent'),
+        );
+        const { config: nested } = deriveAgentConfig(
+          child,
+          path.resolve('/tmp/nested-agent'),
+        );
+        expect(child.getChannel()).toBe(channel);
+        expect(nested.getChannel()).toBe(channel);
+      },
+    );
+
     it('rebinds agent workspace getters and private field reads together', () => {
       const agentWorkspace = path.resolve('/tmp/agent-workspace');
       const parent = makeConfig({ fileFiltering: ignoreFiles() });
@@ -3152,6 +3751,356 @@ describe('Server Config (config.ts)', () => {
     it('returns the same cache instance on repeated getter calls within one Config', () => {
       const config = makeConfig();
       expect(config.getFileReadCache()).toBe(config.getFileReadCache());
+    });
+  });
+
+  describe('bundled Generated UI', () => {
+    const server: MCPServerConfig = {
+      command: process.execPath,
+      args: ['/bundle/generated-ui/main.js'],
+      includeTools: ['generated_ui_show'],
+      trust: false,
+    };
+    const candidate = {
+      enabled: true,
+      server,
+      skillsDir: '/bundle/generated-ui/skills',
+    };
+    const create = (
+      overrides: Partial<ConfigParameters> = {},
+      mcpAppHost = true,
+    ) => {
+      const config = makeConfig({
+        sandbox: undefined,
+        bundledGeneratedUi: candidate,
+        ...overrides,
+      });
+      config.setMcpAppHostSupported(mcpAppHost);
+      return config;
+    };
+    const ready = async (overrides: Partial<ConfigParameters> = {}) => {
+      const config = create(overrides);
+      await config.initialize();
+      return config;
+    };
+    const expectUnavailable = (config: Config, reason: string) => {
+      expect(config.getBundledGeneratedUiStatus()).toEqual({
+        version: 1,
+        enabled: false,
+        reason,
+      });
+      expect(config.getBundledGeneratedUiSkillsDir()).toBeUndefined();
+      expect(
+        config.isSkillEnabled({ name: 'generated-ui', level: 'bundled' }),
+      ).toBe(false);
+    };
+
+    it('keeps default-off and pre-initialization sessions inactive', async () => {
+      const pending = create();
+      expect(pending.getBundledGeneratedUiStatus().enabled).toBe(false);
+      expect(pending.getMcpServers()).not.toHaveProperty('generated-ui');
+      const config = await ready({ bundledGeneratedUi: undefined });
+      expectUnavailable(config, 'setting-disabled');
+      config.setMcpServers({ ordinary: { command: 'ordinary' } });
+      expect(config.getBundledGeneratedUiStatus().enabled).toBe(false);
+      expect(
+        config.isSkillEnabled({ name: 'generated-ui', level: 'user' }),
+      ).toBe(true);
+    });
+
+    it('stays inactive for clients that do not render MCP Apps', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const config = create({}, false);
+        await config.initialize();
+        expectUnavailable(config, 'unsupported-client');
+        expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+        expect(config.getWarnings()).not.toContainEqual(
+          expect.stringContaining('Generated UI'),
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('stays inactive for channel sessions the daemon creates', async () => {
+      const config = create();
+      config.setSessionSource('channel', 'feishu-main');
+      await config.initialize();
+      expectUnavailable(config, 'unsupported-client');
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      expect(config.getWarnings()).not.toContainEqual(
+        expect.stringContaining('Generated UI'),
+      );
+    });
+
+    it('keeps a disabled setting ahead of the client check', async () => {
+      expectUnavailable(
+        await (async () => {
+          const config = create({ bundledGeneratedUi: undefined }, false);
+          await config.initialize();
+          return config;
+        })(),
+        'setting-disabled',
+      );
+    });
+
+    it('registers one independent binding after initialization and retains it across reloads', async () => {
+      const config = await ready();
+      expect(config.getBundledGeneratedUiStatus()).toEqual({
+        version: 1,
+        enabled: true,
+      });
+      expect(config.getMcpServers()?.['generated-ui']).toBe(server);
+      expect(config.getSettingsMcpServers()?.['generated-ui']).toBeUndefined();
+      expect(config.getBundledGeneratedUiSkillsDir()).toBe(candidate.skillsDir);
+      await config.reinitializeMcpServers({
+        ordinary: { command: 'ordinary' },
+      });
+      expect(config.getMcpServers()?.['generated-ui']).toBe(server);
+      expect(config.getBundledGeneratedUiStatus().enabled).toBe(true);
+      const snapshot = config.getBundledGeneratedUiStatus();
+      snapshot.enabled = false;
+      expect(config.getBundledGeneratedUiStatus().enabled).toBe(true);
+    });
+
+    it('freezes the switch until a new owning Config is created', async () => {
+      const settingsCandidate = { ...candidate, enabled: false };
+      const old = await ready({ bundledGeneratedUi: settingsCandidate });
+      settingsCandidate.enabled = true;
+      await old.reinitializeMcpServers({ ordinary: { command: 'ordinary' } });
+      expectUnavailable(old, 'setting-disabled');
+      const next = await ready({ bundledGeneratedUi: settingsCandidate });
+      expect(next.getBundledGeneratedUiStatus().enabled).toBe(true);
+      settingsCandidate.enabled = false;
+      await next.reinitializeMcpServers({});
+      expect(next.getBundledGeneratedUiStatus().enabled).toBe(true);
+      expectUnavailable(
+        await ready({ bundledGeneratedUi: settingsCandidate }),
+        'setting-disabled',
+      );
+    });
+
+    it.each([
+      ['settings', { mcpServers: { 'generated-ui': { command: 'manual' } } }],
+      [
+        'session',
+        {
+          topTierMcpServers: { 'generated-ui': { command: 'manual' } },
+          mcpServers: { 'generated-ui': { command: 'manual' } },
+        },
+      ],
+    ] as const)(
+      'preserves a manual %s provider and does not activate later',
+      async (_label, overrides) => {
+        const config = await ready(overrides);
+        expectUnavailable(config, 'provider-conflict');
+        expect(config.getMcpServers()?.['generated-ui']?.command).toBe(
+          'manual',
+        );
+        config.setMcpServers({});
+        expectUnavailable(config, 'provider-conflict');
+      },
+    );
+
+    it('checks runtime overlays injected after construction', async () => {
+      const config = create();
+      config.addRuntimeMcpServer('generated-ui', { command: 'runtime-manual' });
+      await config.initialize();
+      expectUnavailable(config, 'provider-conflict');
+      expect(config.getMcpServers()?.['generated-ui']?.command).toBe(
+        'runtime-manual',
+      );
+    });
+
+    it('checks active extensions discovered during initialization', async () => {
+      const config = create();
+      const extension = extensionFixture('manual-ui');
+      extension.config.mcpServers = {
+        'generated-ui': { command: 'extension-manual' },
+      };
+      vi.spyOn(config, 'getActiveExtensions').mockReturnValue([extension]);
+      await config.initialize();
+      expectUnavailable(config, 'provider-conflict');
+      expect(config.getMcpServers()?.['generated-ui']?.command).toBe(
+        'extension-manual',
+      );
+    });
+
+    it.each([
+      { bareMode: true },
+      { safeMode: true },
+      { sandbox: SANDBOX },
+      { provisionalWorkspace: true },
+    ])(
+      'withholds the provider and writer in unsupported modes: %j',
+      async (mode) => {
+        const config = await ready(mode);
+        expectUnavailable(config, 'unsupported-runtime');
+        expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      },
+    );
+
+    it('does not enable Generated UI for managed execution', async () => {
+      const config = create({ sessionExecutionEngine: 'managed' });
+      vi.spyOn(internals(config), 'activateChatRecording').mockResolvedValue(
+        undefined,
+      );
+      await config.initialize();
+      expectUnavailable(config, 'unsupported-runtime');
+      expect(config.getMcpServers()).toEqual({});
+    });
+
+    it('does not enable a local provider for an SSH execution environment', async () => {
+      const config = create({
+        executionEnvironment: new SshExecutionEnvironment(
+          { host: 'host', directory: '/srv/project' },
+          '/local/anchor',
+        ),
+      });
+      await config.initialize(SKIP_LLM_INIT);
+      expectUnavailable(config, 'unsupported-runtime');
+      expect(config.getMcpServers()).toEqual({});
+    });
+
+    it('keeps read-only Agent Host sessions unavailable', async () => {
+      const config = create();
+      config.setSessionSource('agent-host');
+      await config.initialize();
+      expectUnavailable(config, 'unsupported-runtime');
+    });
+
+    it.each([
+      { skipMcpDiscovery: true, disableBundledGeneratedUi: true },
+      { skipSkillManager: true, skipHooks: true },
+    ])(
+      'withholds the provider in bootstrap/read-only initialization: %j',
+      async (options) => {
+        const config = create();
+        await config.initialize(options);
+        expectUnavailable(config, 'unsupported-runtime');
+        expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      },
+    );
+
+    it('keeps normal deferred MCP discovery eligible', async () => {
+      const config = create();
+      await config.initialize({ skipMcpDiscovery: true });
+      expect(config.getBundledGeneratedUiStatus()).toEqual({
+        version: 1,
+        enabled: true,
+      });
+      expect(config.getMcpServers()?.['generated-ui']).toBe(server);
+    });
+
+    it('withholds untrusted workspaces and incomplete assets', async () => {
+      expectUnavailable(
+        await ready({ folderTrust: true, trustedFolder: false }),
+        'workspace-untrusted',
+      );
+      expectUnavailable(
+        await ready({
+          bundledGeneratedUi: {
+            enabled: true,
+            unavailableReason: 'assets-missing',
+          },
+        }),
+        'assets-missing',
+      );
+    });
+
+    it('warns about an unavailable runtime only for an explicit opt-in', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const byDefault = await ready({
+          folderTrust: true,
+          trustedFolder: false,
+        });
+        expectUnavailable(byDefault, 'workspace-untrusted');
+        expect(byDefault.getWarnings()).not.toContainEqual(
+          expect.stringContaining('Generated UI'),
+        );
+        const requested = await ready({
+          folderTrust: true,
+          trustedFolder: false,
+          bundledGeneratedUi: { ...candidate, explicit: true },
+        });
+        expectUnavailable(requested, 'workspace-untrusted');
+        expect(requested.getWarnings()).toContainEqual(
+          expect.stringContaining(
+            'Bundled Generated UI is unavailable (workspace-untrusted)',
+          ),
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it.each([
+      { allowedMcpServers: [] },
+      { excludedMcpServers: ['generated-*'] },
+      { pendingMcpServers: ['generated-ui'] },
+      { disabledTools: ['generated_ui_show'] },
+      { disabledTools: ['mcp__generated-ui__generated_ui_show'] },
+    ])('honors existing MCP/tool restrictions: %j', async (policy) => {
+      const config = await ready(policy);
+      expectUnavailable(config, 'policy-disabled');
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+    });
+
+    it('applies live admission restrictions to the provider and cached writer', async () => {
+      const config = await ready();
+      config.setAllowedMcpServers([]);
+      expectUnavailable(config, 'policy-disabled');
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      config.setAllowedMcpServers(undefined);
+      expect(config.getBundledGeneratedUiStatus().enabled).toBe(true);
+      config.setDisabledTools(
+        new Set(['mcp__generated-ui__generated_ui_show']),
+      );
+      expectUnavailable(config, 'policy-disabled');
+    });
+
+    it('does not let a newly enabled extension take over an active built-in binding', async () => {
+      const config = await ready();
+      const extension = extensionFixture('late-manual-ui');
+      extension.config.mcpServers = {
+        'generated-ui': { command: 'extension-manual' },
+      };
+      const active = vi
+        .spyOn(config, 'getActiveExtensions')
+        .mockReturnValue([extension]);
+      expectUnavailable(config, 'provider-conflict');
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      expect(config.isBundledGeneratedUiServer('generated-ui')).toBe(true);
+      await config.reinitializeMcpServers({});
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      active.mockReturnValue([]);
+      expect(config.getMcpServers()?.['generated-ui']).toBe(server);
+    });
+
+    it('rejects hot shadowing without changing the active binding', async () => {
+      const config = await ready();
+      expect(() =>
+        config.addRuntimeMcpServer('generated-ui', { command: 'manual' }),
+      ).toThrow('Restart the owning session');
+      expect(() =>
+        config.setMcpServers({ 'generated-ui': { command: 'manual' } }),
+      ).toThrow('Restart the owning session');
+      expect(config.getMcpServers()?.['generated-ui']).toBe(server);
+    });
+
+    it('cannot grant a disabled bundled writer through skills.enabled', async () => {
+      const config = await ready({
+        bundledGeneratedUi: { enabled: false },
+        enabledSkillNamesProvider: () => new Set(['generated-ui']),
+      });
+      expect(
+        config.isSkillEnabled({ name: 'generated-ui', level: 'bundled' }),
+      ).toBe(false);
+      expect(
+        config.isSkillEnabled({ name: 'generated-ui', level: 'project' }),
+      ).toBe(true);
     });
   });
 
@@ -3635,6 +4584,27 @@ describe('Server Config (config.ts)', () => {
     };
     const emptyResume = () =>
       ({ conversation: { messages: [] } }) as unknown as ResumedSessionData;
+
+    it('drops the extraction-cadence state of both sides of a session switch', async () => {
+      const config = await initConfig({}, LEGACY_SKIP_ALL_INIT);
+      const discard = vi.spyOn(
+        config.getMemoryManager(),
+        'discardExtractCadence',
+      );
+      const previous = config.getSessionId();
+
+      config.startNewSession('replacement-session');
+      expect(discard).toHaveBeenLastCalledWith(previous, 'replacement-session');
+
+      // Resuming the id the session already has is not a lifecycle transition,
+      // but the resumed id still must not inherit the earlier skip.
+      discard.mockClear();
+      config.startNewSession('replacement-session');
+      expect(discard).toHaveBeenCalledWith(
+        'replacement-session',
+        'replacement-session',
+      );
+    });
 
     it('clears loaded Skill state at the session boundary', async () => {
       const config = await initConfig({}, LEGACY_SKIP_ALL_INIT);
@@ -4872,6 +5842,27 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
+    it.each([
+      ['the default', { usageStatisticsEnabled: true }, true],
+      [
+        'the operator refresh switch',
+        { usageStatisticsEnabled: true, modelCatalogRefreshEnabled: false },
+        false,
+      ],
+      [
+        'the usage-statistics opt-out',
+        { usageStatisticsEnabled: false },
+        false,
+      ],
+    ])(
+      'gates the model catalog refresh on %s',
+      async (_name, params, expected) => {
+        await initConfig(params, SKIP_ALL_INIT);
+
+        expect(refreshModelCatalog).toHaveBeenCalledTimes(expected ? 1 : 0);
+      },
+    );
+
     it('accepts managed handoff only after certified takeover is configured', async () => {
       const standalone = makeConfig();
       await standalone.closeSessionWriter({ handoff: true });
@@ -5620,9 +6611,9 @@ describe('Server Config (config.ts)', () => {
 
     it('shares a failed in-flight initialization with concurrent callers', async () => {
       const config = makeConfig();
-      vi.spyOn(internals(config), 'initializeInternal').mockRejectedValue(
-        new Error('startup discovery exploded'),
-      );
+      const initializeInternal = vi
+        .spyOn(internals(config), 'initializeInternal')
+        .mockRejectedValue(new Error('startup discovery exploded'));
 
       const [firstError, secondError] = await Promise.all([
         config.initialize().catch((error: unknown) => error),
@@ -5631,9 +6622,8 @@ describe('Server Config (config.ts)', () => {
       expect(firstError).toBeInstanceOf(Error);
       expect(secondError).toBe(firstError);
 
-      // A failed-and-settled first flight still flips `initializationSettled`,
-      // so a later call must throw rather than re-join the stale rejection.
-      await expect(config.initialize()).rejects.toThrow(ALREADY_INITIALIZED);
+      await expect(config.initialize()).rejects.toBe(firstError);
+      expect(initializeInternal).toHaveBeenCalledOnce();
     });
 
     it('should skip implicit startup discovery in bare mode', async () => {
@@ -5658,6 +6648,19 @@ describe('Server Config (config.ts)', () => {
         ToolNames.GET_GOAL,
         ToolNames.UPDATE_GOAL,
       ]);
+    });
+
+    it('loads bootstrap hooks with file watching disabled', async () => {
+      const config = makeConfig();
+      await config.initialize({
+        skipFileWatching: true,
+        skipLlmInitialization: true,
+        skipMcpDiscovery: true,
+      });
+      expect(HookSystem).toHaveBeenCalled();
+      expect(config.getHookSystem()?.initialize).toHaveBeenCalledWith({
+        skipFileWatching: true,
+      });
     });
 
     it('should skip hook, skill, and file checkpointing side effects when requested', async () => {
@@ -6212,6 +7215,14 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('DW03: applies the constructor and live workflow keyword preference', () => {
+      const config = makeConfig({ workflowKeywordTriggerEnabled: false });
+      expect(config.getWorkflowKeywordTriggerEnabled()).toBe(false);
+      config.setWorkflowKeywordTriggerEnabled(true);
+      expect(config.getWorkflowKeywordTriggerEnabled()).toBe(true);
+      expect(makeConfig().getWorkflowKeywordTriggerEnabled()).toBe(true);
+    });
+
     describe('bundled review workflow activation', () => {
       beforeEach(() => {
         vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', undefined);
@@ -6435,6 +7446,8 @@ describe('Server Config (config.ts)', () => {
       afterEach(restoreEnv);
 
       const interactiveCli = { interactive: true, sdkMode: false };
+      // A host with no record_artifact tool and no artifact metadata route.
+      const workerHost = { artifactRecordingSupported: false };
       // `record` is the expected isRecordArtifactEnabled(), where asserted.
       it.each`
         title                                                                              | env                                                                    | params                                           | artifact | record
@@ -6446,6 +7459,8 @@ describe('Server Config (config.ts)', () => {
         ${'keeps the Artifact tool disabled for daemon CLI env enablement'}                | ${{ QWEN_CODE_ENABLE_ARTIFACT: '1' }}                                  | ${DAEMON}                                        | ${false} | ${true}
         ${'lets daemon sessions record metadata by default without publishing'}            | ${{}}                                                                  | ${DAEMON}                                        | ${false} | ${true}
         ${'lets QWEN_CODE_ENABLE_ARTIFACT force-enable interactive CLI use'}               | ${{ QWEN_CODE_ENABLE_ARTIFACT: '1' }}                                  | ${{ ...interactiveCli, artifactEnabled: false }} | ${true}  | ${undefined}
+        ${'keeps recording off for hosts that do not support it'}                          | ${{}}                                                                  | ${{ ...DAEMON, ...workerHost }}                  | ${false} | ${false}
+        ${'keeps recording off for those hosts even when force-enabled'}                   | ${{ QWEN_CODE_ENABLE_ARTIFACT: '1' }}                                  | ${{ ...interactiveCli, ...workerHost }}          | ${true}  | ${false}
       `('%s', ({ env, params, artifact, record }) => {
         Object.assign(process.env, env);
         const config = makeConfig(params);
@@ -7640,6 +8655,107 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('the main-session policy and the auto-memory reference (#16291)', () => {
+    /** A session that can load skills: a skill manager and a Skill tool. */
+    const withSkillTool = (config: Config) => {
+      vi.spyOn(config, 'getSkillManager').mockReturnValue(
+        {} as unknown as ReturnType<Config['getSkillManager']>,
+      );
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue({
+        getAllToolNames: () => ['skill'],
+        isPermissionDeferred: () => false,
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+    };
+
+    it('sends the resident policy with a pointer when the skill can be loaded', async () => {
+      const config = makeConfig();
+      withSkillTool(config);
+      loadProjectRules();
+
+      await config.refreshHierarchicalMemory();
+
+      const policy = config.getAutoMemoryPrompt();
+      expect(policy).toContain('# auto memory');
+      expect(policy).toContain('load the `auto-memory` skill');
+      expect(policy).not.toContain('<types>');
+    });
+
+    it('keeps the full policy when no skill can be loaded', async () => {
+      const config = makeConfig();
+      vi.spyOn(config, 'getSkillManager').mockReturnValue(null);
+      loadProjectRules();
+
+      await config.refreshHierarchicalMemory();
+
+      const policy = config.getAutoMemoryPrompt();
+      expect(policy).toContain('<types>');
+      expect(policy).not.toContain('auto-memory');
+    });
+
+    // The session-start refresh runs before the tool registry exists, so the
+    // route must be decided when the policy is read, not when it is built.
+    it('sends the full policy once the registry turns out to have no Skill tool', async () => {
+      const config = makeConfig();
+      vi.spyOn(config, 'getSkillManager').mockReturnValue(
+        {} as unknown as ReturnType<Config['getSkillManager']>,
+      );
+      const toolNames: string[] = [];
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue({
+        getAllToolNames: () => toolNames,
+        isPermissionDeferred: () => false,
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      loadProjectRules();
+
+      await config.refreshHierarchicalMemory();
+
+      expect(config.getAutoMemoryPrompt()).toContain('<types>');
+      toolNames.push('skill');
+      expect(config.getAutoMemoryPrompt()).toContain(
+        'load the `auto-memory` skill',
+      );
+    });
+
+    it('gives a derived Config with no skill manager the full policy', async () => {
+      const config = makeConfig();
+      withSkillTool(config);
+      loadProjectRules();
+      await config.refreshHierarchicalMemory();
+
+      // As buildSubagentContextOverride does for a skill-denied agent (#12424).
+      const subagent = deriveConfig(config);
+      subagent.getSkillManager = () => null;
+
+      expect(config.getAutoMemoryPrompt()).toContain(
+        'load the `auto-memory` skill',
+      );
+      expect(subagent.getAutoMemoryPrompt()).toContain('<types>');
+      expect(subagent.getAutoMemoryPrompt()).not.toContain('auto-memory');
+    });
+
+    it('does not list the bundled auto-memory skill under structured recall', () => {
+      const config = makeConfig({ enableManagedAutoMemory: true });
+      Object.assign(config, { memoryRecallMode: 'structured' });
+
+      expect(
+        config.isSkillEnabled({ name: 'auto-memory', level: 'bundled' }),
+      ).toBe(false);
+    });
+
+    it.each([
+      [true, true],
+      [false, false],
+    ])(
+      'lists the bundled auto-memory skill only with managed auto-memory (enabled: %s)',
+      (enableManagedAutoMemory, listed) => {
+        const config = makeConfig({ enableManagedAutoMemory });
+
+        expect(
+          config.isSkillEnabled({ name: 'auto-memory', level: 'bundled' }),
+        ).toBe(listed);
+      },
+    );
+  });
+
   it('delivers each memory tier in the request catalog while keeping indexes out of the policy', async () => {
     const config = makeConfig({ enableTeamMemory: true });
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
@@ -8414,6 +9530,10 @@ describe('Server Config (config.ts)', () => {
 
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = makeConfig();
+    const refreshFileWatchingForWorkingDirectory = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    internals(config).hookSystem = { refreshFileWatchingForWorkingDirectory };
     Object.assign(config, {
       memoryRecallMode: 'structured',
       memoryRecallModeInitialized: true,
@@ -8437,6 +9557,7 @@ describe('Server Config (config.ts)', () => {
 
     await config.relocateWorkingDirectory(NEW_DIR);
 
+    expect(refreshFileWatchingForWorkingDirectory).toHaveBeenCalledOnce();
     expect(cwd.chdirSpy).toHaveBeenCalledWith(NEW_DIR);
     expect(config.getTargetDir()).toBe(NEW_DIR);
     expect(config.getProjectRoot()).toBe(NEW_DIR);
@@ -8570,6 +9691,7 @@ describe('Server Config (config.ts)', () => {
       '.runtime.json',
       '.worktree.json',
       '.pr.json',
+      '.title.json',
     ]);
     mockProcessCwd(NEW_DIR);
     existingPaths(...from);
@@ -9835,6 +10957,62 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
+    it.each([
+      [{}, true],
+      [{ safeMode: true }, false],
+      [{ bareMode: true }, false],
+      [{ webSearch: { enabled: false } }, false],
+      [{ disabledTools: [ToolNames.WEB_SEARCH] }, false],
+    ] satisfies Array<[Partial<ConfigParameters>, boolean]>)(
+      'registers subscription search while respecting restrictions %j',
+      async (overrides, expected) => {
+        vi.stubEnv('DEV', true);
+        process.env['DEV'] = 'true';
+        try {
+          await initConfig({
+            authType: AuthType.QWEN_SUBSCRIPTION,
+            model: 'qwen3.8-max',
+            ...overrides,
+          });
+          expect(registeredToolNames().includes(ToolNames.WEB_SEARCH)).toBe(
+            expected,
+          );
+        } finally {
+          vi.unstubAllEnvs();
+        }
+      },
+    );
+
+    it('activates search immediately after login and removes it when switching away', async () => {
+      vi.stubEnv('DEV', true);
+      process.env['DEV'] = 'true';
+      try {
+        const config = await initConfig({
+          authType: AuthType.USE_GEMINI,
+          model: 'qwen3.8-max',
+        });
+        expect(registeredToolNames()).not.toContain(ToolNames.WEB_SEARCH);
+        vi.spyOn(config, 'refreshSubscriptionModels').mockResolvedValue({
+          models: ['qwen3.8-max'],
+          cached: false,
+        });
+        stubContentGenerator();
+        await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+        expect(registeredToolNames()).toContain(ToolNames.WEB_SEARCH);
+        expect(config.getGeminiClient().setTools).toHaveBeenCalled();
+
+        registerFactory().mockClear();
+        vi.mocked(ToolRegistry.prototype.unregisterTool).mockClear();
+        await config.refreshAuth(AuthType.USE_GEMINI);
+        expect(ToolRegistry.prototype.unregisterTool).toHaveBeenCalledWith(
+          ToolNames.WEB_SEARCH,
+        );
+        expect(registeredToolNames()).not.toContain(ToolNames.WEB_SEARCH);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('does not activate a legacy model-only web search configuration', async () => {
       vi.stubEnv('DASHSCOPE_API_KEY', 'sk-test');
       try {
@@ -10108,6 +11286,21 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('defaults loopProtection to warn', () => {
+      expect(makeConfig().getLoopProtection()).toBe('warn');
+      expect(makeConfig({ loopProtection: 'stop' }).getLoopProtection()).toBe(
+        'stop',
+      );
+    });
+
+    it('falls back to warn for an unknown loopProtection mode', () => {
+      expect(
+        makeConfig({
+          loopProtection: 'Stop' as never,
+        }).getLoopProtection(),
+      ).toBe('warn');
+    });
+
     it('should use a custom maxToolCallsPerTurn if provided', () => {
       const config = makeConfig({ maxToolCallsPerTurn: 42 });
       expect(config.getMaxToolCallsPerTurn()).toBe(42);
@@ -10240,6 +11433,41 @@ describe('Server Config (config.ts)', () => {
         subagentRegistry.__mcpManagerMock.setOnBudgetEvent,
       ).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('explicit folder trust for repository execution', () => {
+  afterEach(() => ideContextStore.clear());
+
+  it.each([
+    [false, undefined, true, false],
+    [false, true, true, false],
+    [true, undefined, false, false],
+    [true, false, false, false],
+    [true, true, true, true],
+  ] as const)(
+    'distinguishes enabled=%s, trusted=%s from implicit trust',
+    (folderTrust, trustedFolder, legacy, explicit) => {
+      ideContextStore.clear();
+      const config = new Config({
+        ...MINIMAL_PARAMS,
+        folderTrust,
+        trustedFolder,
+      });
+      expect(config.isTrustedFolder()).toBe(legacy);
+      expect(config.isExplicitlyTrustedFolder()).toBe(explicit);
+    },
+  );
+
+  it('honors live IDE trust, including denial and disconnect', () => {
+    const config = new Config({ ...MINIMAL_PARAMS, folderTrust: false });
+    ideContextStore.set({ workspaceState: { isTrusted: true } });
+    expect(config.isExplicitlyTrustedFolder()).toBe(true);
+    ideContextStore.set({ workspaceState: { isTrusted: false } });
+    expect(config.isExplicitlyTrustedFolder()).toBe(false);
+    ideContextStore.clear();
+    expect(config.isTrustedFolder()).toBe(true);
+    expect(config.isExplicitlyTrustedFolder()).toBe(false);
   });
 });
 
@@ -11918,7 +13146,13 @@ describe('Model Switching and Config Updates', () => {
         const config = await withHookSystem(hookSystem);
         const warn = vi.spyOn(config.getDebugLogger(), 'warn');
 
-        const response = await hookRequest(config, eventName, {});
+        const response = await hookRequest(
+          config,
+          eventName,
+          eventName === 'FileChanged'
+            ? { file_path: '/tmp/notes.md', event: 'change' }
+            : {},
+        );
 
         expect(warn).not.toHaveBeenCalledWith(
           expect.stringContaining('Unknown hook event'),
@@ -11930,6 +13164,44 @@ describe('Model Switching and Config Updates', () => {
   });
 
   describe('direct-call hook events through the hook execution bridge', () => {
+    it.each(['add', 'change', 'unlink'] as const)(
+      'forwards a valid FileChanged %s input',
+      async (event) => {
+        const fireFileChangedEvent = vi.fn().mockResolvedValue({
+          success: true,
+          allOutputs: [],
+          errors: [],
+          totalDuration: 0,
+        });
+        const config = await withHookSystem({ fireFileChangedEvent });
+        const response = await hookRequest(config, 'FileChanged', {
+          file_path: path.resolve('/memory/topic.md'),
+          event,
+        });
+        expect(response.success).toBe(true);
+        expect(fireFileChangedEvent).toHaveBeenCalledWith(
+          path.resolve('/memory/topic.md'),
+          event,
+          undefined,
+        );
+      },
+    );
+
+    it.each([
+      {},
+      { file_path: 'relative.md', event: 'change' },
+      { file_path: '/memory/topic.md', event: 'rename' },
+      { file_path: 1, event: 'add' },
+    ])(
+      'rejects invalid FileChanged input %j before dispatch',
+      async (input) => {
+        const fireFileChangedEvent = vi.fn();
+        const config = await withHookSystem({ fireFileChangedEvent });
+        const response = await hookRequest(config, 'FileChanged', input);
+        expect(response.success).toBe(false);
+        expect(fireFileChangedEvent).not.toHaveBeenCalled();
+      },
+    );
     const dispatch = async (
       method: string,
       fire: ReturnType<typeof vi.fn>,

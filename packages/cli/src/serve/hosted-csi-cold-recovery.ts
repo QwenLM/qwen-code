@@ -156,12 +156,15 @@ export async function recoverHostedCsiReceipts(
         throw new Error('Original CSI accepted member is missing.');
       reason = 'CSI file input exceeds the durable Session limit.';
     }
+    // The converter carries in-memory provenance, which is a symbol and
+    // cannot survive the persisted history; rebuild the durable shape so
+    // recovery matches the row it reads back.
     const parts = convertToFunctionErrorResponse(
       call.name!,
       call.id!,
       [],
       reason,
-    );
+    ).map((part) => ({ functionResponse: part.functionResponse }));
     const existing = projected[batchIndex + 1 + refusalCount];
     if (
       !existing ||

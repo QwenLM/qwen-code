@@ -44,6 +44,34 @@ function enclosingLayer(rule: Rule): string | undefined {
 }
 
 describe('build artifact — package boundary', () => {
+  it('keeps Generated UI retention out of the read-only transcript runtime', () => {
+    const withoutCss = (javascript: string) =>
+      javascript.replace(/^const __qwenWebShellCss=.*\n/gm, '');
+    expect(withoutCss(readTranscriptBundle())).not.toContain(
+      'data-generated-ui-slot',
+    );
+    expect(withoutCss(readPackageJavascript())).toContain(
+      'data-generated-ui-slot',
+    );
+  });
+
+  it('keeps deletion-only copy out of the read-only transcript', () => {
+    for (const copy of [
+      'Delete permanently',
+      '所选原始消息将从历史中永久删除。已有摘要、命令执行效果和项目文件保持不变。已进入摘要的信息仍可能影响后续回复。',
+      'Session history changed. Select the messages again before deleting.',
+    ]) {
+      expect(
+        readPackageJavascript().includes(copy),
+        `Interactive copy: ${copy}`,
+      ).toBe(true);
+      expect(
+        readTranscriptBundle().includes(copy),
+        `Read-only copy: ${copy}`,
+      ).toBe(false);
+    }
+  });
+
   it.each(['.', 'assets'])(
     'ships the spreadsheet worker in a lazy chunk in dist/%s',
     (directory) => {
@@ -126,6 +154,10 @@ describe('build artifact — package boundary', () => {
     expect(bundle).not.toContain('react/jsx-dev-runtime');
     expect(bundle).not.toContain('jsxDEV');
     expect(bundle).not.toContain('fileName:');
+  });
+
+  it('uses the host React DOM server renderer for conversation exports', () => {
+    expect(readPackageJavascript()).toContain('from "react-dom/server"');
   });
 
   it('externalizes @qwen-code/sdk subpaths', () => {
@@ -483,6 +515,19 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(readTranscriptBundle()).not.toContain('/tool-details/get');
   });
 
+  it('keeps Managed MCP management transport and copy out of the transcript entry', () => {
+    const transcript = readTranscriptBundle();
+    const packaged = readPackageJavascript();
+    for (const content of [
+      '/session-mcp/management/submit',
+      'Choose an exact definition published for this Runtime and Workspace.',
+      '原命令仍需确认，请先查询该命令，再开始其他修改。',
+    ]) {
+      expect(packaged).toContain(content);
+      expect(transcript).not.toContain(content);
+    }
+  });
+
   it('keeps workspace mutations out of the read-only transcript entry', () => {
     const transcript = readTranscriptBundle();
     const packaged = readPackageJavascript();
@@ -520,6 +565,14 @@ describe('build artifact — transcript entry (#11031)', () => {
       expect(bundle).not.toContain(`"${key}"`);
       expect(bundle).not.toContain(`'${key}'`);
     }
+  });
+
+  it('keeps Token Usage copy and lookups in the interactive entry only', () => {
+    expect(readTranscriptBundle()).not.toMatch(/["'`]tokenUsage\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('tokenUsage.inputWithCacheRate');
+    expect(interactive).toContain('Failed to load token usage.');
+    expect(interactive).toContain('Token 消耗加载失败。');
   });
 
   it('carries no Live Voice strings and looks none up', () => {
@@ -577,6 +630,19 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js.includes('managed.tasks.')).toBe(false);
   });
 
+  it('keeps browser notification strings and lookups in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toContain('browserNotifications.');
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('browserNotifications.helpMac');
+    expect(interactive).toContain('browserNotifications.approval');
+    expect(interactive).toContain('Open System Settings → Notifications.');
+    expect(interactive).toContain('浏览器（Chrome');
+  });
+
   it('keeps remote Workspace registration copy in the interactive entry', () => {
     expect(readPackageJavascript()).toContain('managed.remoteWorkspaceAdd');
     expect(readTranscriptBundle()).not.toContain('managed.remoteWorkspace');
@@ -606,13 +672,16 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(interactive).toContain('审阅 App 消息');
   });
 
-  it('keeps trajectory filter strings in the interactive entry only', () => {
+  it('keeps trajectory chrome strings in the interactive entry only', () => {
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js).not.toMatch(/["'`]trajectory\.(filter|window)\./);
-    expect(readPackageJavascript()).toContain('trajectory.window.older');
+    expect(js).not.toMatch(
+      /["'`]trajectory\.(filter|window|summary|pill|boundary|about)\./,
+    );
+    expect(readPackageJavascript()).toContain('trajectory.window.return');
+    expect(readPackageJavascript()).toContain('trajectory.pill.live');
     expect(readPackageJavascript()).toContain('trajectory.filter.search');
     expect(readPackageJavascript()).toContain('Search loaded records');
   });

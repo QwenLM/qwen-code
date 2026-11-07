@@ -9,6 +9,25 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    '週額度已用完{{reset}}。您可以等待額度恢復，或執行 /upgrade 升級方案以取得更多額度。',
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    '週額度已用完{{reset}}，請在額度恢復後重試。',
+  "You've used up your credits.{{reset}} Please try again after the reset.":
+    '額度已用完{{reset}}，請在額度恢復後重試。',
+  ' Your credits are expected to reset in {{time}}.':
+    '，預計將於{{time}}後恢復',
+  '{{days}} and {{hours}}': '{{days}} {{hours}}',
+  '1 day': '1天',
+  '{{count}} days': '{{count}}天',
+  '1 hour': '1小時',
+  '{{count}} hours': '{{count}}小時',
+  Retry: '重試',
+  'Connecting…': '正在連線…',
+  'Generated UI': 'Generated UI 生成式介面',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    '在支援的本機工作階段中啟用內建 Generated UI。重新建立所屬工作階段後生效。',
+
   'Cannot disable an extension-provided MCP server here.':
     '無法在此處停用擴展提供的 MCP 伺服器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的認證資訊。',
@@ -205,6 +224,7 @@ export default {
   'toolDisplayName.CronCreate': '建立定時任務',
   'toolDisplayName.CronList': '定時任務清單',
   'toolDisplayName.CronDelete': '刪除定時任務',
+  'toolDisplayName.AutofixPr': 'PR 自動修復',
   'toolDisplayName.LoopWakeup': '循環喚醒',
   'toolDisplayName.CreateSubSession': '建立子會話',
   'toolDisplayName.ListAgents': '列出 Agent',
@@ -661,6 +681,8 @@ export default {
   'disabled (bare mode)': '已禁用（精簡模式）',
   'disabled (safe mode)': '已禁用（安全模式）',
   'disabled (disableAllHooks)': '已禁用（disableAllHooks）',
+  'disabled (not approved)': '已禁用（未核准）',
+  'disabled (rejected)': '已禁用（已拒絕）',
   'disabled (folder not trusted)': '已禁用（資料夾未受信任）',
   'disabled (turned off for this session)': '已禁用（本工作階段中已關閉）',
   'View Details': '查看詳情',
@@ -714,6 +736,9 @@ export default {
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     '要查看更改，必須重啟 Qwen Code。按 r 退出並立即應用更改。',
   'Code Mode Only (Experimental)': '僅程式碼模式（實驗性）',
+  'Mods (Experimental)': 'Mods（實驗性）',
+  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
+    '在受信任的本機互動終端和無介面工作階段中載入已啟用擴充功能的實驗性 Mods。修改後需重新啟動。',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '終端響鈴通知',
@@ -2014,6 +2039,8 @@ export default {
   'System prompt': '系統提示',
   'Built-in tools': '內置工具',
   'MCP tools': 'MCP tools',
+  'Instruction files': '指令檔案',
+  'Auto memory': '自動記憶',
   'Memory files': '記憶檔案',
   Skills: '技能',
   Messages: '消息',
@@ -2364,6 +2391,8 @@ export default {
   'start server': '啟動伺服器',
   'No compression needed.': '無需壓縮。',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    '指定版本升級需要獨立安裝。請使用目前的安裝方式手動安裝 {{version}} 版本。',
   'Check for Qwen Code updates and install if available':
     '檢查 Qwen Code 更新並安裝（如果可用）',
   'Qwen Code update available! {{current}} → {{latest}}':
@@ -2529,4 +2558,86 @@ export default {
     '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny），並管理受信任控制器（controllers | revoke）',
   'Create a git commit with an AI-drafted message':
     '使用 AI 起草的提交訊息建立 git 提交',
+  'Authentication timed out. Please try again or select a different authentication method.':
+    '驗證逾時，請重試或選擇其他驗證方式。',
+  'Authorization or access was denied.': '授權或存取遭拒。',
+  'Retry Connection': '重試',
+  'Checking your subscription…': '正在檢查你的訂閱…',
+  'Choose another model provider': '選擇其他模型服務供應商',
+  'Could not complete authorization. Please try signing in again.':
+    '無法完成授權，請重新登入。',
+  'Could not read or save Qwen credentials. Check local file permissions and disk space.':
+    '無法讀取或儲存 Qwen 憑證，請檢查本機檔案權限和磁碟空間。',
+  'Could not refresh your Qwen session. Please try again.':
+    '無法更新 Qwen 登入憑證，請重試。',
+  'Could not remove local Qwen credentials. Check local file permissions.':
+    '無法清除本機 Qwen 憑證，請檢查檔案權限。',
+  'Could not request an authorization link. Please try signing in again.':
+    '無法申請授權連結，請重新登入。',
+  'Enter to select, ↑↓ to navigate · Esc to close':
+    '按 Enter 選取，↑↓ 切換 · Esc 關閉',
+  "If the browser didn't open, visit:": '如果瀏覽器未開啟，請前往：',
+  'Loading models from provider…': '正在從服務供應商載入模型…',
+  'Model: {{model}}': '模型：{{model}}',
+  'View Plans': '檢視方案',
+  'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.':
+    '正在瀏覽器中開啟 chat.qwen.ai… 請登入以連接 Qwen Code。',
+  'Opens the Qwen Code plans page in your browser':
+    '在瀏覽器中開啟 Qwen Code 方案頁面',
+  'Qwen Account with Subscription': '使用 Qwen 訂閱帳號',
+  'Qwen Code is included with Qwen Plus and Pro':
+    'Qwen Plus 和 Pro 包含 Qwen Code',
+  'Qwen Subscription': 'Qwen 訂閱',
+  'Qwen {{plan}} is active · usage is included with your plan':
+    'Qwen {{plan}} 已啟用 · 用量包含在你的方案中',
+  'Recommended models · provider list unavailable, showing built-ins':
+    '推薦模型 · 無法取得服務供應商清單，顯示內建模型',
+  'Sign out': '登出',
+  'Signed in as {{email}}': '已登入 {{email}}',
+  'Signed in successfully · {{email}}': '登入成功 · {{email}}',
+  'Current plan: Qwen {{plan}}. Qwen Code is ready.':
+    '目前方案：Qwen {{plan}}，已可使用 Qwen Code',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.':
+    '模型：{{model}}，輸入 /upgrade 升級方案，/usage 查看用量，/model 切換模型。',
+  'Common commands: /usage   /upgrade   /model   /status   /logout':
+    '常用指令：/usage   /upgrade   /model   /status   /logout',
+  'Signed in as {{email}} (Qwen {{plan}})': '已登入 {{email}}（Qwen {{plan}}）',
+  'The network request failed or timed out.': '網路請求失敗或逾時。',
+  'The service returned an invalid response.': '服務回傳的資料格式無效。',
+  'Too many requests. Please try again later.': '請求過多，請稍後重試。',
+  'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai':
+    '在 chat.qwen.ai 訂閱 Plus／Pro，解鎖 Qwen Code 和 Agent 能力',
+  'Your login credentials are no longer valid. Run /auth to sign in again.':
+    '登入憑證已失效，請執行 /auth 重新登入。',
+  'Switch Provider': '切換供應商',
+  'Use another account': '使用其他帳號',
+  'Waiting for sign-in…': '正在等待登入…',
+  'Waiting for your subscription to become active…': '正在等待你的訂閱生效…',
+  'You are signed out locally, but the remote session could not be revoked.':
+    '本機已登出，但未能撤銷遠端工作階段。',
+  "You're signed in with a {{plan}} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; this terminal continues automatically after you subscribe.":
+    '你目前登入的 {{plan}} 帳號未包含 Qwen Code。請在瀏覽器中選擇 Plus 或 Pro；訂閱後此終端機將自動繼續。',
+  'Your Qwen session has expired. Run /auth to sign in again.':
+    '你的 Qwen 登入已過期，請執行 /auth 重新登入。',
+  'c to copy link · Esc to cancel': '按 c 複製連結 · Esc 取消',
+  'Model: {{model}} · Run /usage to see your plan usage':
+    '模型：{{model}} · 執行 /usage 查看方案用量',
+  'Type your request, or /usage': '輸入你的請求，或 /usage',
+  'Try:': '試試：',
+  'Open Qwen subscription plans': '開啟 Qwen 訂閱方案頁',
+  'Could not open your browser. Visit {{url}}':
+    '無法開啟瀏覽器，請造訪 {{url}}',
+  'Qwen subscription plans: {{url}}': 'Qwen 訂閱方案：{{url}}',
+  'Sign out of your Qwen account': '登出 Qwen 帳號',
+  'This connection does not require /logout. Use /auth to switch model providers.':
+    '目前連線無需透過 /logout 登出。如需切換模型服務，請使用 /auth。',
+  'This command is only available with Qwen Subscription login. Use /auth to sign in to Qwen Subscription.':
+    '此命令僅適用於 Qwen 訂閱登入。如需使用 Qwen 訂閱，請透過 /auth 登入。',
+  'Wait for the current response to finish before signing out.':
+    '請等待目前回覆結束後再登出。',
+  'You are signed out, but the saved authentication selection could not be cleared.':
+    '已登出，但無法清除儲存的驗證方式。',
+  'Signed out of Qwen. Use /auth to sign in with another account.':
+    '已登出 Qwen，請使用 /auth 登入其他帳號。',
+  'Tip: Run /usage to see your plan usage.': '提示：執行 /usage 查看方案用量。',
 };

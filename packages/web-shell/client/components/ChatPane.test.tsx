@@ -5,9 +5,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as messageDeletion from '../utils/message-deletion';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { DAEMON_APPROVAL_MODES } from '../test/sidebarHarness';
 import {
   DaemonHttpError,
   GOAL_PAUSE_REASON_COMMAND,
@@ -77,6 +79,7 @@ const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
 const setReasoningEffort = vi.fn(async () => {});
+const setWorkflowMode = vi.fn(async (_requested: boolean) => {});
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
 const getTasks = vi.fn();
 const getWorkflowTasks = vi.fn();
@@ -86,6 +89,8 @@ const readAttachment = vi.fn();
 const getContextUsage = vi.fn();
 const loadSession = vi.fn(async () => {});
 const daemonActions = {
+  getContext: vi.fn(),
+  refreshModels: vi.fn().mockResolvedValue(undefined),
   loadSession,
   sendPrompt,
   submitPermission,
@@ -94,6 +99,7 @@ const daemonActions = {
   setApprovalMode,
   setModel,
   setReasoningEffort,
+  setWorkflowMode,
   loadArtifacts,
   getTasks,
   getWorkflowTasks,
@@ -119,9 +125,20 @@ const latestComposerCoreOptions = vi.hoisted(() => ({
 const paneSettings = vi.fn(async () => ({ v: 1, settings: [] }));
 const workspaceByCwd = vi.fn(() => ({ workspaceSettings: paneSettings }));
 const paneWorkspaceClient = { workspaceByCwd };
+const subscriptionActions = {
+  getSubscriptionConfig: vi.fn().mockResolvedValue({ enabled: false }),
+  loadProviders: vi.fn().mockResolvedValue({ current: null }),
+  signOutSubscription: vi.fn().mockResolvedValue(undefined),
+};
+const ownerGuard = {
+  capture: () => {
+    const captured = ownerVersion;
+    return { isCurrent: () => ownerVersion === captured };
+  },
+};
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
+  DAEMON_APPROVAL_MODES,
   useActions: () => daemonActions,
   useConnection: () => connectionState,
   useDaemonFollowupSuggestion: (options: any) => {
@@ -149,7 +166,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   }),
   usePromptStatus: () => 'idle',
   useOptionalWorkspace: () => undefined,
-  useWorkspaceActions: () => ({}),
+  useWorkspaceActions: () => subscriptionActions,
   useWorkspace: () => ({
     capabilities: connectionState.capabilities,
     client: paneWorkspaceClient,
@@ -157,12 +174,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
     workspaceCwd: '/primary',
   }),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
-  useDaemonSessionOwnerGuard: () => ({
-    capture: () => {
-      const captured = ownerVersion;
-      return { isCurrent: () => ownerVersion === captured };
-    },
-  }),
+  useDaemonSessionOwnerGuard: () => ownerGuard,
 }));
 
 vi.mock('../session-catalog/session-catalog-hooks', () => ({
@@ -432,6 +444,14 @@ let container: HTMLDivElement | null = null;
 const EMPTY_CUSTOMIZATION: WebShellCustomization = {};
 
 beforeEach(() => {
+  subscriptionActions.getSubscriptionConfig.mockReset();
+  subscriptionActions.getSubscriptionConfig.mockResolvedValue({
+    enabled: false,
+  });
+  subscriptionActions.loadProviders.mockReset();
+  subscriptionActions.loadProviders.mockResolvedValue({ current: null });
+  subscriptionActions.signOutSubscription.mockReset();
+  subscriptionActions.signOutSubscription.mockResolvedValue(undefined);
   paneSettings.mockReset();
   paneSettings.mockResolvedValue({ v: 1, settings: [] });
   workspaceByCwd.mockClear();
@@ -491,6 +511,7 @@ beforeEach(() => {
   setApprovalMode.mockClear();
   setModel.mockClear();
   setReasoningEffort.mockClear();
+  setWorkflowMode.mockReset().mockResolvedValue(undefined);
   enqueuePrompt.mockClear();
   enqueuePrompt.mockReturnValue(true);
   removeQueuedPrompt.mockClear();
@@ -544,6 +565,61 @@ function rerender(
     ),
   );
 }
+
+describe('pane subscription logout', () => {
+  it('handles logout in the pane workspace without sending an ACP prompt', async () => {
+    daemonActions.getContext.mockResolvedValue({
+      state: { _meta: { authType: 'qwen-subscription' } },
+    });
+    subscriptionActions.getSubscriptionConfig.mockResolvedValue({
+      enabled: true,
+      signedIn: true,
+    });
+    subscriptionActions.loadProviders.mockResolvedValue({
+      current: { authType: 'qwen-subscription' },
+    });
+    render({ workspaceCwd: '/secondary' });
+    await act(async () => {
+      latestOnSubmit!('/logout');
+    });
+    expect(daemonActions.getContext).toHaveBeenCalled();
+    expect(subscriptionActions.signOutSubscription).toHaveBeenCalledOnce();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+    expect(daemonActions.refreshModels).toHaveBeenCalledWith(undefined, {
+      reloadProviders: false,
+    });
+    expect(transcriptDispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ type: 'status' }),
+    ]);
+  });
+
+  it('keeps a busy pane from signing out or queuing logout', async () => {
+    streamingStateValue = 'responding';
+    render();
+    await act(async () => {
+      expect(latestOnSubmit!('/logout')).toBe(false);
+    });
+    expect(subscriptionActions.signOutSubscription).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not treat a plan prompt as an account command', async () => {
+    subscriptionActions.getSubscriptionConfig.mockResolvedValue({
+      enabled: true,
+    });
+    subscriptionActions.loadProviders.mockResolvedValue({
+      current: { authType: 'qwen-subscription' },
+    });
+    render();
+    await act(async () => {
+      latestOnSubmit!('/plan /logout');
+    });
+    expect(subscriptionActions.signOutSubscription).not.toHaveBeenCalled();
+    expect(sendPrompt).toHaveBeenCalled();
+  });
+});
 
 function testid(id: string): HTMLElement | null {
   return container!.querySelector(`[data-testid="${id}"]`);
@@ -1121,6 +1197,8 @@ describe('ChatPane', () => {
     });
     expect(appendLocalUserMessage).toHaveBeenCalledWith(
       '/goal set ship the other thing',
+      undefined,
+      { localCommandId: expect.stringMatching(/^local-command:/) },
     );
   });
 
@@ -1671,6 +1749,18 @@ describe('ChatPane', () => {
     render({ title: 'Side task', embedded: true });
     expect(container!.querySelector('header')).toBeNull();
     expect(testid('pane-messages')).not.toBeNull();
+  });
+
+  it('threads unavailable models onto its composer', () => {
+    const unavailableModels = [
+      { id: 'qwen-max', label: 'Qwen Max', tooltip: 'Need Pro' },
+    ];
+    const mountUnavailableModelTooltip = () => null;
+    render({ unavailableModels, mountUnavailableModelTooltip });
+    expect(latestChatEditorProps.unavailableModels).toEqual(unavailableModels);
+    expect(latestChatEditorProps.mountUnavailableModelTooltip).toBe(
+      mountUnavailableModelTooltip,
+    );
   });
 
   it('shows the Plan entry only when explicitly enabled and hides it on removal', () => {
@@ -2871,6 +2961,41 @@ describe('ChatPane', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('passes this pane owner mode and allows changing it while a turn is active', async () => {
+    connectionState.workflowMode = {
+      requested: true,
+      available: false,
+      effective: false,
+    };
+    connectionState.workflowModeStatus = 'ready';
+    streamingStateValue = 'responding';
+    sessionHasActivePromptValue = true;
+    render();
+    expect(latestChatEditorProps.workflowMode).toBe(
+      connectionState.workflowMode,
+    );
+    expect(latestChatEditorProps.workflowModeStatus).toBe('ready');
+    expect(latestChatEditorProps.visibleToolbarActions).toContain(
+      'workflowMode',
+    );
+    await act(async () => latestChatEditorProps.onWorkflowModeChange(false));
+    expect(setWorkflowMode).toHaveBeenCalledExactlyOnceWith(false);
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not publish a failed mode action after the pane owner changes', async () => {
+    const failure = deferred<void>();
+    setWorkflowMode.mockReturnValueOnce(failure.promise);
+    const onError = vi.fn();
+    render({ onError });
+    act(() => latestChatEditorProps.onWorkflowModeChange(true));
+    ownerVersion += 1;
+    await act(async () => failure.reject(new Error('Old owner disconnected')));
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])(
     'keeps reasoning persistence scoped with standalone=%s',
     async (standalone) => {
@@ -3057,6 +3182,7 @@ describe('ChatPane', () => {
       JSON.stringify([
         'addMenu',
         'approvalMode',
+        'workflowMode',
         'contextUsage',
         'model',
         'voice',
@@ -3120,6 +3246,29 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.contextUsageControls).toBeUndefined();
   });
 
+  it('keeps the local context group unavailable for deletion until its result settles', async () => {
+    let resolve!: (value: unknown) => void;
+    getContextUsage.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const begin = vi.spyOn(messageDeletion, 'beginLocalCommand');
+    render();
+    act(() => latestChatEditorProps.onShowContextUsage());
+    expect(begin).toHaveBeenCalledTimes(1);
+    const [store] = begin.mock.calls[0]!;
+    expect(messageDeletion.hasPendingLocalCommands(store)).toBe(true);
+    transcriptDispatch.mockImplementationOnce(() => {
+      expect(messageDeletion.hasPendingLocalCommands(store)).toBe(false);
+    });
+    await act(async () => {
+      resolve({ usage: {} });
+    });
+    expect(messageDeletion.hasPendingLocalCommands(store)).toBe(false);
+    begin.mockRestore();
+  });
+
   it.each(['idle', 'responding'])(
     'shows context usage for this pane session while %s',
     async (state) => {
@@ -3131,7 +3280,11 @@ describe('ChatPane', () => {
       });
 
       if (state === 'idle')
-        expect(appendLocalUserMessage).toHaveBeenCalledWith('/context');
+        expect(appendLocalUserMessage).toHaveBeenCalledWith(
+          '/context',
+          undefined,
+          { localCommandId: expect.stringMatching(/^local-command:/) },
+        );
       else expect(appendLocalUserMessage).not.toHaveBeenCalled();
       expect(getContextUsage).toHaveBeenCalledWith({ detail: false });
       expect(transcriptDispatch).toHaveBeenCalledWith([
