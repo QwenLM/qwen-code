@@ -7668,12 +7668,21 @@ export abstract class ChannelBase {
           if (!promptState.cancelled && turnNotice) {
             // Keep notices out of stream buffers and let the answer consume
             // adapter-specific reply metadata (such as DingTalk mentions) first.
-            await this.sendResponseMessage(
-              envelope.chatId,
-              turnNotice,
-              sessionId,
-              sourceLabel,
-            );
+            try {
+              await this.sendResponseMessage(
+                envelope.chatId,
+                turnNotice,
+                sessionId,
+                sourceLabel,
+              );
+            } catch (err) {
+              // The answer is already delivered, so the turn's outcome is fixed
+              // (see the deliveryStarted invariant below): log the failed
+              // notice instead of letting it rewrite completed into failed.
+              process.stderr.write(
+                `[${this.name}] turn notice delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)}\n`,
+              );
+            }
           }
           // Once delivery started the turn's outcome is fixed — don't let a
           // cancel settling during the send rewrite completed into cancelled.

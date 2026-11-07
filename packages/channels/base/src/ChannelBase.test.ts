@@ -16707,6 +16707,53 @@ describe('ChannelBase', () => {
       },
     );
 
+    it('keeps the turn completed when notice delivery fails', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const events = bridge as unknown as EventEmitter;
+      vi.mocked(bridge.prompt).mockImplementation(async (sid) => {
+        events.emit('turnNotice', sid, 'Overflow notice');
+        events.emit('textChunk', sid, 'Answer');
+        return 'Overflow notice\n\nAnswer';
+      });
+      const ch = createChannel();
+      const sendMessage = ch.sendMessage.bind(ch);
+      let failNotice = true;
+      ch.sendMessage = async (chatId, text) => {
+        if (failNotice && text.includes('Overflow notice')) {
+          failNotice = false;
+          throw new Error('secret notice detail');
+        }
+        await sendMessage(chatId, text);
+      };
+      try {
+        await ch.handleInbound(envelope({ messageId: 'notice-failure' }));
+
+        // The answer was delivered before the notice send failed, and the
+        // failure never reaches a user-visible message.
+        expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'Answer' }]);
+        expect(
+          ch.sent.some(({ text }) => text.includes('secret notice detail')),
+        ).toBe(false);
+        // Once delivery started the turn's outcome is fixed: a failing notice
+        // must not rewrite completed into failed.
+        expect(ch.taskEvents).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'completed',
+              messageId: 'notice-failure',
+            }),
+          ]),
+        );
+        expect(ch.taskEvents.some(({ type }) => type === 'failed')).toBe(false);
+        // The failure is logged for developers instead.
+        expect(stderr).toHaveBeenCalled();
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
     it('keeps partial paragraphs in adapter updates until the final response', async () => {
       vi.useFakeTimers();
       try {
