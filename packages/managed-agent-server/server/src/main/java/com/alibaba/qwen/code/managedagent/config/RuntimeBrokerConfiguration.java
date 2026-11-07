@@ -124,7 +124,9 @@ public class RuntimeBrokerConfiguration {
             com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedMcpOAuthConfiguration oauth,
             org.springframework.beans.factory.ObjectProvider<com.alibaba.qwen.code.managedagent.extensions.ManagedMcpOAuthService> issuer) {
         return () -> {
-            if (!oauth.isEnabled()) return;
+            if (!oauth.isEnabled()) {
+                return;
+            }
             if (StringUtils.isBlank(oauth.getRuntimeTokenProxyBaseUrl())) {
                 throw new IllegalStateException("Personal MCP OAuth requires a Runtime token proxy base URL");
             }
