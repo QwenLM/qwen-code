@@ -702,6 +702,29 @@ class ServerEnvironmentTest {
     }
 
     @Test
+    void failsTheRowsThatReadASettingSpringCannotResolve() throws IOException {
+        // A placeholder with no value and no default, in a file the server
+        // reads: Spring would not start, the rows that read it fail, and the
+        // others still run.
+        Path file = write("etc/application.yml", "server.port: ${QMA_PREFLIGHT_UNSET}\n"
+                + "server.address: ${QMA_PREFLIGHT_UNSET}\n"
+                + "spring.datasource.url: ${QMA_PREFLIGHT_UNSET}\n");
+        Map<String, ManagedAgentPreflight.Check> rows = new HashMap<>();
+        for (ManagedAgentPreflight.Check row : ManagedAgentPreflight.checks(
+                new String[] {"--check"}, named("file:" + file))) {
+            rows.put(row.name(), row);
+        }
+        for (String name : List.of("auth", "server-port", "database")) {
+            assertEquals(ManagedAgentPreflight.Status.FAIL, rows.get(name).status(),
+                    rows.toString());
+            assertEquals("Could not resolve placeholder 'QMA_PREFLIGHT_UNSET' in value"
+                    + " \"${QMA_PREFLIGHT_UNSET}\"", rows.get(name).detail());
+        }
+        assertEquals(ManagedAgentPreflight.Status.PASS, rows.get("java").status());
+        assertEquals(ManagedAgentPreflight.Status.SKIP, rows.get("capacity").status());
+    }
+
+    @Test
     void judgesAFileAConfigTreeAlsoReadsByBoth() throws IOException {
         // A config tree imported over a configuration file's directory reads
         // that file as a value too, of a property named application.yml.

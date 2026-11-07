@@ -180,18 +180,20 @@ public final class ManagedAgentPreflight {
         checks.addAll(configChecks(prepared, access.account(), runner));
         checks.add(startupValidationCheck(properties));
         checks.add(keyRingCheck(properties));
-        checks.add(authCheck(environment, properties));
+        checks.add(row("auth", () -> authCheck(environment, properties)));
         checks.add(harnessCheck(properties, distributionQwenCodeVersion()));
         checks.add(credentialsFileCheck(properties, access.account()));
         checks.add(sessionStoreCheck(properties));
         checks.add(toolPathCheck(properties));
         checks.addAll(brokerChecks(properties));
         checks.add(workspaceCheck(properties));
-        String serverAddress = environment.getProperty("server.address", "127.0.0.1");
-        int serverPort = environment.getProperty("server.port", Integer.class,
-                DEFAULT_SERVER_PORT);
-        checks.add(online ? listeningCheck("server", serverAddress, serverPort)
-                : portCheck("server", serverAddress, serverPort));
+        checks.add(row("server-port", () -> {
+            String serverAddress = environment.getProperty("server.address", "127.0.0.1");
+            int serverPort = environment.getProperty("server.port", Integer.class,
+                    DEFAULT_SERVER_PORT);
+            return online ? listeningCheck("server", serverAddress, serverPort)
+                    : portCheck("server", serverAddress, serverPort);
+        }));
         if (properties.getRuntimeBroker().isEnabled()) {
             ManagedAgentProperties.RuntimeBroker broker = properties.getRuntimeBroker();
             checks.add(online ? listeningCheck("broker", broker.getHost(), broker.getPort())
@@ -199,14 +201,28 @@ public final class ManagedAgentPreflight {
         }
         checks.add(workersCheck(properties, () -> ProcessHandle.allProcesses()
                 .collect(Collectors.toList()), online));
-        Check database = databaseCheck(environment);
+        Check database = row("database", () -> databaseCheck(environment));
         checks.add(database);
         checks.add(database.status() == Status.PASS
-                ? capacityCheck(environment)
+                ? row("capacity", () -> capacityCheck(environment))
                 : new Check("capacity", Status.SKIP,
                         "database check did not pass; capacity not measured",
                         null));
         return checks;
+    }
+
+    /**
+     * A row that reads the environment, which fails as Spring would where a
+     * setting does not resolve, such as a placeholder with no value and no
+     * default, rather than stop the check before it prints a row.
+     */
+    private static Check row(String name, Supplier<Check> check) {
+        try {
+            return check.get();
+        } catch (RuntimeException error) {
+            return new Check(name, Status.FAIL, rootMessage(error),
+                    "correct the configured value");
+        }
     }
 
     /**
