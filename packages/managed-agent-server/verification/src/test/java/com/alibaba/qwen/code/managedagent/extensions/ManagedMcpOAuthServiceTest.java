@@ -170,7 +170,7 @@ class ManagedMcpOAuthServiceTest {
     }
 
     @Test
-    void supportedQueryRejectsReadersBeforeInspectionAndAllowsPublishers() {
+    void supportedQueryRejectsReadersBeforeInspectionAndAllowsPublishers() throws Exception {
         enableOAuth();
         var session = sessions.requireReadableSession("tenant", "actor", "session");
         when(sessions.requireReadableSession("tenant", "reader", "session")).thenReturn(session);
