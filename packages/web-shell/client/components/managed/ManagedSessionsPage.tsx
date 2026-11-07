@@ -866,12 +866,16 @@ function ManagedSessionsContent({
     // document.activeElement retargets to the shadow host in portal mode; read
     // the focused node from the page wrapper's own root instead.
     const parked = getShadowAwareActiveElement(pageRef.current);
+    // A shadow root with nothing focused reports null here, not body, so a
+    // shadow-root mount whose discard dropped focus to the outer document
+    // body must still be recognised as unclaimed.
+    const unclaimed = parked === null || parked === document.body;
     // hostSessionOnly renders no list, so the fallback below parks focus on the
     // page wrapper; the latch accepts the node it parked on itself, so a user
     // who merely clicked inside that pane is still recognised as having moved
     // on.
     const ours =
-      parked === document.body ||
+      unclaimed ||
       parked === sessionsNavRef.current ||
       (discardParked.current !== null && parked === discardParked.current);
     if (composer) {

@@ -5191,6 +5191,63 @@ describe('ManagedSessionsPage', () => {
     );
   });
 
+  it('moves focus to the composer after a discard inside a shadow root with a host nav slot', async () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: 'open' });
+    const shadowContainer = document.createElement('div');
+    shadow.appendChild(shadowContainer);
+    const navigationTarget = document.createElement('nav');
+    document.body.appendChild(navigationTarget);
+    const shadowRoot = createRoot(shadowContainer);
+    try {
+      seedPending({
+        idempotencyKey: 'key-1',
+        text: 'Session draft',
+        sessionId: 's1',
+      });
+      await act(async () => {
+        shadowRoot.render(
+          <I18nProvider language="en">
+            <ManagedSessionsPage
+              sessionId="s1"
+              onSelectSession={onSelect}
+              managedAgentProvider={provider}
+              navigationTarget={navigationTarget}
+              interactive={true}
+            />
+          </I18nProvider>,
+        );
+        await flush();
+      });
+      const discard = [...shadowContainer.querySelectorAll('button')].find(
+        (item) => item.textContent === 'Discard this request',
+      );
+      expect(discard).toBeDefined();
+      discard!.focus();
+      await act(async () => {
+        discard!.click();
+        await flush();
+      });
+      // In Chromium the discard button's unmount leaves document.activeElement
+      // at body and shadow.activeElement null; the latch must treat that as
+      // unclaimed and land focus on the composer that just got the draft back,
+      // not drop the latch. jsdom keeps the detached button as the shadow
+      // root's activeElement, so assert only the outcome, not the browser's
+      // exact blur state.
+      expect(shadow.activeElement).toBe(
+        shadowContainer.querySelector('textarea'),
+      );
+      expect(shadowContainer.querySelector('textarea')?.value).toBe(
+        'Session draft',
+      );
+    } finally {
+      await act(async () => shadowRoot.unmount());
+      navigationTarget.remove();
+      host.remove();
+    }
+  });
+
   it('leaves focus alone when the user moved on during a discard’s loading window', async () => {
     let releaseSummary!: (value: ManagedAgentSessionSummary) => void;
     mocks.client.getSession.mockImplementationOnce(
