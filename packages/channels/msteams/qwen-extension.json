@@ -1,6 +1,6 @@
 {
   "name": "qwen-channel-msteams",
-  "version": "0.26.2",
+  "version": "0.26.9",
   "channels": {
     "msteams": {
       "entry": "dist/index.js",
