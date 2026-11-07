@@ -80,6 +80,19 @@ describe('session history projection', () => {
     return record.uuid;
   }
 
+  it('identifies the start offset of a search preview near the end of an entry', async () => {
+    await append('user', [{ text: 'x'.repeat(5000) + 'NEAR_END_MARKER' }]);
+    const result = await service.query(
+      { action: 'search', query: 'NEAR_END_MARKER' },
+      signal,
+    );
+    const page = JSON.parse(result);
+    expect(page.entries).toHaveLength(1);
+    expect(page.entries[0].text).toBe('x'.repeat(40) + 'NEAR_END_MARKER');
+    expect(page.entries[0].start).toBe(4960);
+    expect(Buffer.byteLength(result, 'utf8')).toBeLessThanOrEqual(16 * 1024);
+  });
+
   it('finds earlier-window evidence while excluding reasoning, internal notes and media bodies', async () => {
     const evidence = await append('tool_result', [
       {

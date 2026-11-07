@@ -13574,6 +13574,10 @@ export class Config {
               registry.registerPermissionDeferredFactory(name, factory);
             else registry.registerFactory(name, factory);
           }
+        } else {
+          this.debugLogger.warn(
+            `Session context tools disabled by policy (${names.filter((_, index) => statuses[index] === 'disabled').join(', ')}); using summary compression.`,
+          );
         }
       } catch (error) {
         this.debugLogger.warn(

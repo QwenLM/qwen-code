@@ -721,6 +721,33 @@ describe('local session notes', () => {
     expect((await notes.getNotesForHandoff())?.notes).toEqual(revision);
   });
 
+  it('preserves the active notes projection when an unarchive repair finds an older orphan', async () => {
+    recorder.recordUserMessage('keep the constraint');
+    await write('older archived projection');
+    const forkId = randomUUID();
+    const fork = await sessions.forkSession(sessionId, forkId);
+    expect((await sessions.archiveSessions([forkId])).errors).toEqual([]);
+    const archivedTranscript = path.join(
+      path.dirname(fork.filePath),
+      'archive',
+      `${forkId}.jsonl`,
+    );
+    const archivedNotes = archivedTranscript.replace(/\.jsonl$/, '.notes.md');
+    const activeNotes = fork.filePath.replace(/\.jsonl$/, '.notes.md');
+    await fs.rename(archivedTranscript, fork.filePath);
+    await fs.writeFile(activeNotes, 'newer live projection');
+    expect(await fs.readFile(archivedNotes, 'utf8')).toContain(
+      'older archived projection',
+    );
+    const result = await sessions.unarchiveSessions([forkId], {
+      assertCleanupOwned: () => {},
+    });
+    expect(result.alreadyActive).toContain(forkId);
+    expect(await fs.readFile(activeNotes, 'utf8')).toBe(
+      'newer live projection',
+    );
+  });
+
   it('forks independent projections and moves/removes them with session lifecycle', async () => {
     recorder.recordUserMessage('keep the constraint');
     const revision = await write();

@@ -259,6 +259,10 @@ notes/history maintenance traffic. Mark artifacts, media, truncation, and gaps.
 Reading an artifact body is a separate existing file/media operation; history
 does not expand arbitrary paths or inline base64.
 
+Search previews expose a nonzero `start` as a UTF-16 offset; omitted means zero.
+Read the reference without `start` to recover the beginning before continuing
+with `nextStart`. Offset metadata counts toward the response budget.
+
 Cap each response at 20 entries, 16 KiB UTF-8, and 2,048 estimated tokens, reduced
 further when the current send budget is smaller. Return a continuation cursor
 instead of silently losing remaining matches. Cursors bind to a frozen source

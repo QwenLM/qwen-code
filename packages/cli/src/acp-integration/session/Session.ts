@@ -7273,28 +7273,7 @@ export class Session implements SessionContext {
               void recordDaemonSessionApprovalModeFromConfig(this.config);
             }
 
-            if (goalTurn?.origin === 'runtime') {
-              // The automatic Goal turn was recorded above with its runtime
-              // provenance and must not also appear as real user input.
-            } else if (isContinue || isRestoreAskUserQuestion) {
-              // The orphaned content is already persisted; recording a new user
-              // message would duplicate the turn in the transcript.
-            } else if (isRetry) {
-              retrySessionId = this.config.getSessionId();
-              strippedRetryEntries =
-                this.config
-                  .getLlmClient()!
-                  .stripOrphanedUserEntriesFromHistory() ?? [];
-            } else if (
-              !isSlashInput ||
-              (slashCommandName !== 'advisor' && !notesCompressionCommand)
-            ) {
-              // `/advisor` and notes-mode `/compress` defer recording until
-              // command resolution below — a
-              // user-defined command shadowing the name must keep its record
-              // (R18-6) — while every other slash command records here,
-              // BEFORE its action runs: `/clear` swaps in a fresh recorder
-              // inside its action, so its record must land first (R20-9).
+            const recordPrompt = () => {
               const attachmentReferences = readDaemonAttachmentReferences(
                 promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
               );
@@ -7322,6 +7301,31 @@ export class Session implements SessionContext {
                 promptId,
                 daemonPromptId,
               );
+            };
+
+            if (goalTurn?.origin === 'runtime') {
+              // The automatic Goal turn was recorded above with its runtime
+              // provenance and must not also appear as real user input.
+            } else if (isContinue || isRestoreAskUserQuestion) {
+              // The orphaned content is already persisted; recording a new user
+              // message would duplicate the turn in the transcript.
+            } else if (isRetry) {
+              retrySessionId = this.config.getSessionId();
+              strippedRetryEntries =
+                this.config
+                  .getLlmClient()!
+                  .stripOrphanedUserEntriesFromHistory() ?? [];
+            } else if (
+              !isSlashInput ||
+              (slashCommandName !== 'advisor' && !notesCompressionCommand)
+            ) {
+              // `/advisor` and notes-mode `/compress` defer recording until
+              // command resolution below — a
+              // user-defined command shadowing the name must keep its record
+              // (R18-6) — while every other slash command records here,
+              // BEFORE its action runs: `/clear` swaps in a fresh recorder
+              // inside its action, so its record must land first (R20-9).
+              recordPrompt();
             }
 
             if (
@@ -7406,38 +7410,14 @@ export class Session implements SessionContext {
                 goalTurn?.origin !== 'runtime' &&
                 !isRetry
               ) {
-                const attachmentReferences = readDaemonAttachmentReferences(
-                  promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
-                );
-                const resourceLinks = params.prompt
-                  .filter((block) => block.type === 'resource_link')
-                  .map((block) => structuredClone(block));
-                const recorder = this.config.getChatRecordingService();
-                if (this.config.getChatCompression?.()?.strategy === 'notes')
-                  notesPromptRecorder = recorder;
-                notesPromptUuid = recorder?.recordUserMessage(
-                  promptText,
-                  goalTurn?.permit,
-                  promptDisplayText !== undefined ||
-                    inputAnnotations ||
-                    attachmentReferences ||
-                    resourceLinks.length > 0
-                    ? {
-                        displayText: promptDisplayText ?? promptText,
-                        hookContext: '',
-                        ...(inputAnnotations ? { inputAnnotations } : {}),
-                        ...(attachmentReferences
-                          ? { attachmentReferences }
-                          : {}),
-                        ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
-                      }
-                    : undefined,
-                  promptId,
-                  daemonPromptId,
-                );
+                recordPrompt();
               }
 
-              if (builtInNotesCompression) {
+              if (
+                builtInNotesCompression &&
+                !isRetry &&
+                goalTurn?.origin !== 'runtime'
+              ) {
                 this.config.getChatRecordingService()?.recordSlashCommand({
                   phase: 'invocation',
                   rawCommand: inputText,

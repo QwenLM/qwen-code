@@ -2003,8 +2003,7 @@ export class SessionService {
     if (fs.existsSync(sourceNotes)) {
       assertCleanupOwned?.();
       try {
-        fs.mkdirSync(path.dirname(destinationNotes), { recursive: true });
-        fs.renameSync(sourceNotes, destinationNotes);
+        this.moveOptionalFile(sourceNotes, destinationNotes);
       } catch (error) {
         this.warn(
           `${action}Sessions: failed to move notes projection for ${sessionId}: ${error}`,

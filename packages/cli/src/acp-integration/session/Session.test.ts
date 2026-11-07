@@ -36670,6 +36670,30 @@ describe('Session', () => {
         );
       });
 
+      it('does not duplicate notes compression invocation records on daemon retry', async () => {
+        mockConfig.getChatCompression = vi
+          .fn()
+          .mockReturnValue({ strategy: 'notes' });
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValue({
+          type: 'message',
+          messageType: 'info',
+          content: 'New context started.',
+          resolvedCommand: { name: 'compress', kind: CommandKind.BUILT_IN },
+        });
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress' }],
+          _meta: { 'qwen.daemon.retry': true },
+        });
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).not.toHaveBeenCalledWith(
+          expect.objectContaining({ phase: 'invocation' }),
+        );
+      });
+
       it('keeps built-in notes compression from invalidating its checkpoint', async () => {
         mockConfig.getChatCompression = vi
           .fn()

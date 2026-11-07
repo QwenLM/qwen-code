@@ -30,6 +30,7 @@ interface HistoryEntry {
   ref: string;
   role: 'user' | 'assistant' | 'tool';
   text: string;
+  start?: number;
   truncated?: boolean;
   nextStart?: number;
 }
@@ -168,6 +169,7 @@ export class SessionHistoryService {
       start: number,
       preview: boolean,
     ): HistoryEntry => {
+      if (start > 0) entry = { ...entry, start };
       let low = 0;
       let high = Math.min(entry.text.length - start, preview ? 240 : 16 * 1024);
       while (low < high) {

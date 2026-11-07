@@ -232,6 +232,10 @@ History 使用已持久化 record UUID 作为引用；一条记录有多个 text
 读取 artifact 正文继续由现有文件/媒体工具处理；history 不展开任意路径，
 也不内联 base64。
 
+搜索预览用非零 `start` 标明 UTF-16 偏移；省略时表示零。
+读取同一引用且不传 `start` 可以找回开头，再通过 `nextStart` 继续。
+偏移元数据同样计入响应预算。
+
 每次响应最多 20 条，且同时不超过 16 KiB UTF-8、2,048 估算 tokens；
 当前发送预算更小时进一步收紧。
 返回 continuation cursor，不静默丢弃剩余匹配结果。

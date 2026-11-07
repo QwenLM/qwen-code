@@ -25,7 +25,7 @@ import { SessionService } from './sessionService.js';
 import { type SessionWriterLease } from './session-writer-lease.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 
-describe('Nov5 notes regressions', () => {
+describe('notes lifecycle boundaries', () => {
   let runtime: string;
   let workspace: string;
   let sessionId: string;
@@ -115,7 +115,7 @@ describe('Nov5 notes regressions', () => {
     };
   }
 
-  it('R2-4 releases a tool-result batch while retaining unmatched pending user input', async () => {
+  it('releases a tool-result batch while retaining unmatched pending user input', async () => {
     recorder.recordUserMessage('keep the constraint');
     await write();
     const results: Part[] = ['read-a', 'read-b'].map((id) => ({
@@ -144,7 +144,7 @@ describe('Nov5 notes regressions', () => {
     ).resolves.toMatchObject({ text: 'Preserve the new steering.' });
   });
 
-  it('R2-18 does not accumulate inputs while notes tools are unavailable', async () => {
+  it('does not accumulate inputs while notes tools are unavailable', async () => {
     const { LlmChat } = await import('../core/llm-chat.js');
     Object.assign(config, {
       getDebugLogger: () => ({ warn: vi.fn() }),
@@ -159,7 +159,7 @@ describe('Nov5 notes regressions', () => {
       .unobservedNotesInputs.length;
     expect(count).toBe(0);
   });
-  it('R2-5 rejects resurrected notes with a missing covered source during rebuild', async () => {
+  it('rejects resurrected notes with a missing covered source during rebuild', async () => {
     recorder.recordUserMessage(
       'keep the constraint',
       undefined,
@@ -190,7 +190,6 @@ describe('Nov5 notes regressions', () => {
     expect(revision.windowId).not.toBe(revision.sourceLeafUuid);
     const surviving = records.filter((r) => r.uuid !== revision.sourceLeafUuid);
     recorder.rebuildTurnBoundaries(surviving);
-    console.log('R2-5 rebuilt notes', recorder.getSessionNotesState().notes);
     expect(recorder.getSessionNotesState().notes).toBeUndefined();
     const userTurns = surviving.filter((record) => record.type === 'user');
     const target = userTurns.findIndex((record) =>
@@ -200,7 +199,7 @@ describe('Nov5 notes regressions', () => {
     recorder.rewindRecording(target, { truncatedCount: 1 });
     expect(recorder.getSessionNotesState().notes).toBeUndefined();
   });
-  it('R2-12 retains canonical notes when the Markdown sidecar is unwritable', async () => {
+  it('retains canonical notes when the Markdown sidecar is unwritable', async () => {
     recorder.recordUserMessage('keep the constraint');
     const revision = await write();
     const projection = transcriptPath.replace(/\.jsonl$/, '.notes.md');
@@ -211,7 +210,7 @@ describe('Nov5 notes regressions', () => {
       notes: { revision: revision.revision },
     });
   });
-  it('R2-7 a queued notes read does not poison the writer when close begins', async () => {
+  it('a queued notes read does not poison the writer when close begins', async () => {
     recorder.recordUserMessage('keep the constraint');
     await write();
     const restored = (await reader.readRestoreProjection(sessionId, {
@@ -248,11 +247,10 @@ describe('Nov5 notes regressions', () => {
       (e) => String(e),
     );
     resume();
-    const results = await Promise.all([reading, closing]);
-    console.log('R2-7 results', results);
+    await Promise.all([reading, closing]);
     await expect(recorder.flush()).resolves.toBeUndefined();
   });
-  it('R2-23 source deletion is independently detected after a compression', async () => {
+  it('source deletion is independently detected after a compression', async () => {
     recorder.recordUserMessage(
       'keep the constraint',
       undefined,

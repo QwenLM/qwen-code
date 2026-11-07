@@ -19,7 +19,7 @@ import {
   SessionTranscriptSnapshotUnavailableError,
 } from './session-transcript-reader.js';
 
-describe('Nov5 history regressions', () => {
+describe('history snapshot and paging boundaries', () => {
   let runtime: string;
   let workspace: string;
   let transcript: string;
@@ -74,7 +74,7 @@ describe('Nov5 history regressions', () => {
     return record.uuid;
   }
 
-  it('Nov5 extra empty history snapshot stays empty after a user record is appended', async () => {
+  it('empty history snapshot stays empty after a user record is appended', async () => {
     await append('system', [], {
       subtype: 'session_sources_snapshot',
       systemPayload: { version: 1, revision: 1, sources: [] },
@@ -96,7 +96,7 @@ describe('Nov5 history regressions', () => {
     expect(frozen.snapshot).toBe(empty.snapshot);
   });
 
-  it('Nov5 extra empty transcript rejects missing notes leaf and invalid history offsets', async () => {
+  it('empty transcript rejects missing notes leaf and invalid history offsets', async () => {
     await append('system', [], {
       subtype: 'session_sources_snapshot',
       systemPayload: { version: 1, revision: 1, sources: [] },
@@ -115,7 +115,7 @@ describe('Nov5 history regressions', () => {
     ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
   });
 
-  it('R2-3 emits a CJK preview and advances at a 400-token budget', async () => {
+  it('emits a CJK preview and advances at a 400-token budget', async () => {
     service = new SessionHistoryService(
       () => reader,
       sessionId,
@@ -123,10 +123,6 @@ describe('Nov5 history regressions', () => {
     );
     await append('user', [{ text: '中'.repeat(5000) }]);
     let page = JSON.parse(await service.query({ action: 'list' }, signal));
-    console.log('R2-3 page', {
-      entries: page.entries.length,
-      partial: page.partial,
-    });
     for (let i = 0; i < 2 && page.nextCursor; i++) {
       page = JSON.parse(
         await service.query(
@@ -134,14 +130,10 @@ describe('Nov5 history regressions', () => {
           signal,
         ),
       );
-      console.log('R2-3 continuation', {
-        entries: page.entries.length,
-        partial: page.partial,
-      });
     }
     expect(page.entries).toHaveLength(1);
   });
-  it('R2-6 pages to evidence after an oversized record', async () => {
+  it('pages to evidence after an oversized record', async () => {
     await append('user', [{ text: 'before' }]);
     await append('tool_result', [
       {
@@ -166,10 +158,9 @@ describe('Nov5 history regressions', () => {
         outcomes.push(String(error));
       }
     }
-    console.log('R2-6 outcomes', outcomes);
     expect(JSON.stringify(outcomes)).toContain('AFTER-OVERSIZED-KEY');
   });
-  it('R2-11 omits raw provider video and base64 media bodies', async () => {
+  it('omits raw provider video and base64 media bodies', async () => {
     for (const media of [
       { type: 'video', data: 'YWJj'.repeat(1000) },
       { type: 'video_url', video_url: { url: 'YWJj'.repeat(1000) } },
@@ -194,14 +185,10 @@ describe('Nov5 history regressions', () => {
         { action: 'read', ref: ref + ':0' },
         signal,
       );
-      console.log('R2-11', JSON.stringify(media).slice(0, 60), {
-        raw: raw.includes('YWJjYWJj'),
-        redacted: raw.includes('omitted'),
-      });
       expect.soft(raw).not.toContain('YWJjYWJj');
     }
   });
-  it('R2-15 exposes the actual literal search hit after a long prefix', async () => {
+  it('exposes the actual literal search hit after a long prefix', async () => {
     await append('tool_result', [
       {
         functionResponse: {
@@ -214,10 +201,9 @@ describe('Nov5 history regressions', () => {
     const page = JSON.parse(
       await service.query({ action: 'search', query: 'RECOVERY_KEY' }, signal),
     );
-    console.log('R2-15 preview', page.entries[0]);
     expect(page.entries[0].text).toContain('RECOVERY_KEY');
   });
-  it('R2-13 returns empty history for a sources-only transcript', async () => {
+  it('returns empty history for a sources-only transcript', async () => {
     await append('system', [], {
       subtype: 'session_sources_snapshot',
       systemPayload: { version: 1, revision: 1, sources: [] },

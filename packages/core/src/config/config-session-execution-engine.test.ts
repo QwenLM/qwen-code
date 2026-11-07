@@ -277,3 +277,35 @@ it('falls back to summary for managed notes without changing the saved choice', 
     await config.closeSessionWriter();
   }
 });
+
+it('reports a notes downgrade when policy disables a required context tool', async () => {
+  const config = createConfig({
+    chatCompression: { strategy: 'notes' },
+    bareMode: true,
+  });
+  const permissionManager = {
+    getToolRegistrationStatus: vi.fn(async (name: string) =>
+      name === ToolNames.SESSION_NOTES
+        ? ('disabled' as const)
+        : ('registered' as const),
+    ),
+  };
+  vi.spyOn(config, 'getPermissionManager').mockReturnValue(
+    permissionManager as unknown as NonNullable<
+      ReturnType<Config['getPermissionManager']>
+    >,
+  );
+  const warn = vi.spyOn(
+    (config as unknown as { debugLogger: { warn(...args: unknown[]): void } })
+      .debugLogger,
+    'warn',
+  );
+  const registry = await config.createToolRegistry(undefined, {
+    skipDiscovery: true,
+  });
+  expect(registry.getAllToolNames()).not.toContain(ToolNames.SESSION_NOTES);
+  expect(registry.getAllToolNames()).not.toContain(ToolNames.SESSION_HISTORY);
+  expect(warn).toHaveBeenCalledWith(
+    expect.stringMatching(/session_notes.*using summary compression/),
+  );
+});
