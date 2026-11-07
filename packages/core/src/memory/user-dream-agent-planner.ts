@@ -9,6 +9,7 @@ import {
   runForkedAgent,
   type ForkedAgentResult,
 } from '../agents/forkedAgent.js';
+import { describeTerminateReason } from '../agents/runtime/terminate-mode-message.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
@@ -127,7 +128,14 @@ export async function planUserAutoMemoryDreamByAgent(
   });
 
   if (result.status !== 'completed') {
-    throw new Error(result.terminateReason || 'User Dream agent failed');
+    throw new Error(
+      describeTerminateReason(
+        result.terminateReason,
+        result.status === 'cancelled'
+          ? 'User Dream agent cancelled before completion'
+          : 'User Dream agent failed',
+      ),
+    );
   }
   return result;
 }
