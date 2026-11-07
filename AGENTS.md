@@ -266,6 +266,20 @@ things a reviewer of _this_ codebase must check — not general advice.
 
 - **Apply module-specific review rules.** Read any nested `AGENTS.md` that
   applies to the reviewed files and include its `## Code Review` rules.
+- **Never let a sub-agent launch bypass the concurrency caps.** Every
+  top-level launch — background or foreground, whatever model it resolves —
+  must reserve a slot through `BackgroundTaskRegistry` against both
+  `agents.maxParallelAgents` and, when configured, the per-model cap, and
+  release it on every exit path. On a machine with a local LLM that serves one
+  request at a time, extra parallelism is not faster: it oversubscribes the GPU
+  and every agent slows down. Treat a new or changed launch path (a skill, a
+  batch helper, a workflow dispatcher, a fork) that skips the reservation as
+  Critical unless the diff proves the path cannot start top-level agents, and
+  check that a new launch mode does not leave a held claim unreleased. Guards:
+  `packages/core/src/agents/background-tasks.test.ts` (foreground per-model
+  slot claims, global ceiling includes foreground claims) and
+  `packages/core/src/tools/agent/agent.test.ts` (reserves a foreground
+  per-model slot; parks a foreground launch behind the global cap).
 - **Verify a finding against the exact reviewed commit before reporting it.**
   Read the lines you are about to cite. A Critical that quotes code not present at
   the commit under review is worse than no finding — it blocks the author over

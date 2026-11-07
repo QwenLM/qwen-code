@@ -214,6 +214,7 @@ npm run lint
 
 - Please adhere to the coding style, patterns, and conventions used throughout the existing codebase.
 - **Imports:** Pay special attention to import paths. The project uses ESLint to enforce restrictions on relative imports between packages.
+- **Sub-agent concurrency is a resource guard, not an optimization knob.** Every top-level sub-agent launch — background or foreground, whatever model it resolves — must reserve a slot through `BackgroundTaskRegistry` (against both `agents.maxParallelAgents` and `agents.maxParallelAgentsByModel` for the model that will actually serve it) and release it on every exit path. On a machine with a local LLM that serves one request at a time, extra parallel agents do not finish the work sooner: they contend for the same GPU and every agent slows down. When you add a launch path — a skill, a batch helper, a workflow dispatcher — wire it through the same reservation instead of calling the agent runtime directly. The guard tests live in `packages/core/src/agents/background-tasks.test.ts` ("foreground per-model slot claims") and `packages/core/src/tools/agent/agent.test.ts` ("reserves a foreground per-model slot", "parks a foreground launch behind the global cap").
 
 ### Project Structure
 

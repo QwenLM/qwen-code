@@ -3304,86 +3304,81 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         isTopLevelSession() &&
         subagentConfig.executor === undefined
       ) {
-        // Foreground top-level sub-agents previously bypassed the per-model
-        // concurrency cap entirely: the cap lived only in the background
-        // reservation path, so a skill (e.g. /batch) or any single message
-        // issuing multiple Agent calls could fan out N concurrent foreground
-        // agents on a low-capacity model and exhaust its VRAM. Reserve a
-        // per-model slot here so `agents.maxParallelAgentsByModel` bounds
-        // foreground launches too. The claim is a foreground claim: it counts
-        // toward the model's cap (shared with background launches) but is
-        // excluded from the global background budget and owner-scoped
-        // notifications, so a synchronous foreground run never consumes
-        // background capacity nor blocks behind background agents on other
-        // models. Released by the existing foreground `finally` / outer
-        // `catch` via releaseBackgroundSlotReservation(). Gated on a
-        // configured per-model cap so uncapped models keep their current
-        // behavior, and on top-level launches so a nested agent never waits
-        // on a slot its own parent holds. Interactive forks are excluded:
-        // their detached body returns a placeholder with no release site on
-        // this path, so capping them would leak the slot.
+        // This gate is what stops a skill from starting many agents at once.
+        // Keep it on every new launch path. On a machine with a local model,
+        // many agents do not finish the work sooner: they share one GPU, so
+        // they only wait on each other and every one of them gets slower. The
+        // claim counts in the global budget and, when configured, in the
+        // model's own budget. It is released by the foreground finally / outer
+        // catch below. Nested launches are skipped so a child never waits on a
+        // slot its own parent holds; interactive forks are skipped because
+        // their detached body has no release point here.
         subagentModelId =
           this.resolveSubagentModel(subagentConfig.model)?.modelId ??
           this.config.getModel();
         const fgRegistry = this.config.getBackgroundTaskRegistry();
-        const perModelCap = fgRegistry.resolvePerModelCap(subagentModelId);
-        if (perModelCap !== undefined) {
-          backgroundSlotReservation = fgRegistry.tryReserveForegroundModelSlot(
-            subagentModelId,
-            backgroundOwnerId,
+        backgroundSlotReservation = fgRegistry.tryReserveForegroundModelSlot(
+          subagentModelId,
+          backgroundOwnerId,
+        );
+        if (!backgroundSlotReservation) {
+          const perModelCap = fgRegistry.resolvePerModelCap(subagentModelId);
+          const claimed = fgRegistry.getClaimedModelSlotCount(subagentModelId);
+          const aheadText = this.formatSlotQueueText(
+            fgRegistry.getForegroundQueuedCount(),
           );
-          if (!backgroundSlotReservation) {
-            const claimed =
-              fgRegistry.getClaimedModelSlotCount(subagentModelId);
-            const aheadText = this.formatSlotQueueText(
-              fgRegistry.getForegroundQueuedCount(),
-            );
-            debugLogger.debug(
-              `[AgentTool] Foreground launch queued behind per-model cap ` +
-                `on ${subagentModelId} (cap=${perModelCap}, ` +
-                `claimed=${claimed}, ${aheadText}).`,
-            );
-            this.updateDisplay(
-              {
-                status: 'running' as const,
-                terminateReason: `Waiting for a model slot (${claimed}/${perModelCap} in use, ${aheadText}).`,
-              },
-              updateOutput,
-            );
-            try {
-              backgroundSlotReservation =
-                await fgRegistry.waitForForegroundModelSlot(
-                  signal,
-                  subagentModelId,
-                  backgroundOwnerId,
-                );
-            } catch (waitError) {
-              if (
-                waitError instanceof Error &&
-                waitError.message === FOREGROUND_MODEL_SLOT_WAIT_CANCELLED
-              ) {
-                // The user cancelled while the foreground launch was queued.
-                // Report a clean cancellation, not a background-subsystem
-                // failure, so the model does not retry it.
-                this.updateDisplay(
-                  { status: 'cancelled' as const, terminateReason: undefined },
-                  updateOutput,
-                );
-                return {
-                  llmContent: FOREGROUND_MODEL_SLOT_WAIT_CANCELLED,
-                  returnDisplay: {
-                    ...this.currentDisplay!,
-                    status: 'cancelled' as const,
-                  },
-                };
-              }
-              throw waitError;
+          // Name the ceiling that actually parked the launch: the model's own
+          // cap reads differently from the machine-wide budget, and a user who
+          // sees the wrong one adds a setting that changes nothing.
+          const modelFull = perModelCap !== undefined && claimed >= perModelCap;
+          debugLogger.debug(
+            `[AgentTool] Foreground launch queued behind ` +
+              `${modelFull ? 'per-model cap' : 'the global agent cap'} ` +
+              `on ${subagentModelId} (cap=${perModelCap ?? 'none'}, ` +
+              `claimed=${claimed}, ${aheadText}).`,
+          );
+          this.updateDisplay(
+            {
+              status: 'running' as const,
+              terminateReason: modelFull
+                ? `Waiting for a model slot (${claimed}/${perModelCap} in use, ${aheadText}).`
+                : `Waiting for a sub-agent slot (${aheadText}).`,
+            },
+            updateOutput,
+          );
+          try {
+            backgroundSlotReservation =
+              await fgRegistry.waitForForegroundModelSlot(
+                signal,
+                subagentModelId,
+                backgroundOwnerId,
+              );
+          } catch (waitError) {
+            if (
+              waitError instanceof Error &&
+              waitError.message === FOREGROUND_MODEL_SLOT_WAIT_CANCELLED
+            ) {
+              // The user cancelled while the foreground launch was queued.
+              // Report a clean cancellation, not a background-subsystem
+              // failure, so the model does not retry it.
+              this.updateDisplay(
+                { status: 'cancelled' as const, terminateReason: undefined },
+                updateOutput,
+              );
+              return {
+                llmContent: FOREGROUND_MODEL_SLOT_WAIT_CANCELLED,
+                returnDisplay: {
+                  ...this.currentDisplay!,
+                  status: 'cancelled' as const,
+                },
+              };
             }
-            this.updateDisplay(
-              { status: 'running' as const, terminateReason: undefined },
-              updateOutput,
-            );
+            throw waitError;
           }
+          this.updateDisplay(
+            { status: 'running' as const, terminateReason: undefined },
+            updateOutput,
+          );
         }
       }
 
