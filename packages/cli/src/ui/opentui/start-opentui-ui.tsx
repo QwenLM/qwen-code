@@ -488,6 +488,7 @@ function OpenTuiEntryApp({
       renderMain={renderMain}
       onSubmitPrompt={handleSubmitPrompt}
       onScheduleTool={live.scheduleTool}
+      onRunModPrompt={live.runModPrompt}
       onRetryPrompt={live.retryLastPrompt}
       onInputProcessed={live.notifyInputProcessed}
       onQuit={handleQuit}
