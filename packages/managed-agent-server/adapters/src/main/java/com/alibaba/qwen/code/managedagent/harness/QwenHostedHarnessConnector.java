@@ -794,13 +794,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public boolean supportsRuntimeSkillImport() {
         try {
             return client().capabilities().getFeatures().contains("managed-runtime-skill-import/1");
-        } catch (RuntimeException unavailable) { return false; }
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
     }
 
     @Override
     public boolean supportsPersonalMcpOAuth() {
-        try { return client().capabilities().getFeatures().contains("managed-mcp-oauth/1"); }
-        catch (RuntimeException unavailable) { return false; }
+        try {
+            return client().capabilities().getFeatures().contains("managed-mcp-oauth/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
     }
 
     @Override
