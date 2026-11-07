@@ -243,6 +243,81 @@ describe('start_sandbox', () => {
     await expect(result).resolves.toBe(0);
   });
 
+  it.each([
+    {
+      store: path.join(process.cwd(), '.qwen', 'trustedFolders.json'),
+      exists: true,
+    },
+    { store: '/opt/qwen-external-trust/trustedFolders.json', exists: true },
+    // A store the host has not created yet must still reach the container:
+    // its fallback under QWEN_HOME cannot hold the decision (#16397).
+    { store: '/opt/qwen-external-trust/trustedFolders.json', exists: false },
+  ])(
+    'forwards a custom trust store without mounting the store file ($store, exists: $exists)',
+    async ({ store, exists }) => {
+      vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+      vi.spyOn(os, 'platform').mockReturnValue('linux');
+      vi.stubEnv('QWEN_CODE_TRUSTED_FOLDERS_PATH', store);
+      vi.spyOn(fs, 'existsSync').mockImplementation(
+        (filePath) => filePath !== store || exists,
+      );
+      vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+        String(filePath),
+      );
+      execSyncMock.mockReturnValue(Buffer.from(''));
+
+      const imageCheck = Object.assign(new EventEmitter(), {
+        stdout: new EventEmitter(),
+      });
+      const child = new EventEmitter();
+      spawnMock
+        .mockImplementationOnce(() => {
+          queueMicrotask(() => {
+            imageCheck.stdout.emit('data', Buffer.from('image-id'));
+            imageCheck.emit('close', 0);
+          });
+          return imageCheck;
+        })
+        .mockReturnValueOnce(child);
+
+      const result = start_sandbox(
+        { command: 'docker', image: 'example.com/qwen-code:latest' },
+        [],
+        undefined,
+        [process.execPath, '/path/to/cli.js'],
+      );
+
+      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+      const args = spawnMock.mock.calls[1]?.[1] as string[];
+      const mountSpecs: string[] = [];
+      for (let index = 0; index < args.length; index++) {
+        if (args[index] === '--volume' || args[index] === '-v') {
+          mountSpecs.push(args[index + 1]);
+        } else if (args[index].startsWith('--volume=')) {
+          mountSpecs.push(args[index].slice('--volume='.length));
+        } else if (args[index] === '--mount') {
+          throw new Error(`unexpected --mount spec: ${args[index + 1]}`);
+        }
+      }
+      expect(mountSpecs.length).toBeGreaterThan(0);
+      expect(
+        mountSpecs.some((spec) => {
+          const { from, to } = parseSandboxMountSpec(spec, 'linux');
+          return from === store || to === store;
+        }),
+      ).toBe(false);
+      const envFlag = `QWEN_CODE_TRUSTED_FOLDERS_PATH=${store}`;
+      const envIndex = args.indexOf(envFlag);
+      expect(args.slice(envIndex - 1, envIndex + 1)).toEqual([
+        '--env',
+        envFlag,
+      ]);
+
+      child.emit('close', 0);
+      await expect(result).resolves.toBe(0);
+    },
+  );
+
   it('checks image presence with an offline inspect that sees digest references', async () => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
     vi.spyOn(fs, 'existsSync').mockReturnValue(true);
