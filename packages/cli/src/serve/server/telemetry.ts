@@ -45,6 +45,12 @@ interface LegacySessionTelemetryRoute {
 export const legacySessionTelemetryRoutes = [
   {
     method: 'POST',
+    path: '/sessions/live-state',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/live-state',
+  },
+  {
+    method: 'POST',
     path: '/sessions/catalog',
     attribution: 'handler_resolved',
     route: 'POST /sessions/catalog',
@@ -756,6 +762,9 @@ export function resolveDaemonTelemetryRoute(
   const pluralWorkspacePrefix = /^\/workspaces\/[^/]+/;
   if (pluralWorkspacePrefix.test(path)) {
     const suffix = path.replace(pluralWorkspacePrefix, '/workspace');
+    if (req.method === 'POST' && suffix === '/workspace/language') {
+      return { route: 'POST /workspaces/:workspace/language' };
+    }
     if (req.method === 'GET') {
       if (
         suffix === '/workspace/mcp' ||

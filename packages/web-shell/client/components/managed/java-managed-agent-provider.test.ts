@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { artifact } from './managed-tool-result.test-fixtures';
 import { createJavaManagedAgentProvider } from './java-managed-agent-provider';
+import { pendingQuestion } from './managed-question.test-fixtures';
 
 function jsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), {
@@ -1403,6 +1404,7 @@ describe('createJavaManagedAgentProvider', () => {
         events: [],
         items: [],
         lastSequence: 7,
+        coveredSequence: 5,
         hasMore: true,
         olderCursor: 'older-1',
       }),
@@ -1419,7 +1421,9 @@ describe('createJavaManagedAgentProvider', () => {
     });
 
     expect(transcript.olderCursor).toBe('older-1');
-    expect(transcript.lastEventId).toBe(7);
+    expect(transcript.lastEventId).toBe(5);
+    expect(transcript.history).toBe('items');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(String(url)).toBe(
       'https://product.example/api/agent/web-shell/v1/transcript/query',
@@ -1432,6 +1436,37 @@ describe('createJavaManagedAgentProvider', () => {
       }),
     );
   });
+
+  it.each([
+    ['missing', undefined],
+    ['null', null],
+    ['negative', -1],
+    ['fractional', 1.5],
+  ])(
+    'rejects %s message coverage instead of resuming at the head',
+    async (_label, coverage) => {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          events: [],
+          items: [],
+          lastSequence: 400,
+          coveredSequence: coverage,
+          hasMore: false,
+        }),
+      );
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: fetchImpl,
+      });
+      await expect(
+        provider.getTranscript('session-1', {
+          clientId: 'client-1',
+          limit: 100,
+        }),
+      ).rejects.toThrow('Invalid message transcript coverage.');
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('sends idempotent create, submit, and cancel commands only to Java', async () => {
     const fetchImpl = vi
@@ -1770,6 +1805,7 @@ describe('createJavaManagedAgentProvider', () => {
         olderCursor: 'older-1',
         hasMore: true,
         lastSequence: 4,
+        coveredSequence: 4,
       }),
     );
     const provider = createJavaManagedAgentProvider({
@@ -1919,6 +1955,7 @@ describe('createJavaManagedAgentProvider', () => {
                 ...permission,
                 actionId: 'question_1',
                 kind: 'question',
+                state: 'decided',
                 questions: [],
               },
             ],
@@ -1952,6 +1989,7 @@ describe('createJavaManagedAgentProvider', () => {
           toolName: 'write_file',
           inputRevision: 1,
           policyRevision: 'hosted-tool-approval/1',
+          createdAt: 1,
           expiresAt: 600_001,
           ...(inputPreview ? { inputPreview } : {}),
           options: [
@@ -2062,6 +2100,69 @@ describe('createJavaManagedAgentProvider', () => {
       }
     },
   );
+
+  it('lists a durable question and submits its structured answer through the existing operation', async () => {
+    const question = pendingQuestion();
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: [
+            {
+              ...question,
+              source: { kind: 'tool_call', id: question.functionCallId },
+              state: 'requested',
+              createdAt: 1,
+            },
+          ],
+          hasMore: false,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          operationId: 'question-response',
+          type: 'action_response',
+          status: 'completed',
+        }),
+      );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    const pending = await provider.actions!.listPending(question.sessionId, {
+      clientId: 'client',
+    });
+    expect(pending).toEqual([{ ...question, createdAt: 1 }]);
+    const response = {
+      kind: 'question' as const,
+      answers: [
+        { questionId: 'q1', optionIds: ['q1o2'] },
+        { questionId: 'q2', optionIds: ['q2o1', 'q2o2'], text: 'custom' },
+      ],
+    };
+    await provider.actions!.respond(question, response, {
+      clientId: 'client',
+      idempotencyKey: 'question:stable-digest',
+    });
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      requestId: expect.any(String),
+      sessionId: question.sessionId,
+      actionId: question.actionId,
+      idempotencyKey: 'question:stable-digest',
+      response: {
+        ...response,
+        inputRevision: question.inputRevision,
+        policyRevision: question.policyRevision,
+      },
+    });
+    await expect(
+      provider.actions!.respond(question, 'allow', {
+        clientId: 'client',
+        idempotencyKey: 'invalid',
+      }),
+    ).rejects.toThrow('kind does not match');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
 
   describe('an accepted approval answer', () => {
     const action = {

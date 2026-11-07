@@ -11,7 +11,9 @@ import type { ACPToolCall } from '../../adapters/types';
 import {
   extractText,
   isShellToolName,
+  MAX_TOOL_PAYLOAD_LENGTH,
   sanitizeControlChars,
+  stringifyValue,
   truncateText,
 } from '../messages/toolFormatting';
 import { extractDiff, fencedCodeBlock } from '../messages/ToolGroup';
@@ -20,23 +22,11 @@ import { parseShellLiveOutput } from '../messages/tools/shellLiveOutput';
 import styles from './tool-call-content.module.css';
 
 /** The longest stretch of one argument or result put in the DOM by default. */
-export const MAX_DETAIL_LENGTH = 4000;
+export const MAX_DETAIL_LENGTH = MAX_TOOL_PAYLOAD_LENGTH;
+
+export { stringifyValue };
 
 const EDIT_TOOL = /^(edit|editfile|write|write_file|writefile)$/;
-
-export function stringifyValue(value: unknown): string {
-  if (value === undefined || value === null) return '';
-  const text = typeof value === 'string' ? value : safeJson(value);
-  return text.trim();
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2) ?? '';
-  } catch {
-    return '';
-  }
-}
 
 /** Valid JSON renders as a code block; anything else stays plain text. */
 export function ToolCallDetail({

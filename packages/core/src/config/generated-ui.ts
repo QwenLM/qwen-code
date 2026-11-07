@@ -29,4 +29,9 @@ export interface BundledGeneratedUiConfig {
   server?: MCPServerConfig;
   skillsDir?: string;
   unavailableReason?: BundledGeneratedUiStatus['reason'];
+  /**
+   * The user turned the feature on rather than inheriting the default; only
+   * then is an unavailable runtime reported as a warning.
+   */
+  explicit?: boolean;
 }

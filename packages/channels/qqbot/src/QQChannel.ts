@@ -14,6 +14,7 @@
 
 import {
   ChannelBase,
+  ChannelProactiveDeliveryError,
   SessionRouter,
   getGlobalQwenDir,
   sanitizeSenderName,
@@ -77,8 +78,14 @@ import {
   fetchAccessToken,
   fetchGatewayUrl,
   getApiBase,
+  requestQQApi,
   sendQQMessage,
 } from './api.js';
+import type { QQApiMethod } from './api.js';
+import {
+  buildModerationTools,
+  type ModerationApiResult,
+} from './moderation-tools.js';
 
 /** QQ Bot OPENID format: exactly 32 uppercase hex chars (bot and sender OPENIDs). */
 const QQ_OPENID_RE = /^[A-F0-9]{32}$/i;
@@ -97,6 +104,21 @@ export class DeliveryError extends Error {
     super(message);
     this.name = 'DeliveryError';
   }
+}
+
+/**
+ * Delivery failures no retry can fix. The single definition of the permanent
+ * set: every send/flush site and the proactive arm classify with it, so a code
+ * added or renamed here changes all of them together.
+ */
+const PERMANENT_DELIVERY_CODES = new Set<DeliveryErrorCode>([
+  'RETRY_EXHAUSTED',
+  'ACTIVE_MSG_DISABLED',
+  'FALLBACK_FAILED',
+]);
+
+function isPermanentDeliveryError(err: unknown): err is DeliveryError {
+  return err instanceof DeliveryError && PERMANENT_DELIVERY_CODES.has(err.code);
 }
 
 interface QQReplyContext {
@@ -380,6 +402,16 @@ export class QQChannel extends ChannelBase {
   private replyMsgId: Map<string, { msgId: string; timestamp: number }> =
     new Map();
   private replyContextByMessageId = new Map<string, QQReplyContext>();
+  /**
+   * Recent inbound messages per chat, newest last, used by the moderation
+   * tools to resolve "that member's last message" into a message id the
+   * platform can recall. The ring is bounded by the per-chat count cap and,
+   * when `moderationRecallWindowMs` is positive, by that age.
+   */
+  private recentInbound = new Map<
+    string,
+    Array<{ messageId: string; senderId: string; at: number }>
+  >();
   private inboundReplyContext = new AsyncLocalStorage<QQReplyContext>();
   /** msg_seq counter per user messageId, for multi-block streaming. */
   private msgSeqMap: Map<string, number> = new Map();
@@ -395,6 +427,16 @@ export class QQChannel extends ChannelBase {
   private replyMsgIdCleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** 5-minute TTL for replyMsgId entries and seenMessages dedup. */
   private static readonly REPLY_MSG_ID_TTL_MS = 300_000;
+  /**
+   * How long the ring keeps an entry, from `moderationRecallWindowMs`: a
+   * positive value is an age in ms, -1 keeps entries until the count cap
+   * evicts them, and 0 disables the ring (and member-targeted recall).
+   */
+  private moderationRecallWindowMs: number;
+  /** Per-chat cap for the recent-inbound ring. */
+  private static readonly MAX_RECENT_INBOUND = 50;
+  /** Sweep idle chats out of the ring once it holds this many. */
+  private static readonly MAX_RECENT_INBOUND_CHATS = 256;
   /** Idle-flush timeout: buffer is sent after this many ms of silence. */
   private static readonly IDLE_FLUSH_MS = 2000;
   /** Max consecutive send failures before the stream is abandoned. */
@@ -480,6 +522,15 @@ export class QQChannel extends ChannelBase {
    * chunks onto its own msg_id (see PR #6457 review).
    */
   private sessionReplyMsgId: Map<string, { msgId: string; timestamp: number }> =
+    new Map();
+  /**
+   * Chat the turn in progress is about, per session, recorded by
+   * onPromptStart. Under a shared `sessionScope` a session serves many chats,
+   * so the router target frozen at session creation is whichever chat created
+   * it — not the chat a tool call belongs to. The moderation tools resolve
+   * their chat from here instead. Cleared on prompt end and session teardown.
+   */
+  private sessionTurnChat: Map<string, { chatId: string; isGroup: boolean }> =
     new Map();
   /**
    * Monotonic turn counter per session, bumped on every onPromptStart.
@@ -670,6 +721,18 @@ export class QQChannel extends ChannelBase {
       );
       this.qqConfig.bufferFlushLength = QQChannel.MAX_BUFFER_LENGTH;
     }
+    const recallWindow = this.qqConfig.moderationRecallWindowMs;
+    if (
+      recallWindow !== undefined &&
+      (!Number.isInteger(recallWindow) || recallWindow < -1)
+    ) {
+      process.stderr.write(
+        `[QQ:${this.name}] WARNING: invalid moderationRecallWindowMs=${recallWindow}, using -1 (no time limit)\n`,
+      );
+      this.moderationRecallWindowMs = -1;
+    } else {
+      this.moderationRecallWindowMs = recallWindow ?? -1;
+    }
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     // In standalone mode (no external router), use the per-channel
     // sessions path so the channel owns its own session file.
@@ -693,6 +756,7 @@ export class QQChannel extends ChannelBase {
       this._cronTextHandler = (sid, t) => this.handleCronTextChunk(sid, t);
       this.attachCronHandler();
     }
+    this.registerModerationTools();
     // Seal a stashed head on every bridge boundary, including the ones
     // ChannelBase suppresses while a cancel is pending.
     this.attachBridgeBoundarySeal();
@@ -773,11 +837,7 @@ export class QQChannel extends ChannelBase {
             process.stderr.write(
               `[QQ:${this.name}] Cron flush send error${codeStr}: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
             );
-            if (
-              code === 'RETRY_EXHAUSTED' ||
-              code === 'ACTIVE_MSG_DISABLED' ||
-              code === 'FALLBACK_FAILED'
-            ) {
+            if (isPermanentDeliveryError(err)) {
               this.dropCronEntryOrRearm(sessionId, entry);
               return;
             }
@@ -829,11 +889,7 @@ export class QQChannel extends ChannelBase {
                     `[QQ:${this.name}] Cron flush retry failed${retryCodeStr}: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}\n`,
                   );
                   entry.pendingRetry = '';
-                  if (
-                    retryCode === 'RETRY_EXHAUSTED' ||
-                    retryCode === 'ACTIVE_MSG_DISABLED' ||
-                    retryCode === 'FALLBACK_FAILED'
-                  ) {
+                  if (isPermanentDeliveryError(retryErr)) {
                     this.dropCronEntryOrRearm(sessionId, entry);
                     return;
                   }
@@ -889,11 +945,7 @@ export class QQChannel extends ChannelBase {
                             `[QQ:${this.name}] Cron flush re-retry failed${code2Str}: ${sanitizeLogText(err2 instanceof Error ? err2.message : String(err2), 200)}, toFlush=${toFlush.length}, session=${sanitizeLogText(sessionId, 32)}\n`,
                           );
                           entry.pendingRetry = '';
-                          if (
-                            code2 === 'RETRY_EXHAUSTED' ||
-                            code2 === 'ACTIVE_MSG_DISABLED' ||
-                            code2 === 'FALLBACK_FAILED'
-                          ) {
+                          if (isPermanentDeliveryError(err2)) {
                             this.dropCronEntryOrRearm(sessionId, entry);
                             return;
                           }
@@ -1002,13 +1054,15 @@ export class QQChannel extends ChannelBase {
   }
   /**
    * Override setBridge to re-attach the permanent `_cronTextHandler`
-   * after bridge crash-recovery.
+   * after bridge crash-recovery, and to re-register the moderation tools:
+   * they live on the bridge instance, so a fresh bridge starts without them.
    */
   override setBridge(bridge: ChannelAgentBridge): void {
     this.detachCronHandler();
     this.detachBridgeBoundarySeal();
     super.setBridge(bridge);
     this.attachCronHandler();
+    this.registerModerationTools();
     this.attachBridgeBoundarySeal();
   }
 
@@ -1126,6 +1180,29 @@ export class QQChannel extends ChannelBase {
     );
   }
 
+  override supportsProactiveSend(): boolean {
+    return true;
+  }
+
+  /**
+   * A group whose active-message toggle is known to be off rejects every
+   * proactive send, so loops/webhooks/background results must not target it.
+   * Direct messages never consult the group toggle map.
+   *
+   * The chat type comes from `chatTypeFor` (not `chatTypeMap`) so a group
+   * declared only in the channel config is gated on the same type `resolveRoute`
+   * routes on. A target explicitly marked as a group whose type has not been
+   * learned yet is rejected here: the send would otherwise die on the wire
+   * after a full unattended turn was spent.
+   */
+  protected override supportsProactiveTarget(target: SessionTarget): boolean {
+    if (!super.supportsProactiveTarget(target)) return false;
+    const chatType = this.chatTypeFor(target.chatId);
+    if (target.isGroup === true && chatType !== 'group') return false;
+    const isGroup = target.isGroup === true || chatType === 'group';
+    return !isGroup || this.groupActiveMsgEnabled.get(target.chatId) !== false;
+  }
+
   async sendMessage(chatId: string, text: string): Promise<void> {
     const inboundContext = this.inboundReplyContext.getStore();
     const latest = this.replyMsgId.get(chatId);
@@ -1158,6 +1235,73 @@ export class QQChannel extends ChannelBase {
       replyContext,
       sourceLabel,
     );
+  }
+
+  /**
+   * Proactive deliveries are unattended. Four callers reach this override —
+   * the loop prompt, the webhook-task prompt, background/named-task response
+   * delivery (deliverBackgroundResponseToTarget), and the daemon's
+   * deliverProactive. All of them send as active messages with no reply
+   * anchor: an unattended delivery must not inherit a chat-level reply anchor,
+   * because QQ would accept it as a passive reply (msg_id/msg_seq) and the
+   * active-message toggle would not apply.
+   */
+  protected override async pushProactive(
+    target: SessionTarget,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    try {
+      const blocked = await this.sendMessageWithReplyContext(
+        target.chatId,
+        text,
+        undefined,
+        sourceLabel,
+      );
+      // A route-blocked send resolves without throwing and never reaches the
+      // wire (see resolveRoute), while runLoopPrompt has already marked the
+      // delivery started — returning here would record an undelivered loop as
+      // delivered. Keep the block's class: the daemon's proactive-delivery arm
+      // maps `permanent` to `channel_delivery_rejected` via
+      // classifyChannelDeliveryError. The loop scheduler counts any failure
+      // alike.
+      if (blocked !== undefined) {
+        throw new ChannelProactiveDeliveryError(
+          blocked,
+          `outgoing route unresolved (${blocked}) for ${target.chatId}`,
+        );
+      }
+    } catch (err) {
+      // A permanent delivery code keeps its class: the daemon's
+      // proactive-delivery arm maps `permanent` to `channel_delivery_rejected`
+      // via classifyChannelDeliveryError, and the loop scheduler counts any
+      // failure alike. RATE_LIMITED and any other error stay untouched, so
+      // base's pushProactiveDelivery wrapper labels them retryable.
+      if (isPermanentDeliveryError(err)) {
+        throw new ChannelProactiveDeliveryError('permanent', err.message, {
+          cause: err,
+        });
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Background/named-task responses are unattended too, so they must never
+   * fall back to the anchored passive reply that base's
+   * `deliverBackgroundReply` would produce when the target gate fails: a
+   * toggle-off group would silently receive the response as a passive reply
+   * (msg_id/msg_seq), exactly what the active-message toggle is meant to
+   * block. Route every target through `pushProactive`; a target that cannot
+   * receive active messages then fails permanently instead of being delivered
+   * anyway. Base's fallback stays for attended replies.
+   */
+  protected override async deliverBackgroundResponseToTarget(
+    _sessionId: string,
+    text: string,
+    delivery: { target: SessionTarget; sourceLabel?: string },
+  ): Promise<void> {
+    await this.pushProactive(delivery.target, text, delivery.sourceLabel);
   }
 
   /**
@@ -1628,6 +1772,7 @@ export class QQChannel extends ChannelBase {
     }
     this.streamState.clear();
     this.sessionReplyMsgId.clear();
+    this.sessionTurnChat.clear();
     this.turnCounter.clear();
     this.flushingSessions.clear();
     this.pendingStreamDelete.clear();
@@ -1672,10 +1817,16 @@ export class QQChannel extends ChannelBase {
    * replies must go out as active messages, so clear any stale anchor.
    */
   protected override onPromptStart(
-    _chatId: string,
+    chatId: string,
     sessionId: string,
     messageId?: string,
   ): void {
+    // A shared sessionScope maps many chats onto one session, so the chat a
+    // tool call belongs to is this turn's, not the session's routed target.
+    this.sessionTurnChat.set(sessionId, {
+      chatId,
+      isGroup: this.chatTypeFor(chatId) === 'group',
+    });
     this.activePromptSessions.add(sessionId);
     // Bump the turn generation: streamState entries created by a previous
     // turn on this session (e.g. one left behind by a deferred send) are now
@@ -1734,6 +1885,7 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
     _messageId?: string,
   ): void {
+    this.sessionTurnChat.delete(sessionId);
     // Always clear the prompt-in-flight marker first: the PR #8241 teardown
     // below has early returns (deferred flush chains) that must not leave
     // this session marked as an active prompt for the cron discriminator.
@@ -2009,12 +2161,7 @@ export class QQChannel extends ChannelBase {
           // RETRY_EXHAUSTED / ACTIVE_MSG_DISABLED / FALLBACK_FAILED are permanent
           // (see flushAndTrack); everything else — RATE_LIMITED and a plain
           // network error — is transient and re-attempted under the bound.
-          if (
-            e instanceof DeliveryError &&
-            (e.code === 'RETRY_EXHAUSTED' ||
-              e.code === 'ACTIVE_MSG_DISABLED' ||
-              e.code === 'FALLBACK_FAILED')
-          ) {
+          if (isPermanentDeliveryError(e)) {
             process.stderr.write(
               `[QQ:${this.name}] cancelled-stash delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, dropping ${text.length} chars\n`,
             );
@@ -2072,6 +2219,10 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): void {
+    // Unattended turns (loop/webhook task) deliver their answer once, in full,
+    // through pushProactive; base never calls onResponseComplete for them, so
+    // streaming the chunks here would post the same text to the group twice.
+    if (this.isProactivePromptTurn(sessionId)) return;
     const currentTurn = this.turnCounter.get(sessionId) ?? 0;
     let state = this.streamState.get(sessionId);
     if (state && state.turn !== currentTurn) {
@@ -2528,12 +2679,7 @@ export class QQChannel extends ChannelBase {
         }
       })
       .catch((e: unknown) => {
-        if (
-          e instanceof DeliveryError &&
-          (e.code === 'RETRY_EXHAUSTED' ||
-            e.code === 'ACTIVE_MSG_DISABLED' ||
-            e.code === 'FALLBACK_FAILED')
-        ) {
+        if (isPermanentDeliveryError(e)) {
           // The text that accumulated into state.buffer while this send was in
           // flight is dropped with the entry below, so the loss log must report
           // it too: the payload count alone under-reports what the operator
@@ -3889,6 +4035,7 @@ export class QQChannel extends ChannelBase {
   }
 
   override onSessionDied(sessionId: string): void {
+    this.sessionTurnChat.delete(sessionId);
     const state = this.streamState.get(sessionId);
     if (state?.timer) {
       clearTimeout(state.timer);
@@ -4895,6 +5042,216 @@ export class QQChannel extends ChannelBase {
     this.saveQQState();
   }
 
+  /**
+   * Track an inbound message for the moderation tools. Kept in memory only:
+   * the ring does not survive a restart, so member-targeted recall only
+   * reaches messages received since the process started.
+   */
+  private recordRecentInbound(
+    chatId: string,
+    senderId: string | undefined,
+    messageId: string,
+  ): void {
+    // Nothing can resolve a member's message when the tools are off or the
+    // window is 0, so do not spend memory recording one.
+    const window = this.moderationRecallWindowMs;
+    if (this.qqConfig.moderationTools !== true || window === 0) return;
+    if (!senderId || !messageId) return;
+    const prior = this.recentInbound.get(chatId) ?? [];
+    // First write wins for one message id. The same platform id is redelivered
+    // on reconnect replay and arrives twice when a message is both
+    // GROUP_AT_MESSAGE_CREATE and GROUP_MESSAGE_CREATE; re-stamping it would
+    // make an older message outrank a newer one and extend its lifetime.
+    if (prior.some((entry) => entry.messageId === messageId)) return;
+    const now = Date.now();
+    const entries =
+      window > 0 ? prior.filter((entry) => now - entry.at < window) : prior;
+    entries.push({ messageId, senderId, at: now });
+    if (entries.length > QQChannel.MAX_RECENT_INBOUND) {
+      entries.splice(0, entries.length - QQChannel.MAX_RECENT_INBOUND);
+    }
+    this.recentInbound.set(chatId, entries);
+    if (this.recentInbound.size > QQChannel.MAX_RECENT_INBOUND_CHATS) {
+      this.sweepRecentInbound(now);
+    }
+  }
+
+  /**
+   * Drop one recalled message from the ring so the next member-targeted recall
+   * resolves the previous message instead of re-targeting the destroyed one.
+   * Splices in place: `recentMemberMessage`'s backward scan relies on the ring
+   * staying ascending by `at`.
+   */
+  private dropRecentMessage(chatId: string, messageId: string): void {
+    const entries = this.recentInbound.get(chatId);
+    if (!entries) return;
+    const index = entries.findIndex((entry) => entry.messageId === messageId);
+    if (index === -1) return;
+    entries.splice(index, 1);
+    if (entries.length === 0) this.recentInbound.delete(chatId);
+  }
+
+  /** Keep the ring's chat keys bounded: stale chats first, then LRU. */
+  private sweepRecentInbound(now: number): void {
+    const window = this.moderationRecallWindowMs;
+    if (window > 0) {
+      for (const [chatId, entries] of this.recentInbound) {
+        if (entries.every((entry) => now - entry.at >= window)) {
+          this.recentInbound.delete(chatId);
+        }
+      }
+    }
+    while (this.recentInbound.size > QQChannel.MAX_RECENT_INBOUND_CHATS) {
+      let oldestChat: string | undefined;
+      let oldestAt = Infinity;
+      for (const [chatId, entries] of this.recentInbound) {
+        const last = entries[entries.length - 1]?.at ?? 0;
+        if (last < oldestAt) {
+          oldestAt = last;
+          oldestChat = chatId;
+        }
+      }
+      if (oldestChat === undefined) return;
+      this.recentInbound.delete(oldestChat);
+    }
+  }
+
+  /** Newest tracked message id from `senderId` in `chatId`. */
+  private recentMemberMessage(
+    chatId: string,
+    senderId: string,
+  ): string | undefined {
+    const now = Date.now();
+    const window = this.moderationRecallWindowMs;
+    const entries = this.recentInbound.get(chatId) ?? [];
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i]!;
+      if (window > 0 && now - entry.at >= window) break;
+      if (entry.senderId === senderId) return entry.messageId;
+    }
+    return undefined;
+  }
+
+  /**
+   * The chat a moderation call may touch, resolved from the turn in progress.
+   * Under a shared `sessionScope` one session serves every group and DM, and
+   * the router target frozen at session creation is whichever chat happened to
+   * create it — using it would recall a message in a chat nobody asked about.
+   * ChannelBase calls `onPromptStart` for every turn with that turn's envelope
+   * chat, which is the only chat the turn is about.
+   */
+  private resolveModerationChat(
+    sessionId: string,
+  ): { chatId: string; isGroup: boolean } | undefined {
+    const turn = this.sessionTurnChat.get(sessionId);
+    if (turn) return turn;
+    // No turn in progress. A per-chat scope still maps the session to one
+    // chat, so its routed target is that chat — keep the channel-name guard so
+    // this instance's token cannot act on another channel's chat when several
+    // channels share one router. 'single' maps every chat onto one session, so
+    // its frozen target cannot say which chat this is: fail closed.
+    if (this.config.sessionScope === 'single') return undefined;
+    const target = this.router.getTarget(sessionId);
+    if (!target || target.channelName !== this.name) return undefined;
+    return { chatId: target.chatId, isGroup: target.isGroup === true };
+  }
+
+  /**
+   * Expose the QQ group-management surface to the agent as client MCP tools.
+   * Opt-in: a no-op unless the channel sets moderationTools: true, and also a
+   * no-op when the bridge has no client MCP tool support. Tools are owned by
+   * this channel instance: one bridge can serve several channels, and the
+   * owner is what keeps each channel's sessions on their own credentials.
+   */
+  private registerModerationTools(): void {
+    if (this.qqConfig.moderationTools !== true) return;
+    const register = this.bridge.registerChannelTool?.bind(this.bridge);
+    if (!register) return;
+    for (const tool of buildModerationTools({
+      resolveChat: (sessionId) => this.resolveModerationChat(sessionId),
+      memberRecallDisabled: this.moderationRecallWindowMs === 0,
+      currentSenderId: (sessionId) => this.getResponseSenderId(sessionId),
+      recentMemberMessage: (chatId, senderId) =>
+        this.recentMemberMessage(chatId, senderId),
+      dropRecentMessage: (chatId, messageId) =>
+        this.dropRecentMessage(chatId, messageId),
+      request: (input) => this.requestModerationApi(input),
+      log: (message) =>
+        process.stderr.write(
+          `[QQ:${this.name}] ${sanitizeLogText(message, 200)}\n`,
+        ),
+    })) {
+      register({ ...tool, owner: this.name });
+    }
+  }
+
+  /** Single REST entry point for the moderation tools. */
+  private async requestModerationApi(input: {
+    method: QQApiMethod;
+    path: string;
+    body?: Record<string, unknown>;
+  }): Promise<ModerationApiResult> {
+    if (this.disposed) {
+      return { ok: false, status: 0, message: 'channel disposed' };
+    }
+    if (!this.accessToken || Date.now() >= this.tokenExpiresAt) {
+      try {
+        await this.fetchToken();
+      } catch (error) {
+        return {
+          ok: false,
+          status: 0,
+          message: `token refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+    if (!this.accessToken) {
+      return { ok: false, status: 0, message: 'no QQ access token' };
+    }
+    try {
+      const response = await requestQQApi(
+        getApiBase(Boolean(this.qqConfig.sandbox)),
+        input.method,
+        input.path,
+        this.accessToken,
+        input.body,
+      );
+      const text = await response.text().catch(() => '');
+      let data: unknown;
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = text;
+        }
+      }
+      if (!response.ok) {
+        const record = (
+          typeof data === 'object' && data !== null ? data : {}
+        ) as Record<string, unknown>;
+        const rawCode = record['code'] ?? record['err_code'];
+        const code = typeof rawCode === 'number' ? rawCode : undefined;
+        const message =
+          typeof record['message'] === 'string' && record['message']
+            ? record['message']
+            : text || `HTTP ${response.status}`;
+        return {
+          ok: false,
+          status: response.status,
+          ...(code === undefined ? {} : { code }),
+          message,
+        };
+      }
+      return { ok: true, status: response.status, data };
+    } catch (error) {
+      return {
+        ok: false,
+        status: 0,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   private deleteReplyContext(context: QQReplyContext): void {
     this.replyContextByMessageId.delete(context.msgId);
     // Drop the chat-level naming entry BEFORE the reclaim: while it is still
@@ -5330,16 +5687,36 @@ export class QQChannel extends ChannelBase {
         } else if (t === 'GROUP_ADD_ROBOT') {
           this.handleGroupAddRobot(msg['d'] as unknown as GroupAddRobotEvent);
         } else if (t === 'GROUP_DEL_ROBOT') {
-          this.handleGroupDelRobot(msg['d'] as unknown as GroupDelRobotEvent);
+          void this.handleGroupDelRobot(
+            msg['d'] as unknown as GroupDelRobotEvent,
+          ).catch((error: unknown) =>
+            this.logGroupEventError(
+              'handleGroupDelRobot',
+              (msg['d'] as unknown as GroupDelRobotEvent).group_openid,
+              error,
+            ),
+          );
         } else if (t === 'GROUP_MSG_REJECT') {
-          this.handleGroupMsgToggle(
+          void this.handleGroupMsgToggle(
             msg['d'] as unknown as GroupMsgToggleEvent,
             false,
+          ).catch((error: unknown) =>
+            this.logGroupEventError(
+              'handleGroupMsgToggle',
+              (msg['d'] as unknown as GroupMsgToggleEvent).group_openid,
+              error,
+            ),
           );
         } else if (t === 'GROUP_MSG_RECEIVE') {
-          this.handleGroupMsgToggle(
+          void this.handleGroupMsgToggle(
             msg['d'] as unknown as GroupMsgToggleEvent,
             true,
+          ).catch((error: unknown) =>
+            this.logGroupEventError(
+              'handleGroupMsgToggle',
+              (msg['d'] as unknown as GroupMsgToggleEvent).group_openid,
+              error,
+            ),
           );
         } else if (t === 'RESUMED') {
           // RESUME success — the process did NOT restart, all in-memory
@@ -5891,6 +6268,9 @@ export class QQChannel extends ChannelBase {
     }
     this.chatTypeMap.set(chatId, 'c2c');
     this.setReplyMsgId(chatId, event.id);
+    // Not recorded in the recent-inbound ring: it is read only by the
+    // group-only member-targeted recall, so a DM entry could never be
+    // resolved and would consume the ring's shared 256-chat budget.
     const senderName = event.author.username || event.author.id || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
     const cleanText = rawContent.trim();
@@ -6000,6 +6380,7 @@ export class QQChannel extends ChannelBase {
       return;
     }
     this.setReplyMsgId(chatId, event.id);
+    this.recordRecentInbound(chatId, senderId, event.id);
     const envelope: Envelope = {
       channelName: this.name,
       senderId,
@@ -6056,6 +6437,14 @@ export class QQChannel extends ChannelBase {
     const isNewGroup = !this.chatTypeMap.has(chatId);
     this.chatTypeMap.set(chatId, 'group');
     if (isNewGroup) this.saveQQState();
+
+    // Track before the policy gates below: a 'log'-policy message is still a
+    // message the bot received, and its id is what a later recall needs.
+    this.recordRecentInbound(
+      chatId,
+      event.author.user_openid || event.author.id || event.author.member_openid,
+      event.id,
+    );
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
@@ -6192,6 +6581,16 @@ export class QQChannel extends ChannelBase {
 
   // ── Group management events ────────────────────────────────────
 
+  private logGroupEventError(
+    handler: string,
+    groupOpenid: string | undefined,
+    error: unknown,
+  ): void {
+    process.stderr.write(
+      `[QQ:${this.name}] ${handler} failed for group ${sanitizeLogText(groupOpenid ?? '', 64)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 200)}\n`,
+    );
+  }
+
   private handleGroupAddRobot(event: GroupAddRobotEvent): void {
     const groupId = event.group_openid;
     if (!groupId) {
@@ -6213,7 +6612,7 @@ export class QQChannel extends ChannelBase {
     );
   }
 
-  private handleGroupDelRobot(event: GroupDelRobotEvent): void {
+  private async handleGroupDelRobot(event: GroupDelRobotEvent): Promise<void> {
     const groupId = event.group_openid;
     if (!groupId) {
       process.stderr.write(
@@ -6248,6 +6647,7 @@ export class QQChannel extends ChannelBase {
     }
     this.botOpenIdByGroup.delete(groupId);
     this._lastKeywordNoMatchLog.delete(groupId);
+    this.recentInbound.delete(groupId);
     // Clean up cron buffers targeting this group (always, regardless of config flag)
     let cleanedCron = 0;
     for (const [sid, entry] of this.cronBuffer) {
@@ -6296,16 +6696,17 @@ export class QQChannel extends ChannelBase {
         cleanedStreams++;
       }
     }
+    const disabledLoops = await this.disableLoopJobsForChat(groupId);
     this.saveQQState();
     process.stderr.write(
-      `[QQ:${this.name}] Removed from group ${sanitizeLogText(groupId, 64)} by ${sanitizeLogText(event.op_member_openid, 64)}, cleaned ${cleanedStreams} stream(s) and ${cleanedCron} cron buffer(s)\n`,
+      `[QQ:${this.name}] Removed from group ${sanitizeLogText(groupId, 64)} by ${sanitizeLogText(event.op_member_openid, 64)}, cleaned ${cleanedStreams} stream(s), ${cleanedCron} cron buffer(s), and disabled ${disabledLoops} loop(s)\n`,
     );
   }
 
-  private handleGroupMsgToggle(
+  private async handleGroupMsgToggle(
     event: GroupMsgToggleEvent,
     enabled: boolean,
-  ): void {
+  ): Promise<void> {
     if (!event.group_openid) {
       process.stderr.write(
         `[QQ:${this.name}] Group msg toggle dropped: missing group_openid\n`,
@@ -6323,5 +6724,10 @@ export class QQChannel extends ChannelBase {
     process.stderr.write(
       `[QQ:${this.name}] Active msg ${enabled ? 'enabled' : 'disabled'} for group ${sanitizeLogText(event.group_openid, 64)}\n`,
     );
+    // No eager loop teardown here: a toggle is reversible. The pre-flight
+    // target gate already refuses the next fire (so no turn is burned), and a
+    // loop left failing is retired by the scheduler's 5-failure limit.
+    // handleGroupDelRobot still disables eagerly: the gate cannot see a
+    // removal, so there the teardown is the only thing that stops the fires.
   }
 }
