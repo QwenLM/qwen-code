@@ -1,10 +1,16 @@
 package com.alibaba.qwen.code.runtimebroker.provisioning.kubernetes;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.contracts.runtime.ProtectionIdentity;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentReclamation;
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.spi.KubernetesMaintenanceClient;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
@@ -24,17 +30,19 @@ import java.security.GeneralSecurityException;
 import java.security.KeyStore;
 import java.security.cert.CertificateFactory;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
 
 /** Bounded core-v1 API calls with rotating service-account tokens and explicit CA trust. */
-public final class KubernetesHttpRuntimeClient implements com.alibaba.qwen.code.runtimebroker.spi.KubernetesMaintenanceClient {
+public final class KubernetesHttpRuntimeClient implements KubernetesMaintenanceClient {
     private static final int RESPONSE_LIMIT = 1024 * 1024;
     private static final int CONFIG_MAP_RESPONSE_LIMIT = RESPONSE_LIMIT + 64 * 1024;
     private static final int DELETE_REQUEST_LIMIT = 16 * 1024;
@@ -263,7 +271,7 @@ public final class KubernetesHttpRuntimeClient implements com.alibaba.qwen.code.
         });
         return result.exceptionallyCompose(error -> {
             Throwable cause = error;
-            while (cause instanceof java.util.concurrent.CompletionException && cause.getCause() != null) {
+            while (cause instanceof CompletionException && cause.getCause() != null) {
                 cause = cause.getCause();
             }
             return CompletableFuture.failedFuture(cause instanceof RuntimeBrokerException ? cause : failure(503, true));
@@ -333,20 +341,20 @@ public final class KubernetesHttpRuntimeClient implements com.alibaba.qwen.code.
         return new RuntimeBrokerException(status >= 400 && status <= 599 ? status : 502,
                 "runtime_kubernetes_api_failed", "Kubernetes API request failed.", retryable);
     }
-    public java.util.concurrent.CompletionStage<Void> verifyProtection(
-            com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration registration,
-            com.alibaba.qwen.code.managedagent.contracts.runtime.ProtectionIdentity protection) {
-        return new com.alibaba.qwen.code.runtimebroker.provisioning.kubernetes.WorkspaceCsiResourceGuard(
+    public CompletionStage<Void> verifyProtection(
+            WorkspaceCsiRegistration registration,
+            ProtectionIdentity protection) {
+        return new WorkspaceCsiResourceGuard(
                 this, registration.clusterDomain(), registration, protection).verify().thenApply(receipt -> null);
     }
 
-    public com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentReclamation.Baseline reclamationBaseline(
-            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord original,
-            com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.RuntimeBroker.ResidentWorkspace selected,
-            String finalizer, java.time.Instant now) { return com.alibaba.qwen.code.runtimebroker.provisioning.kubernetes.ResidentWorkspaceReclamation.prepare(original, selected, finalizer, this, now); }
-    public com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentReclamation.Receipt reclamationReceipt(
-            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord original,
-            com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.RuntimeBroker.ResidentWorkspace selected,
-            com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentReclamation.Baseline baseline,
-            Map<String, Object> pod, java.time.Instant now) { return com.alibaba.qwen.code.runtimebroker.provisioning.kubernetes.ResidentWorkspaceReclamation.complete(original, selected, baseline, pod, this, now); }
+    public ResidentReclamation.Baseline reclamationBaseline(
+            RuntimeBindingRecord original,
+            ManagedAgentSettings.RuntimeBroker.ResidentWorkspace selected,
+            String finalizer, Instant now) { return ResidentWorkspaceReclamation.prepare(original, selected, finalizer, this, now); }
+    public ResidentReclamation.Receipt reclamationReceipt(
+            RuntimeBindingRecord original,
+            ManagedAgentSettings.RuntimeBroker.ResidentWorkspace selected,
+            ResidentReclamation.Baseline baseline,
+            Map<String, Object> pod, Instant now) { return ResidentWorkspaceReclamation.complete(original, selected, baseline, pod, this, now); }
 }

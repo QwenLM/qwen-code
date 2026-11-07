@@ -421,6 +421,16 @@ PR 3b-2b has the turn await its batch. The batch's completion step still stops t
 
 When the turn's stream ends while another stream is active, which may be the stream that sent its round, the turn does not wait: a response of provider replays alone sends its answers before its own stream closes. The batch then waits for the streams to end and completes on its own, as before, and batches that wait for the streams still go out in one continuation.
 
+PR 3c-1 has the turn send the round its batch continues with. The batch's completion step still repairs history, splits the results by interaction owner, starts the tool-use summary and checks the stops, then hands the next round to the turn. The turn builds it as the loop's `nextRound` builds a round after its batch, and sends it:
+
+| The TUI today                                                                                                                            | With the setting on                                           |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| the completion step takes the input queued for the tool boundary, mid-turn messages and then teammate messages, and sends the next round | the turn takes that input after the batch and sends the round |
+
+Until the turn sends the round, the batch keeps the scheduler and keeps the TUI off Idle, so queued batches and idle work do not start in between. A turn that does not wait for its batch, because another stream is active, leaves the round to the batch, which sends it itself. Batches that wait for the streams still go out in one continuation, which the turn whose stream ends last sends.
+
+A retry with Ctrl+Y already runs on the shared round and, from PR 3b-2b, awaits its batch. PR 3c-1 adds the retry scenarios to the Ink parity suite, with a retried tool-result round whose response calls a tool, and a scenario for input queued while a tool runs.
+
 ## Migration
 
 | PR    | Content                                                                                                                                             |
@@ -521,6 +531,9 @@ A continuation's request runs under a prompt id of its own on the current loop a
 - a stream that drops and is retried;
 - two prompts in one session;
 - a model error;
+- a retry after a model error, and a retry that fails again;
+- a retried tool-result round whose response calls a tool;
+- input queued while a tool runs, which goes out with the tool's result;
 - a UserPromptSubmit hook that blocks;
 - a Stop hook that blocks once.
 

@@ -14321,35 +14321,92 @@ describe('Session', () => {
       },
     );
 
-    it('does not persist a shared model default for a standalone session', async () => {
-      session.dispose();
-      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
-      session = new Session(
-        'test-session-id',
-        mockConfig,
-        mockClient,
-        mockSettings,
-      );
+    it.each([
+      [AuthType.USE_OPENAI, 'qwen3-coder-flash', false],
+      [AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max', true],
+    ] as const)(
+      'switches standalone %s using only the session config',
+      async (authType, modelId, refresh) => {
+        session.dispose();
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+          'standalone',
+        );
+        const refreshSubscriptionModels = vi.fn().mockResolvedValue({
+          models: [modelId],
+          cached: false,
+        });
+        Object.assign(mockConfig, { refreshSubscriptionModels });
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
 
-      await session.setModel(
-        {
-          sessionId: 'test-session-id',
-          modelId: `qwen3-coder-flash(${AuthType.USE_OPENAI})`,
-        },
-        { persistDefault: true },
-      );
+        await session.setModel(
+          {
+            sessionId: 'test-session-id',
+            modelId: `${modelId}(${authType})`,
+          },
+          { persistDefault: true },
+        );
 
-      expect(mockConfig.switchModel).toHaveBeenCalledWith(
-        AuthType.USE_OPENAI,
-        'qwen3-coder-flash',
-        undefined,
-      );
-      expect(mockSettings.setValue).not.toHaveBeenCalled();
-      expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
-        modelId: 'qwen3-coder-flash',
-        authType: AuthType.USE_OPENAI,
-      });
-    });
+        expect(mockConfig.switchModel).toHaveBeenCalledWith(
+          authType,
+          modelId,
+          undefined,
+        );
+        expect(mockSettings.setValue).not.toHaveBeenCalled();
+        if (refresh) {
+          expect(refreshSubscriptionModels).toHaveBeenCalledOnce();
+          expect(refreshSubscriptionModels).toHaveBeenCalledBefore(
+            switchModelSpy,
+          );
+        } else {
+          expect(refreshSubscriptionModels).not.toHaveBeenCalled();
+        }
+        expect(
+          mockChatRecordingService.recordSessionModel,
+        ).toHaveBeenCalledWith({
+          modelId,
+          authType,
+        });
+      },
+    );
+
+    it.each([
+      'qwen3.8-max(qwen-subscription)',
+      '$runtime|qwen-subscription|qwen3.8-max(openai)',
+    ])(
+      'enforces session auth policy for %s before refreshing models',
+      async (modelId) => {
+        session.dispose();
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+          'standalone',
+        );
+        const refreshSubscriptionModels = vi.fn();
+        Object.assign(mockConfig, { refreshSubscriptionModels });
+        mockSettings.merged.security = {
+          auth: { enforcedType: AuthType.USE_OPENAI },
+        };
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+
+        await expect(
+          session.setModel({
+            sessionId: 'test-session-id',
+            modelId,
+          }),
+        ).rejects.toMatchObject({ data: { errorKind: 'auth_type_enforced' } });
+        expect(refreshSubscriptionModels).not.toHaveBeenCalled();
+        expect(switchModelSpy).not.toHaveBeenCalled();
+        expect(mockSettings.setValue).not.toHaveBeenCalled();
+      },
+    );
 
     it('propagates errors from config.switchModel', async () => {
       const configError = new Error('Invalid model');
@@ -37489,6 +37546,32 @@ describe('Session', () => {
         });
       });
 
+      it('tags the stacked-skill overflow notice for channel replies', async () => {
+        const notice =
+          'Only the first 5 skills were loaded. Additional /skill tokens were treated as prompt text.';
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Expanded prompt' }],
+          stackedSkillOverflow: notice,
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/skill a /skill b' }],
+        });
+
+        expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(1, {
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: notice },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        });
+      });
+
       it('forwards the structured compression result and records it for replay', async () => {
         const compression = {
           phase: 'done' as const,
@@ -52719,6 +52802,34 @@ describe('Session', () => {
           errorType: undefined,
         }),
       );
+    });
+
+    it('reports a returned interruption as interrupted and keeps its output', async () => {
+      const abortController = new AbortController();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return {
+          llmContent: 'Below is the output before it was cancelled.\npartial',
+          returnDisplay: 'partial',
+          interruptedBeforeCompletion: true,
+        };
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('cancel_tool', execute),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(abortController.signal, 'prompt-interrupted-cancel', [
+        { id: 'interrupted_cancel_call', name: 'cancel_tool', args: {} },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error:
+          'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.\n\nBelow is the output before it was cancelled.\npartial',
+      });
     });
 
     it('does not execute after cancellation settles during PreToolUse', async () => {

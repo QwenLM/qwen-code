@@ -35,6 +35,7 @@ import {
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { enforceFunctionResponseBudget } from '@qwen-code/qwen-code-core/tools/tool-response-finalizer.js';
 import { hostedToolOutputBudget } from './hosted-harness-model.js';
+import { RESIDENT_WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
@@ -90,6 +91,7 @@ import {
   hostedRouteAnswer,
   hostedTeamJoinedText,
   hostedRuntimeSessionId,
+  hostedReadRangeGuidance,
   journaledToolResultIds,
   truncateHostedGlobResponse,
   type HostedShellTurnOptions,
@@ -2797,7 +2799,10 @@ export async function recoverHostedRuntimeTurn(input: {
               [],
               `Tool execution settled as ${result.executionStatus}, but its output exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte durable Session limit and was omitted.` +
                 (item.toolName === 'read_file'
-                  ? ' Request a smaller offset/limit range.'
+                  ? hostedReadRangeGuidance(
+                      broker.capabilityDigest ===
+                        RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+                    )
                   : ''),
             );
             const omittedResponse = omitted[0]?.functionResponse;

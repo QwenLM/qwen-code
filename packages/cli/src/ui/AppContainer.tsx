@@ -209,6 +209,7 @@ import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { keyMatchers, Command } from './keyMatchers.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalProgress } from './hooks/useTerminalProgress.js';
+import { useProgramStatus } from './hooks/use-program-status.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useMcpApproval } from './hooks/useMcpApproval.js';
 import { useProjectHooksApproval } from './hooks/use-project-hooks-approval.js';
@@ -1858,12 +1859,18 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     historyManager.addItem,
     handleAuthChange,
+    initializationResult.skipStartupAuthDialog,
   );
   const { state: authState, actions: authActions } = auth;
   const { onAuthError, openAuthDialog, closeAuthDialog } = authActions;
   const { isAuthDialogOpen, isAuthenticating, pendingAuthType } = authState;
 
-  useInitializationAuthError(initializationResult.authError, onAuthError);
+  useInitializationAuthError(
+    initializationResult.skipStartupAuthDialog
+      ? null
+      : initializationResult.authError,
+    onAuthError,
+  );
 
   // Sync user tier from config when authentication changes
   // TODO: Implement getUserTier() method on Config if needed
@@ -2629,6 +2636,7 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingResponseLengthRef,
     isReceivingContent,
     workflowKeywordActive,
+    turnCancelledRef,
   } = useLlmStream(
     config.getLlmClient(),
     historyManager.history,
@@ -4851,6 +4859,22 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     terminal,
     pendingToolCalls,
+  });
+
+  // Program status (OSC 7501) for terminal tabs and agent inboxes
+  useProgramStatus({
+    streamingState,
+    pendingToolCalls,
+    history: historyManager.history,
+    pendingHistoryItems,
+    turnCancelledRef,
+    authPending: isAuthDialogOpen || isAuthenticating,
+    shellConfirmationPending: !!shellConfirmationRequest,
+    loopDetectionPending: !!loopDetectionConfirmationRequest,
+    startupApprovalPending:
+      isFolderTrustDialogOpen ||
+      isMcpApprovalDialogOpen ||
+      isProjectHooksApprovalDialogOpen,
   });
 
   // P-notif: terminal-bell when a workflow run finishes (completed / failed),
