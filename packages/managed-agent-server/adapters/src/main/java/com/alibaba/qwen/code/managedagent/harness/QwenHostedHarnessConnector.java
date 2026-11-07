@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.daemon.CancelManagedRuntime;
 import com.alibaba.qwen.code.daemon.CreateHarnessSession;
 import com.alibaba.qwen.code.daemon.DaemonApprovalMode;
 import com.alibaba.qwen.code.daemon.DaemonEvent;
+import com.alibaba.qwen.code.daemon.DaemonException;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.GetHarnessTranscript;
 import com.alibaba.qwen.code.daemon.HarnessEventStream;
@@ -23,18 +24,23 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HostedHarnessRecover
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.ApiModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import javax.net.ssl.SSLContext;
 
@@ -51,8 +57,8 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 public class QwenHostedHarnessConnector implements HarnessConnector {
-    private static final com.fasterxml.jackson.databind.ObjectMapper LIFECYCLE_JSON =
-            new com.fasterxml.jackson.databind.ObjectMapper();
+    private static final ObjectMapper LIFECYCLE_JSON =
+            new ObjectMapper();
     private final ManagedAgentSettings settings;
     private final ManagedAgentSettings.Harness properties;
     private final ManagedAgentSettings.SessionStore sessionStore;
@@ -63,13 +69,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final DaemonApprovalMode approvalMode;
     private final ManagedActionStore actions;
     private final ManagedAgentDefinitionStore definitions;
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     private ManagedSessionSkills sessionSkills;
     private final ManagedSessionStore resources;
-    @org.springframework.beans.factory.annotation.Autowired
-    private com.fasterxml.jackson.databind.ObjectMapper extensionJson;
-    @org.springframework.beans.factory.annotation.Autowired
-    private com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore extensions;
+    @Autowired
+    private ObjectMapper extensionJson;
+    @Autowired
+    private ManagedExtensionRecordStore extensions;
     private final WriterCredentialPolicy credentials;
     private final SshWorkspaceStore ssh;
     /** #13753 I2: this control plane serves child Workspaces (startup checks the shape). */
@@ -93,8 +99,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         this.client = negotiated;
     }
 
-    public void configureExtensionResources(com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore records,
-            com.fasterxml.jackson.databind.ObjectMapper json) {
+    public void configureExtensionResources(ManagedExtensionRecordStore records,
+            ObjectMapper json) {
         this.extensions = records;
         this.extensionJson = json;
     }
@@ -288,7 +294,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public boolean supportsFencedTitles() {
         try {
             return client().capabilities().getTitleProtocolVersion() == 1;
-        } catch (com.alibaba.qwen.code.daemon.DaemonException
+        } catch (DaemonException
                 | IllegalStateException unavailable) {
             return false;
         }
@@ -306,15 +312,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     ? isWorkspaceFilesAvailable() && client().capabilities().getLifecycleProtocolVersion() == 1
                     : WorkspaceToolProfiles.lifecycleProtocol(profile) == 2
                             && client().capabilities().getLifecycleV2Profiles().contains(profile);
-        } catch (com.alibaba.qwen.code.daemon.DaemonException
+        } catch (DaemonException
                 | IllegalStateException unavailable) {
             return false;
         }
     }
 
     @Override
-    public com.fasterxml.jackson.databind.JsonNode settleLifecycle(
-            com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
+    public JsonNode settleLifecycle(
+            StoreModels.OperationRecord operation) {
         try {
             return doSettleLifecycle(operation, "effects");
         } catch (HostedHarnessGenerationException error) {
@@ -323,8 +329,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
     }
 
-    private com.fasterxml.jackson.databind.JsonNode doSettleLifecycle(
-            com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation, String phase) {
+    private JsonNode doSettleLifecycle(
+            StoreModels.OperationRecord operation, String phase) {
         SessionRecord session = sessions.requireSession(operation.tenantId(), operation.sessionId());
         if (operation.lifecycleProtocolVersion() < 0 || operation.lifecycleProtocolVersion() > 2) {
             throw new IllegalArgumentException("Unknown lifecycle protocol");
@@ -337,7 +343,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         var authority = Map.<String, Object>of("operationId", operation.operationId(), "claimGeneration", operation.claimGeneration());
         var request = new LinkedHashMap<String, Object>(Map.<String, Object>of("sessionKey", Map.of("tenantId", session.tenantId(),
                 "workspaceId", session.workspace().getWorkspaceId(), "sessionId", session.sessionId()),
-                "kind", operation.kind().name().toLowerCase(java.util.Locale.ROOT), "authority", authority));
+                "kind", operation.kind().name().toLowerCase(Locale.ROOT), "authority", authority));
         if (operation.lifecycleProtocolVersion() == 2) {
             request.put("protocolVersion", 2);
             request.put("phase", phase);
@@ -358,7 +364,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private HarnessSessionRef lifecycleAttachment(
-            com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation, SessionRecord session) {
+            StoreModels.OperationRecord operation, SessionRecord session) {
         AttachmentKey key = attachmentKey(operation.tenantId(), operation.sessionId());
         HarnessSessionRef ref = attachments.get(key);
         if (ref == null) {
@@ -384,7 +390,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public void runLifecycleChildOperation(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation,
+    public void runLifecycleChildOperation(StoreModels.OperationRecord operation,
             Map<String, Object> body) {
         try {
             SessionRecord session = sessions.requireSession(operation.tenantId(), operation.sessionId());
@@ -399,16 +405,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public void prepareLifecycleResources(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
+    public void prepareLifecycleResources(StoreModels.OperationRecord operation) {
         runResourcePhase(operation, "prepare_resources");
     }
 
     @Override
-    public void settleLifecycleResources(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
+    public void settleLifecycleResources(StoreModels.OperationRecord operation) {
         runResourcePhase(operation, "settle_resources");
     }
 
-    private void runResourcePhase(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation, String phase) {
+    private void runResourcePhase(StoreModels.OperationRecord operation, String phase) {
         try {
             doSettleLifecycle(operation, phase);
         } catch (HostedHarnessGenerationException error) {
@@ -418,7 +424,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public void detachLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
+    public void detachLifecycle(StoreModels.OperationRecord operation) {
         try {
             doDetachLifecycle(operation);
         } catch (HostedHarnessGenerationException error) {
@@ -427,7 +433,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
     }
 
-    private void doDetachLifecycle(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
+    private void doDetachLifecycle(StoreModels.OperationRecord operation) {
         AttachmentKey key = attachmentKey(operation.tenantId(), operation.sessionId());
         HarnessSessionRef ref = attachments.get(key);
         try {
@@ -784,7 +790,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             attached = attachments.get(attachmentKey(tenantId, sessionId));
         }
         if (attached == null) {
-            throw new com.alibaba.qwen.code.daemon.DaemonException("The original Session must be resumed first");
+            throw new DaemonException("The original Session must be resumed first");
         }
         return attached;
     }
@@ -824,7 +830,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         HarnessSessionRef ref = attachment(tenantId, sessionId, true);
         var preparedClient = client();
         if (!preparedClient.capabilities().getFeatures().contains("context-compression/1")) {
-            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(
+            throw new ManagedAgentException(
                     409, "unsupported_feature",
                     "Hosted context compression is unavailable.");
         }
@@ -2033,7 +2039,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
     }
 
-    private void requireExtendedApprovalSupport(com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection policy) {
+    private void requireExtendedApprovalSupport(ApiModels.WebShellApprovalSelection policy) {
         if (policy != null && "auto".equals(policy.mode()) && !supportsAutoApproval()) {
             throw new IllegalStateException("Hosted classifier approval is unavailable");
         }
@@ -2056,7 +2062,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         var run = extensions.findRecord(session.tenantId(), lineage.parentSessionId(), "child_run", lineage.parentChildRunId()).orElseThrow();
         var launch = extensions.readRecordResource(session.tenantId(), lineage.parentSessionId(), run.required("inputRef"));
         var route = launch.required("publicLaunch").required("modelRoute");
-        Map<String, Object> result = new java.util.LinkedHashMap<>(Map.of("authType", route.required("authType").textValue(),
+        Map<String, Object> result = new LinkedHashMap<>(Map.of("authType", route.required("authType").textValue(),
                 "endpointDigest", route.required("endpointDigest").textValue(),
                 "providerPin", route.required("providerPin").textValue()));
         if (route.has("origin")) {

@@ -530,6 +530,7 @@ describe('useLlmStream', () => {
     goalQueueRef?: Parameters<typeof useLlmStream>[24],
     modelSwitchedFromQuotaError = false,
     onPromptReturned?: Parameters<typeof useLlmStream>[25],
+    midTurnDrainRef?: Parameters<typeof useLlmStream>[19],
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -606,7 +607,7 @@ describe('useLlmStream', () => {
           () => {},
           80,
           24,
-          undefined, // midTurnDrainRef
+          midTurnDrainRef,
           logger,
           availableTerminalHeightRef,
           undefined, // terminalWidthRef
@@ -20106,6 +20107,35 @@ describe('useLlmStream', () => {
       expect(infoMessages).toHaveLength(0);
     });
 
+    it('should prefer a provider refusal message', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: {
+              reason: 'SAFETY',
+              usageMetadata: undefined,
+              finishMessage:
+                'Response refused due to cyber-related safety policy.',
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('Test refusal');
+      });
+
+      const infoItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter((item) => item.type === 'info');
+      expect(infoItems).toContainEqual({
+        type: 'info',
+        text: '⚠  Response refused due to cyber-related safety policy.',
+      });
+    });
+
     it('should not add message for FINISH_REASON_UNSPECIFIED', async () => {
       // Setup mock to return a stream with FINISH_REASON_UNSPECIFIED
       mockSendMessageStream.mockReturnValue(
@@ -25309,6 +25339,45 @@ describe('useLlmStream', () => {
           );
         },
       );
+    const holdBatches = () => {
+      const pending: Array<() => void> = [];
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          pending.push(() => {
+            void onBatchComplete?.(
+              requests.map((request) => completedCall(request)),
+            );
+          });
+        },
+      );
+      return pending;
+    };
+    // A call the provider replays, with a client whose history already
+    // holds its fingerprint, so the batch answers it instead of running it.
+    const replayedCall = () => {
+      const request = toolRequest('replayed');
+      const replayed = {
+        ...request,
+        value: { ...request.value, providerCallId: request.value.callId },
+      };
+      const client = mockConfig.getLlmClient();
+      client.getHistoryToolCallFingerprints = vi
+        .fn()
+        .mockReturnValue(
+          new Map([
+            [
+              replayed.value.providerCallId,
+              getToolCallFingerprint(replayed.value.name, replayed.value.args),
+            ],
+          ]),
+        );
+      return { replayed, client };
+    };
     const rounds = (...events: unknown[][]) => {
       for (const roundEvents of events) {
         mockSendMessageStream.mockReturnValueOnce(
@@ -25544,21 +25613,7 @@ describe('useLlmStream', () => {
 
     it('answers a replayed call in the batch and runs only the others', async () => {
       completeBatches();
-      const replayed = {
-        ...toolRequest('replayed'),
-        value: { ...toolRequest('replayed').value, providerCallId: 'replayed' },
-      };
-      const client = mockConfig.getLlmClient();
-      client.getHistoryToolCallFingerprints = vi
-        .fn()
-        .mockReturnValue(
-          new Map([
-            [
-              'replayed',
-              getToolCallFingerprint(replayed.value.name, replayed.value.args),
-            ],
-          ]),
-        );
+      const { replayed, client } = replayedCall();
       rounds(
         [replayed, toolRequest('fresh')],
         [{ type: ServerLlmEventType.Content, value: 'Done.' }],
@@ -25670,21 +25725,7 @@ describe('useLlmStream', () => {
           );
         },
       );
-      const replayed = {
-        ...toolRequest('replayed'),
-        value: { ...toolRequest('replayed').value, providerCallId: 'replayed' },
-      };
-      const client = mockConfig.getLlmClient();
-      client.getHistoryToolCallFingerprints = vi
-        .fn()
-        .mockReturnValue(
-          new Map([
-            [
-              'replayed',
-              getToolCallFingerprint(replayed.value.name, replayed.value.args),
-            ],
-          ]),
-        );
+      const { replayed, client } = replayedCall();
       rounds(
         [replayed, toolRequest('declined')],
         [{ type: ServerLlmEventType.Content, value: 'Done.' }],
@@ -25940,21 +25981,7 @@ describe('useLlmStream', () => {
     });
 
     it('awaits its batch and the round the batch continues with', async () => {
-      let completeBatch: (() => void) | undefined;
-      mockScheduleToolCalls.mockImplementation(
-        (
-          requests: ToolCallRequestInfo[],
-          _signal: AbortSignal,
-          _modelOverride: string | undefined,
-          onBatchComplete?: (calls: unknown[]) => Promise<void>,
-        ) => {
-          completeBatch = () => {
-            void onBatchComplete?.(
-              requests.map((request) => completedCall(request)),
-            );
-          };
-        },
-      );
+      const pending = holdBatches();
       rounds(
         [toolRequest('read_a')],
         [{ type: ServerLlmEventType.Content, value: 'Read.' }],
@@ -25967,14 +25994,14 @@ describe('useLlmStream', () => {
           settled = true;
         });
       });
-      await waitFor(() => expect(completeBatch).toBeDefined());
+      await waitFor(() => expect(pending).toHaveLength(1));
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
       expect(settled).toBe(false);
 
       await act(async () => {
-        completeBatch!();
+        pending[0]();
       });
 
       await waitFor(() => expect(settled).toBe(true));
@@ -26041,22 +26068,126 @@ describe('useLlmStream', () => {
       expect(callbacksReturned).toEqual([true, true]);
     });
 
-    it('sends no replay answers alone when history answered every executed call', async () => {
-      const replayed = {
-        ...toolRequest('replayed'),
-        value: { ...toolRequest('replayed').value, providerCallId: 'replayed' },
+    it('sends the input queued for the tool boundary after the results, in the next round', async () => {
+      completeBatches();
+      rounds(
+        [toolRequest('read_a')],
+        [{ type: ServerLlmEventType.Content, value: 'Read.' }],
+      );
+      let queued = ['Also check b.'];
+      const midTurnDrainRef = {
+        current: vi.fn(() => {
+          const drained = queued;
+          queued = [];
+          return drained;
+        }),
       };
-      const client = mockConfig.getLlmClient();
-      client.getHistoryToolCallFingerprints = vi
-        .fn()
-        .mockReturnValue(
-          new Map([
-            [
-              'replayed',
-              getToolCallFingerprint(replayed.value.name, replayed.value.args),
-            ],
-          ]),
-        );
+      const { result } = renderTestHook(
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        midTurnDrainRef,
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      const sent = mockSendMessageStream.mock.calls[1][0] as Part[];
+      expect(sent[0]?.functionResponse?.id).toBe('read_a');
+      expect(JSON.stringify(sent.slice(1))).toContain('Also check b.');
+    });
+
+    it('keeps the turn responding and the scheduler held while it takes the input at the tool boundary', async () => {
+      let callbackReturned = false;
+      const pending = holdBatches();
+      mockScheduleToolCalls.mockImplementationOnce(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          pending.push(() => {
+            void onBatchComplete?.(
+              requests.map((request) => completedCall(request)),
+            )?.then(() => {
+              callbackReturned = true;
+            });
+          });
+        },
+      );
+      rounds(
+        [toolRequest('read_a')],
+        [{ type: ServerLlmEventType.Content, value: 'Read.' }],
+      );
+      // A Goal command queued mid-turn runs while the input is taken.
+      let releaseCommand: (() => void) | undefined;
+      mockHandleSlashCommand.mockImplementation(
+        () =>
+          new Promise<boolean>((resolve) => {
+            releaseCommand = () => resolve(false);
+          }),
+      );
+      let queued = ['/goal status', 'Also check b.'];
+      const midTurnDrainRef = {
+        current: vi.fn(() => {
+          const drained = queued;
+          queued = [];
+          return drained;
+        }),
+      };
+      const { result } = renderTestHook(
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        midTurnDrainRef,
+      );
+
+      // The batch completes after its stream ended, so the turn sends its
+      // next round.
+      let submission!: Promise<void>;
+      await act(async () => {
+        submission = result.current.submitQuery('Read the file.');
+      });
+      await waitFor(() => expect(pending).toHaveLength(1));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await act(async () => {
+        pending[0]();
+      });
+      await waitFor(() => expect(releaseCommand).toBeDefined());
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      expect(callbackReturned).toBe(false);
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        releaseCommand!();
+        await submission;
+      });
+
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      expect(callbackReturned).toBe(true);
+    });
+
+    it('sends no replay answers alone when history answered every executed call', async () => {
+      const { replayed, client } = replayedCall();
       client.getHistoryFunctionResponseIds = vi
         .fn()
         .mockReturnValue(new Set(['read_a']));
@@ -26085,21 +26216,7 @@ describe('useLlmStream', () => {
 
     it('runs a batch of a round that a response of replays alone sent, while that response is handled', async () => {
       completeBatches();
-      const replayed = {
-        ...toolRequest('replayed'),
-        value: { ...toolRequest('replayed').value, providerCallId: 'replayed' },
-      };
-      const client = mockConfig.getLlmClient();
-      client.getHistoryToolCallFingerprints = vi
-        .fn()
-        .mockReturnValue(
-          new Map([
-            [
-              'replayed',
-              getToolCallFingerprint(replayed.value.name, replayed.value.args),
-            ],
-          ]),
-        );
+      const { replayed, client } = replayedCall();
       // The replays' round sends their answers while its stream is still
       // open; the round it sends runs a batch, which waits for that stream.
       rounds(
@@ -26117,6 +26234,35 @@ describe('useLlmStream', () => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
       });
       expect(sentIds(1)).toEqual(['replayed']);
+      expect(sentIds(2)).toEqual(['read_a']);
+    });
+
+    it('sends its next round itself when its turn did not wait for it', async () => {
+      const pending = holdBatches();
+      const { replayed, client } = replayedCall();
+      // The round the replays' response sends ends while that response's
+      // stream is open, so its turn does not wait; its batch completes
+      // once every stream ended.
+      rounds(
+        [replayed],
+        [toolRequest('read_a')],
+        [{ type: ServerLlmEventType.Content, value: 'Read.' }],
+      );
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+      await waitFor(() => expect(pending).toHaveLength(1));
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        pending[0]();
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      });
       expect(sentIds(2)).toEqual(['read_a']);
     });
 
@@ -26252,21 +26398,7 @@ describe('useLlmStream', () => {
 
     it('does not count a replay as answered when the batch fails before sending it', async () => {
       completeBatches();
-      const replayed = {
-        ...toolRequest('replayed'),
-        value: { ...toolRequest('replayed').value, providerCallId: 'replayed' },
-      };
-      const client = mockConfig.getLlmClient();
-      client.getHistoryToolCallFingerprints = vi
-        .fn()
-        .mockReturnValue(
-          new Map([
-            [
-              'replayed',
-              getToolCallFingerprint(replayed.value.name, replayed.value.args),
-            ],
-          ]),
-        );
+      const { replayed, client } = replayedCall();
       // The first batch's finalize throws.
       let budgetCalls = 0;
       mockConfig.getToolOutputBatchBudget = () => {
@@ -26292,25 +26424,6 @@ describe('useLlmStream', () => {
       expect(sentIds(1)).toEqual(['read_a']);
       expect(sentIds(2)).toEqual(['replayed']);
     });
-
-    const holdBatches = () => {
-      const pending: Array<() => void> = [];
-      mockScheduleToolCalls.mockImplementation(
-        (
-          requests: ToolCallRequestInfo[],
-          _signal: AbortSignal,
-          _modelOverride: string | undefined,
-          onBatchComplete?: (calls: unknown[]) => Promise<void>,
-        ) => {
-          pending.push(() => {
-            void onBatchComplete?.(
-              requests.map((request) => completedCall(request)),
-            );
-          });
-        },
-      );
-      return pending;
-    };
 
     it('continues a batch that settles after a re-render with the state of that render', async () => {
       const pending = holdBatches();
