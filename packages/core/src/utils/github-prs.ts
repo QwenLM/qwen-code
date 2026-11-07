@@ -5,7 +5,12 @@
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import {
+  accessSync,
+  constants as fsConstants,
+  existsSync,
+  statSync,
+} from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { findGitRoot } from './gitUtils.js';
@@ -342,6 +347,41 @@ export interface FetchGitHubPullRequestsOptions {
   slim?: boolean;
 }
 
+/**
+ * Run gh in `cwd` with the wrappers' shared conventions (the resolved
+ * binary, the scrubbed env, the buffer cap) and resolve its stdout. A
+ * failure rejects with execFile's error carrying gh's stderr: the callback
+ * error has no stderr of its own (only the promisified form attaches it),
+ * and ghErrorMessage reports gh's diagnostic from it instead of Node's
+ * "Command failed: <argv>" message.
+ */
+function runGh(
+  args: readonly string[],
+  cwd: string,
+  env: Readonly<Record<string, string | undefined>> | undefined,
+  timeoutMs = GH_TIMEOUT_MS,
+): Promise<string> {
+  const childEnv = ghEnv(env);
+  return new Promise((resolve, reject) => {
+    execFile(
+      resolveGhBinary(childEnv, cwd),
+      args,
+      {
+        cwd,
+        timeout: timeoutMs,
+        maxBuffer: GH_MAX_BUFFER,
+        windowsHide: true,
+        encoding: 'utf8',
+        env: childEnv,
+      },
+      (error, stdout, stderr) => {
+        if (error) reject(Object.assign(error, { stderr }));
+        else resolve(stdout);
+      },
+    );
+  });
+}
+
 function runGhPrList(
   gitRoot: string,
   env?: Readonly<Record<string, string | undefined>>,
@@ -351,37 +391,20 @@ function runGhPrList(
     Math.max(options.limit ?? GITHUB_PR_LIST_LIMIT, 1),
     1000,
   );
-  const childEnv = ghEnv(env);
-  return new Promise((resolve, reject) => {
-    execFile(
-      resolveGhBinary(childEnv, gitRoot),
-      [
-        'pr',
-        'list',
-        '--state',
-        options.state ?? 'open',
-        '--limit',
-        String(limit),
-        '--json',
-        options.slim ? GH_PR_LIST_FIELDS_SLIM : GH_PR_LIST_FIELDS,
-      ],
-      {
-        cwd: gitRoot,
-        timeout: GH_TIMEOUT_MS,
-        maxBuffer: GH_MAX_BUFFER,
-        windowsHide: true,
-        encoding: 'utf8',
-        env: childEnv,
-      },
-      (error, stdout, stderr) => {
-        // execFile's error carries no stderr of its own (only the promisified
-        // form attaches it); ghErrorMessage reports gh's diagnostic from it
-        // instead of Node's "Command failed: <argv>" message.
-        if (error) reject(Object.assign(error, { stderr }));
-        else resolve(stdout);
-      },
-    );
-  });
+  return runGh(
+    [
+      'pr',
+      'list',
+      '--state',
+      options.state ?? 'open',
+      '--limit',
+      String(limit),
+      '--json',
+      options.slim ? GH_PR_LIST_FIELDS_SLIM : GH_PR_LIST_FIELDS,
+    ],
+    gitRoot,
+    env,
+  );
 }
 
 /** Shared by the sibling `gh` wrappers (PR issues); stays thin on purpose. */
@@ -496,13 +519,16 @@ export interface GitHubPullRequestView {
 }
 
 /**
- * Why a view failed: refused before any process started (`not_a_pr_url`,
- * `cwd_missing`), `gh` failed or was killed at the timeout (`gh_failed`,
- * `timed_out`), or its output did not parse (`unparsable`).
+ * Why a view failed: refused before any process started (`not_a_pr_url`;
+ * `cwd_missing` for a working directory that does not exist or is not a
+ * directory, `cwd_unusable` for one that cannot be inspected or entered),
+ * `gh` failed or was killed at the timeout (`gh_failed`, `timed_out`), or
+ * its output did not parse (`unparsable`).
  */
 export type GitHubPullRequestViewFailure =
   | 'not_a_pr_url'
   | 'cwd_missing'
+  | 'cwd_unusable'
   | 'gh_failed'
   | 'timed_out'
   | 'unparsable';
@@ -653,40 +679,58 @@ export function pullRequestViewUrl(url: string): string | undefined {
   return `${parsed.protocol}//${parsed.host}/${owner}/${repo}/pull/${number}`;
 }
 
+/** Why `cwd` cannot host a `gh pr view`, or undefined when it can. */
+function viewWorkingDirectoryProblem(
+  cwd: string,
+): { reason: 'cwd_missing' | 'cwd_unusable'; message: string } | undefined {
+  let isDirectory: boolean;
+  try {
+    isDirectory = statSync(cwd).isDirectory();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ENOTDIR'
+      ? {
+          reason: 'cwd_missing',
+          message: 'gh pr view working directory does not exist',
+        }
+      : {
+          reason: 'cwd_unusable',
+          message: `gh pr view working directory cannot be inspected (${code ?? 'unknown error'})`,
+        };
+  }
+  if (!isDirectory) {
+    return {
+      reason: 'cwd_missing',
+      message: 'gh pr view working directory is not a directory',
+    };
+  }
+  try {
+    accessSync(cwd, fsConstants.X_OK);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return {
+      reason: 'cwd_unusable',
+      message: `gh pr view working directory cannot be entered (${code ?? 'unknown error'})`,
+    };
+  }
+  return undefined;
+}
+
 function runGhPrView(
   url: string,
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<string> {
-  const childEnv = ghEnv(env);
-  return new Promise((resolve, reject) => {
-    execFile(
-      resolveGhBinary(childEnv, cwd),
-      ['pr', 'view', url, '--json', GH_PR_VIEW_FIELDS],
-      {
-        cwd,
-        timeout: GH_TIMEOUT_MS,
-        maxBuffer: GH_MAX_BUFFER,
-        windowsHide: true,
-        encoding: 'utf8',
-        env: childEnv,
-      },
-      (error, stdout, stderr) => {
-        // execFile's error carries no stderr of its own (only the promisified
-        // form attaches it); ghErrorMessage reports gh's diagnostic from it
-        // instead of Node's "Command failed: <argv>" message.
-        if (error) reject(Object.assign(error, { stderr }));
-        else resolve(stdout);
-      },
-    );
-  });
+  return runGh(['pr', 'view', url, '--json', GH_PR_VIEW_FIELDS], cwd, env);
 }
 
 /**
  * View one PR by its web URL with the `gh` CLI. Going by URL, never by
  * number, makes `gh` resolve the PR's own repository instead of the one the
  * working directory belongs to, so `cwd` only sets where the child runs; it
- * must be an existing directory, and the caller passes a private one,
+ * must be an existing directory the process can enter (otherwise the view
+ * fails as `cwd_missing` or `cwd_unusable` before any process starts), and
+ * the caller passes a private one,
  * because `gh` resolution (`resolveGhBinary`) treats relative or empty
  * `PATH` entries as relative to it. The optional `env` supplies credentials
  * (`GH_TOKEN`, `GH_CONFIG_DIR`) as for {@link fetchGitHubPullRequests}. An
@@ -710,19 +754,11 @@ export async function fetchGitHubPullRequestView(
     };
   }
   // A missing working directory fails the spawn with ENOENT, which would
-  // otherwise read as "gh is not installed".
-  let isDirectory = false;
-  try {
-    isDirectory = statSync(cwd).isDirectory();
-  } catch {
-    // reported below
-  }
-  if (!isDirectory) {
-    return {
-      kind: 'failed',
-      reason: 'cwd_missing',
-      message: 'gh pr view working directory is not a directory',
-    };
+  // otherwise read as "gh is not installed", and one that cannot be entered
+  // fails it with EACCES, which would read as a problem with gh.
+  const cwdProblem = viewWorkingDirectoryProblem(cwd);
+  if (cwdProblem !== undefined) {
+    return { kind: 'failed', ...cwdProblem };
   }
   let stdout: string;
   try {
@@ -785,28 +821,7 @@ function runGhPrCreate(
   args.push('--body', opts.body ?? '');
   if (opts.base) args.push('--base', opts.base);
   if (opts.head) args.push('--head', opts.head);
-  const childEnv = ghEnv(env);
-  return new Promise((resolve, reject) => {
-    execFile(
-      resolveGhBinary(childEnv, gitRoot),
-      args,
-      {
-        cwd: gitRoot,
-        timeout: GH_CREATE_TIMEOUT_MS,
-        maxBuffer: GH_MAX_BUFFER,
-        windowsHide: true,
-        encoding: 'utf8',
-        env: childEnv,
-      },
-      (error, stdout, stderr) => {
-        // execFile's error carries no stderr of its own (only the promisified
-        // form attaches it); ghErrorMessage reports gh's diagnostic from it
-        // instead of Node's "Command failed: <argv>" message.
-        if (error) reject(Object.assign(error, { stderr }));
-        else resolve(stdout);
-      },
-    );
-  });
+  return runGh(args, gitRoot, env, GH_CREATE_TIMEOUT_MS);
 }
 
 /**

@@ -20669,6 +20669,35 @@ describe('useLlmStream', () => {
       expect(infoMessages).toHaveLength(0);
     });
 
+    it('should prefer a provider refusal message', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: {
+              reason: 'SAFETY',
+              usageMetadata: undefined,
+              finishMessage:
+                'Response refused due to cyber-related safety policy.',
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('Test refusal');
+      });
+
+      const infoItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter((item) => item.type === 'info');
+      expect(infoItems).toContainEqual({
+        type: 'info',
+        text: '⚠  Response refused due to cyber-related safety policy.',
+      });
+    });
+
     it('should not add message for FINISH_REASON_UNSPECIFIED', async () => {
       // Setup mock to return a stream with FINISH_REASON_UNSPECIFIED
       mockSendMessageStream.mockReturnValue(
