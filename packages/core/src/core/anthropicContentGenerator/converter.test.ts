@@ -1759,6 +1759,39 @@ describe('AnthropicContentConverter', () => {
       );
     });
 
+    it.each([
+      ['cyber', 'Response refused due to cyber-related safety policy.'],
+      ['bio', 'Response refused due to biological safety policy.'],
+      [
+        'frontier_llm',
+        'Response refused due to frontier model development policy.',
+      ],
+      ['general_harms', 'Response refused due to a general safety policy.'],
+      // Provider text can be any string, including prototype keys: those must
+      // land on the generic notice instead of leaking `[object Object]`.
+      ['__proto__', 'Response refused due to safety reasons.'],
+      ['unmapped_category', 'Response refused due to safety reasons.'],
+    ])(
+      'maps the %s refusal category to its curated notice',
+      (category, expected) => {
+        const response = respond({
+          stop_reason: 'refusal',
+          stop_details: { type: 'refusal', category },
+        });
+
+        expect(response.candidates?.[0]?.finishMessage).toBe(expected);
+      },
+    );
+
+    it('ignores stop_details that is not a refusal', () => {
+      const response = respond({
+        stop_reason: 'end_turn',
+        stop_details: { type: 'something_else', category: 'cyber' },
+      });
+
+      expect(response.candidates?.[0]?.finishMessage).toBeUndefined();
+    });
+
     it('forwards cache_read_input_tokens and cache_creation_input_tokens through to usageMetadata', () => {
       // A real mid-conversation Anthropic response carries all three prompt
       // buckets at once: `input_tokens` (non-cached tail),

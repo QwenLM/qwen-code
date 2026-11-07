@@ -1040,8 +1040,14 @@ export class AnthropicContentConverter {
       general_harms: 'Response refused due to a general safety policy.',
     };
     const category = details['category'];
-    return typeof category === 'string'
-      ? (messages[category] ?? 'Response refused due to safety reasons.')
+    if (typeof category !== 'string') {
+      return 'Response refused due to safety reasons.';
+    }
+    // `category` is provider text: an own-property check keeps `__proto__` /
+    // `constructor` on the unknown-category fallback instead of returning an
+    // object that would render as `[object Object]`.
+    return Object.prototype.hasOwnProperty.call(messages, category)
+      ? messages[category]
       : 'Response refused due to safety reasons.';
   }
 

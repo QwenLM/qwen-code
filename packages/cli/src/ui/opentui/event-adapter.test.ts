@@ -293,6 +293,27 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         text: '⚠  Response refused due to cyber-related safety policy.',
       });
     });
+
+    it('keeps the curated notice when a non-safety reason carries provider text', () => {
+      const map = createEventMapper();
+      const out = map({
+        type: 'finished',
+        value: {
+          reason: 'MAX_TOKENS',
+          finishMessage: 'Provider-authored stop detail.',
+        },
+      } as unknown as AnyEv);
+      expect(out).toContainEqual({
+        type: 'info',
+        text: '⚠  Response truncated due to token limits.',
+      });
+      expect(
+        out.some(
+          (item) =>
+            item.type === 'info' && item.text.includes('Provider-authored'),
+        ),
+      ).toBe(false);
+    });
   });
 
   describe('error events', () => {

@@ -7225,6 +7225,9 @@ export class LlmChat {
               deferredFinishReason ??= candidate.finishReason;
               deferredFinishMessage ??= candidate.finishMessage;
               delete candidate.finishReason;
+              // The message is replayed with the deferred reason at the end of
+              // the stream; keeping it here would ship a notice with no reason.
+              delete candidate.finishMessage;
             }
           }
         }

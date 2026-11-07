@@ -957,8 +957,11 @@ export function createEventMapper(
           | { reason?: string; finishMessage?: string }
           | undefined;
         const reason = value?.reason;
+        // `finishMessage` is provider-authored free text; only the safety path
+        // curates it (Anthropic refusal details), so other reasons keep their
+        // maintained notice even if a provider fills the field (#9005).
         const message =
-          value?.finishMessage ??
+          (reason === 'SAFETY' ? value?.finishMessage : undefined) ??
           (reason ? FINISH_REASON_NOTICES[reason] : undefined);
         if (message) out.push({ type: 'info', text: `⚠  ${message}` });
         // Segment marker only — the turn settles when the live generator
