@@ -76,6 +76,7 @@ import {
   configuredPrivatePolicy,
   PRIVATE_ONLY_FIELD_KEYS,
   invalidRepositoryGroupEntries,
+  isRepoFilterActive,
   projectRepositoryGroup,
   recordHasRoute,
   repositoryAllowlistIds,
@@ -117,6 +118,8 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     pollInterval: 'channels.editor.field.github.pollInterval',
     groupPolicy: 'channels.editor.field.github.groupPolicy',
     reasonFilter: 'channels.editor.field.github.reasonFilter',
+    repoFilterMode: 'channels.editor.field.github.repoFilterMode',
+    repoFilter: 'channels.editor.field.github.repoFilter',
     deliverToBoundSessions:
       'channels.editor.field.github.deliverToBoundSessions',
     prWatchEvents: 'channels.editor.field.github.prWatchEvents',
@@ -168,6 +171,7 @@ const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
 /** Per-platform placeholders that spell out the expected value shape. */
 const FIELD_PLACEHOLDER_KEYS: Record<string, string> = {
   'github.baseUrl': 'https://ghe.example.com/api/v3',
+  'github.repoFilter': 'owner/repo, owner/repo',
 };
 
 const CONNECTION_FIELD_KEYS = new Set(['baseUrl', 'wsUrl', 'pollInterval']);
@@ -485,6 +489,8 @@ export function ChannelEditorDialog({
       return t('channels.editor.validation.invalidGroupId');
     if (code === 'invalidRepoId')
       return t('channels.editor.validation.invalidRepoId');
+    if (code === 'repoFilterRequired')
+      return t('channels.editor.validation.repoFilterRequired');
     if (code === 'conflictingRepoAliases')
       return t('channels.editor.validation.conflictingRepoAliases');
     if (code === 'invalidOption')
@@ -722,7 +728,13 @@ export function ChannelEditorDialog({
     const id = `${formId}-${field.key}`;
     const value = draft.values[field.key];
     const error = errors[field.key];
-    const update = (next: string | boolean) =>
+    const update = (next: string | boolean) => {
+      if (field.key === 'repoFilterMode' || field.key === 'repoFilter') {
+        // Both remedies retire a shown error: switching to off hides the
+        // list, and typing a valid entry satisfies the instruction. Submit
+        // stays the only site that populates errors.
+        refreshErrors({ ...draft.values, [field.key]: next });
+      }
       setDraft((current) => ({
         ...current,
         values: {
@@ -733,6 +745,7 @@ export function ChannelEditorDialog({
             : {}),
         },
       }));
+    };
     if (field.kind === 'boolean') {
       const isLocalGhSwitch =
         field.key === 'useLocalGh' &&
@@ -1547,7 +1560,16 @@ export function ChannelEditorDialog({
 
             {(['credentials', 'connection'] as const).map((section) => {
               const sectionFields = credentialFields.filter(
-                (field) => fieldSectionKey(field) === section,
+                (field) =>
+                  fieldSectionKey(field) === section &&
+                  // The repository list only means something while a filter
+                  // mode is active; validation is gated on the same
+                  // predicate, so the hidden field can never strand a save.
+                  !(
+                    field.key === 'repoFilter' &&
+                    isRepositoryOnlyChannelType(descriptor.type) &&
+                    !isRepoFilterActive(draft.values['repoFilterMode'])
+                  ),
               );
               if (sectionFields.length === 0) return null;
               return (

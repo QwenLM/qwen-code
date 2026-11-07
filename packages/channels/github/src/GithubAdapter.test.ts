@@ -4428,6 +4428,347 @@ describe('GithubChannel', () => {
     });
   });
 
+  describe('repoFilter', () => {
+    function connectWithRepoFilter(
+      overrides: Record<string, unknown>,
+    ): Promise<void> {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig(overrides),
+        makeBridge(),
+      );
+      // connect() ends in startPollLoop(); seed the first poll so a successful
+      // connect does not print a backoff line from an unseeded paginate mock.
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      return channel.connect();
+    }
+
+    function notificationFor(repo: string, issue: number) {
+      return makeNotification({
+        subject: {
+          title: 'Test Issue',
+          url: `https://api.github.com/repos/${repo}/issues/${issue}`,
+          type: 'Issue',
+        },
+        repository: { full_name: repo },
+      });
+    }
+
+    it('allowlist processes only listed repositories', async () => {
+      const stderrWrite = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      await initWithoutLoop({
+        repoFilterMode: 'allowlist',
+        repoFilter: ['owner/repo'],
+      });
+      try {
+        mockOctokit.paginate
+          .mockResolvedValueOnce([
+            notificationFor('noise/archive', 7),
+            notificationFor('owner/repo', 42),
+          ])
+          .mockResolvedValueOnce([makeComment({ body: 'hello @test-bot' })]);
+
+        await pollOnce();
+
+        expect(channel.inboundEnvelopes).toHaveLength(1);
+        expect(channel.inboundEnvelopes[0]!.chatId).toBe('owner/repo');
+        expect(stderrWrite).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'skipping notification (repository=noise/archive excluded by repoFilter allowlist',
+          ),
+        );
+        expect(
+          readChannelEvents().filter(
+            (event) => event['reason'] === 'repo_filter',
+          ),
+        ).toEqual([
+          expect.objectContaining({
+            type: 'inbound',
+            outcome: 'skipped',
+            reason: 'repo_filter',
+            repository: 'noise/archive',
+            thread: 'issue:7',
+            number: 7,
+          }),
+        ]);
+      } finally {
+        stderrWrite.mockRestore();
+      }
+    });
+
+    it('blocklist processes all except listed repositories', async () => {
+      await initWithoutLoop({
+        repoFilterMode: 'blocklist',
+        repoFilter: ['noise/archive'],
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          notificationFor('noise/archive', 7),
+          notificationFor('owner/repo', 42),
+        ])
+        .mockResolvedValueOnce([makeComment({ body: 'hello @test-bot' })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.chatId).toBe('owner/repo');
+      expect(
+        readChannelEvents().filter(
+          (event) => event['reason'] === 'repo_filter',
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          repository: 'noise/archive',
+          outcome: 'skipped',
+        }),
+      ]);
+    });
+
+    it('matches repository names case-insensitively', async () => {
+      await initWithoutLoop({
+        repoFilterMode: 'allowlist',
+        repoFilter: ['OWNER/Repo'],
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([notificationFor('owner/repo', 42)])
+        .mockResolvedValueOnce([makeComment({ body: 'hello @test-bot' })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+
+    it('matches a mixed-case notification repository against a lowercase entry', async () => {
+      // The mirror of the config-side case above: GitHub returns the canonical
+      // casing in subject URLs, so the comparison site must lowercase chatId.
+      // Deleting chatId.toLowerCase() there leaves the config-side case green
+      // and fails this one.
+      await initWithoutLoop({
+        repoFilterMode: 'blocklist',
+        repoFilter: ['owner/repo'],
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([
+        notificationFor('Owner/Repo', 42),
+      ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(
+        readChannelEvents().filter(
+          (event) => event['reason'] === 'repo_filter',
+        ),
+      ).toEqual([expect.objectContaining({ repository: 'Owner/Repo' })]);
+    });
+
+    it('trims entries and drops empty ones when normalizing the list', async () => {
+      await initWithoutLoop({
+        repoFilterMode: 'allowlist',
+        repoFilter: [' Owner/Repo ', '', 'owner/repo'],
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([notificationFor('owner/repo', 42)])
+        .mockResolvedValueOnce([makeComment({ body: 'hello @test-bot' })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(
+        readChannelEvents().some((event) => event['reason'] === 'repo_filter'),
+      ).toBe(false);
+    });
+
+    it('processes every repository when the mode is off or unset', async () => {
+      await initWithoutLoop({
+        repoFilterMode: 'off',
+        repoFilter: ['owner/repo'],
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([notificationFor('noise/archive', 7)])
+        .mockResolvedValueOnce([makeComment({ body: 'hello @test-bot' })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(
+        readChannelEvents().some((event) => event['reason'] === 'repo_filter'),
+      ).toBe(false);
+    });
+
+    it('advances the cursor past a poll of only filtered notifications', async () => {
+      await initWithoutLoop({
+        repoFilterMode: 'blocklist',
+        repoFilter: ['owner/repo'],
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({ last_read_at: '2026-07-01T12:00:00.000Z' }),
+      ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).toHaveBeenCalledWith({
+        last_read_at: '2026-07-02T10:00:00.000Z',
+        read: true,
+      });
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+    });
+
+    it('journals at most 20 individual skips plus one counted row', async () => {
+      await initWithoutLoop({
+        repoFilterMode: 'allowlist',
+        repoFilter: ['owner/repo'],
+      });
+      const flood = Array.from({ length: 25 }, (_, index) =>
+        notificationFor(`noise/repo-${index}`, 100 + index),
+      );
+      mockOctokit.paginate.mockResolvedValueOnce(flood);
+
+      await pollOnce();
+
+      const events = readChannelEvents().filter(
+        (event) => event['reason'] === 'repo_filter',
+      );
+      expect(events).toHaveLength(21);
+      const individual = events.filter(
+        (event) => event['detail'] === undefined,
+      );
+      expect(individual).toHaveLength(20);
+      expect(individual[0]).toMatchObject({
+        repository: 'noise/repo-0',
+        thread: 'issue:100',
+        number: 100,
+      });
+      expect(events.at(-1)).toEqual(
+        expect.objectContaining({
+          type: 'inbound',
+          outcome: 'skipped',
+          reason: 'repo_filter',
+          detail: { filtered: 5 },
+        }),
+      );
+      expect(events.at(-1)).not.toHaveProperty('repository');
+    });
+
+    it('resets the journal budget on the next poll', async () => {
+      // The counters live in the poll body, so each busy poll journals its own
+      // 20 individual rows plus one counted row. Hoisting them to instance
+      // fields would yield 22 rows total and fail here.
+      await initWithoutLoop({
+        repoFilterMode: 'allowlist',
+        repoFilter: ['owner/repo'],
+      });
+      const flood = Array.from({ length: 25 }, (_, index) =>
+        notificationFor(`noise/repo-${index}`, 100 + index),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce(flood)
+        .mockResolvedValueOnce(flood);
+
+      await pollOnce();
+      await pollOnce();
+
+      const events = readChannelEvents().filter(
+        (event) => event['reason'] === 'repo_filter',
+      );
+      expect(events).toHaveLength(42);
+      const counted = events.filter(
+        (event) =>
+          (event['detail'] as { filtered?: number } | undefined)?.filtered !==
+          undefined,
+      );
+      expect(counted).toHaveLength(2);
+      expect(
+        counted.every((event) => event['detail']?.['filtered'] === 5),
+      ).toBe(true);
+    });
+
+    it('journals repo_filter, not reason_filter, when both gates exclude a notification', async () => {
+      // Pins the documented ordering: the repository filter runs before the
+      // reason filter, so a notification excluded by both is journaled under
+      // repo_filter. Swapping the two blocks flips this row to reason_filter.
+      await initWithoutLoop({
+        repoFilterMode: 'blocklist',
+        repoFilter: ['owner/repo'],
+        reasonFilter: ['mention'],
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({ reason: 'comment' }),
+      ]);
+
+      await pollOnce();
+
+      expect(
+        readChannelEvents()
+          .filter((event) => event['type'] === 'inbound')
+          .map((event) => event['reason']),
+      ).toEqual(['repo_filter']);
+    });
+
+    it('rejects an active mode with an empty list', async () => {
+      await expect(
+        connectWithRepoFilter({ repoFilterMode: 'allowlist', repoFilter: [] }),
+      ).rejects.toThrow(
+        'repoFilter for channel test-github requires at least one owner/repo entry when repoFilterMode is "allowlist".',
+      );
+    });
+
+    it('rejects an active mode without a list', async () => {
+      await expect(
+        connectWithRepoFilter({ repoFilterMode: 'blocklist' }),
+      ).rejects.toThrow(
+        'repoFilter for channel test-github must be an array of owner/repo repository names when repoFilterMode is "blocklist".',
+      );
+    });
+
+    it('rejects malformed repository entries', async () => {
+      await expect(
+        connectWithRepoFilter({
+          repoFilterMode: 'blocklist',
+          repoFilter: ['https://github.com/owner/repo'],
+        }),
+      ).rejects.toThrow(
+        'repoFilter entries for channel test-github must be owner/repo repository names: https://github.com/owner/repo',
+      );
+    });
+
+    it('rejects non-string entries', async () => {
+      await expect(
+        connectWithRepoFilter({
+          repoFilterMode: 'allowlist',
+          repoFilter: [42],
+        }),
+      ).rejects.toThrow(
+        'repoFilter entries for channel test-github must be strings.',
+      );
+    });
+
+    it('rejects an unknown mode', async () => {
+      await expect(
+        connectWithRepoFilter({
+          repoFilterMode: 'denylist',
+          repoFilter: ['owner/repo'],
+        }),
+      ).rejects.toThrow(
+        'repoFilterMode for channel test-github must be one of: off, allowlist, blocklist.',
+      );
+    });
+
+    it('ignores a parked list while the mode is off', async () => {
+      await expect(
+        connectWithRepoFilter({
+          repoFilterMode: 'off',
+          repoFilter: ['not a repo'],
+        }),
+      ).resolves.toBeUndefined();
+      channel.disconnect();
+    });
+  });
+
   describe('publication contract', () => {
     const nameHash = createHash('sha256')
       .update('test-github')
@@ -15621,6 +15962,67 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       await pollOnce();
 
       expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+    });
+
+    it('delivers watch events for a repository the notification filter excludes', async () => {
+      // Pins the documented boundary: the repository filter governs
+      // notification intake only. A bound PR's state watch events bypass it,
+      // so blocklisting the repository must not silence its watch delivery.
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          prWatchEvents: ['ci_failure'],
+          repoFilterMode: 'blocklist',
+          repoFilter: ['owner/repo'],
+        },
+        { boundSessions },
+      );
+      mockPull({});
+      mockNotificationsOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+      mockNotificationsOnce([]);
+      mockChecks([
+        { status: 'completed', conclusion: 'failure', name: 'build' },
+      ]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        'CI failed on head sha-1',
+      );
+    });
+
+    it('filters notifications about a bound PR instead of delivering them', async () => {
+      // The complement of the watch-bypass case: bound-session routing must
+      // not exempt a notification from the repository filter. Moving bound
+      // delivery above the filter (or early-continuing bound threads into it)
+      // delivers this prompt and fails here.
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          repoFilterMode: 'blocklist',
+          repoFilter: ['owner/repo'],
+        },
+        { boundSessions },
+      );
+      mockNotificationsOnce([makeNotification({ reason: 'mention' })]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(
+        readChannelEvents().filter(
+          (event) => event['reason'] === 'repo_filter',
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          repository: 'owner/repo',
+          outcome: 'skipped',
+        }),
+      ]);
     });
 
     it('fires ci_failure once per head and not again for the same head', async () => {

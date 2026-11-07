@@ -40,7 +40,12 @@ import {
 import { testBotMention, stripBotMention } from './mention.js';
 import { resolveGithubWebOrigin } from './web-origin.js';
 
-interface GithubConfig extends ChannelConfig {
+interface RepoFilterConfigFields {
+  repoFilterMode?: unknown;
+  repoFilter?: unknown;
+}
+
+interface GithubConfig extends ChannelConfig, RepoFilterConfigFields {
   baseUrl?: string;
   reasonFilter?: unknown;
   useLocalGh?: boolean;
@@ -309,6 +314,89 @@ function normalizeReasonFilter(
     );
   }
   return reasons.length > 0 ? new Set(reasons) : null;
+}
+
+/**
+ * The repository event filter modes, shared by the descriptor options and
+ * the validator so the UI and the runtime cannot drift. `off` (or absent)
+ * processes every repository and ignores the list entirely.
+ */
+export const REPO_FILTER_MODES = ['off', 'allowlist', 'blocklist'] as const;
+
+const REPOSITORY_FULL_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+interface RepoFilter {
+  mode: 'allowlist' | 'blocklist';
+  repos: Set<string>;
+}
+
+/**
+ * Parse and validate the repository event filter. Repository full names are
+ * case-insensitive on GitHub, so entries are matched lowercased. An active
+ * mode with an empty list is rejected: an empty allowlist would silently
+ * drop every event, and an empty blocklist is a no-op nobody asked for.
+ * While the mode is off the list is ignored, so a parked list never blocks
+ * an unrelated save or connect.
+ */
+function normalizeRepoFilter(
+  config: RepoFilterConfigFields,
+  channelName: string,
+): RepoFilter | null {
+  const mode = config.repoFilterMode;
+  if (mode === undefined || mode === 'off') return null;
+  if (mode !== 'allowlist' && mode !== 'blocklist') {
+    throw new Error(
+      `repoFilterMode for channel ${channelName} must be one of: ${REPO_FILTER_MODES.join(', ')}.`,
+    );
+  }
+  if (!Array.isArray(config.repoFilter)) {
+    throw new Error(
+      `repoFilter for channel ${channelName} must be an array of owner/repo repository names when repoFilterMode is "${mode}".`,
+    );
+  }
+  if (config.repoFilter.some((entry) => typeof entry !== 'string')) {
+    throw new Error(
+      `repoFilter entries for channel ${channelName} must be strings.`,
+    );
+  }
+  const repos = new Set(
+    config.repoFilter
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => entry.length > 0),
+  );
+  if (repos.size === 0) {
+    throw new Error(
+      `repoFilter for channel ${channelName} requires at least one owner/repo entry when repoFilterMode is "${mode}".`,
+    );
+  }
+  const invalid = [...repos].filter(
+    (entry) => !REPOSITORY_FULL_NAME_RE.test(entry),
+  );
+  if (invalid.length > 0) {
+    throw new Error(
+      `repoFilter entries for channel ${channelName} must be owner/repo repository names: ${invalid.join(', ')}`,
+    );
+  }
+  return { mode, repos };
+}
+
+/**
+ * Shared validation for the plugin descriptor (returns the message) and
+ * connect() (throws it): one source of truth for the repository filter
+ * rules, so the management UI and the adapter cannot drift (the
+ * validateBoundSessionConfig pattern).
+ */
+export function validateRepoFilterConfig(
+  config: RepoFilterConfigFields,
+  channelName: string,
+): string | undefined {
+  try {
+    normalizeRepoFilter(config, channelName);
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+  return undefined;
 }
 
 /**
@@ -803,6 +891,8 @@ const MAX_WINDOW_KEYS = 8192;
  * first few individually and collapse the rest into one counted row.
  */
 const MAX_REASON_FILTER_EVENTS_PER_POLL = 20;
+/** Same journal bound for repository-filter skips (see the reason above). */
+const MAX_REPO_FILTER_EVENTS_PER_POLL = 20;
 
 interface InboundTaskDedupe {
   dispatchedBodies?: string[];
@@ -1233,6 +1323,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private pendingFinalDeliveryRequestsActive = 0;
   private pendingFinalDeliveryRetryStopRequested = false;
   private reasonFilter: Set<string> | null = null;
+  private repoFilter: RepoFilter | null = null;
   private deliverToBoundSessions = false;
   private prWatchEvents = new Set<PrWatchEventType>();
   /**
@@ -1488,6 +1579,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   async connect(): Promise<void> {
     const cfg = this.config as GithubConfig;
     this.reasonFilter = normalizeReasonFilter(cfg, this.name);
+    this.repoFilter = normalizeRepoFilter(cfg, this.name);
     const boundConfigError = validateBoundSessionConfig(cfg, this.name);
     if (boundConfigError) {
       throw new Error(boundConfigError);
@@ -2449,7 +2541,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           : this.pendingCursorUpdatedAt;
     }
     // Snapshot the threads whose in-flight work holds the cursor BEFORE the
-    // lanes run; see threadTaskHoldsCursor.
+    // lanes run; see threadHeldAtPollStart.
     this.pollStartHeldThreads = new Set();
     try {
       for (const task of this.readInboundTasks()) {
@@ -2468,6 +2560,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     let reasonFilterJournaled = 0;
     let reasonFilterCollapsed = 0;
+    let repoFilterJournaled = 0;
+    let repoFilterCollapsed = 0;
     let transientHeld = false;
     let sharedHeld = false;
     for (const notification of notifications) {
@@ -2480,6 +2574,38 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const { chatId, threadId, issueNumber } = extracted;
       const lastReadAt = notification.last_read_at;
       const reason = String(notification.reason ?? '').toLowerCase();
+      if (this.repoFilter) {
+        const listed = this.repoFilter.repos.has(chatId.toLowerCase());
+        const filtered =
+          this.repoFilter.mode === 'allowlist' ? !listed : listed;
+        if (filtered) {
+          process.stderr.write(
+            `[Channel:${this.name}] skipping notification (repository=${sanitizeLogText(chatId, 140)} excluded by repoFilter ${this.repoFilter.mode}, subject=${sanitizeLogText(String(notification.subject.url ?? ''), 200)})\n`,
+          );
+          this.logDebugPayload('Github', {
+            event: 'repoFilter.skip',
+            chatId,
+            threadId,
+            mode: this.repoFilter.mode,
+            reason: notification.reason,
+          });
+          if (repoFilterJournaled < MAX_REPO_FILTER_EVENTS_PER_POLL) {
+            repoFilterJournaled += 1;
+            this.recordChannelEvent({
+              type: 'inbound',
+              outcome: 'skipped',
+              reason: 'repo_filter',
+              triggerKind: reason,
+              repository: chatId,
+              thread: threadId,
+              number: issueNumber,
+            });
+          } else {
+            repoFilterCollapsed += 1;
+          }
+          continue;
+        }
+      }
       if (this.reasonFilter && !this.reasonFilter.has(reason)) {
         process.stderr.write(
           `[Channel:${this.name}] skipping notification (reason=${sanitizeLogText(reason, 64)} not in reasonFilter, subject=${sanitizeLogText(String(notification.subject.url ?? ''), 200)})\n`,
@@ -2656,6 +2782,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         outcome: 'skipped',
         reason: 'reason_filter',
         detail: { filtered: reasonFilterCollapsed },
+      });
+    }
+    if (repoFilterCollapsed > 0) {
+      this.recordChannelEvent({
+        type: 'inbound',
+        outcome: 'skipped',
+        reason: 'repo_filter',
+        detail: { filtered: repoFilterCollapsed },
       });
     }
     if (this.hasRecoverableInboundTasks()) {

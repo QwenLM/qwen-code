@@ -4018,6 +4018,37 @@ const EN: Messages = {
   'stream.cancel': 'esc to cancel',
   'stream.cancelArmed': 'Press Esc again to stop',
   'stream.tokens': (v) => `${v?.count ?? 0} tokens`,
+  'waitingGame.title': 'Juust Relax',
+  'waitingGame.activityTitle': 'Q&A activity',
+  'waitingGame.usageTitle': 'Token usage',
+  'waitingGame.openActivity': 'Open task activity',
+  'waitingGame.startGame': 'Start a random game',
+  'waitingGame.backToHeatmap': 'Back to activity',
+  'waitingGame.heatmap': 'Activity',
+  'waitingGame.tokens': 'Usage',
+  'waitingGame.heatmapTooltip': (v) =>
+    `${v?.time ?? ''} · ${v?.count ?? 0} Q&A`,
+  'waitingGame.jumpToMessage': 'Click to locate',
+  'waitingGame.tokenTotal': 'Total tokens',
+  'waitingGame.tokenInput': 'Input',
+  'waitingGame.tokenOutput': 'Output',
+  'waitingGame.tokenCached': 'Cached',
+  'waitingGame.tokenContext': 'Context',
+  'waitingGame.tokenEmpty': 'No token data yet',
+  'waitingGame.snakeControls': 'Arrows / WASD turn · Space pause · Esc close',
+  'waitingGame.collapse': 'Collapse',
+  'waitingGame.region': 'Waiting minigame',
+  'waitingGame.score': (v) => `Score ${v?.score ?? 0}`,
+  'waitingGame.best': (v) => `Best ${v?.score ?? 0}`,
+  'waitingGame.controls':
+    '↑↓ move · → speed up · ← rotate · Space pause/resume · clear a column +50',
+  'waitingGame.paused': 'Paused',
+  'waitingGame.pausedHint': 'Press Space to resume',
+  'waitingGame.gameOver': 'Game over',
+  'waitingGame.restart': 'Play again',
+  'waitingGame.cleared': (v) => `Cleared ${v?.count ?? 0} · +${v?.score ?? 0}`,
+  'waitingGame.mute': 'Mute game sound',
+  'waitingGame.unmute': 'Unmute game sound',
   'theme.current': (v) => `current: ${v?.theme ?? ''}`,
   'theme.auto': 'Auto',
   'theme.dark': 'Dark',
@@ -4739,6 +4770,18 @@ const EN: Messages = {
     'member_feature_requested — organization members asked to enable a feature such as Copilot',
   'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
     'security_advisory_credit — the bot was credited for contributing to a security advisory',
+  'channels.editor.field.github.repoFilterMode': 'Repository Filter',
+  'channels.editor.field.github.repoFilterMode.description':
+    'Filter incoming notifications by repository. Notifications about PRs bound to a session are filtered too; only their PR state watch events bypass the filter.',
+  'channels.editor.field.github.repoFilterMode.option.off':
+    'Off — all repositories',
+  'channels.editor.field.github.repoFilterMode.option.allowlist':
+    'Allowlist — only listed repositories',
+  'channels.editor.field.github.repoFilterMode.option.blocklist':
+    'Blocklist — all except listed repositories',
+  'channels.editor.field.github.repoFilter': 'Filtered Repositories',
+  'channels.editor.field.github.repoFilter.description':
+    'Comma-separated owner/repo names. You can paste repository or PR URLs; they are shortened to owner/repo on save.',
   'channels.editor.field.github.deliverToBoundSessions':
     'Deliver To PR-Bound Sessions',
   'channels.editor.field.github.deliverToBoundSessions.description':
@@ -4971,6 +5014,8 @@ const EN: Messages = {
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.requiresBoundDelivery':
     'Enable "Deliver To PR-Bound Sessions" to save the selected watch events.',
+  'channels.editor.validation.repoFilterRequired':
+    'List at least one repository, or set Repository Filter to Off.',
   'channels.editor.validation.number': 'Enter a valid number.',
   'channels.editor.validation.outOfRange': (v) =>
     v?.min !== undefined && v?.max !== undefined
@@ -8742,6 +8787,37 @@ const ZH: Messages = {
   'status.shortcuts': '? 查看快捷键',
   'stream.cancel': 'esc 取消',
   'stream.cancelArmed': '再按一次 Esc 停止',
+  'waitingGame.title': 'Juust Relax',
+  'waitingGame.activityTitle': '问答热度',
+  'waitingGame.usageTitle': 'Token 消耗',
+  'waitingGame.openActivity': '打开任务热度',
+  'waitingGame.startGame': '随机开始游戏',
+  'waitingGame.backToHeatmap': '返回热力图',
+  'waitingGame.heatmap': '热力图',
+  'waitingGame.tokens': '消耗',
+  'waitingGame.heatmapTooltip': (v) =>
+    `${v?.time ?? ''} · ${v?.count ?? 0} 条问答`,
+  'waitingGame.jumpToMessage': '点击定位',
+  'waitingGame.tokenTotal': '总 Token',
+  'waitingGame.tokenInput': '输入',
+  'waitingGame.tokenOutput': '输出',
+  'waitingGame.tokenCached': '缓存',
+  'waitingGame.tokenContext': '上下文',
+  'waitingGame.tokenEmpty': '暂无 Token 数据',
+  'waitingGame.snakeControls': '方向键 / WASD 转向 · 空格暂停 · Esc 收起',
+  'waitingGame.collapse': '收起',
+  'waitingGame.region': '等待小游戏',
+  'waitingGame.score': (v) => `得分 ${v?.score ?? 0}`,
+  'waitingGame.best': (v) => `最高 ${v?.score ?? 0}`,
+  'waitingGame.controls':
+    '↑↓ 移动 · → 加速 · ← 旋转 · 空格 暂停/继续 · 满列消除 +50',
+  'waitingGame.paused': '已暂停',
+  'waitingGame.pausedHint': '按空格继续',
+  'waitingGame.gameOver': '游戏结束',
+  'waitingGame.restart': '再来一局',
+  'waitingGame.cleared': (v) => `消除 ${v?.count ?? 0} 列 · +${v?.score ?? 0}`,
+  'waitingGame.mute': '关闭游戏音效',
+  'waitingGame.unmute': '开启游戏音效',
   'stream.tokens': (v) => `${v?.count ?? 0} tokens`,
   'theme.current': (v) => `当前：${v?.theme ?? ''}`,
   'theme.auto': '自动',
@@ -9415,6 +9491,17 @@ const ZH: Messages = {
     'member_feature_requested — 组织成员请求启用 Copilot 等功能',
   'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
     'security_advisory_credit — 机器人因参与安全公告而被致谢',
+  'channels.editor.field.github.repoFilterMode': '按仓库过滤',
+  'channels.editor.field.github.repoFilterMode.description':
+    '按仓库过滤入站通知。绑定到会话的 PR，其通知同样被过滤；只有它们的状态监视事件绕过此过滤器。',
+  'channels.editor.field.github.repoFilterMode.option.off': '关闭 — 所有仓库',
+  'channels.editor.field.github.repoFilterMode.option.allowlist':
+    '白名单 — 仅列出的仓库',
+  'channels.editor.field.github.repoFilterMode.option.blocklist':
+    '黑名单 — 除列出的仓库以外',
+  'channels.editor.field.github.repoFilter': '过滤的仓库',
+  'channels.editor.field.github.repoFilter.description':
+    '以逗号分隔的 owner/repo 仓库名。可以直接粘贴仓库或 PR 链接，保存时会自动缩短为 owner/repo。',
   'channels.editor.field.github.deliverToBoundSessions': '投递到 PR 绑定会话',
   'channels.editor.field.github.deliverToBoundSessions.description':
     '将已绑定到活跃会话的 PR 事件以 prompt 形式投递进该会话，而不是频道自有会话。需要 daemon 托管的频道。',
@@ -9633,6 +9720,8 @@ const ZH: Messages = {
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.requiresBoundDelivery':
     '需开启「投递到 PR 绑定会话」才能保存所选的监视事件。',
+  'channels.editor.validation.repoFilterRequired':
+    '请至少列出一个仓库，或把「按仓库过滤」设为关闭。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>
     v?.min !== undefined && v?.max !== undefined
