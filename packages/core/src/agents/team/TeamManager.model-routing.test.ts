@@ -93,6 +93,8 @@ function createLeaderConfig(projectRoot: string): Config {
     getModel: vi.fn().mockReturnValue(LEADER_MODEL),
     getFastModel: vi.fn().mockReturnValue(undefined),
     getAllConfiguredModels: vi.fn().mockReturnValue([]),
+    getModelProvidersConfig: vi.fn().mockReturnValue(undefined),
+    getProviderProtocolConfig: vi.fn().mockReturnValue({}),
     getToolRegistry: vi.fn().mockReturnValue(createMockToolRegistry()),
     createToolRegistry: vi.fn().mockResolvedValue(createMockToolRegistry()),
     getMonitorRegistry: vi.fn().mockReturnValue({
@@ -390,6 +392,46 @@ describe('TeamManager teammate model routing (#10071)', () => {
     expect(backend.getAgentContentGenerator(agentId('w9'))).toBeDefined();
     expect(lastCoreCall().modelConfig.model).toBe('claude-worker');
     expect(members()[0]!.model).toBe('claude-worker');
+  });
+
+  it('strips a custom modelProviders prefix and routes via its mapped protocol (#13561)', async () => {
+    // The definition selects a model registered under a custom provider id;
+    // only the provider's mapped protocol and the bare model ID may leave
+    // this process.
+    const leader = leaderConfig as unknown as {
+      getModelProvidersConfig: ReturnType<typeof vi.fn>;
+      getProviderProtocolConfig: ReturnType<typeof vi.fn>;
+    };
+    leader.getModelProvidersConfig.mockReturnValue({
+      'huawei-maas': [
+        {
+          id: 'deepseek-v4.1-flash',
+          name: 'DeepSeek-V4.1-Flash',
+          envKey: 'MAAS_API_KEY',
+          baseUrl: 'https://maas.example.com/v2',
+        },
+      ],
+    });
+    leader.getProviderProtocolConfig.mockReturnValue({
+      'huawei-maas': 'openai',
+    });
+    await define(
+      'maas-worker',
+      'A worker on a custom provider',
+      'huawei-maas:deepseek-v4.1-flash',
+    );
+    await spawn({ name: 'w10', agentType: 'maas-worker' });
+
+    expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authType: 'openai',
+        model: 'deepseek-v4.1-flash',
+      }),
+      expect.anything(),
+    );
+    const { modelConfig } = lastCoreCall();
+    expect(modelConfig.model).toBe('deepseek-v4.1-flash');
+    expect(members()[0]!.model).toBe('deepseek-v4.1-flash');
   });
 
   it('fails loudly on a backend that omits getAgentContentGenerator', async () => {
