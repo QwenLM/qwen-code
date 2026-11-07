@@ -319,7 +319,8 @@ function getSessionBranchDisplayName(data: unknown): string | null {
 function getMidTurnInjectedImages(
   data: unknown,
 ):
-  Array<{ data: string; mimeType: string; attachmentId?: string }> | undefined {
+  | Array<{ data: string; mimeType: string; attachmentId?: string }>
+  | undefined {
   if (!data || typeof data !== 'object') return undefined;
   const items = (data as { items?: unknown }).items;
   if (!Array.isArray(items) || items.length === 0) return undefined;
@@ -2220,7 +2221,8 @@ type ParsedInsight =
   | { type: 'insight_error'; error: string };
 
 type InsightSegment =
-  { kind: 'text'; text: string } | { kind: 'insight'; data: ParsedInsight };
+  | { kind: 'text'; text: string }
+  | { kind: 'insight'; data: ParsedInsight };
 
 const INSIGHT_PREFIXES = [
   '"insight_progress":',

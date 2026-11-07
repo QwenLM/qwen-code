@@ -119,21 +119,23 @@ type ResumedSpec = [string, 'user' | 'assistant', string, Partial<ChatRecord>?];
 // Resumed records without provenance, each parented on the previous one (the
 // first on `root`), one second apart; assistants carry a model.
 function resumedChain(root: string | null, ...specs: ResumedSpec[]) {
-  return specs.map(([uuid, type, text, extra], index): ChatRecord => ({
-    uuid,
-    parentUuid: index ? specs[index - 1][0] : root,
-    sessionId: 'test-session-id',
-    timestamp: `2026-06-27T00:00:0${index}.000Z`,
-    type,
-    ...extra,
-    cwd: '/test/project/root',
-    version: '1.0.0',
-    message: {
-      role: type === 'assistant' ? 'model' : 'user',
-      parts: [{ text }],
-    },
-    ...(type === 'assistant' ? { model: 'gemini-pro' } : {}),
-  }));
+  return specs.map(
+    ([uuid, type, text, extra], index): ChatRecord => ({
+      uuid,
+      parentUuid: index ? specs[index - 1][0] : root,
+      sessionId: 'test-session-id',
+      timestamp: `2026-06-27T00:00:0${index}.000Z`,
+      type,
+      ...extra,
+      cwd: '/test/project/root',
+      version: '1.0.0',
+      message: {
+        role: type === 'assistant' ? 'model' : 'user',
+        parts: [{ text }],
+      },
+      ...(type === 'assistant' ? { model: 'gemini-pro' } : {}),
+    }),
+  );
 }
 
 function deferred() {
