@@ -77,6 +77,8 @@ Auto-memory runs in the background. After each of your conversations, Qwen quiet
 
 This is different from QWEN.md: you don't write it, Qwen does.
 
+When a turn that answers a message relayed by a [channel](./channels/overview) — GitHub, Telegram, DingTalk and the others — ends, Qwen runs no extraction and schedules no [periodic cleanup](#periodic-cleanup): the sender is often not you, and extracting after every relayed message would add model calls to each one. In a session that also takes your own prompts, such as one bound to a pull request, extraction after your next prompt still reads the recent conversation, so relayed messages still in it can be learned from. Memory recall is unaffected: a reply to a channel message can draw on what is already saved. A channel chat keeps durable context in [channel memory](./channels/overview#channel-memory) instead.
+
 ### What Qwen saves
 
 Qwen looks for four kinds of things worth remembering:
