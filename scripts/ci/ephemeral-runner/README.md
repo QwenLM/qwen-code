@@ -21,11 +21,16 @@ pull requests, verify they cannot select other sensitive runner pools.
 
 The image supports Linux x64 and ARM64. Its Node base is pinned to an OCI index
 digest and the runner downloads are checked against pinned SHA-256 digests.
-BuildKit supplies `TARGETARCH`; with Docker's legacy builder pass it explicitly:
+Use BuildKit to select both the base image and runner architecture:
 
 ```sh
-docker build --build-arg TARGETARCH=arm64 -t qwen-ephemeral-runner:trial scripts/ci/ephemeral-runner
+docker buildx build --platform linux/arm64 --load -t qwen-ephemeral-runner:trial scripts/ci/ephemeral-runner
 ```
+
+BuildKit supplies `TARGETARCH`. With Docker's legacy builder, build on the target
+architecture and pass its matching `TARGETARCH` explicitly (`amd64` or `arm64`).
+That argument selects only the runner archive; it does not change the base image
+architecture.
 
 The runner image supports ARM64, but full PR CI on this image has not yet been
 verified. The repository also selects ARM64 linters; verify the complete CI
@@ -78,6 +83,10 @@ The `ttlSeconds` limit starts when the container starts, including idle time.
 A job assigned near the deadline can be interrupted. The manager removes and
 replaces the container; GitHub remains authoritative for job status. The
 manager logs cleanup but does not distinguish expiry from normal completion.
+A nonzero or unknown container exit status delays replenishment by 60 seconds;
+a successful short job is replenished immediately. GitHub remains authoritative
+for job success. Diagnostic export is best effort: stderr is not archived, and
+output exceeding the capture limits is discarded.
 `minDiskBytes` applies to the Docker data filesystem. Configure and verify
 disk quotas or a dedicated data volume as appropriate for the host.
 

@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { command as runCommand, createManager } from './manager.mjs';
@@ -116,7 +124,7 @@ async function fixture(t) {
       if (!keepContainerAfterRemove) containers.delete(args[args.length - 1]);
       return '';
     }
-    if (args[0] === 'wait') return '';
+    if (args[0] === 'wait') return '0\n';
     if (args[0] === 'start') return '';
     return '';
   }
@@ -626,6 +634,10 @@ test('passes only the docker environment allowlist and the JIT config by name', 
   );
   assert.ok(!JSON.stringify(create.options.env).includes('sentinel'));
   assert.ok(!JSON.stringify(create.args).includes('sentinel'));
+  assert.equal(
+    create.args[create.args.indexOf('--log-driver') + 1],
+    'json-file',
+  );
   const at = create.args.indexOf('--env');
   assert.equal(create.args[at + 1], 'RUNNER_JIT_CONFIG');
 });
@@ -722,20 +734,23 @@ test('rejects corrupted slot state without deleting a runner', async (t) => {
   }
 });
 
-test('marks a cycle where the container exits before serving a job', async (t) => {
+test('backs off on a failed container even after the startup window', async (t) => {
   const f = await fixture(t);
+  f.config.ttlSeconds = 120;
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
   const command = (program, args, options) => {
-    if (program === 'docker' && args[0] === 'wait')
-      return Promise.reject(
-        Object.assign(new Error('docker failed (exit 126)'), { exitCode: 126 }),
-      );
+    if (program === 'docker' && args[0] === 'wait') {
+      now += 31000;
+      return Promise.resolve('126\n');
+    }
     return f.command(program, args, options);
   };
   const result = await createManager(f.config, { command }).cycle(1);
   assert.equal(result.earlyExit, true);
 });
 
-test('backs off before the next JIT request after an early exit', async (t) => {
+test('backs off before the next JIT request after a failed container', async (t) => {
   const f = await fixture(t);
   const previousPath = process.env.PATH;
   await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
@@ -756,10 +771,7 @@ test('backs off before the next JIT request after an early exit', async (t) => {
       jitRequests += 1;
       if (jitRequests > 1) manager.stop();
     }
-    if (program === 'docker' && args[0] === 'wait')
-      return Promise.reject(
-        Object.assign(new Error('docker failed (exit 127)'), { exitCode: 127 }),
-      );
+    if (program === 'docker' && args[0] === 'wait') return '127\n';
     return f.command(program, args, options);
   };
   manager = createManager(f.config, {
@@ -774,4 +786,37 @@ test('backs off before the next JIT request after an early exit', async (t) => {
   assert.equal(sleeps.filter((ms) => ms === 60000).length, 1);
   assert.equal(sleeps.at(-1), 60000);
   assert.equal(jitRequests, 2);
+});
+
+test('does not penalize a fast successful container', async (t) => {
+  const f = await fixture(t);
+  const result = await createManager(f.config, { command: f.command }).cycle(1);
+  assert.equal(result.earlyExit, false);
+});
+
+test('backs off when docker wait cannot determine container status', async (t) => {
+  const f = await fixture(t);
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'wait')
+      return Promise.reject(new Error('Docker disconnected'));
+    return f.command(program, args, options);
+  };
+  const result = await createManager(f.config, { command }).cycle(1);
+  assert.equal(result.earlyExit, true);
+});
+
+test('starts through a symlink and reports invalid configuration', async (t) => {
+  const f = await fixture(t);
+  const link = join(f.config.stateDir, 'manager.mjs');
+  await symlink(new URL('./manager.mjs', import.meta.url), link);
+  const result = spawnSync(
+    process.execPath,
+    [link, join(f.config.stateDir, 'missing.json')],
+    {
+      env: { ...process.env, GH_TOKEN: 'test-only' },
+      encoding: 'utf8',
+    },
+  );
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /^manager: /);
 });

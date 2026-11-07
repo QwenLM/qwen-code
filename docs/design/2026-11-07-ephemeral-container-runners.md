@@ -2,7 +2,7 @@
 
 [English](2026-11-07-ephemeral-container-runners.md) | [简体中文](2026-11-07-ephemeral-container-runners.zh-CN.md)
 
-Date: 2026-11-07. Status: implemented; a one-slot systemd trial is deployed on
+Date: 2026-11-07. Status: implemented; a five-slot systemd trial is deployed on
 hz4. Production external-PR routing remains disabled.
 
 Ten slots registering and running ten keyless test jobs of a private repository
@@ -55,7 +55,7 @@ Each container
 ```
 
 The manager keeps a configured number of slots, at most one container per slot.
-The Hangzhou trial ran ten slots at once; the hz4 deployment runs one slot. It takes no webhook, schedules no PR
+The Hangzhou trial ran ten slots at once; the hz4 deployment now maintains five slots. It takes no webhook, schedules no PR
 itself, and introduces neither Kubernetes nor a database. GitHub assigns work by
 runner label. Each ECS runs its own manager against its local Docker socket,
 with a unique `poolId` and a per-host `slots` count. Hosts share the scheduling

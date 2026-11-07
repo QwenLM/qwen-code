@@ -2,7 +2,7 @@
 
 [English](2026-11-07-ephemeral-container-runners.md) | [简体中文](2026-11-07-ephemeral-container-runners.zh-CN.md)
 
-日期：2026-11-07。状态：已实现并在 hz4 部署单槽位 systemd 试运行服务；
+日期：2026-11-07。状态：已实现并在 hz4 部署五槽位 systemd 试运行服务；
 外部 PR 的生产路由仍未启用。
 
 杭州共享测试机上已验证 10 个槽位同时注册，并执行同一个私有测试仓库的 10 个无密钥
@@ -47,7 +47,7 @@
 ```
 
 管理程序按配置维护固定数量的槽位，每个槽位最多一个容器；杭州十槽位试验同时使用
-十个槽位，hz4 部署使用一个槽位。不接 webhook、不自行调度 PR、不引入 Kubernetes 或数据库。
+十个槽位，hz4 部署目前维持五个槽位。不接 webhook、不自行调度 PR、不引入 Kubernetes 或数据库。
 GitHub 根据 runner 标签分配任务。每台 ECS 各运行一个管理程序，只连接本机
 Docker socket，使用独立的 `poolId` 和按主机配置的 `slots`。各主机共用调度
 标签，无需中央管理器。新名称使用 `ecs-qwen-` 前缀以兼容 CI 并发上限和超时；

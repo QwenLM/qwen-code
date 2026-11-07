@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import {
   lstat,
   mkdir,
@@ -451,6 +452,8 @@ export function createManager(config, dependencies = {}) {
             config.memory,
             '--pids-limit',
             String(config.pidsLimit),
+            '--log-driver',
+            'json-file',
             '--log-opt',
             'max-size=10m',
             '--log-opt',
@@ -467,7 +470,6 @@ export function createManager(config, dependencies = {}) {
       if (!id) throw new Error('Docker returned no container ID');
       if (!stopping) {
         await run('docker', ['start', id]);
-        const startedAt = Date.now();
         log(
           `slot ${slot}: started runner ${state.name}, id ${state.runnerId}, container ${id}`,
         );
@@ -476,12 +478,16 @@ export function createManager(config, dependencies = {}) {
         const watching = run('docker', ['wait', id], {
           timeout: (config.ttlSeconds + 10) * 1000,
         }).then(
-          () => {
-            exitCode = 0;
+          (output) => {
+            const status = output.trim();
+            exitCode =
+              /^\d+$/.test(status) && Number(status) <= 255
+                ? Number(status)
+                : null;
             return true;
           },
-          (error) => {
-            exitCode = error.exitCode ?? null;
+          () => {
+            exitCode = null;
             return true;
           },
         );
@@ -489,14 +495,11 @@ export function createManager(config, dependencies = {}) {
           if (await Promise.race([watching, wait(1000).then(() => false)]))
             break;
         }
-        if (exitCode !== undefined) {
-          const uptimeMs = Date.now() - startedAt;
-          if (exitCode !== 0 || uptimeMs < 30000) {
-            earlyExit = true;
-            log(
-              `slot ${slot}: runner exited before serving a job (exit ${exitCode ?? 'unknown'}, uptime ${uptimeMs} ms); next JIT request is delayed`,
-            );
-          }
+        if (exitCode !== undefined && exitCode !== 0) {
+          earlyExit = true;
+          log(
+            `slot ${slot}: runner exit status ${exitCode ?? 'unknown'}; next JIT request is delayed`,
+          );
         }
       }
     } finally {
@@ -599,7 +602,7 @@ export function createManager(config, dependencies = {}) {
 
 if (
   process.argv[1] &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+  realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
   try {
     if (!process.env.GH_TOKEN?.trim()) throw new Error('GH_TOKEN is required');
