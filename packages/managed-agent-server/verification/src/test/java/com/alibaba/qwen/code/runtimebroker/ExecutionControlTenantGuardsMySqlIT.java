@@ -89,4 +89,68 @@ class ExecutionControlTenantGuardsMySqlIT extends ExecutionControlTenantGuardsTe
         }
         assertEquals(0, MySqlLockProbe.innodbDeadlocks(admin) - deadlocks);
     }
+
+    /**
+     * Placement-free admission locks the Session root, then the binding.
+     * Binding control takes the root before the binding behind both guards,
+     * and the drain takes the root behind placement, so the three never close
+     * a cycle. Once the drain commits, every later admission is refused.
+     */
+    @org.junit.jupiter.api.Test
+    void admissionBesideDrainAndBindingControlOfTheSameSessionDoesNotDeadlock() throws Exception {
+        var fixture = sessionFixture(true);
+        bindings.releaseOperation(fixture.binding.getBindingId(), "recovery", fixture.binding.getOperationGeneration());
+        var admin = new JdbcTemplate(source);
+        long deadlocks = MySqlLockProbe.innodbDeadlocks(admin);
+        int rounds = 40;
+        var start = new CyclicBarrier(3);
+        var drainNow = new java.util.concurrent.CountDownLatch(1);
+        try (var pool = Executors.newFixedThreadPool(3)) {
+            var admission = pool.submit(() -> {
+                start.await(10, TimeUnit.SECONDS);
+                var outcomes = new ArrayList<String>();
+                for (int index = 0; index < rounds; index++) {
+                    if (index == rounds / 4) {
+                        drainNow.countDown();
+                    }
+                    try {
+                        fixture.prepare("call-" + index);
+                        outcomes.add("admitted");
+                    } catch (RuntimeBrokerException refused) {
+                        outcomes.add(refused.getCode());
+                    }
+                }
+                return outcomes;
+            });
+            var drain = pool.submit(() -> {
+                start.await(10, TimeUnit.SECONDS);
+                drainNow.await(60, TimeUnit.SECONDS);
+                bindings.requestHarnessDrain(fixture.id, fixture.id + "-harness");
+                return null;
+            });
+            var control = pool.submit(() -> {
+                start.await(10, TimeUnit.SECONDS);
+                for (int index = 0; index < rounds; index++) {
+                    var claimed = bindings.claimOperation(fixture.binding.getBindingId(), "control",
+                            Duration.ofMinutes(1));
+                    if (claimed != null) {
+                        bindings.renewOperation(claimed.getBindingId(), "control",
+                                claimed.getOperationGeneration(), Duration.ofMinutes(1));
+                        bindings.releaseOperation(claimed.getBindingId(), "control",
+                                claimed.getOperationGeneration());
+                    }
+                }
+                return null;
+            });
+            drain.get(120, TimeUnit.SECONDS);
+            control.get(120, TimeUnit.SECONDS);
+            var outcomes = admission.get(120, TimeUnit.SECONDS);
+            int firstClosed = outcomes.indexOf("runtime_admission_closed");
+            org.junit.jupiter.api.Assertions.assertTrue(firstClosed > 0, outcomes.toString());
+            org.junit.jupiter.api.Assertions.assertTrue(outcomes.subList(firstClosed, rounds).stream()
+                    .allMatch("runtime_admission_closed"::equals), outcomes.toString());
+        }
+        assertEquals(0, MySqlLockProbe.innodbDeadlocks(admin) - deadlocks);
+        org.junit.jupiter.api.Assertions.assertTrue(bindings.isHarnessDraining(fixture.id, fixture.id + "-harness"));
+    }
 }
