@@ -393,6 +393,23 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
+          # Harden gh against the pool's shared, writable HOME config. This
+          # gate runs on the persistent ecs-qwen pool for comment/dispatch
+          # triggers; a planted ~/.config/gh (http_unix_socket) would
+          # otherwise receive CI_BOT_PAT and could forge the permission
+          # response that downstream jobs consume as should_review. Same
+          # pins as qwen-autofix.yml's route/review-scan — but NO
+          # `unset GH_TOKEN` here: it is this step's only credential.
+          export GH_HOST=github.com
+          # `export VAR="$(...)"` reports export's status, not the
+          # substitution's: a failing mktemp must abort the step (the gate
+          # fails closed), not continue with an empty GH_CONFIG_DIR that gh
+          # treats as unset — falling back to the shared config.
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/authorize-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
           # Select the principal whose permission gates this trigger.
           case "$EVENT_NAME" in
             pull_request_target)

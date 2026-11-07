@@ -96,6 +96,11 @@ Behavior by event:
 
 Only the last two rows change.
 
+The gate step also opens with the sibling jobs' gh config pins —
+`export GH_HOST=github.com` plus a private, guarded `GH_CONFIG_DIR` — so the
+PAT-bearing API call cannot be rerouted through the pool's shared, writable
+`~/.config/gh` (see Risks).
+
 ## Design decisions and rationale
 
 1. **Safe on the persistent pool because no fork code reaches the job.** The
@@ -141,11 +146,18 @@ Only the last two rows change.
   set.
 - **PAT exposure on a shared host.** `authorize` loads `CI_BOT_PAT`. On the
   persistent pool a co-resident survivor from an earlier job could in principle
-  target it. This is the same exposure already accepted for `review-scan`
-  (which loads `CI_DEV_BOT_PAT` on the same pool; `route` loads only the
-  read-only `github.token`), and `authorize` is strictly lighter (one read API,
-  no checkout). The structural close for PAT-bearing steps on the shared pool
-  is tracked separately in
+  target it — in particular through the pool's shared, writable `~/.config/gh`:
+  a planted `http_unix_socket` there would receive the PAT and could forge the
+  permission response that downstream jobs consume as `should_review`. The
+  step therefore opens with the same gh pins as `qwen-autofix.yml`'s
+  `route`/`review-scan` — `export GH_HOST=github.com` plus a private, guarded
+  `GH_CONFIG_DIR` (a failed `mktemp` exits 1; the gate fails closed) — and a
+  meta-test pins them. **With those pins** the exposure is the one already
+  accepted for `review-scan` (which loads `CI_DEV_BOT_PAT` on the same pool;
+  `route` loads only the read-only `github.token`), and `authorize` is strictly
+  lighter (one read API, no checkout). Without them the parity would not hold.
+  The structural close for PAT-bearing steps on the shared pool is tracked
+  separately in
   [autofix-gate-runner-isolation.md](autofix-gate-runner-isolation.md); this
   change does not regress it.
 - **Residual hosted queue downstream.** `resolve-pr` and `publish-resolution`
@@ -156,11 +168,15 @@ Only the last two rows change.
 ## Validation plan
 
 - A meta-test in `scripts/tests/qwen-pr-review-workflow.test.js` pins the exact
-  `authorize` `runs-on` expression and asserts the security invariants (command
+  `authorize` `runs-on` expression and asserts the security invariants: command
   events reach ECS; the same-repo fork guard, the hosted fallback, and the ECS
-  kill switch are all still present).
-- Mutation witness: reverting the expression to the old same-repo-only form
-  makes the new test fail (verified locally); restoring it makes the suite pass.
+  kill switch are all still present; the job stays checkout-free (no `uses:`
+  step); its step inventory is exactly the one permission step with no `${{`
+  spliced into any `run:` body; and the step carries the gh config pins
+  (`GH_HOST=github.com` plus a private, guarded `GH_CONFIG_DIR`).
+- Mutation witnesses (verified locally): reverting the expression to the old
+  same-repo-only form, adding a `uses:` step, adding a run-only second step, or
+  removing the gh config preamble each makes the test fail; restoring passes.
 - Full `qwen-pr-review-workflow.test.js` (271 tests) and
   `qwen-resolve-workflow.test.js` (55 tests) pass.
 
@@ -169,7 +185,8 @@ Only the last two rows change.
 - `authorize` routes `issue_comment` and `workflow_dispatch` to the ECS pool when
   the repository guard and kill switch allow.
 - PR-payload events keep their existing same-repo/fork routing.
-- The pinning meta-test passes and kills the reverted-expression mutation.
+- The gate step keeps the gh config pins and the checkout-free / no-splice
+  invariants; the pinning meta-test kills a mutation of each.
 - No other job's routing changes.
 
 ## Open questions

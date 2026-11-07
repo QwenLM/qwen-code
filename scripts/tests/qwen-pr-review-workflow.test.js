@@ -159,6 +159,30 @@ describe('qwen pr review runner routing', () => {
     // to authorize — other jobs in this workflow legitimately check out.
     const authorizeJob = parse(workflow).jobs['authorize'];
     expect(authorizeJob.steps.every((s) => s.uses === undefined)).toBe(true);
+    // Pin the run: half of the premise too: the step inventory is exactly
+    // the one permission step, and no event value is spliced into the shell
+    // — everything must keep arriving through env:. A run-only debug step
+    // interpolating github.event.comment.body adds no `uses:` key and would
+    // slip past the assertion above.
+    expect(authorizeJob.steps.map((s) => s.name)).toEqual([
+      'Check principal write permission',
+    ]);
+    for (const s of authorizeJob.steps) {
+      expect(String(s.run ?? '')).not.toContain('${{');
+    }
+    // On the persistent pool the step must also pin gh's config resolution:
+    // GH_HOST plus a private, guarded GH_CONFIG_DIR, like qwen-autofix.yml's
+    // route/review-scan. Without them a planted shared ~/.config/gh
+    // (http_unix_socket) receives CI_BOT_PAT and can forge the permission
+    // response that downstream jobs consume as should_review.
+    const authorizeStep = authorizeJob.steps.find(
+      (s) => s.id === 'principal_permission',
+    );
+    expect(String(authorizeStep.run)).toContain('export GH_HOST=github.com');
+    expect(String(authorizeStep.run)).toContain(
+      'GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/authorize-gh-config.XXXXXX")"',
+    );
+    expect(String(authorizeStep.run)).toContain('export GH_CONFIG_DIR');
   });
 });
 

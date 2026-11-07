@@ -89,6 +89,10 @@ PR 载荷的事件（`pull_request_target`、`pull_request_review`、
 
 只有最后两行发生变化。
 
+该门步骤还以兄弟 job 的 gh 配置 pin 开场——`export GH_HOST=github.com` 加一个私有、
+带守卫的 `GH_CONFIG_DIR`——使携带 PAT 的 API 调用不会被改道经由池上共享且可写的
+`~/.config/gh`（见「风险」）。
+
 ## 设计决策与理由
 
 1. **因为没有任何 fork 代码进入该 job，所以在持久池上是安全的。** 让 fork 触发的
@@ -125,11 +129,16 @@ PR 载荷的事件（`pull_request_target`、`pull_request_review`、
   [autofix-gate-runner-isolation.md](autofix-gate-runner-isolation.md) 跟踪的同一
   共享主机类别；本条记录这次触发面扩大，以免被误认为触发集未变。
 - **共享主机上的 PAT 暴露。** `authorize` 加载 `CI_BOT_PAT`。在持久池上，先前 job
-  的同驻幸存进程原则上可能以它为目标。这与 `review-scan` 已被接受的暴露相同（它在
-  同一池上加载 `CI_DEV_BOT_PAT`；`route` 只加载只读的 `github.token`），且
-  `authorize` 严格更轻（一个只读 API、无 checkout）。共享池上携带 PAT 步骤的结构性
-  收口在 [autofix-gate-runner-isolation.md](autofix-gate-runner-isolation.md) 中单独
-  跟踪；本改动不使其倒退。
+  的同驻幸存进程原则上可能以它为目标——尤其是经由池上共享且可写的 `~/.config/gh`：
+  在那里植入的 `http_unix_socket` 会收到该 PAT，并能伪造下游 job 当作 `should_review`
+  消费的权限响应。因此该步骤以与 `qwen-autofix.yml` 的 `route`/`review-scan` 相同的
+  gh pin 开场——`export GH_HOST=github.com` 加一个私有、带守卫的 `GH_CONFIG_DIR`
+  （`mktemp` 失败即 exit 1；该门 fail closed）——并由一条 meta-test pin 住它们。
+  **带着这些 pin**，其暴露才与 `review-scan` 已被接受的相同（它在同一池上加载
+  `CI_DEV_BOT_PAT`；`route` 只加载只读的 `github.token`），且 `authorize` 严格更轻
+  （一个只读 API、无 checkout）。没有这些 pin，该对等就不成立。共享池上携带 PAT 步骤
+  的结构性收口在 [autofix-gate-runner-isolation.md](autofix-gate-runner-isolation.md)
+  中单独跟踪；本改动不使其倒退。
 - **下游仍有托管队列。** `resolve-pr` 与 `publish-resolution` 仍在托管上运行，因此
   饱和的托管池仍可能延迟 agent 与推送。本改动只消除门口等待，并不宣称 `/resolve` 变
   得无队列。
@@ -137,10 +146,12 @@ PR 载荷的事件（`pull_request_target`、`pull_request_review`、
 ## 验证计划
 
 - `scripts/tests/qwen-pr-review-workflow.test.js` 中的一条 meta-test pin 住
-  `authorize` 的精确 `runs-on` 表达式，并断言安全不变量（命令事件到达 ECS；同仓
-  fork 守卫、托管回落、ECS 开关全都仍在）。
-- 变异见证：把表达式还原为旧的同仓唯一形式会使新测试失败（已在本机验证）；恢复后套
-  件通过。
+  `authorize` 的精确 `runs-on` 表达式，并断言安全不变量：命令事件到达 ECS；同仓
+  fork 守卫、托管回落、ECS 开关全都仍在；该 job 保持无 checkout（无 `uses:` 步骤）；
+  其步骤清单恰为那一个权限步骤、且任何 `run:` 正文都不拼接 `${{`；该步骤携带 gh 配置
+  pin（`GH_HOST=github.com` 加私有、带守卫的 `GH_CONFIG_DIR`）。
+- 变异见证（已在本机验证）：把表达式还原为旧的同仓唯一形式、加一个 `uses:` 步骤、
+  加一个仅 `run:` 的第二步、或删掉 gh 配置前导，都会使测试失败；恢复后通过。
 - 完整 `qwen-pr-review-workflow.test.js`（271 个测试）与
   `qwen-resolve-workflow.test.js`（55 个测试）通过。
 
@@ -149,7 +160,8 @@ PR 载荷的事件（`pull_request_target`、`pull_request_review`、
 - 在仓库守卫与开关允许时，`authorize` 把 `issue_comment` 与 `workflow_dispatch` 路
   由到 ECS 池。
 - PR 载荷事件保持既有的同仓/fork 路由。
-- pin 住路由的 meta-test 通过，并能杀死"还原表达式"的变异。
+- 该门步骤保持 gh 配置 pin 与无 checkout/无拼接不变量；pin 住它们的 meta-test 能杀死
+  针对每一项的变异。
 - 其他任何 job 的路由都不变。
 
 ## 未决问题
