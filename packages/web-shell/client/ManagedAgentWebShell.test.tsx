@@ -423,6 +423,44 @@ describe('ManagedAgentWebShell', () => {
     });
   });
 
+  it('shows the config fallback and renders no provider-less page when the guard fires', async () => {
+    const first = { storageKey: 'tenant-a:actor-a' } as ManagedAgentProvider;
+    const third = { storageKey: 'tenant-c:actor-c' } as ManagedAgentProvider;
+    // No provider and no baseUrl is a configuration error the baseUrl guard
+    // raises inside the boundary: that render commits nothing, which is what
+    // makes the identity-switch arm on a provider-less render unreachable.
+    // Relaxing or moving the guard lets a provider-less render commit and
+    // carry `s1` past the switch, so this test is the pin for the guard.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const render = (provider?: ManagedAgentProvider) =>
+      act(async () =>
+        root.render(
+          <ManagedAgentWebShell
+            managedAgentProvider={provider}
+            hostSessionOnly
+            sessionId="s1"
+          />,
+        ),
+      );
+    try {
+      await render(first);
+      const committed = captured.props;
+      await render(undefined);
+      // The guard throws inside the boundary: the fallback is shown and the
+      // page never renders without a provider, so no selection state is
+      // committed for the intermediate step.
+      expect(container.textContent).toContain('Something went wrong');
+      expect(captured.props).toBe(committed);
+      await render(third);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(captured.props).toMatchObject({
+      managedAgentProvider: third,
+      sessionId: 's1',
+    });
+  });
+
   it('styles both wrappers when the host reuses one slot element', async () => {
     const provider = { storageKey: 'slot-reused' } as ManagedAgentProvider;
     const target = document.createElement('div');
@@ -450,6 +488,40 @@ describe('ManagedAgentWebShell', () => {
       }
     } finally {
       target.remove();
+    }
+  });
+
+  it('styles both wrappers when the host uses distinct slot elements', async () => {
+    const provider = { storageKey: 'slot-distinct' } as ManagedAgentProvider;
+    const navigation = document.createElement('div');
+    const archived = document.createElement('div');
+    document.body.append(navigation, archived);
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAgentWebShell
+            managedAgentProvider={provider}
+            navigationTarget={navigation}
+            archivedNavigationTarget={archived}
+            language="zh-CN"
+          />,
+        ),
+      );
+      // A single shared target cannot tell the two branches apart: deleting the
+      // archived branch would still leave one wrapper inside it.
+      for (const target of [navigation, archived]) {
+        const wrappers = [
+          ...target.querySelectorAll<HTMLElement>(
+            '[data-web-shell-portal-root]',
+          ),
+        ];
+        expect(wrappers).toHaveLength(1);
+        expect(wrappers[0]?.lang).toBe('zh-CN');
+        expect(wrappers[0]?.classList.contains('dark')).toBe(true);
+      }
+    } finally {
+      navigation.remove();
+      archived.remove();
     }
   });
 
