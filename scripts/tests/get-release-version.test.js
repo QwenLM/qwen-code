@@ -933,6 +933,40 @@ describe('getVersion', () => {
       );
     });
 
+    it('should allow a bump that lands exactly on the checked-out ref version', () => {
+      // A ref at 0.9.1 publishing the next patch after latest 0.9.0 is the
+      // ordinary release; the cross-line guard must stay strictly-below.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.9.1' }),
+      );
+      const mockWithExactRefBump = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.7.0-preview.1';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.9.0';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify([
+            '0.7.0-preview.0',
+            '0.7.0-preview.1',
+            '0.9.0',
+          ]);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithExactRefBump);
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.9.1');
+      expect(result.npmTag).toBe('latest');
+    });
+
     it('should refuse a stale ref when no preview has ever been published', () => {
       // The package.json fallback skipped the stale-ref check, so a ref at
       // 0.8.0 could select 0.8.x while latest had already moved to 0.9.0.
