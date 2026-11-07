@@ -148,6 +148,77 @@ interface PKCEParams {
 
 const HTTP_OK = 200;
 
+// Upper bound for a refresh request. Keep it below the retry interval of the
+// per-request token getter (mcp-client.ts), so a hung request is gone, and its
+// shared read with it, before the next attempt.
+const TOKEN_REFRESH_TIMEOUT_MS = 10_000;
+
+/** The token endpoint answered a refresh request with an HTTP error status. */
+class TokenEndpointError extends Error {
+  readonly status: number;
+  /** The RFC 6749 §5.2 `error` code, when the response carried one. */
+  readonly oauthError: string | undefined;
+
+  constructor(message: string, status: number, oauthError?: string) {
+    super(message);
+    this.name = 'TokenEndpointError';
+    this.status = status;
+    this.oauthError = oauthError;
+  }
+}
+
+/**
+ * Reads `error` and `error_description` from a token endpoint error body,
+ * which RFC 6749 §5.2 sends as JSON; form-encoded bodies are accepted too.
+ */
+function parseTokenErrorBody(body: string): {
+  error?: string;
+  errorDescription?: string;
+} {
+  try {
+    const json: unknown = JSON.parse(body);
+    if (json && typeof json === 'object') {
+      const { error, error_description } = json as Record<string, unknown>;
+      return {
+        error: typeof error === 'string' ? error : undefined,
+        errorDescription:
+          typeof error_description === 'string' ? error_description : undefined,
+      };
+    }
+  } catch {
+    // Not JSON: try form-urlencoded below.
+  }
+  const params = new URLSearchParams(body);
+  return {
+    error: params.get('error') ?? undefined,
+    errorDescription: params.get('error_description') ?? undefined,
+  };
+}
+
+/**
+ * Whether the authorization server refused the refresh token itself. Only
+ * invalid_grant says so (RFC 6749 §5.2); invalid_client, invalid_request,
+ * invalid_scope, a status without a code, network errors, timeouts, 5xx and
+ * throttling say nothing about the stored token.
+ */
+function isRefreshTokenRejected(error: unknown): boolean {
+  return (
+    error instanceof TokenEndpointError && error.oauthError === 'invalid_grant'
+  );
+}
+
+// Token reads/refreshes in flight, keyed by server name. Module-level so every
+// provider instance in the process shares it: authorization servers commonly
+// rotate refresh tokens, so a second concurrent refresh would present an
+// already-consumed token, fail with invalid_grant and wipe the credentials.
+// Every caller for one server must pass the same config: the first one wins.
+const inflightTokenReads = new Map<string, Promise<OAuthToken | null>>();
+
+/** Drops every shared token read, so one test's stranded flight cannot leak. */
+export function clearInflightTokenReadsForTest(): void {
+  inflightTokenReads.clear();
+}
+
 /**
  * Provider for handling OAuth authentication for MCP servers.
  */
@@ -609,27 +680,20 @@ export class MCPOAuthProvider {
         Accept: 'application/json, application/x-www-form-urlencoded',
       },
       body: params.toString(),
+      signal: AbortSignal.timeout(TOKEN_REFRESH_TIMEOUT_MS),
     });
 
     const responseText = await response.text();
     const contentType = response.headers.get('content-type') || '';
 
     if (!response.ok) {
-      // Try to parse error from form-urlencoded response
-      let errorMessage: string | null = null;
-      try {
-        const errorParams = new URLSearchParams(responseText);
-        const error = errorParams.get('error');
-        const errorDescription = errorParams.get('error_description');
-        if (error) {
-          errorMessage = `Token refresh failed: ${error} - ${errorDescription || 'No description'}`;
-        }
-      } catch {
-        // Fall back to raw error
-      }
-      throw new Error(
-        errorMessage ||
-          `Token refresh failed: ${response.status} - ${responseText}`,
+      const { error, errorDescription } = parseTokenErrorBody(responseText);
+      throw new TokenEndpointError(
+        error
+          ? `Token refresh failed: ${error} - ${errorDescription || 'No description'}`
+          : `Token refresh failed: ${response.status} - ${responseText}`,
+        response.status,
+        error,
       );
     }
 
@@ -920,6 +984,9 @@ export class MCPOAuthProvider {
         config.tokenUrl,
         mcpServerUrl,
       );
+      // A refresh already in flight holds the previous refresh token: later
+      // callers must read these credentials instead of joining it.
+      inflightTokenReads.delete(serverName);
       debugLogger.debug('✓ Authentication successful! Token saved.');
 
       // Verify token was saved
@@ -958,6 +1025,37 @@ export class MCPOAuthProvider {
     serverName: string,
     config: MCPOAuthConfig,
   ): Promise<string | null> {
+    return (
+      (await this.getValidOAuthToken(serverName, config))?.accessToken ?? null
+    );
+  }
+
+  /**
+   * Like {@link getValidToken} but returns the full token (including
+   * `expiresAt`) so callers can cache it and decide locally when to ask again.
+   * Concurrent calls for the same server share one read-and-refresh.
+   */
+  getValidOAuthToken(
+    serverName: string,
+    config: MCPOAuthConfig,
+  ): Promise<OAuthToken | null> {
+    const inflight = inflightTokenReads.get(serverName);
+    if (inflight) {
+      return inflight;
+    }
+    const read = this.readOrRefreshToken(serverName, config).finally(() => {
+      if (inflightTokenReads.get(serverName) === read) {
+        inflightTokenReads.delete(serverName);
+      }
+    });
+    inflightTokenReads.set(serverName, read);
+    return read;
+  }
+
+  private async readOrRefreshToken(
+    serverName: string,
+    config: MCPOAuthConfig,
+  ): Promise<OAuthToken | null> {
     debugLogger.debug(`Getting valid token for server: ${serverName}`);
     const credentials = await this.tokenStorage.getCredentials(serverName);
 
@@ -974,18 +1072,22 @@ export class MCPOAuthProvider {
     // Check if token is expired
     if (!this.tokenStorage.isTokenExpired(token)) {
       debugLogger.debug(`Returning valid token for server: ${serverName}`);
-      return token.accessToken;
+      return token;
     }
 
+    // A dynamically registered client has no clientId in the user's config;
+    // only the stored credentials know it.
+    const clientId = config.clientId ?? credentials.clientId;
+
     // Try to refresh if we have a refresh token
-    if (token.refreshToken && config.clientId && credentials.tokenUrl) {
+    if (token.refreshToken && clientId && credentials.tokenUrl) {
       try {
         debugLogger.info(
           `Refreshing expired token for MCP server: ${serverName}`,
         );
 
         const newTokenResponse = await this.refreshAccessToken(
-          config,
+          { ...config, clientId },
           token.refreshToken,
           credentials.tokenUrl,
           credentials.mcpServerUrl,
@@ -1004,19 +1106,33 @@ export class MCPOAuthProvider {
           newToken.expiresAt = Date.now() + expiresIn * 1000;
         }
 
+        // A re-authentication during the refresh has replaced the credentials:
+        // keep those rather than overwrite them with a result of the old token.
+        const latest = await this.tokenStorage.getCredentials(serverName);
+        if (latest?.token.refreshToken !== token.refreshToken) {
+          return latest?.token ?? null;
+        }
+
         await this.tokenStorage.saveToken(
           serverName,
           newToken,
-          config.clientId,
+          clientId,
           credentials.tokenUrl,
           credentials.mcpServerUrl,
         );
 
-        return newToken.accessToken;
+        return newToken;
       } catch (error) {
         debugLogger.error(`Failed to refresh token: ${getErrorMessage(error)}`);
-        // Remove invalid token
-        await this.tokenStorage.deleteCredentials(serverName);
+        // Only a refusal by the authorization server makes the stored token
+        // useless; anything else may pass by the next attempt. Not even a
+        // refusal removes credentials a re-authentication replaced meanwhile.
+        if (isRefreshTokenRejected(error)) {
+          const latest = await this.tokenStorage.getCredentials(serverName);
+          if (latest?.token.refreshToken === token.refreshToken) {
+            await this.tokenStorage.deleteCredentials(serverName);
+          }
+        }
       }
     }
 

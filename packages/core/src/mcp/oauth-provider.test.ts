@@ -47,7 +47,10 @@ import type {
   OAuthTokenResponse,
   OAuthClientRegistrationResponse,
 } from './oauth-provider.js';
-import { MCPOAuthProvider } from './oauth-provider.js';
+import {
+  MCPOAuthProvider,
+  clearInflightTokenReadsForTest,
+} from './oauth-provider.js';
 import type { OAuthToken } from './token-storage/types.js';
 import { MCPOAuthTokenStorage } from './oauth-token-storage.js';
 import type {
@@ -122,9 +125,11 @@ vi.mock('node:http', () => ({
   createServer: vi.fn(() => mockHttpServer),
 }));
 
-const jsonResponse = (body: unknown) =>
+// JSON token endpoint response; passing a status makes it a failure.
+const jsonResponse = (body: unknown, status?: number) =>
   createMockResponse({
-    ok: true,
+    ok: status === undefined,
+    status,
     contentType: 'application/json',
     text: JSON.stringify(body),
     json: body,
@@ -224,11 +229,19 @@ describe('MCPOAuthProvider', () => {
     registration_endpoint: 'https://auth.example.com/register',
   };
 
+  // The promise's result, or 'pending' if it hasn't settled by then.
+  const withinMs = (promise: Promise<unknown>, ms: number) =>
+    Promise.race([
+      promise,
+      new Promise((resolve) => setTimeout(() => resolve('pending'), ms)),
+    ]);
+
   const authenticate = (config = mockConfig, mcpServerUrl?: string) =>
     new MCPOAuthProvider().authenticate('test-server', config, mcpServerUrl);
 
   beforeEach(() => {
     vi.clearAllMocks();
+    clearInflightTokenReadsForTest();
     mockOpenBrowserSecurely.mockClear();
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -746,6 +759,7 @@ describe('MCPOAuthProvider', () => {
             Accept: 'application/json, application/x-www-form-urlencoded',
           },
           body: expect.stringContaining('grant_type=refresh_token'),
+          signal: expect.any(AbortSignal),
         }),
       );
     });
@@ -795,6 +809,19 @@ describe('MCPOAuthProvider', () => {
 
       await expect(refresh('invalid_refresh_token')).rejects.toThrow(
         'Token refresh failed: invalid_request - Invalid refresh token',
+      );
+    });
+
+    it('should read the error code from a JSON error response', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse(
+          { error: 'invalid_grant', error_description: 'Token revoked' },
+          400,
+        ),
+      );
+
+      await expect(refresh('revoked_refresh_token')).rejects.toThrow(
+        'Token refresh failed: invalid_grant - Token revoked',
       );
     });
 
@@ -885,7 +912,7 @@ describe('MCPOAuthProvider', () => {
       vi.mocked(tokenStorage.deleteCredentials).mockResolvedValue(undefined);
       mockFetch.mockResolvedValueOnce(
         formResponse(
-          'error=invalid_request&error_description=Invalid refresh token',
+          'error=invalid_grant&error_description=Invalid refresh token',
           400,
         ),
       );
@@ -905,6 +932,291 @@ describe('MCPOAuthProvider', () => {
       mockStoredToken({ ...expiredToken(), refreshToken: undefined }, true);
 
       expect(await getValidToken()).toBeNull();
+    });
+
+    it('should return the full token from getValidOAuthToken', async () => {
+      vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+      mockStoredToken(expiredToken(), true);
+      mockFetch.mockResolvedValueOnce(jsonResponse(mockRefreshResponse));
+
+      const token = await new MCPOAuthProvider().getValidOAuthToken(
+        'test-server',
+        mockConfig,
+      );
+
+      expect(token).toMatchObject({
+        accessToken: 'new_access_token',
+        expiresAt: 1_700_000_000_000 + mockRefreshResponse.expires_in! * 1000,
+      });
+    });
+
+    it('should share one refresh between concurrent callers', async () => {
+      const tokenStorage = mockStoredToken(expiredToken(), true);
+      // Hold the token endpoint open so every caller overlaps the refresh.
+      let respond!: () => void;
+      mockFetch.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            respond = () => resolve(jsonResponse(mockRefreshResponse));
+          }),
+      );
+
+      // Separate provider instances: the dedupe is process-wide.
+      const calls = Array.from({ length: 5 }, () =>
+        new MCPOAuthProvider().getValidToken('test-server', mockConfig),
+      );
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledOnce());
+      respond();
+
+      expect(await Promise.all(calls)).toEqual(
+        Array(5).fill('new_access_token'),
+      );
+      expect(mockFetch).toHaveBeenCalledOnce();
+      expect(tokenStorage.saveToken).toHaveBeenCalledOnce();
+      expect(tokenStorage.deleteCredentials).not.toHaveBeenCalled();
+    });
+
+    it('should refresh again once the previous refresh has finished', async () => {
+      mockStoredToken(expiredToken(), true);
+      mockFetch
+        .mockResolvedValueOnce(jsonResponse(mockRefreshResponse))
+        .mockResolvedValueOnce(jsonResponse(mockRefreshResponse));
+
+      await getValidToken();
+      await getValidToken();
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('should refresh with the stored client id when the config has none', async () => {
+      const tokenStorage = mockStoredToken(expiredToken(), true);
+      mockFetch.mockResolvedValueOnce(jsonResponse(mockRefreshResponse));
+
+      const result = await new MCPOAuthProvider().getValidToken('test-server', {
+        enabled: true,
+      });
+
+      expect(result).toBe('new_access_token');
+      const body = new URLSearchParams(mockFetch.mock.calls[0][1].body);
+      expect(body.get('client_id')).toBe('test-client-id');
+      expect(tokenStorage.saveToken).toHaveBeenCalledWith(
+        'test-server',
+        expect.objectContaining({ accessToken: 'new_access_token' }),
+        'test-client-id',
+        'https://auth.example.com/token',
+        undefined,
+      );
+    });
+
+    it('should resolve every waiter to null when a shared refresh fails', async () => {
+      const tokenStorage = mockStoredToken(expiredToken(), true);
+      vi.mocked(tokenStorage.deleteCredentials).mockResolvedValue(undefined);
+      let respond!: () => void;
+      mockFetch.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            respond = () => resolve(formResponse('error=invalid_grant', 400));
+          }),
+      );
+
+      const calls = Array.from({ length: 3 }, () => getValidToken());
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledOnce());
+      respond();
+
+      expect(await Promise.all(calls)).toEqual([null, null, null]);
+      expect(tokenStorage.deleteCredentials).toHaveBeenCalledOnce();
+
+      // The failed flight is gone: the next caller starts a fresh one.
+      mockFetch.mockResolvedValueOnce(jsonResponse(mockRefreshResponse));
+      expect(await getValidToken()).toBe('new_access_token');
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('should keep credentials saved by a re-authentication during a failing refresh', async () => {
+      const tokenStorage = mockStoredToken(expiredToken(), true);
+      const staleCredentials =
+        (await tokenStorage.getCredentials('test-server'))!;
+      // By the time the refresh with the old refresh token is rejected, the
+      // user has re-authenticated and the stored refresh token is a new one.
+      const reauthenticated = {
+        ...staleCredentials,
+        token: {
+          ...mockToken,
+          accessToken: 'reauth_access_token',
+          refreshToken: 'reauth_refresh_token',
+        },
+      };
+      vi.mocked(tokenStorage.getCredentials)
+        .mockResolvedValueOnce(staleCredentials)
+        .mockResolvedValue(reauthenticated);
+      vi.mocked(tokenStorage.isTokenExpired).mockImplementation(
+        (token) => token.accessToken === mockToken.accessToken,
+      );
+      let respond!: () => void;
+      mockFetch.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            respond = () => resolve(formResponse('error=invalid_grant', 400));
+          }),
+      );
+
+      const refresh = getValidToken();
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledOnce());
+      respond();
+
+      expect(await refresh).toBeNull();
+      expect(tokenStorage.deleteCredentials).not.toHaveBeenCalled();
+      expect(await getValidToken()).toBe('reauth_access_token');
+    });
+
+    it('should not join a refresh in flight once a re-authentication saved new credentials', async () => {
+      const tokenStorage = mockStoredToken(expiredToken(), true);
+      let stored = (await tokenStorage.getCredentials('test-server'))!;
+      vi.mocked(tokenStorage.getCredentials).mockImplementation(
+        async () => stored,
+      );
+      vi.mocked(tokenStorage.saveToken).mockImplementation(
+        async (_serverName, token) => {
+          stored = { ...stored, token };
+        },
+      );
+      vi.mocked(tokenStorage.isTokenExpired).mockImplementation(
+        (token) => token.accessToken === mockToken.accessToken,
+      );
+      let respond!: () => void;
+      mockFetch.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            respond = () => resolve(formResponse('error=invalid_grant', 400));
+          }),
+      );
+      const staleRefresh = getValidToken();
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledOnce());
+
+      mockOAuthCallback();
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({
+          ...mockTokenResponse,
+          access_token: 'reauth_token',
+          refresh_token: 'reauth_refresh_token',
+        }),
+      );
+      await authenticate();
+
+      // The refresh with the old refresh token is still hanging.
+      expect(await withinMs(getValidToken(), 100)).toBe('reauth_token');
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+
+      respond();
+      expect(await staleRefresh).toBeNull();
+      expect(tokenStorage.deleteCredentials).not.toHaveBeenCalled();
+    });
+
+    it('should keep credentials saved by a re-authentication when the refresh succeeds late', async () => {
+      const tokenStorage = mockStoredToken(expiredToken(), true);
+      const staleCredentials =
+        (await tokenStorage.getCredentials('test-server'))!;
+      const reauthenticated = {
+        ...staleCredentials,
+        token: {
+          ...mockToken,
+          accessToken: 'reauth_access_token',
+          refreshToken: 'reauth_refresh_token',
+        },
+      };
+      vi.mocked(tokenStorage.getCredentials)
+        .mockResolvedValueOnce(staleCredentials)
+        .mockResolvedValue(reauthenticated);
+      // The old refresh token still works at the authorization server.
+      mockFetch.mockResolvedValueOnce(jsonResponse(mockRefreshResponse));
+
+      expect(await getValidToken()).toBe('reauth_access_token');
+      expect(tokenStorage.saveToken).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['400 invalid_grant', () => formResponse('error=invalid_grant', 400)],
+      [
+        '400 invalid_grant as JSON',
+        () => jsonResponse({ error: 'invalid_grant' }, 400),
+      ],
+    ])(
+      'should remove credentials when the server answers %s',
+      async (_n, respond) => {
+        const tokenStorage = mockStoredToken(expiredToken(), true);
+        mockFetch.mockResolvedValueOnce(respond());
+
+        expect(await getValidToken()).toBeNull();
+        expect(tokenStorage.deleteCredentials).toHaveBeenCalledWith(
+          'test-server',
+        );
+      },
+    );
+
+    it.each([
+      ['a 503 response', () => formResponse('temporarily_unavailable', 503)],
+      ['a 429 response', () => formResponse('error=slow_down', 429)],
+      ['a 403 response', () => formResponse('Forbidden', 403)],
+      ['a network error', () => Promise.reject(new TypeError('fetch failed'))],
+      [
+        'a timeout',
+        () => Promise.reject(new DOMException('timed out', 'TimeoutError')),
+      ],
+      [
+        '400 invalid_client as JSON',
+        () => jsonResponse({ error: 'invalid_client' }, 400),
+      ],
+      ['401 invalid_client', () => formResponse('error=invalid_client', 401)],
+      [
+        '400 invalid_request',
+        () => jsonResponse({ error: 'invalid_request' }, 400),
+      ],
+      [
+        '400 invalid_scope',
+        () => jsonResponse({ error: 'invalid_scope' }, 400),
+      ],
+      ['a 400 without an error code', () => formResponse('Bad Request', 400)],
+    ])('should keep credentials after %s', async (_n, respond) => {
+      const tokenStorage = mockStoredToken(expiredToken(), true);
+      mockFetch.mockImplementationOnce(respond);
+
+      expect(await getValidToken()).toBeNull();
+      expect(tokenStorage.deleteCredentials).not.toHaveBeenCalled();
+    });
+
+    it('should refresh servers independently when they refresh at the same time', async () => {
+      const tokenStorage = new MCPOAuthTokenStorage();
+      vi.mocked(tokenStorage.getCredentials).mockImplementation(
+        async (serverName) => ({
+          serverName,
+          token: {
+            ...expiredToken(),
+            refreshToken: `refresh_for_${serverName}`,
+          },
+          clientId: 'test-client-id',
+          tokenUrl: 'https://auth.example.com/token',
+          updatedAt: Date.now(),
+        }),
+      );
+      vi.mocked(tokenStorage.isTokenExpired).mockReturnValue(true);
+      mockFetch.mockImplementation(async (_url, init) =>
+        jsonResponse({
+          ...mockRefreshResponse,
+          access_token: `token_for_${new URLSearchParams(init.body).get('refresh_token')}`,
+        }),
+      );
+
+      const provider = new MCPOAuthProvider();
+      const results = await Promise.all([
+        provider.getValidToken('server-a', mockConfig),
+        provider.getValidToken('server-b', mockConfig),
+      ]);
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(results).toEqual([
+        'token_for_refresh_for_server-a',
+        'token_for_refresh_for_server-b',
+      ]);
     });
   });
 
