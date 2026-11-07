@@ -3042,6 +3042,110 @@ describe('createAcpSessionBridge', () => {
 
       await bridge.shutdown();
     });
+
+    it('reaps an idle channel session while its channel subscriber is attached', async () => {
+      const closeCalls: string[] = [];
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+            closeCalls.push(String(params['sessionId']));
+          }
+          return { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 10,
+        sessionIdleTimeoutMs: 10,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      const abort = new AbortController();
+      const pending = bridge
+        .subscribeEvents(session.sessionId, { signal: abort.signal })
+        [Symbol.asyncIterator]()
+        .next();
+      await vi.waitFor(() =>
+        expect(
+          bridge.getDaemonStatusSnapshot().sessions[0]?.subscriberCount,
+        ).toBe(1),
+      );
+
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+      expect(closeCalls).toEqual([session.sessionId]);
+
+      abort.abort();
+      await pending.catch(() => undefined);
+      await bridge.shutdown();
+    });
+
+    it('keeps a non-channel session with an attached subscriber past the idle threshold', async () => {
+      const closeCalls: string[] = [];
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+            closeCalls.push(String(params['sessionId']));
+          }
+          return { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 10,
+        sessionIdleTimeoutMs: 10,
+      });
+      const channelSession = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        sourceType: 'channel',
+      });
+      const userSession = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: channelSession.sessionId, holds: [] },
+        { sessionId: userSession.sessionId, holds: [] },
+      ]);
+      const subscriptions = [channelSession, userSession].map((session) => {
+        const abort = new AbortController();
+        const pending = bridge
+          .subscribeEvents(session.sessionId, { signal: abort.signal })
+          [Symbol.asyncIterator]()
+          .next();
+        return { abort, pending };
+      });
+      await vi.waitFor(() =>
+        expect(
+          bridge
+            .getDaemonStatusSnapshot()
+            .sessions.every((session) => session.subscriberCount === 1),
+        ).toBe(true),
+      );
+
+      // The channel sibling proves the reaper ran; the user session survives
+      // that same tick only because the subscriber guard still applies to it.
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(1));
+      expect(closeCalls).toEqual([channelSession.sessionId]);
+      expect(bridge.getDaemonStatusSnapshot().sessions[0]?.sessionId).toBe(
+        userSession.sessionId,
+      );
+
+      for (const subscription of subscriptions) {
+        subscription.abort.abort();
+        await subscription.pending.catch(() => undefined);
+      }
+      await bridge.shutdown();
+    });
   });
 
   it('streams workspace content without requiring a session', async () => {

@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutation;
 
 import java.time.Duration;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -77,7 +78,7 @@ public interface SessionLifecycleStore {
 
     /** The given Sessions whose execution facts hold, in one read. */
     public Set<String> sessionsWithExecutionRegistryFacts(String tenantId,
-            java.util.Collection<String> sessionIds);
+            Collection<String> sessionIds);
 
     public SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
             String actorId, String scopedKey, String requestDigest);

@@ -49,6 +49,10 @@ interface Scenario {
   approvals?: Array<'allow' | 'deny'>;
   /** Presses Esc once this text is on screen. */
   cancelOn?: string;
+  /** Submits `input` once `on` is on screen, while the turn runs. */
+  queue?: { on: string; input: string };
+  /** Presses Ctrl+Y this many times after the prompt, each after a turn. */
+  retries?: number;
   /** The model requests each run must send, retries included. */
   requests: number;
   /**
@@ -144,6 +148,8 @@ const VOLATILE_KEYS = new Set([
   'event.timestamp',
   // When a write backed up the file it replaced.
   'backupTime',
+  // A shell command's process.
+  'pid',
 ]);
 
 // Timings, such as the telemetry recorded with each response.
@@ -174,7 +180,9 @@ function normalize(value: unknown, dir: string, scratch: string): unknown {
       .join('<DIR>')
       .split(scratch)
       .join('<SCRATCH>')
-      .replace(RANDOM_ID, '<ID>'),
+      .replace(RANDOM_ID, '<ID>')
+      // A shell command's result names its process group.
+      .replace(/Process Group PGID: \d+/g, 'Process Group PGID: <PGID>'),
   );
   const strip = (node: unknown): unknown => {
     if (Array.isArray(node)) return node.map(strip);
@@ -370,6 +378,20 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     );
     await session.idle(300, 5_000);
 
+    // A turn is over once the spinner stops and no request is in flight.
+    const turnEnds = async () => {
+      await sleep(500);
+      await session!.idle(2_000, 90_000);
+      await until(
+        () =>
+          server!.requests.every(
+            (request) => request.transport.closedAt !== undefined,
+          ),
+        'model requests complete',
+      );
+      await session!.idle(1_000, 30_000);
+    };
+
     for (const prompt of scenario.prompts) {
       await session.send(prompt);
       for (const answer of scenario.approvals ?? []) {
@@ -395,17 +417,19 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
         await sleep(1_500);
         session.pressKey('\x1b');
       }
-      // A turn is over once the spinner stops and no request is in flight.
-      await sleep(500);
-      await session.idle(2_000, 90_000);
-      await until(
-        () =>
-          server!.requests.every(
-            (request) => request.transport.closedAt !== undefined,
-          ),
-        'model requests complete',
-      );
-      await session.idle(1_000, 30_000);
+      if (scenario.queue) {
+        await until(
+          async () => (await session!.viewport()).includes(scenario.queue!.on),
+          'the tool starts',
+        );
+        await sleep(1_000);
+        await session.send(scenario.queue.input);
+      }
+      await turnEnds();
+      for (let retry = 0; retry < (scenario.retries ?? 0); retry++) {
+        session.pressKey('\x19');
+        await turnEnds();
+      }
     }
 
     const screen = await session.screen();
@@ -622,6 +646,78 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       batches: 0,
       prompts: ['Fail please.'],
       reply: () => ({ errorContent: 'upstream exploded' }),
+    },
+    {
+      name: 'a retry after a model error',
+      requests: 2,
+      rounds: 2,
+      batches: 0,
+      prompts: ['Fail once.'],
+      retries: 1,
+      recorded: 'Recovered.',
+      reply: (_messages, _dir, index) =>
+        index === 0
+          ? { errorContent: 'upstream exploded' }
+          : { content: 'Recovered.' },
+    },
+    {
+      name: 'a retry that fails again',
+      requests: 3,
+      rounds: 3,
+      batches: 0,
+      prompts: ['Fail twice.'],
+      retries: 2,
+      recorded: 'Recovered.',
+      reply: (_messages, _dir, index) =>
+        index < 2
+          ? { errorContent: 'upstream exploded' }
+          : { content: 'Recovered.' },
+    },
+    {
+      // The retried tool-result round calls another tool, whose batch the
+      // retry's turn runs and continues.
+      name: 'a retried tool-result round that calls a tool',
+      requests: 4,
+      rounds: 4,
+      batches: 2,
+      prompts: ['Read both files.'],
+      files: { 'a.txt': 'alpha\n', 'b.txt': 'beta\n' },
+      retries: 1,
+      recorded: 'Both read.',
+      reply: (_messages, dir, index) =>
+        index === 0
+          ? { toolCalls: [read(join(dir, 'a.txt'), 'call_a')] }
+          : index === 1
+            ? { errorContent: 'upstream exploded' }
+            : index === 2
+              ? { toolCalls: [read(join(dir, 'b.txt'), 'call_b')] }
+              : { content: 'Both read.' },
+    },
+    {
+      // Input submitted while a tool runs goes out with its result.
+      name: 'input queued while a tool runs',
+      requests: 2,
+      rounds: 2,
+      batches: 1,
+      prompts: ['Run the slow command.'],
+      queue: { on: 'queue-now', input: 'Also mention the weather.' },
+      sent: 'Also mention the weather.',
+      reply: (messages) =>
+        toolResults(messages) === 0
+          ? {
+              toolCalls: [
+                fakeToolCall(
+                  'run_shell_command',
+                  {
+                    command:
+                      'echo queue-now && node -e "setTimeout(() => {}, 5000)"',
+                    is_background: false,
+                  },
+                  'call_slow',
+                ),
+              ],
+            }
+          : { content: 'Done, and it is sunny.' },
     },
     {
       name: 'a UserPromptSubmit hook that blocks',
