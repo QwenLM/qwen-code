@@ -20,6 +20,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getLocalGitConfigRisk } from './git-config-safety.js';
+import { isOfflineRemoteShow } from './git-remote-show-offline.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
   classifyAwkCommandSafety,
@@ -788,7 +789,10 @@ function evaluateOutputOption(args: string[], long = true, short = true) {
   return null;
 }
 
-function evaluateGitSafety(args: string[]): ShellCommandSafety {
+function evaluateGitSafety(
+  args: string[],
+  commandText: string,
+): ShellCommandSafety {
   const first = args[0];
   if (!first || first === '--version') return 'read-only';
   if (first === '--help') return args.length === 1 ? 'read-only' : 'unknown';
@@ -838,19 +842,10 @@ function evaluateGitSafety(args: string[]): ShellCommandSafety {
       // `git remote show` queries the remote over the network
       // (git-upload-pack) unless `-n` is given, so without that flag it has a
       // network side effect and must not auto-run as read-only — the argument
-      // can be any URL. `get-url` never connects. A quote or backslash left in
-      // an argument means its text is not yet the word bash hands git (`\--`
-      // reaches git as the `--` terminator), so `-n` cannot be placed by it.
-      // git ends option parsing at `--end-of-options` just as at `--`, so a
-      // `-n` after either one is a remote name, not the flag.
-      const end = rest.findIndex(
-        (arg) => arg === '--' || arg === '--end-of-options',
-      );
-      const showOptions = end < 0 ? rest : rest.slice(0, end);
-      if (
-        action === 'show' &&
-        (!showOptions.includes('-n') || rest.some((arg) => /["'\\]/.test(arg)))
-      ) {
+      // can be any URL. `get-url` never connects. The `-n` is proven from the
+      // command's raw text, not from `args`: tree-sitter's words are not
+      // always the ones bash hands git.
+      if (action === 'show' && !isOfflineRemoteShow(commandText)) {
         return 'unknown';
       }
       return 'read-only';
@@ -1017,8 +1012,9 @@ function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
     result = hasHelp(args) ? 'unknown' : 'write';
   } else if (/^(kill|killall|pkill)$/.test(root)) {
     result = processSafety(root, args);
-  } else if (root === 'git') result = evaluateGitSafety(args);
-  else if (root === 'find') result = evaluateFindSafety(args);
+  } else if (root === 'git') {
+    result = evaluateGitSafety(args, commandNode.text);
+  } else if (root === 'find') result = evaluateFindSafety(args);
   else if (root === 'sed') result = evaluateSedSafety(args);
   else if (root === 'awk') result = evaluateAwkSafety(args);
   else if (root === 'sort' || root === 'tree') {

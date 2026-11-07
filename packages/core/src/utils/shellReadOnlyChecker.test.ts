@@ -261,6 +261,21 @@ describe('evaluateShellCommandReadOnly', () => {
       'git remote show ssh://evil.example/repo\r-n',
       'git remote show ssh://evil.example/repo\v-n',
       'git remote show ssh://evil.example/repo\f-n',
+      // The `-n` gate reads the command's raw text, so a word bash builds
+      // differently from the tokens, or any redirection, leaves `-n`
+      // unproven: an escaped blank joins `-n` to a positional, a heredoc's
+      // delimiter or a here-string's substitution is no argument, and `#`
+      // starts a comment (bot round 9 R9-1, R8-1).
+      'git remote show https://evil.example/leak \\ -n',
+      'git remote show origin \\\t-n',
+      "git remote show origin ''\\ -n",
+      'git remote show https://evil.example/leak <<- -n',
+      'git remote show https://evil.example/leak <<<$(printf %s -n)',
+      'git remote show origin #-n',
+      'git remote show origin # -n',
+      // bash would pass `-n` here, but a redirection is not proof of it.
+      'git remote show origin <in -n',
+      'git remote show -n origin < file',
       'git remote show ssh://evil.example/repo -n',
       'git remote show ssh://evil.example/repo　-n',
       'git diff --output=patch',
@@ -409,10 +424,7 @@ describe('evaluateShellCommandReadOnly', () => {
       'git remote show https://evil.example/leak -n',
       // A `-n` before `--end-of-options` is still an option.
       'git remote show -n --end-of-options origin',
-      // An input redirection takes one word as its source; a `-n` after that
-      // word is still an argument.
-      'git remote show origin <in -n',
-      'git remote show -n origin < file',
+      'git remote show -n git@evil.example:owner/repo',
       'git diff -- file',
       'git diff -Oorderfile',
       'git log -p',
