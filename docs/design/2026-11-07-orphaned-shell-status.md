@@ -2,7 +2,7 @@
 
 [English](2026-11-07-orphaned-shell-status.md) | [简体中文](2026-11-07-orphaned-shell-status.zh-CN.md)
 
-- Status: proposed (draft PR; the persisted value needs maintainer agreement)
+- Status: proposed (the persisted value needs maintainer agreement)
 - Date: 2026-11-07
 - Issue: #15800
 - Scope: `packages/core/src/services/backgroundShellRegistry.ts`,

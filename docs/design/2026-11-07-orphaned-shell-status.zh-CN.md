@@ -2,7 +2,7 @@
 
 [English](2026-11-07-orphaned-shell-status.md) | [简体中文](2026-11-07-orphaned-shell-status.zh-CN.md)
 
-- 状态：提议（草稿 PR；持久化取值需维护者认可）
+- 状态：提议（持久化取值需维护者认可）
 - 日期：2026-11-07
 - Issue：#15800
 - 范围：`packages/core/src/services/backgroundShellRegistry.ts`、
