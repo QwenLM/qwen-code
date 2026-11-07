@@ -9,6 +9,7 @@ import {
   readdirSync,
   rmSync,
   symlinkSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,6 +22,44 @@ import { parse } from 'yaml';
 // Resolve external tools the way the workflows themselves do.
 // macOS readlink has no -f, so only the symlink arms need this capability;
 // the base accept, writable-root and missing-docker arms never resolve a link.
+// usable() rejects a candidate the job uid OWNS, because ownership implies
+// chmod. A same-uid fixture therefore cannot construct the accept arm at all
+// (it can neither create a root-owned file nor write into a root-owned dir),
+// so that arm runs against the real system roots and skips when the host does
+// not keep the whole toolset there. The refusal arms stay fixture-driven.
+const systemRootsAcceptable = (() => {
+  if (process.getuid?.() === 0) return false;
+  try {
+    for (const tool of [
+      'rm',
+      'git',
+      'timeout',
+      'gh',
+      'node',
+      'mkdir',
+      'grep',
+      'readlink',
+      'docker',
+    ]) {
+      let found = false;
+      for (const root of ['/usr/bin', '/bin', '/usr/local/bin']) {
+        const p = join(root, tool);
+        if (!existsSync(p)) continue;
+        const st = statSync(p);
+        if (st.uid !== 0 && st.uid !== process.getuid?.()) continue;
+        if (st.uid === process.getuid?.()) continue;
+        if ((st.mode & 0o222) !== 0) continue;
+        found = true;
+        break;
+      }
+      if (!found) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
 const hasReadlinkF = (() => {
   try {
     execFileSync('bash', ['-c', 'readlink -f / >/dev/null 2>&1'], {
@@ -313,13 +352,21 @@ describe('ci failure patrol workflow', () => {
     // on the shared ECS pool; the key set stays an exact pin so nothing that
     // could authenticate can be added without updating this allowlist.
     expect(Object.keys(classifier.env).sort()).toEqual([
+      'BASH_ENV',
       'DOCKER_CONTEXT',
       'DOCKER_HOST',
       'GH_TOKEN',
       'GITHUB_TOKEN',
+      'LD_AUDIT',
+      'LD_LIBRARY_PATH',
+      'LD_PRELOAD',
+      'NODE_OPTIONS',
       'PATH',
       'QWEN_HOME',
+      'QWEN_SANDBOX',
       'QWEN_SANDBOX_IMAGE',
+      'SANDBOX',
+      'SHELLOPTS',
     ]);
     expect(classifier.env.GH_TOKEN).toBe('');
     expect(classifier.env.GITHUB_TOKEN).toBe('');
@@ -517,7 +564,7 @@ describe('ci failure patrol workflow', () => {
   // non-root uid. The platform is NOT the gate: the base accept, writable-root
   // and missing-docker arms never call readlink -f, so they must keep running on
   // macOS — they are the only pins on the accept verdict and publish()'s writes.
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(!systemRootsAcceptable)(
     'behaviorally proves the guard accepts a non-writable base and publishes it',
     () => {
       const guard = yml.jobs.classify.steps[0];
@@ -684,6 +731,12 @@ describe('ci failure patrol workflow', () => {
     // A blanket symlink refusal rejected node on a correctly provisioned pool
     // host; the target and its directory must be checked, not the link alone.
     expect(guard.run).toContain('if [ -L "${p}" ]; then');
+    // Ownership implies chmod, so a uid-owned 0555 residue binary must be
+    // refused even though -w passes. The behavioural accept arm cannot cover
+    // this on a host without a root-owned toolset, so pin all three arms.
+    expect(guard.run).toContain('[ ! -O "${p}" ]');
+    expect(guard.run).toContain('[ ! -O "${c}" ]');
+    expect(guard.run).toContain('[ ! -O "${t}" ]');
     expect(guard.run).toContain('[ ! -w "${t}" ]');
     expect(guard.run).toContain('[ ! -w "${td}" ]');
   });
@@ -961,6 +1014,10 @@ describe('ci failure patrol workflow', () => {
   it('reuses the pool CLI rather than a hard-coded version the pool does not keep warm', () => {
     const classify = yml.jobs.classify;
     const ensure = classify.steps.find((step) => step.id === 'ensure_qwen');
+    // The pool uid owns $HOME/.npmrc; a residue file there redirects the
+    // install, and its stdout becomes the version pin the classifier uses.
+    expect(ensure.env.npm_config_userconfig).toBe('/dev/null');
+    expect(ensure.env.npm_config_globalconfig).toBe('/dev/null');
     expect(ensure.run).toContain('command -v qwen');
     expect(ensure.run).toContain('version=$(qwen --version)');
     const classifier = classify.steps.find((step) =>
@@ -1031,6 +1088,20 @@ describe('ci failure patrol workflow', () => {
     expect(names.indexOf('Scan stale PR failures')).toBeLessThan(
       names.indexOf('Classify with ci-flaky-patrol skill'),
     );
+    // scan resets the home, then the install and the image pull run for
+    // minutes before the classifier reads memory.md / skills / extensions from
+    // it. The reset must be repeated immediately before its only consumer.
+    const homeReset = classify.steps.find(
+      (step) => step.name === 'Reset agent home immediately before classifying',
+    );
+    expect(homeReset).toBeTruthy();
+    expect(names.indexOf(homeReset.name)).toBe(
+      names.indexOf('Classify with ci-flaky-patrol skill') - 1,
+    );
+    expect(homeReset.if).toBe(classifier.if);
+    expect(homeReset.env.QWEN_HOME).toBe(classifier.env.QWEN_HOME);
+    expect(homeReset.run).toContain('"${RM_BIN:?}" -rf -- "${QWEN_HOME}"');
+    expect(homeReset.run).toContain('"${MKDIR_BIN:?}" -p "${QWEN_HOME}"');
   });
 
   it('gates the token-bearing reset on the guard and a successful checkout', () => {
@@ -1391,8 +1462,10 @@ describe('ci failure patrol workflow', () => {
     // refill it between the step's gh calls.
     const runnerTemp = join(root, 'runner-temp');
     mkdirSync(runnerTemp);
+    let status = 0;
+    let output = '';
     try {
-      execFileSync('bash', ['-c', identity.run], {
+      output = execFileSync('bash', ['-c', identity.run], {
         env: {
           ...process.env,
           // The planted directory wins an ambient PATH lookup.
@@ -1410,12 +1483,129 @@ describe('ci failure patrol workflow', () => {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
       });
+    } catch (e) {
+      status = e.status;
+      output = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+    }
+    try {
+      // The security property: the planted gh never receives the token. The
+      // point-of-use recheck refuses even the "trusted" fixture stub, because
+      // a same-uid fixture cannot produce a binary the job uid does not own —
+      // so the step exits before ANY gh runs. That is a stronger outcome than
+      // the old "trusted stub was invoked" control, and it is the one the
+      // ownership rule actually guarantees.
       expect(existsSync(leaked)).toBe(false);
-      expect(existsSync(invoked)).toBe(true);
-      expect(readFileSync(outFile, 'utf8')).toContain('bot_login=real-bot');
+      expect(status).not.toBe(0);
+      expect(output).toContain('point of use');
       // The step must leave nothing behind in the uid-writable temp dir: no
       // minted config dir means no pre-plant and no post-mint refill target.
       expect(readdirSync(runnerTemp)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('behaviorally refuses a forged guard output before the binary is invoked', () => {
+    // Pin the MODEL, not the next channel: the published path arrives through
+    // $GITHUB_OUTPUT, so a consumer must re-verify it where it is used. A
+    // forged node= pointing at a uid-owned file must fail fast, before exec,
+    // with the PAT still unspent.
+    const scan = yml.jobs.classify.steps.find((step) => step.id === 'scan');
+    const root = mkdtempSync(join(tmpdir(), 'patrol-forged-'));
+    const evil = join(root, 'node');
+    const ran = join(root, 'EVIL-RAN');
+    writeFileSync(evil, `#!/bin/sh\ntouch '${ran}'\n`);
+    chmodSync(evil, 0o755);
+    try {
+      let status = 0;
+      let output = '';
+      try {
+        output = execFileSync('bash', ['-c', scan.run], {
+          env: {
+            ...process.env,
+            NODE_BIN: evil,
+            GH_BIN: evil,
+            GITHUB_TOKEN: 'SENTINEL-PAT-VALUE',
+            GITHUB_OUTPUT: join(root, 'out'),
+            RUNNER_TEMP: root,
+            WORKDIR: root,
+          },
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (e) {
+        status = e.status;
+        output = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+      }
+      expect(status).not.toBe(0);
+      expect(output).toContain('point of use');
+      // Refused BEFORE the exec: the forged binary never ran.
+      expect(existsSync(ran)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('behaviorally proves a re-planted repository config cannot run during checkout', () => {
+    // The reset deletes .git and actions/checkout re-creates it, so the
+    // REPOSITORY scope is reachable even with both file scopes neutralised.
+    // GIT_CONFIG_* env entries outrank it. Positive control first: with only
+    // the file scopes pinned, the planted hook DOES fire — otherwise the
+    // second arm would pass vacuously.
+    const checkout = yml.jobs.classify.steps.find(
+      (step) => step.id === 'checkout',
+    );
+    const root = mkdtempSync(join(tmpdir(), 'patrol-repocfg-'));
+    const ws = join(root, 'workspace');
+    const hooks = join(root, 'hooks');
+    mkdirSync(ws);
+    mkdirSync(hooks);
+    const fired = join(root, 'HOOK-FIRED');
+    writeFileSync(
+      join(hooks, 'post-checkout'),
+      `#!/bin/sh\ntouch '${fired}'\n`,
+    );
+    chmodSync(join(hooks, 'post-checkout'), 0o755);
+    const git = (args, env) =>
+      execFileSync('git', args, {
+        cwd: ws,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, ...env },
+      });
+    try {
+      git(['init', '-q', '.']);
+      git(['config', 'user.email', 't@e']);
+      git(['config', 'user.name', 't']);
+      writeFileSync(join(ws, 'a'), 'a\n');
+      git(['add', 'a']);
+      git(['commit', '-qm', 'init']);
+      // Plant the repository-scope config the reset cannot reach.
+      git(['config', 'core.hooksPath', hooks]);
+
+      const fileScopesOnly = {
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_CONFIG_COUNT: '0',
+        GIT_CONFIG_PARAMETERS: '',
+      };
+      git(['checkout', '--force', '-q', 'HEAD'], fileScopesOnly);
+      expect(existsSync(fired)).toBe(true); // positive control
+
+      rmSync(fired);
+      // Now apply exactly what the checkout step pins.
+      const pinned = {
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_CONFIG_PARAMETERS: '',
+        GIT_CONFIG_COUNT: checkout.env.GIT_CONFIG_COUNT,
+        GIT_CONFIG_KEY_0: checkout.env.GIT_CONFIG_KEY_0,
+        GIT_CONFIG_VALUE_0: checkout.env.GIT_CONFIG_VALUE_0,
+        GIT_CONFIG_KEY_1: checkout.env.GIT_CONFIG_KEY_1,
+        GIT_CONFIG_VALUE_1: checkout.env.GIT_CONFIG_VALUE_1,
+      };
+      git(['checkout', '--force', '-q', 'HEAD'], pinned);
+      expect(existsSync(fired)).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1460,8 +1650,19 @@ describe('ci failure patrol workflow', () => {
       // git layers env-provided config ABOVE both file scopes, so neutralising
       // the files alone leaves core.hooksPath reachable through $GITHUB_ENV.
       // Step env, not $GITHUB_ENV: the runner takes the last duplicated key.
-      expect(checkout.env.GIT_CONFIG_COUNT).toBe('0');
+      // Env config outranks the repository scope, which the reset cannot
+      // reach: it deletes .git and actions/checkout re-creates it, so a
+      // re-planted .git/config would otherwise run fsmonitor / post-checkout.
+      expect(checkout.env.GIT_CONFIG_COUNT).toBe('2');
+      expect(checkout.env.GIT_CONFIG_KEY_0).toBe('core.hooksPath');
+      expect(checkout.env.GIT_CONFIG_VALUE_0).toBe('/dev/null');
+      expect(checkout.env.GIT_CONFIG_KEY_1).toBe('core.fsmonitor');
+      expect(checkout.env.GIT_CONFIG_VALUE_1).toBe('false');
       expect(checkout.env.GIT_CONFIG_PARAMETERS).toBe('');
+      expect(checkout.env.GIT_EXEC_PATH).toBe('');
+      expect(checkout.env.GIT_TEMPLATE_DIR).toBe('/dev/null');
+      expect(checkout.env.GIT_DIR).toBe('${{ github.workspace }}/.git');
+      expect(checkout.env.GIT_WORK_TREE).toBe('${{ github.workspace }}');
       // checkout spawns git by name, so it gets only verified directories.
       expect(checkout.env.PATH).toBe('${{ steps.guard.outputs.system_path }}');
     }

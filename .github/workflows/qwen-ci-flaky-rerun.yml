@@ -28,14 +28,14 @@ jobs:
     # ticks were cancelled with zero jobs — they never received one at all.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # Budget: capped steps sum to guard 2 + capture 1 + docker recheck 2 +
-    # identity 1 + ensure 5 + resolve 12 + classifier 10 = 33, and scan (~1m
-    # measured), checkout (~22s), setup-node and the upload still have to fit.
+    # identity 1 + ensure 5 + resolve 12 + home reset 1 + classifier 10 = 34, and
+    # scan (~1m measured), checkout (~22s), setup-node and the upload still fit.
     # Earlier caps were wrong twice: 20 omitted the guard's own 2 minutes, 25
     # omitted the classifier raise. The resolver can attempt TWO sequential
     # 10-minute pulls, so its step stays capped below the job: a cold host costs
     # one round, not the job. Cron fires every 10 minutes, so a worst-case cold
     # round costs ticks — the deliberate trade for not killing a round mid-pull.
-    timeout-minutes: 36
+    timeout-minutes: 37
     permissions:
       actions: 'read'
       contents: 'read'
@@ -88,9 +88,22 @@ jobs:
             esac
           fi
 
+          # THREAT MODEL — residue, not a live same-uid process. This job shares
+          # a persistent runner with untrusted jobs, so it defends against what
+          # an earlier job LEFT BEHIND: planted binaries, config files, env
+          # entries in $GITHUB_ENV, and trees it did not clean up. It does NOT
+          # claim to hold against a process running as the same uid during the
+          # job: such a process can append to $GITHUB_OUTPUT (the runner takes
+          # the last value for a key), ptrace this one, or swap a file between
+          # the check and the exec. Closing that needs an actual boundary — a
+          # per-job container, a dedicated uid, or a runner no untrusted job
+          # shares — and is out of scope here. The pins below are stopgaps for
+          # the residue channels, not a proof of isolation.
+          #
           # A candidate is trusted only when it is an executable the job uid can
           # write neither directly nor by replacing it through its containing
-          # directory. Every test here is a bash builtin and ${c%/*} replaces
+          # directory, and does not OWN (ownership implies chmod). Every test
+          # here is a bash builtin and ${c%/*} replaces
           # dirname. readlink is the one external command the predicate needs,
           # so it is established by builtins FIRST and invoked absolutely below:
           # resolving it by name would hand the trust anchor to the same
@@ -100,7 +113,7 @@ jobs:
           readlink=''
           for root in ${PATROL_BIN_ROOTS:?}; do
             c="${root}/readlink"
-            if [ -e "${c}" ] && [ ! -L "${c}" ] && [ -x "${c}" ] && [ ! -w "${c}" ] && [ ! -w "${c%/*}" ]; then
+            if [ -e "${c}" ] && [ ! -L "${c}" ] && [ -x "${c}" ] && [ ! -w "${c}" ] && [ ! -O "${c}" ] && [ ! -w "${c%/*}" ]; then
               readlink="${c}"
               break
             fi
@@ -140,12 +153,12 @@ jobs:
           # it would reject every round on a correctly provisioned host.
           usable() {
             local p="$1" d t td
-            [ -e "${p}" ] && [ -x "${p}" ] && [ ! -w "${p}" ] || return 1
+            [ -e "${p}" ] && [ -x "${p}" ] && [ ! -w "${p}" ] && [ ! -O "${p}" ] || return 1
             d="${p%/*}"
             [ -n "${d}" ] && [ ! -w "${d}" ] || return 1
             if [ -L "${p}" ]; then
               t="$("${readlink:?}" -f "${p}" 2>/dev/null)" || return 1
-              [ -n "${t}" ] && [ -f "${t}" ] && [ ! -w "${t}" ] || return 1
+              [ -n "${t}" ] && [ -f "${t}" ] && [ ! -w "${t}" ] && [ ! -O "${t}" ] || return 1
               td="${t%/*}"
               [ -n "${td}" ] && [ ! -w "${td}" ] || return 1
             fi
@@ -267,8 +280,24 @@ jobs:
           # neutralising the files alone leaves core.hooksPath reachable through
           # $GITHUB_ENV. Same channel qwen-autofix closes; step env, because the
           # runner takes the last value for a duplicated $GITHUB_ENV key.
-          GIT_CONFIG_COUNT: '0'
+          # GIT_CONFIG_* env entries outrank the REPOSITORY scope too, which
+          # matters because the reset deletes .git and actions/checkout
+          # re-creates it — a re-planted .git/config would otherwise run
+          # core.fsmonitor / post-checkout inside this very checkout. Probed:
+          # with only the file scopes neutralised the hook fires; with these
+          # two entries it does not.
+          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_KEY_0: 'core.hooksPath'
+          GIT_CONFIG_VALUE_0: '/dev/null'
+          GIT_CONFIG_KEY_1: 'core.fsmonitor'
+          GIT_CONFIG_VALUE_1: 'false'
           GIT_CONFIG_PARAMETERS: ''
+          # Transport helpers and template hooks come from these, not from
+          # config files, so pin them as well.
+          GIT_EXEC_PATH: ''
+          GIT_TEMPLATE_DIR: '/dev/null'
+          GIT_DIR: '${{ github.workspace }}/.git'
+          GIT_WORK_TREE: '${{ github.workspace }}'
         with:
           ref: '${{ github.sha }}'
           persist-credentials: false
@@ -344,6 +373,15 @@ jobs:
           # The PAT rides in GITHUB_TOKEN and is handed to gh inline, so the
           # preamble below can unset GH_TOKEN without losing the credential.
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          # These take effect before the step body's first line, so a residue
+          # entry in $GITHUB_ENV would already have run by the time any check
+          # inside the body could see it.
+          BASH_ENV: ''
+          SHELLOPTS: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
           GH_BIN: '${{ steps.guard.outputs.gh }}'
         run: |-
           # gh has its own reroute channels, independent of PATH: on this pool
@@ -353,6 +391,17 @@ jobs:
           # provenance anchor for every marker comment. Pin the host, drop
           # planted tokens, and mint a fresh empty config dir. Same preamble as
           # qwen-autofix (af-112 / af-148).
+          # The published path came through $GITHUB_OUTPUT, which a live
+          # same-uid process could append to. Re-check it here, right before the
+          # exec, so a forged value fails fast instead of running with the PAT.
+          for v in NODE_BIN GH_BIN RM_BIN MKDIR_BIN GREP_BIN; do
+            eval "p=\${$v:-}"
+            [ -n "${p}" ] || continue
+            if [ ! -x "${p}" ] || [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; then
+              echo "::error::${v} is not a verified binary at the point of use; refusing to run."
+              exit 1
+            fi
+          done
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
           # Not a minted directory. `mktemp -d` under $RUNNER_TEMP is 0700 but
@@ -396,6 +445,17 @@ jobs:
           # QWEN_HOME; a test binds the two so they cannot drift apart.
           QWEN_HOME: '${{ runner.temp }}/qwen-patrol-home'
         run: |-
+          # The published path came through $GITHUB_OUTPUT, which a live
+          # same-uid process could append to. Re-check it here, right before the
+          # exec, so a forged value fails fast instead of running with the PAT.
+          for v in NODE_BIN GH_BIN RM_BIN MKDIR_BIN GREP_BIN; do
+            eval "p=\${$v:-}"
+            [ -n "${p}" ] || continue
+            if [ ! -x "${p}" ] || [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; then
+              echo "::error::${v} is not a verified binary at the point of use; refusing to run."
+              exit 1
+            fi
+          done
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
           # See the identity step: a minted dir under the uid-writable
@@ -432,6 +492,11 @@ jobs:
         timeout-minutes: 5
         env:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
+          # The pool uid owns $HOME/.npmrc; without this, a residue file points
+          # the install at an attacker registry and its stdout becomes the
+          # version pin the classifier then installs.
+          npm_config_userconfig: '/dev/null'
+          npm_config_globalconfig: '/dev/null'
         run: |-
           set -euo pipefail
           export PATH="${TRUSTED_PATH:?}"
@@ -482,6 +547,28 @@ jobs:
           echo "::notice::Sandbox image resolve took $((SECONDS - start))s (exit ${status})."
           exit "${status}"
 
+      # The agent home is reset by scan, then sits unattended through the CLI
+      # install and the image pull — minutes in which residue can be planted
+      # before the classifier loads memory.md, skills/ and extensions/ from it.
+      # Re-create it here, immediately before its only consumer.
+      - name: 'Reset agent home immediately before classifying'
+        if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        timeout-minutes: 1
+        env:
+          RM_BIN: '${{ steps.guard.outputs.rm }}'
+          MKDIR_BIN: '${{ steps.guard.outputs.mkdir }}'
+          QWEN_HOME: '${{ runner.temp }}/qwen-patrol-home'
+        run: |-
+          for v in RM_BIN MKDIR_BIN; do
+            eval "p=\${$v:-}"
+            if [ ! -x "${p}" ] || [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; then
+              echo "::error::${v} is not a verified binary at the point of use; refusing to run."
+              exit 1
+            fi
+          done
+          "${RM_BIN:?}" -rf -- "${QWEN_HOME}"
+          "${MKDIR_BIN:?}" -p "${QWEN_HOME}"
+
       - name: 'Classify with ci-flaky-patrol skill'
         if: "${{ steps.scan.outputs.target_found == 'true' }}"
         # The model can outlast the WHOLE job budget when it is under load:
@@ -498,6 +585,17 @@ jobs:
         env:
           GH_TOKEN: ''
           GITHUB_TOKEN: ''
+          # sandboxConfig.ts returns '' when SANDBOX is set and lets
+          # QWEN_SANDBOX override the settings, so a residue value here would
+          # switch the sandbox OFF and run the agent's tools on the pool host.
+          SANDBOX: ''
+          QWEN_SANDBOX: ''
+          BASH_ENV: ''
+          SHELLOPTS: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
           # The CLI resolves its sandbox command as the bare name `docker`
           # through PATH, so the guard's absolute-path probe only vouches for
           # this step if the step searches the same PATH the guard checked.
@@ -640,9 +738,22 @@ jobs:
             esac
           fi
 
+          # THREAT MODEL — residue, not a live same-uid process. This job shares
+          # a persistent runner with untrusted jobs, so it defends against what
+          # an earlier job LEFT BEHIND: planted binaries, config files, env
+          # entries in $GITHUB_ENV, and trees it did not clean up. It does NOT
+          # claim to hold against a process running as the same uid during the
+          # job: such a process can append to $GITHUB_OUTPUT (the runner takes
+          # the last value for a key), ptrace this one, or swap a file between
+          # the check and the exec. Closing that needs an actual boundary — a
+          # per-job container, a dedicated uid, or a runner no untrusted job
+          # shares — and is out of scope here. The pins below are stopgaps for
+          # the residue channels, not a proof of isolation.
+          #
           # A candidate is trusted only when it is an executable the job uid can
           # write neither directly nor by replacing it through its containing
-          # directory. Every test here is a bash builtin and ${c%/*} replaces
+          # directory, and does not OWN (ownership implies chmod). Every test
+          # here is a bash builtin and ${c%/*} replaces
           # dirname. readlink is the one external command the predicate needs,
           # so it is established by builtins FIRST and invoked absolutely below:
           # resolving it by name would hand the trust anchor to the same
@@ -652,7 +763,7 @@ jobs:
           readlink=''
           for root in ${PATROL_BIN_ROOTS:?}; do
             c="${root}/readlink"
-            if [ -e "${c}" ] && [ ! -L "${c}" ] && [ -x "${c}" ] && [ ! -w "${c}" ] && [ ! -w "${c%/*}" ]; then
+            if [ -e "${c}" ] && [ ! -L "${c}" ] && [ -x "${c}" ] && [ ! -w "${c}" ] && [ ! -O "${c}" ] && [ ! -w "${c%/*}" ]; then
               readlink="${c}"
               break
             fi
@@ -692,12 +803,12 @@ jobs:
           # it would reject every round on a correctly provisioned host.
           usable() {
             local p="$1" d t td
-            [ -e "${p}" ] && [ -x "${p}" ] && [ ! -w "${p}" ] || return 1
+            [ -e "${p}" ] && [ -x "${p}" ] && [ ! -w "${p}" ] && [ ! -O "${p}" ] || return 1
             d="${p%/*}"
             [ -n "${d}" ] && [ ! -w "${d}" ] || return 1
             if [ -L "${p}" ]; then
               t="$("${readlink:?}" -f "${p}" 2>/dev/null)" || return 1
-              [ -n "${t}" ] && [ -f "${t}" ] && [ ! -w "${t}" ] || return 1
+              [ -n "${t}" ] && [ -f "${t}" ] && [ ! -w "${t}" ] && [ ! -O "${t}" ] || return 1
               td="${t%/*}"
               [ -n "${td}" ] && [ ! -w "${td}" ] || return 1
             fi
@@ -790,8 +901,24 @@ jobs:
           # neutralising the files alone leaves core.hooksPath reachable through
           # $GITHUB_ENV. Same channel qwen-autofix closes; step env, because the
           # runner takes the last value for a duplicated $GITHUB_ENV key.
-          GIT_CONFIG_COUNT: '0'
+          # GIT_CONFIG_* env entries outrank the REPOSITORY scope too, which
+          # matters because the reset deletes .git and actions/checkout
+          # re-creates it — a re-planted .git/config would otherwise run
+          # core.fsmonitor / post-checkout inside this very checkout. Probed:
+          # with only the file scopes neutralised the hook fires; with these
+          # two entries it does not.
+          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_KEY_0: 'core.hooksPath'
+          GIT_CONFIG_VALUE_0: '/dev/null'
+          GIT_CONFIG_KEY_1: 'core.fsmonitor'
+          GIT_CONFIG_VALUE_1: 'false'
           GIT_CONFIG_PARAMETERS: ''
+          # Transport helpers and template hooks come from these, not from
+          # config files, so pin them as well.
+          GIT_EXEC_PATH: ''
+          GIT_TEMPLATE_DIR: '/dev/null'
+          GIT_DIR: '${{ github.workspace }}/.git'
+          GIT_WORK_TREE: '${{ github.workspace }}'
         with:
           ref: '${{ github.sha }}'
           persist-credentials: false
@@ -812,12 +939,32 @@ jobs:
         if: "${{ needs.classify.outputs.target_found == 'true' }}"
         env:
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          # These take effect before the step body's first line, so a residue
+          # entry in $GITHUB_ENV would already have run by the time any check
+          # inside the body could see it.
+          BASH_ENV: ''
+          SHELLOPTS: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
           NODE_BIN: '${{ steps.guard.outputs.node }}'
           GH_BIN: '${{ steps.guard.outputs.gh }}'
           PATROL_GH: '${{ steps.guard.outputs.gh }}'
         run: |-
           # Same gh reroute preamble as identity: the driver spawns gh itself,
           # so it inherits this environment and the same planted-config risk.
+          # The published path came through $GITHUB_OUTPUT, which a live
+          # same-uid process could append to. Re-check it here, right before the
+          # exec, so a forged value fails fast instead of running with the PAT.
+          for v in NODE_BIN GH_BIN RM_BIN MKDIR_BIN GREP_BIN; do
+            eval "p=\${$v:-}"
+            [ -n "${p}" ] || continue
+            if [ ! -x "${p}" ] || [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; then
+              echo "::error::${v} is not a verified binary at the point of use; refusing to run."
+              exit 1
+            fi
+          done
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
           # See the identity step: a minted dir under the uid-writable
@@ -841,12 +988,32 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          # These take effect before the step body's first line, so a residue
+          # entry in $GITHUB_ENV would already have run by the time any check
+          # inside the body could see it.
+          BASH_ENV: ''
+          SHELLOPTS: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
           NODE_BIN: '${{ steps.guard.outputs.node }}'
           GH_BIN: '${{ steps.guard.outputs.gh }}'
           PATROL_GH: '${{ steps.guard.outputs.gh }}'
         run: |-
           # Same gh reroute preamble as identity: the driver spawns gh itself,
           # so it inherits this environment and the same planted-config risk.
+          # The published path came through $GITHUB_OUTPUT, which a live
+          # same-uid process could append to. Re-check it here, right before the
+          # exec, so a forged value fails fast instead of running with the PAT.
+          for v in NODE_BIN GH_BIN RM_BIN MKDIR_BIN GREP_BIN; do
+            eval "p=\${$v:-}"
+            [ -n "${p}" ] || continue
+            if [ ! -x "${p}" ] || [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; then
+              echo "::error::${v} is not a verified binary at the point of use; refusing to run."
+              exit 1
+            fi
+          done
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
           # See the identity step: a minted dir under the uid-writable
