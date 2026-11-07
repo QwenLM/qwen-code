@@ -84,6 +84,7 @@ import {
 } from '../extensions/inputHighlight';
 import { isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
+import { QUOTE_FENCE_OPEN } from '../utils/quoteReference';
 import {
   createInputAnnotationsFromComposerTags,
   getComposerTagDisplay,
@@ -980,6 +981,10 @@ export function getInlineComposerTags(view: EditorView): WebShellComposerTag[] {
     if (tag) tags.push(toPublicComposerTag(tag));
   });
   return tags;
+}
+
+function isQuoteComposerTag(tag: WebShellComposerTag): boolean {
+  return tag.kind === 'quote';
 }
 
 function hasInlineComposerTags(view: EditorView): boolean {
@@ -1976,14 +1981,6 @@ export function useComposerCore(
     resolveComposerTagIcon,
   ]);
 
-  const toggleShellMode = useCallback(() => {
-    if (!shellModeEnabledRef.current) return;
-    if (followupStateRef.current?.isVisible) {
-      onDismissFollowupRef.current?.();
-    }
-    setShellMode((value) => !value);
-    viewRef.current?.focus();
-  }, [setShellMode]);
   const [searchMode, setSearchMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMatches, setSearchMatches] = useState<string[]>([]);
@@ -2572,6 +2569,26 @@ export function useComposerCore(
     setComposerTagsState(next);
     publishDraftContentRef.current();
   }, []);
+  // A quote chip shows its fragment but carries the `<quoted-message>` fence,
+  // which a shell reads as redirections and comments. A draft holding one
+  // must not become a shell command line, so shell mode waits for its removal.
+  const draftHasQuote = useCallback(() => {
+    if (composerTagsRef.current.some(isQuoteComposerTag)) return true;
+    const view = viewRef.current;
+    return !!view && getInlineComposerTags(view).some(isQuoteComposerTag);
+  }, []);
+  const toggleShellMode = useCallback(() => {
+    if (!shellModeEnabledRef.current) return;
+    if (!shellModeRef.current && draftHasQuote()) {
+      emitImageIngestionNotice('warning', t('composer.quote.blocksShellMode'));
+      return;
+    }
+    if (followupStateRef.current?.isVisible) {
+      onDismissFollowupRef.current?.();
+    }
+    setShellMode((value) => !value);
+    viewRef.current?.focus();
+  }, [draftHasQuote, emitImageIngestionNotice, setShellMode, t]);
   function referenceDraft(view: EditorView | null) {
     if (!persistFileReferencesRef.current) return undefined;
     return {
@@ -3349,6 +3366,19 @@ export function useComposerCore(
     const prompt = buildComposerPrompt(text, tags);
     const isShellMode = shellModeRef.current;
     const promptText = isShellMode && prompt ? `!${prompt}` : prompt;
+    // A `!` prompt runs as a shell command. Whatever put a quote into it (a
+    // host's addTags, a typed leading `!`, a recalled prompt that holds the
+    // fence as plain text), the fence must not reach the shell; the draft
+    // stays as is for the user to edit.
+    if (
+      promptText.startsWith('!') &&
+      (promptText.includes(QUOTE_FENCE_OPEN) ||
+        tags.some(isQuoteComposerTag) ||
+        normalizedInlineTags.some(({ tag }) => isQuoteComposerTag(tag)))
+    ) {
+      emitImageIngestionNotice('warning', t('composer.quote.blocksShellMode'));
+      return true;
+    }
     // Inline chip placements are offsets into the pre-substitution editor
     // document; they stay valid for `text` only while substitution preserves
     // their length, and the annotation generator validates each range (with

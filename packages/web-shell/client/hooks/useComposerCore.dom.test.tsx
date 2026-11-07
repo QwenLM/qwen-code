@@ -3214,6 +3214,136 @@ describe('useComposerCore tags', () => {
       expect(inserted).toBe(false);
       expect(view.state.doc.toString()).toBe('');
     });
+
+    // A shell reads the fence as redirections: `#` comments out the closing
+    // tag and truncates a file named after the first word; `; … #` also runs
+    // the message text as a command.
+    const shellHostileFragments = [
+      'see issue #123 for details',
+      'notes; echo INJECTED-FROM-MESSAGE #',
+    ];
+    const quoteOf = (fragment: string) => ({
+      id: `quote:${fragment}`,
+      kind: 'quote',
+      value: fragment,
+      serialized: `<quoted-message>${fragment}</quoted-message>`,
+    });
+    const blocksShellMode = 'Remove the quote from the draft to use shell mode';
+
+    it.each(shellHostileFragments)(
+      'keeps a draft holding a quote out of shell mode: %s',
+      async (fragment) => {
+        const onSubmit = vi.fn();
+        const onImageIngestionNotice = vi.fn();
+        await mount({ onSubmit, onImageIngestionNotice });
+        act(() => {
+          latest!.handle.insertQuote!(quoteOf(fragment));
+        });
+        const view = latest!.viewRef.current!;
+        const draft = view.state.doc.toString();
+
+        act(() => latest!.toggleShellMode());
+
+        expect(latest!.shellMode).toBe(false);
+        expect(view.state.doc.toString()).toBe(draft);
+        expect(onImageIngestionNotice).toHaveBeenCalledWith(
+          'warning',
+          blocksShellMode,
+        );
+        act(() => {
+          view.dispatch(view.state.replaceSelection('echo typed-command'));
+        });
+        act(() => latest!.submitText());
+        expect(onSubmit).toHaveBeenCalledTimes(1);
+        expect(onSubmit.mock.calls[0]![0]).not.toMatch(/^!/);
+      },
+    );
+
+    it.each(shellHostileFragments)(
+      'refuses to submit a quote chip from a shell-mode draft: %s',
+      async (fragment) => {
+        const onSubmit = vi.fn();
+        const onImageIngestionNotice = vi.fn();
+        await mount({ onSubmit, onImageIngestionNotice });
+        act(() => latest!.toggleShellMode());
+        expect(latest!.shellMode).toBe(true);
+        // A host can still place a quote chip through addTags.
+        act(() => {
+          latest!.addTags([quoteOf(fragment)], { placement: 'inline' });
+        });
+        const view = latest!.viewRef.current!;
+        act(() => {
+          view.dispatch(view.state.replaceSelection('echo typed-command'));
+        });
+        const draft = view.state.doc.toString();
+
+        act(() => latest!.submitText());
+
+        expect(onSubmit).not.toHaveBeenCalled();
+        expect(view.state.doc.toString()).toBe(draft);
+        expect(latest!.shellMode).toBe(true);
+        expect(onImageIngestionNotice).toHaveBeenCalledWith(
+          'warning',
+          blocksShellMode,
+        );
+      },
+    );
+
+    it.each(shellHostileFragments)(
+      'refuses a typed "!" command line that carries a quote chip: %s',
+      async (fragment) => {
+        const onSubmit = vi.fn();
+        const onImageIngestionNotice = vi.fn();
+        await mount({ onSubmit, onImageIngestionNotice });
+        act(() => {
+          latest!.handle.insertQuote!(quoteOf(fragment));
+        });
+        const view = latest!.viewRef.current!;
+        act(() => {
+          view.dispatch({ changes: { from: 0, insert: '!' } });
+          view.dispatch(view.state.replaceSelection('echo typed-command'));
+        });
+        const draft = view.state.doc.toString();
+        expect(latest!.shellMode).toBe(false);
+
+        act(() => latest!.submitText());
+
+        expect(onSubmit).not.toHaveBeenCalled();
+        expect(view.state.doc.toString()).toBe(draft);
+        expect(onImageIngestionNotice).toHaveBeenCalledWith(
+          'warning',
+          blocksShellMode,
+        );
+      },
+    );
+
+    it.each(shellHostileFragments)(
+      'refuses a shell command that holds the fence as plain text: %s',
+      async (fragment) => {
+        const onSubmit = vi.fn();
+        const onImageIngestionNotice = vi.fn();
+        await mount({ onSubmit, onImageIngestionNotice });
+        act(() => latest!.toggleShellMode());
+        expect(latest!.shellMode).toBe(true);
+        // Prompt-history recall and draft restore bring the fence back as
+        // text, without the chip.
+        act(() => {
+          latest!.insertText(
+            `${quoteOf(fragment).serialized}\necho typed-command`,
+          );
+        });
+        const draft = latest!.getText();
+
+        act(() => latest!.submitText());
+
+        expect(onSubmit).not.toHaveBeenCalled();
+        expect(latest!.getText()).toBe(draft);
+        expect(onImageIngestionNotice).toHaveBeenCalledWith(
+          'warning',
+          blocksShellMode,
+        );
+      },
+    );
   });
 
   it('updates inline tag state when a document change removes the last tag', async () => {

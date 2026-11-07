@@ -37,6 +37,9 @@ export function isQuotableText(raw: string): boolean {
   return flattenQuoteText(raw).length > 0;
 }
 
+/** Opening token of the quote fence; a shell must never receive it. */
+export const QUOTE_FENCE_OPEN = '<quoted-message>';
+
 /**
  * Builds the composer insert text for a quoted fragment, e.g.
  * `<quoted-message>quoted fragment text</quoted-message>`. The semantic
@@ -44,7 +47,7 @@ export function isQuotableText(raw: string): boolean {
  * markdown blockquote styling.
  */
 export function quoteReferenceInsertText(flattened: string): string {
-  return `<quoted-message>${flattened}</quoted-message>`;
+  return `${QUOTE_FENCE_OPEN}${flattened}</quoted-message>`;
 }
 
 function hashQuoteText(text: string): string {

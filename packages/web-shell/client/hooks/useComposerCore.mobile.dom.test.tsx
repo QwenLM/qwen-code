@@ -434,6 +434,35 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(onSubmit.mock.calls[0][0]).toBe('!ls');
   });
 
+  it('keeps a quote top tag out of a shell command line', async () => {
+    mockTouchDevice();
+    const { onSubmit } = await mount();
+    const quote = {
+      id: 'quote:touch',
+      kind: 'quote',
+      value: 'see issue #123 for details',
+      serialized: '<quoted-message>see issue #123 for details</quoted-message>',
+    };
+    act(() => {
+      latest!.handle.insertQuote!(quote);
+    });
+    expect(latest!.composerTags).toEqual([quote]);
+
+    act(() => latest!.toggleShellMode());
+    expect(latest!.shellMode).toBe(false);
+
+    // A tag that reaches a shell-mode draft another way is not sent either.
+    act(() => latest!.removeTopTag(quote.id));
+    act(() => latest!.toggleShellMode());
+    expect(latest!.shellMode).toBe(true);
+    act(() => latest!.addTags([quote]));
+    typeText('echo typed-command');
+    act(() => latest!.submitText());
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.composerTags).toEqual([quote]);
+    expect(latest!.mobileComposer!.value).toBe('echo typed-command');
+  });
+
   it('includes top tags in the submission and clears them after commit', async () => {
     mockTouchDevice();
     const { onSubmit } = await mount();
