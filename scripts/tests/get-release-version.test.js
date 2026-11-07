@@ -842,6 +842,37 @@ describe('getVersion', () => {
       );
     });
 
+    it('should refuse a stale ref when the preview base is ahead and no bump happens', () => {
+      // release/v0.26 at 0.26.8 with `latest` also 0.26.8: the preview tag
+      // already carries 0.27.0, so no bump is computed and only a direct
+      // base-vs-ref comparison can refuse publishing 0.26 content as 0.27.0.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.26.8' }),
+      );
+      const mockWithAheadPreviewAtLatest = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.27.0-preview.0';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.8';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.26.8', '0.27.0-preview.0']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithAheadPreviewAtLatest);
+
+      expect(() => getVersion({ type: 'stable' })).toThrow(
+        'Derived base 0.27.0 is ahead of the checked-out package.json version 0.26.8',
+      );
+    });
+
     it('should refuse a stable release when the ref is behind latest on the same line', () => {
       // release/0.26.5 predates the 0.26.8 stable. Bumping it to 0.26.9
       // would publish older content over a newer stable.
