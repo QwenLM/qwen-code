@@ -285,6 +285,7 @@ function hostContinuationOptions(
     ...(options?.toolCallPreparations && { toolCallPreparations: true }),
     ...(options?.interactionSpanByHost && { interactionSpanByHost: true }),
     ...(options?.toolLoopGuardsByHost && { toolLoopGuardsByHost: true }),
+    ...(options?.skipMemoryExtraction && { skipMemoryExtraction: true }),
     ...(options?.stopPolicies && { stopPolicies: options.stopPolicies }),
     // A Goal turn's continuation runs under the same permit.
     ...(options?.goalPermit && {
@@ -345,6 +346,12 @@ export interface SendMessageOptions {
   submittedAsUser?: true;
   /** A UserQuery running beside an active turn, without replacing its state. */
   isConcurrentSideQuery?: boolean;
+  /**
+   * The turn answers a message the host relays, as a channel's turn does, so
+   * its stop schedules no memory extraction or Dream. The host sets it on each
+   * round it sends; the client carries it to the continuations it starts.
+   */
+  skipMemoryExtraction?: boolean;
   /**
    * The host already recorded this UserQuery's user message, started its todo
    * work chain and took its file-history snapshot, as ACP does when it admits
@@ -3312,8 +3319,12 @@ export class LlmClient {
   /**
    * Schedules the memory work due when a response ends without tool calls.
    * A host calls this at turn completion if the client did not schedule it.
+   * `skipMemoryExtraction` is {@link SendMessageOptions.skipMemoryExtraction}.
    */
-  runManagedAutoMemoryBackgroundTasks(messageType: SendMessageType): void {
+  runManagedAutoMemoryBackgroundTasks(
+    messageType: SendMessageType,
+    { skipMemoryExtraction = false }: { skipMemoryExtraction?: boolean } = {},
+  ): void {
     // During shutdown, skip all background memory tasks so the process
     // can exit cleanly without spawning new work.
     if (this.shutdownRequested) {
@@ -3424,6 +3435,12 @@ export class LlmClient {
     // person's conversation: extracting from it would add a model call to
     // every agent turn and feed agent chatter into the person's memory.
     if (this.config.isSessionAgentSession?.() === true) {
+      return;
+    }
+    // A relayed message is often not the person's own: extracting at its stop
+    // would add model calls to every relayed event, learning from turns the
+    // person did not take.
+    if (skipMemoryExtraction) {
       return;
     }
 
@@ -6240,7 +6257,9 @@ export class LlmClient {
 
         if (this.config.getSkipNextSpeakerCheck()) {
           if (!isGoalRuntimeTurn) {
-            this.runManagedAutoMemoryBackgroundTasks(managedMemoryType);
+            this.runManagedAutoMemoryBackgroundTasks(managedMemoryType, {
+              skipMemoryExtraction: options?.skipMemoryExtraction === true,
+            });
           }
           if (arenaAgentClient) {
             await arenaAgentClient.reportCompleted();
@@ -6323,7 +6342,9 @@ export class LlmClient {
         }
 
         if (!isGoalRuntimeTurn) {
-          this.runManagedAutoMemoryBackgroundTasks(managedMemoryType);
+          this.runManagedAutoMemoryBackgroundTasks(managedMemoryType, {
+            skipMemoryExtraction: options?.skipMemoryExtraction === true,
+          });
         }
 
         if (arenaAgentClient) {

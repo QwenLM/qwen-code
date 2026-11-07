@@ -731,6 +731,13 @@ export async function parseChannelConfig(
     'purgeLegacySessions',
     rawConfig['purgeLegacySessions'],
   );
+  // Validated like multiSession so a stringified "true" cannot silently leave
+  // bot-message forwarding off.
+  const forwardBotMessages = optionalBooleanField(
+    name,
+    'forwardBotMessages',
+    rawConfig['forwardBotMessages'],
+  );
   const configuredSessionScope = effectiveSessionScope(
     rawConfig,
     multiSession,
@@ -767,6 +774,7 @@ export async function parseChannelConfig(
     sessionScope: configuredSessionScope,
     multiSession,
     purgeLegacySessions,
+    forwardBotMessages,
     sessionRotation,
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
