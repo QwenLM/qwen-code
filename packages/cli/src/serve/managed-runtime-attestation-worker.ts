@@ -45,7 +45,11 @@ import {
 } from './managed-extension-runtime.js';
 import { MANAGED_EXTENSION_COMMAND_ROUTE } from './managed-extension-command-runtime.js';
 import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
-import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import {
+  isWorkspaceToolCapability,
+  MEASURED_WORKSPACE_CAPABILITY_DIGEST,
+} from './managed-workspace-activation.js';
+import { MANAGED_RUNTIME_TOOL_V4_ROUTES } from './managed-runtime-tool-v4-routes.js';
 import {
   ManagedShellPublisherRegistry,
   MANAGED_SHELL_PUBLISHER_ROUTE,
@@ -384,10 +388,13 @@ export async function startManagedRuntimeAttestationWorker(
       boot.version === 2
         ? capturePublisher ||
           remotePublishers ||
-          boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST ||
+          isWorkspaceToolCapability(boot.capabilityDigest) ||
           boot.managedExtensions !== undefined
           ? [
               ...MANAGED_CONTEXT_WORKER_ROUTES,
+              ...(boot.capabilityDigest === MEASURED_WORKSPACE_CAPABILITY_DIGEST
+                ? MANAGED_RUNTIME_TOOL_V4_ROUTES
+                : []),
               ...(boot.managedExtensions
                 ? [
                     MANAGED_EXTENSION_RUNTIME_ROUTE,
@@ -408,7 +415,7 @@ export async function startManagedRuntimeAttestationWorker(
               ...(remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
               ...(!capturePublisher &&
               !publication &&
-              (boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST ||
+              (isWorkspaceToolCapability(boot.capabilityDigest) ||
                 boot.managedExtensions !== undefined)
                 ? [PUBLICATION_INSTALL_ROUTE]
                 : []),
@@ -689,7 +696,7 @@ export async function runManagedRuntimeAttestationWorker(
     undefined,
     contextBoot.version === 2 &&
       !('storage' in contextBoot) &&
-      (contextBoot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST ||
+      (isWorkspaceToolCapability(contextBoot.capabilityDigest) ||
         contextBoot.managedExtensions !== undefined)
       ? new ManagedShellPublisherRegistry()
       : undefined,
