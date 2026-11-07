@@ -81,6 +81,9 @@ import {
 } from './i18n.js';
 import {
   getEnvContents,
+  ExtensionSettingsReadError,
+  getScopedEnvContents,
+  ExtensionSettingScope,
   maybePromptForSettings,
   promptForSetting,
   type PreparedExtensionSettingsMutation,
@@ -1886,7 +1889,7 @@ export class ExtensionManager {
     extension: Extension;
     loadedManifest: LoadedExtensionManifest;
   }> {
-    const { workspaceDir } = context;
+    const { workspaceDir = this.workspaceDir } = context;
     const loadedManifest = this.loadExtensionManifest({
       extensionDir: effectiveExtensionPath,
       workspaceDir,
@@ -1896,6 +1899,58 @@ export class ExtensionManager {
       config = resolveEnvVarsInObject(config);
     }
     const extensionId = getExtensionId(config, installMetadata);
+    if (
+      loadedManifest.format === 'qwen' &&
+      config.mcpServers &&
+      config.settings?.length
+    ) {
+      try {
+        const extensionEnv = this.isWorkspaceTrusted
+          ? await getEnvContents(config, extensionId, workspaceDir)
+          : await getScopedEnvContents(
+              config,
+              extensionId,
+              ExtensionSettingScope.USER,
+              workspaceDir,
+            );
+        config = {
+          ...config,
+          mcpServers: Object.fromEntries(
+            Object.entries(config.mcpServers).map(([name, server]) => {
+              const original = loadedManifest.config.mcpServers![name];
+              return [
+                name,
+                {
+                  ...server,
+                  ...(original.headers === undefined
+                    ? {}
+                    : {
+                        headers: resolveEnvVarsInObject(
+                          original.headers,
+                          extensionEnv,
+                        ),
+                      }),
+                  ...(original.env === undefined
+                    ? {}
+                    : {
+                        env: resolveEnvVarsInObject(original.env, extensionEnv),
+                      }),
+                },
+              ];
+            }),
+          ),
+        };
+      } catch (error) {
+        const code =
+          error instanceof ExtensionSettingsReadError
+            ? error.code
+            : 'unexpected';
+        const warning = `Unable to read settings for extension "${config.name}". Its MCP servers are disabled (settings:${code}). Check credential storage availability, then restart or reload the extension. If settings are confirmed missing or corrupt, back them up before uninstalling and reinstalling.`;
+        process.stderr.write(`[warn] ${warning}\n`);
+        debugLogger.warn(warning);
+        config = { ...config, mcpServers: undefined };
+      }
+    }
     if (loadedManifest.format === 'agent-plugins-v1') {
       // The MCP load runs on the manifest-only path too (with its data-dir
       // creation disabled): its throws are part of the head's rejection set,
@@ -2700,6 +2755,7 @@ export class ExtensionManager {
           previousSettings = await getEnvContents(
             previousExtensionConfig,
             extensionId,
+            currentDir,
           );
         }
         stagingPath = await this.extensionStore.createStagingDirectory();
@@ -2887,6 +2943,7 @@ export class ExtensionManager {
           extension = await this.loadExtension(
             {
               extensionDir: destinationPath,
+              workspaceDir: currentDir,
             },
             { throwOnError: true },
           );
@@ -3162,6 +3219,7 @@ export class ExtensionManager {
           (await this.loadExtension(
             {
               extensionDir: prepared.destinationDirectory,
+              workspaceDir: prepared.currentDir,
             },
             { throwOnError: true },
           )) ?? undefined;
