@@ -627,17 +627,28 @@ const FALLBACK_ELIGIBLE_STATUS_CODES = new Set([429, 503, 529]);
  * The PR scope is intentionally narrow: fallback only applies to the explicit
  * capacity statuses documented for the feature (429/503/529), after same-model
  * retries are exhausted.
+ *
+ * A 429 whose body carries a provider code outside the rate-limit set (e.g.
+ * Z.AI's `1310` weekly/monthly limit) classifies `client-error`/`fail-fast`.
+ * Fail-fast is right for the retry ladder, since retrying the same model
+ * cannot clear a quota, but a different model is exactly the recovery the
+ * fallback chain exists for, so that case stays eligible. Recognized
+ * provider-business codes (allocated quota, free-tier quota) are unchanged.
  */
 export function isFallbackEligible(
   classification: RetryErrorClassification,
 ): boolean {
-  return (
-    classification.kind !== 'transport' &&
-    classification.statusCode !== undefined &&
-    FALLBACK_ELIGIBLE_STATUS_CODES.has(classification.statusCode) &&
-    classification.diagnosis !== 'fail-fast' &&
-    classification.diagnosis !== 'unknown'
-  );
+  if (
+    classification.kind === 'transport' ||
+    classification.statusCode === undefined ||
+    !FALLBACK_ELIGIBLE_STATUS_CODES.has(classification.statusCode)
+  ) {
+    return false;
+  }
+  if (classification.diagnosis === 'fail-fast') {
+    return classification.reason === 'client-error';
+  }
+  return classification.diagnosis !== 'unknown';
 }
 
 /**
