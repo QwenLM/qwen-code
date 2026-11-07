@@ -1313,7 +1313,7 @@ const SETTINGS_SCHEMA = {
         type: 'boolean',
         label: 'Start Expanded',
         category: 'UI',
-        requiresRestart: false,
+        requiresRestart: true,
         default: false,
         description:
           'Start in expanded detail mode: thinking blocks and tool output are shown inline from the first turn. Ctrl+O / Alt+T still toggles it. TUI only — the web shell is unaffected.',
