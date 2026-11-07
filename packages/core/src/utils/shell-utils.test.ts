@@ -919,6 +919,15 @@ describe('normalizeMonitorCommand', () => {
       strippedTrailingAmp,
     });
 
+  it('reads `--` as the -c option terminator', () => {
+    expect(normalizeMonitorCommand("sh -c -- 'ls -l'")).toEqual({
+      analysisCommand: 'ls -l',
+      safetyCommand: 'ls -l',
+      spawnCommand: "sh -c -- 'ls -l'",
+      strippedTrailingAmp: false,
+    });
+  });
+
   it('unwraps quoted env-prefixed shell wrappers for analysis', () => {
     expectNormalized(
       `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
