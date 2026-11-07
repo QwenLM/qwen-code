@@ -397,6 +397,14 @@ export function ChatPane({
   >(undefined);
   const [goalEditOpen, setGoalEditOpen] = useState(false);
   const [goalEditError, setGoalEditError] = useState<string | null>(null);
+  // The main view floats its scroll-to-bottom button from App state; a pane
+  // keeps the same affordance locally (the viewport handle already returns a
+  // historical view to live on the same call).
+  const [canScrollToBottom, setCanScrollToBottom] = useState(false);
+  const handleCanScrollToBottomChange = useCallback(
+    (value: boolean) => setCanScrollToBottom(value),
+    [],
+  );
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
   const connectionGoalComplete =
@@ -1902,6 +1910,7 @@ export function ChatPane({
                   onImagePreview={handleImagePreview}
                   onAttachmentPreview={handleAttachmentPreview}
                   onError={reportError}
+                  onCanScrollToBottomChange={handleCanScrollToBottomChange}
                   generateContent={
                     connection.capabilities?.features.includes(
                       'session_generation',
@@ -1917,6 +1926,33 @@ export function ChatPane({
       </div>
 
       <div className={styles.footer}>
+        {canScrollToBottom && (
+          <div className={styles.scrollToBottomLayer}>
+            <button
+              type="button"
+              className={styles.scrollToBottomButton}
+              aria-label={t('chat.scrollToBottom')}
+              data-testid="pane-scroll-to-bottom"
+              onClick={() =>
+                transcriptViewportRef.current?.scrollToBottom('smooth')
+              }
+            >
+              <svg
+                className={styles.scrollToBottomIcon}
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <path
+                  d="M12 5v13M6.5 12.5 12 18l5.5-5.5"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+          </div>
+        )}
         {pendingToolApproval && (
           <div className={styles.approval} data-testid="pane-approval">
             <ToolApproval

@@ -109,6 +109,7 @@ const daemonActions = {
   getContextUsage,
 };
 const enqueuePrompt = vi.fn(() => true);
+const paneScrollToBottom = vi.hoisted(() => vi.fn());
 const removeQueuedPrompt = vi.fn();
 const editQueuedPrompt = vi.fn();
 const sendQueuedPromptNow = vi.fn();
@@ -231,41 +232,53 @@ vi.mock('../monitorDetailsContext', async () => {
   };
 });
 
-vi.mock('./TranscriptViewport', () => ({
-  TranscriptViewport: (props: any) => (
-    <div
-      data-testid="pane-messages"
-      data-approval={props.pendingApproval ? 'yes' : 'no'}
-    >
-      {props.messages.length}
-      <button
-        data-testid="pane-open-turn-output"
-        type="button"
-        onClick={() =>
-          props.onTurnOutputOpen?.({
-            id: 'artifact:turn-artifact',
-            kind: 'artifact',
-            title: 'Turn artifact',
-            turnId: 'turn-1',
-            artifactId: 'turn-artifact',
-            artifact: { id: 'turn-artifact', title: 'Turn artifact' },
-            workspaceCwd: '/w',
-          })
-        }
-      />
-      <button
-        data-testid="pane-open-attachment"
-        type="button"
-        onClick={() =>
-          props.onAttachmentPreview?.({
-            name: 'data.json',
-            attachmentId: 'attachment-1',
-          })
-        }
-      />
-    </div>
-  ),
-}));
+let latestTranscriptViewportProps: any;
+vi.mock('./TranscriptViewport', async () => {
+  const { useImperativeHandle } = await import('react');
+  return {
+    TranscriptViewport: (props: any) => {
+      latestTranscriptViewportProps = props;
+      useImperativeHandle(props.ref, () => ({
+        scrollToSearchHit: () => {},
+        scrollToMessage: () => false,
+        scrollToBottom: paneScrollToBottom,
+      }));
+      return (
+        <div
+          data-testid="pane-messages"
+          data-approval={props.pendingApproval ? 'yes' : 'no'}
+        >
+          {props.messages.length}
+          <button
+            data-testid="pane-open-turn-output"
+            type="button"
+            onClick={() =>
+              props.onTurnOutputOpen?.({
+                id: 'artifact:turn-artifact',
+                kind: 'artifact',
+                title: 'Turn artifact',
+                turnId: 'turn-1',
+                artifactId: 'turn-artifact',
+                artifact: { id: 'turn-artifact', title: 'Turn artifact' },
+                workspaceCwd: '/w',
+              })
+            }
+          />
+          <button
+            data-testid="pane-open-attachment"
+            type="button"
+            onClick={() =>
+              props.onAttachmentPreview?.({
+                name: 'data.json',
+                attachmentId: 'attachment-1',
+              })
+            }
+          />
+        </div>
+      );
+    },
+  };
+});
 vi.mock('./StreamingStatus', () => ({
   StreamingStatus: (props: any) => (
     <div
@@ -520,6 +533,8 @@ beforeEach(() => {
   clearQueuedPrompts.mockClear();
   transcriptDispatch.mockClear();
   appendLocalUserMessage.mockClear();
+  paneScrollToBottom.mockClear();
+  latestTranscriptViewportProps = undefined;
   catalogController.invalidateWorkspace.mockClear();
   catalogController.promptAdmitted.mockClear();
   catalogController.promptAdmissionUncertain.mockClear();
@@ -4285,5 +4300,29 @@ describe('pane approval mode allowlist', () => {
     expect(workspaceByCwd).toHaveBeenCalledOnce();
     // A failed scoped read fails closed rather than offering every mode.
     expect(latestChatEditorProps.availableModes).toEqual([]);
+  });
+});
+
+describe('ChatPane scroll-to-bottom button (#16569)', () => {
+  it('floats while the pane scroll is detached from the bottom and jumps back on click', async () => {
+    render();
+    expect(testid('pane-scroll-to-bottom')).toBeNull();
+    const report = latestTranscriptViewportProps?.onCanScrollToBottomChange;
+    expect(typeof report).toBe('function');
+    await act(async () => {
+      report(true);
+    });
+    const button = testid('pane-scroll-to-bottom');
+    expect(button).not.toBeNull();
+    expect(button!.getAttribute('aria-label')).toBe('Scroll to bottom');
+    await act(async () => {
+      button!.click();
+    });
+    expect(paneScrollToBottom).toHaveBeenCalledTimes(1);
+    expect(paneScrollToBottom).toHaveBeenCalledWith('smooth');
+    await act(async () => {
+      report(false);
+    });
+    expect(testid('pane-scroll-to-bottom')).toBeNull();
   });
 });
