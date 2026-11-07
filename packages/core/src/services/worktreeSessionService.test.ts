@@ -675,7 +675,15 @@ describe('isSessionRuntimeActive', () => {
     ScopedStorage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
     onTestFinished(() => ScopedStorage.setRuntimeBaseDir(null));
 
-    await writeRuntimeStatus(
+    // The writer needs the same module graph for the same reason: the
+    // statically imported copy stats the real `/proc/self/ns/pid`, so on a
+    // Linux runner it would record the runner's own namespace while the mocked
+    // reader sees `localNsIno`, making every record look foreign.
+    const { writeRuntimeStatus: writeScopedRuntimeStatus } = await import(
+      '../utils/runtimeStatus.js'
+    );
+
+    await writeScopedRuntimeStatus(
       new ScopedStorage(repoRoot).getRuntimeStatusPath('owner-session'),
       {
         sessionId: 'owner-session',
