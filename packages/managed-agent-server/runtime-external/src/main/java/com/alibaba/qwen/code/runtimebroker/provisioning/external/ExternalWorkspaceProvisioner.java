@@ -26,8 +26,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 /**
- * Session-exclusive workers whose Workspace is a registered EXTERNAL storage
- * tree instead of a local directory.
+ * Workspace-shared workers whose Workspace is either registered durable
+ * storage or an ephemeral directory owned by the original Sandbox.
  *
  * <p>This is internal provisioning, acquisition proof and drain plumbing, not
  * a public Hosted profile. It mints the shipped {@code managed-context/1} boot
@@ -43,10 +43,9 @@ import java.util.concurrent.CompletionStage;
  * reply or the boot document. Any disagreement is a permanent refusal.
  */
 public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvisioner
-        implements com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceAcquisitionVerifier {
+        implements com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceAcquisitionVerifier,
+        com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceRecoverySupport {
     public static final String KIND = "external-workspace";
-    /** The shipped worker contract's storage discriminator. */
-    static final String STORAGE_KIND = "external";
     private static final List<String> CONTINUITY = List.of("confirms", "denies", "unknown");
     /**
      * The evidence members this profile verifies. The design's wider set also
@@ -78,6 +77,11 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
         return WorkspaceExecutionProfile.isExternalWorkspaceRequest(request);
     }
 
+    @Override
+    protected boolean supportsReattach(RuntimeProvisionRequest request) {
+        return isWorkspaceRequest(request);
+    }
+
     /** Verifies the saved original for acquisition; never provisions a replacement. */
     public CompletionStage<Void> verifyAcquisition(RuntimeBindingRecord binding) {
         try {
@@ -103,7 +107,10 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
                         }
                         requireOriginalReady(binding, observation(request, seed, handle, response));
                         if (!(response.get("storage") instanceof Map<?, ?> evidence)
-                                || !"confirms".equals(evidence.get("continuity"))) {
+                                || !(binding(request).ephemeral()
+                                        ? "same-runtime"
+                                        : "confirms").equals(
+                                                evidence.get("continuity"))) {
                             throw new RuntimeBrokerException(503, "runtime_external_unavailable",
                                 "External Workspace continuity is not confirmed.", true);
                         }
@@ -150,7 +157,7 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
     public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
         try {
             validatedSavedBoot(binding);
-            return true;
+            return !binding(binding.getRequest()).ephemeral();
         } catch (RuntimeBrokerException failure) {
             if (failure.isRetryable()) {
                 throw failure;
@@ -166,6 +173,10 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
         try {
             if (binding == null || !binding.isDrainRequested()) {
                 throw refuse("workspace_close_identity_unverified", "External Workspace drain is not authorized.");
+            }
+            if (binding(binding.getRequest()).ephemeral()) {
+                throw refuse("ephemeral_workspace_recovery_required",
+                        "Ephemeral Workspace cannot be remounted.");
             }
             Map<String, Object> boot = validatedSavedBoot(binding);
             Map<?, ?> storage = (Map<?, ?>) boot.get("storage");
@@ -221,12 +232,7 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
     protected Map<String, Object> bootDocument(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         ExternalStorageRegistry.RegisteredExternalStorage storage = binding(request);
         Map<String, Object> boot = new LinkedHashMap<>(ManagedContextProtocol.boot(request, seed));
-        boot.put("storage", Map.of(
-                "kind", STORAGE_KIND,
-                "physicalKey", storage.physicalKey(),
-                "aliasPath", storage.aliasPath(),
-                "mountRoot", storage.mountRoot(),
-                "registrationRevision", storage.registrationRevision()));
+        boot.put("storage", storage.bootStorage(seed));
         return Map.copyOf(boot);
     }
 
@@ -239,6 +245,36 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
     protected RuntimeObservation observation(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle handle, Map<String, Object> response) {
         Object reported = response.get("storage");
+        ExternalStorageRegistry.RegisteredExternalStorage registered = binding(request);
+        if (registered.ephemeral()) {
+            if (!"RUNNING".equals(response.get("state"))) {
+                if (reported != null) {
+                    throw refuse("ephemeral_workspace_identity_mismatch",
+                            "Unexpected ephemeral evidence.");
+                }
+                return super.observation(request, seed, handle, response);
+            }
+            if (!(reported instanceof Map<?, ?> evidence)
+                    || !evidence.keySet().equals(Set.of("kind", "provisionRequestId",
+                            "runtimeIncarnation", "mountRoot", "continuity"))
+                    || !"ephemeral".equals(evidence.get("kind"))
+                    || !seed.getProvisionRequestId().equals(
+                            evidence.get("provisionRequestId"))
+                    || !seed.getGatewayIncarnation().equals(
+                            evidence.get("runtimeIncarnation"))
+                    || !registered.mountRoot().equals(evidence.get("mountRoot"))) {
+                throw refuse("ephemeral_workspace_identity_mismatch",
+                        "Ephemeral evidence does not identify the original runtime.");
+            }
+            if ("unknown".equals(evidence.get("continuity"))) {
+                return RuntimeObservation.unknown(handle);
+            }
+            if (!"same-runtime".equals(evidence.get("continuity"))) {
+                throw refuse("ephemeral_workspace_continuity_lost",
+                        "Original ephemeral runtime continuity is lost.");
+            }
+            return super.observation(request, seed, handle, response);
+        }
         if (reported != null) {
             if (!"RUNNING".equals(response.get("state"))
                     || !(reported instanceof Map<?, ?> evidence)) {
@@ -311,7 +347,8 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
                     "No external storage registration matches this Workspace.");
         }
         ExternalStorageRegistry.RegisteredExternalStorage storage = found.get();
-        if (!alias.equals(storage.tenantWorkspaceId())
+        if (storage.ephemeral() && !tenant.equals(storage.ephemeralTenantId())
+                || !alias.equals(storage.tenantWorkspaceId())
                 || !request.getScope().getWorkspaceId().equals(storage.tenantWorkspaceId())
                 || !provider.equals(storage.providerId())
                 || !request.getScope().getCanonicalCwd().equals(storage.mountRoot())

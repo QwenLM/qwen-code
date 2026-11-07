@@ -91,20 +91,20 @@ class ManagedStoreDecompositionTest {
     @Test
     void facadesKeepTheExistingEntryAndTransactionPopulation() {
         assertEntries(ManagedAgentStore.class, """
-                findSessionWorktree/2:- findSessionWorktrees/2:- insertSessionCommand/10::REQUIRED:DEFAULT:false
-                insertSessionCommand/11::REQUIRED:DEFAULT:false
+                findSessionWorktree/2:- findSessionWorktrees/2:- insertSessionCommand/10::REQUIRED:DEFAULT:false insertSessionCommand/10::REQUIRED:DEFAULT:false
+                insertSessionCommand/11::REQUIRED:DEFAULT:false insertSessionCommand/11::REQUIRED:DEFAULT:false
                 insertWorkspaceSessionCommand/1::REQUIRED:DEFAULT:false insertInternalTeamLeadSessionCommand/6::REQUIRED:DEFAULT:false findWorkspaceCreateReplay/4:-
                 replayWorkspaceSessionCommand/4::REQUIRED:DEFAULT:false insertCsiSessionCommand/7:- requireCsiRequest/2:-
                 insertChildSessionCommand/8::REQUIRED:DEFAULT:false insertChildSessionCommand/9::REQUIRED:DEFAULT:false findChildWorkspaceCwd/3:-
                 insertPublicChildSessionCommand/9::REQUIRED:DEFAULT:false replayChildSessionCommand/4::REQUIRED:DEFAULT:false findChildLineage/2:-
                 workspaceSessionOptions/2::REQUIRED:DEFAULT:false supportsPlanMode/1:- hasMcpServers/1:-
                 requireMcpManagement/4::REQUIRED:DEFAULT:false requireMcpSettingsCommit/3::MANDATORY:DEFAULT:false requireExtensionManagement/5::REQUIRED:DEFAULT:false
-                requireConfigurationCommit/4::MANDATORY:DEFAULT:false insertTurnCommand/7::REQUIRED:DEFAULT:false insertTurnCommand/8::REQUIRED:DEFAULT:false
-                insertCancelCommand/6::REQUIRED:DEFAULT:false insertCancelCommand/7::REQUIRED:DEFAULT:false beginSessionRename/5::REQUIRED:DEFAULT:false
-                beginSessionRename/6::REQUIRED:DEFAULT:false completeSessionRename/6::REQUIRED:DEFAULT:false completeSessionRename/3::REQUIRED:DEFAULT:false
+                requireConfigurationCommit/4::MANDATORY:DEFAULT:false insertTurnCommand/7::REQUIRED:DEFAULT:false insertTurnCommand/8::REQUIRED:DEFAULT:false insertTurnCommand/8::REQUIRED:DEFAULT:false
+                insertCancelCommand/6::REQUIRED:DEFAULT:false insertCancelCommand/7::REQUIRED:DEFAULT:false insertCancelCommand/7::REQUIRED:DEFAULT:false beginSessionRename/5::REQUIRED:DEFAULT:false
+                beginSessionRename/6::REQUIRED:DEFAULT:false beginSessionRename/7::REQUIRED:DEFAULT:false completeSessionRename/6::REQUIRED:DEFAULT:false completeSessionRename/3::REQUIRED:DEFAULT:false
                 abandonSessionRename/5::REQUIRED:DEFAULT:false deliverableRenames/1::REQUIRED:DEFAULT:false claimRename/3::REQUIRED:DEFAULT:false
                 markRenameSubmitted/2:- retryRename/3::REQUIRED:DEFAULT:false beginSessionMutation/6::REQUIRED:DEFAULT:false
-                beginSessionMutation/7::REQUIRED:DEFAULT:false completeSessionMutation/7::REQUIRED:DEFAULT:false abandonSessionMutation/4::REQUIRED:DEFAULT:false
+                beginSessionMutation/7::REQUIRED:DEFAULT:false beginSessionMutation/8::REQUIRED:DEFAULT:false completeSessionMutation/7::REQUIRED:DEFAULT:false abandonSessionMutation/4::REQUIRED:DEFAULT:false
                 beginOperation/6::REQUIRED:DEFAULT:false workspaceFilesEnabled/0:- workspaceShellEnabled/0:-
                 beginWorkspaceClose/7::REQUIRED:DEFAULT:false beginWorkspaceLifecycle/8::REQUIRED:DEFAULT:false beginWorkspaceLifecycle/9::REQUIRED:DEFAULT:false
                 hasCompletedWorkspaceClose/2:- completedWorkspaceCloses/2:- unarchiveWorkspaceSession/5::REQUIRED:DEFAULT:false
@@ -121,7 +121,7 @@ class ManagedStoreDecompositionTest {
                 blockLifecycleOperation/7::REQUIRED:DEFAULT:false blockLifecycleOperation/8::REQUIRED:DEFAULT:false retryOperation/6::REQUIRED:DEFAULT:false
                 retryOperation/7::REQUIRED:DEFAULT:false markOperationAnswered/5::REQUIRED:DEFAULT:false replayCommand/4:-
                 findCommand/3:- findSession/2:- findSessionById/1:-
-                listSessions/5:- listSessions/6:- listSessions/7:-
+                listSessions/5:- listSessions/6:- listSessions/7:- listSessions/7:-
                 findLatestLifecycleOperations/2:- findTurn/3:- findActiveTurns/2:-
                 findLatestTurns/2:- findModelContexts/2:- modelOptions/0:-
                 findModelSelections/2:- findTurnModelSelection/3:- changeSessionModel/8::REQUIRED:DEFAULT:false
@@ -143,6 +143,8 @@ class ManagedStoreDecompositionTest {
                 failTurn/6::REQUIRED:DEFAULT:false failWorktreeInitialTurns/3::REQUIRED:DEFAULT:false failRecoveryBlockedTurn/5::REQUIRED:DEFAULT:false
                 appendPublicEventIfAbsent/7::REQUIRED:DEFAULT:false appendLiveSessionEventIfAbsent/5::REQUIRED:DEFAULT:false findLastVisibleStatusBeforeDelete/2:-
                 requireSession/2:- readBinding/1:- insertSessionCommand/9::REQUIRED:DEFAULT:false
+                listOwnedSessions/7:- ownsSession/3:- requireSessionOwnership/3:-
+                requireSessionAuthority/3:- requireSessionReadAuthority/3:-
                 """);
         assertEntries(ManagedSessionStore.class, """
                 authorizeLifecycle/5::REQUIRED:DEFAULT:false skipContended/2:- lockBounded/1:-

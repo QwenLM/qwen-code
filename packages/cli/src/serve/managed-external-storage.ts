@@ -88,8 +88,14 @@ export async function readManagedExternalBoot(
     const { storage: rawStorage, ...context } = object;
     const boot = parseManagedContextBoot(context);
     const storage = parseStorage(rawStorage);
+    // A resident external Workspace is shared across Sessions, so its boot is
+    // workspace-isolated; a single-Session external boot stays session-isolated.
+    // Both are admitted on this external boot path only — plain v1 boots keep
+    // the session requirement in the worker. The substitution fences below
+    // (mount root, capability digest, registration identity) are unchanged.
     if (
-      boot.isolationClass !== 'session' ||
+      (boot.isolationClass !== 'session' &&
+        boot.isolationClass !== 'workspace') ||
       boot.mountRoot !== storage.mountRoot ||
       boot.capabilityDigest !== WORKSPACE_CAPABILITY_DIGEST
     )

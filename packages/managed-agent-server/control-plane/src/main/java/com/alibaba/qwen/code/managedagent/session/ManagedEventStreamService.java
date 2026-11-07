@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.ReplayCursorExpired;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionResyncRequired;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellResyncRequired;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -51,10 +52,25 @@ public class ManagedEventStreamService {
 
     public SseEmitter publicStream(String tenantId, String actorId,
             String sessionId, long afterSequence) {
+        return publicStream(tenantId,
+                actorId == null || actorId.isBlank() ? null
+                        : SessionPrincipal.ofUser(tenantId, actorId),
+                sessionId, afterSequence);
+    }
+
+    public SseEmitter publicStream(SessionPrincipal principal,
+            String sessionId, long afterSequence) {
+        return publicStream(principal == null ? null : principal.tenantId(),
+                principal, sessionId, afterSequence);
+    }
+
+    private SseEmitter publicStream(String tenantId, SessionPrincipal principal,
+            String sessionId, long afterSequence) {
         SessionRecord session = agentService.requireReadableSession(
-                tenantId, actorId, sessionId);
+                tenantId, principal, sessionId);
         SseEmitter emitter = emitter();
-        executor.execute(() -> stream(emitter, actorId, session, afterSequence,
+        executor.execute(() -> stream(emitter, principal, session,
+                afterSequence,
                 agentService::publicEvent, window -> new SessionResyncRequired(
                         RESYNC, session.sessionId(), window.floorSequence(),
                         window.snapshotThroughSequence(), RESYNC_ACTION)));
@@ -63,10 +79,25 @@ public class ManagedEventStreamService {
 
     public SseEmitter webShellStream(String tenantId, String actorId,
             String sessionId, long afterSequence) {
+        return webShellStream(tenantId,
+                actorId == null || actorId.isBlank() ? null
+                        : SessionPrincipal.ofUser(tenantId, actorId),
+                sessionId, afterSequence);
+    }
+
+    public SseEmitter webShellStream(SessionPrincipal principal,
+            String sessionId, long afterSequence) {
+        return webShellStream(principal == null ? null : principal.tenantId(),
+                principal, sessionId, afterSequence);
+    }
+
+    private SseEmitter webShellStream(String tenantId, SessionPrincipal principal,
+            String sessionId, long afterSequence) {
         SessionRecord session = agentService.requireReadableSession(
-                tenantId, actorId, sessionId);
+                tenantId, principal, sessionId);
         SseEmitter emitter = emitter();
-        executor.execute(() -> stream(emitter, actorId, session, afterSequence,
+        executor.execute(() -> stream(emitter, principal, session,
+                afterSequence,
                 agentService::webShellEvent, window -> new WebShellResyncRequired(
                         RESYNC, session.sessionId(), window.floorSequence(),
                         window.snapshotThroughSequence(), RESYNC_ACTION)));
@@ -77,14 +108,14 @@ public class ManagedEventStreamService {
         return new SseEmitter(streamTimeout.toMillis());
     }
 
-    private void stream(SseEmitter emitter, String actorId,
+    private void stream(SseEmitter emitter, SessionPrincipal principal,
             SessionRecord session, long initialSequence,
             Function<EventRecord, ?> eventPayload,
             Function<ReplayWindow, ?> resyncPayload) {
         String tenantId = session.tenantId();
         String sessionId = session.sessionId();
         AtomicBoolean closed = callbacks(emitter);
-        ReadGrant grant = new ReadGrant(emitter, closed, actorId, session);
+        ReadGrant grant = new ReadGrant(emitter, closed, principal, session);
         long sequence = initialSequence;
         long heartbeatAt = System.nanoTime()
                 + heartbeatInterval.toNanos();
@@ -205,17 +236,17 @@ public class ManagedEventStreamService {
     private final class ReadGrant {
         private final SseEmitter emitter;
         private final AtomicBoolean closed;
-        private final String actorId;
+        private final SessionPrincipal principal;
         private final SessionRecord session;
         // MIN_VALUE, not 0: nanoTime may be negative, and a first check must
         // always run.
         private long recheckAt = Long.MIN_VALUE;
 
         private ReadGrant(SseEmitter emitter, AtomicBoolean closed,
-                String actorId, SessionRecord session) {
+                SessionPrincipal principal, SessionRecord session) {
             this.emitter = emitter;
             this.closed = closed;
-            this.actorId = actorId;
+            this.principal = principal;
             this.session = session;
         }
 
@@ -225,7 +256,7 @@ public class ManagedEventStreamService {
                 return true;
             }
             if (ManagedEventStreamService.this.stillReadable(emitter, closed,
-                    actorId, session)) {
+                    principal, session)) {
                 recheckAt = now + readGrantRecheckInterval.toNanos();
                 return true;
             }
@@ -234,9 +265,9 @@ public class ManagedEventStreamService {
     }
 
     private boolean stillReadable(SseEmitter emitter, AtomicBoolean closed,
-            String actorId, SessionRecord session) {
+            SessionPrincipal principal, SessionRecord session) {
         try {
-            agentService.requireReadGrant(session, actorId);
+            agentService.requireReadGrant(session, principal);
             return true;
         } catch (ManagedAgentException error) {
             if (error.getStatus() != 404) {

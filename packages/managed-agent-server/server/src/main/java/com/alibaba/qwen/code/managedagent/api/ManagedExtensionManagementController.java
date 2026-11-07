@@ -25,28 +25,32 @@ public class ManagedExtensionManagementController {
 
     @GetMapping(BASE)
     public ResponseEntity<JsonNode> query(TenantContext tenant, @PathVariable String sessionId) {
-        return noStore(service.query(tenant.tenantId(), tenant.requireActorId(), sessionId, null));
+        return noStore(service.query(tenant.requirePrincipal(), sessionId, null));
     }
 
     @PostMapping(BASE)
     public ResponseEntity<JsonNode> submit(TenantContext tenant, @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String key, @RequestBody JsonNode command) {
-        return noStore(service.submit(tenant.tenantId(), tenant.requireActorId(), sessionId, key, command));
+        return noStore(service.submit(tenant.requirePrincipal(), sessionId, key,
+                command));
     }
 
     @GetMapping(BASE + "/operations/{operationId}")
     public ResponseEntity<JsonNode> operation(TenantContext tenant, @PathVariable String sessionId, @PathVariable String operationId) {
-        return noStore(service.query(tenant.tenantId(), tenant.requireActorId(), sessionId, operationId));
+        return noStore(service.query(tenant.requirePrincipal(), sessionId,
+                operationId));
     }
 
     @PostMapping(BASE + "/operations/{operationId}/continue")
     public ResponseEntity<JsonNode> resume(TenantContext tenant, @PathVariable String sessionId, @PathVariable String operationId) {
-        return noStore(service.resume(tenant.tenantId(), tenant.requireActorId(), sessionId, operationId, false));
+        return noStore(service.resume(tenant.requirePrincipal(), sessionId,
+                operationId, false));
     }
 
     @PostMapping(BASE + "/operations/{operationId}/recover-previous")
     public ResponseEntity<JsonNode> recover(TenantContext tenant, @PathVariable String sessionId, @PathVariable String operationId) {
-        return noStore(service.resume(tenant.tenantId(), tenant.requireActorId(), sessionId, operationId, true));
+        return noStore(service.resume(tenant.requirePrincipal(), sessionId,
+                operationId, true));
     }
 
     public record WebQuery(@NotBlank String sessionId, String operationId) { }
@@ -54,22 +58,26 @@ public class ManagedExtensionManagementController {
 
     @PostMapping(WEB + "/query")
     public ResponseEntity<JsonNode> webQuery(TenantContext tenant, @Valid @RequestBody WebQuery request) {
-        return noStore(service.query(tenant.tenantId(), tenant.requireActorId(), request.sessionId(), request.operationId()));
+        return noStore(service.query(tenant.requirePrincipal(),
+                request.sessionId(), request.operationId()));
     }
 
     @PostMapping(WEB + "/submit")
     public ResponseEntity<JsonNode> webSubmit(TenantContext tenant, @Valid @RequestBody WebSubmit request) {
-        return noStore(service.submit(tenant.tenantId(), tenant.requireActorId(), request.sessionId(), request.idempotencyKey(), request.command()));
+        return noStore(service.submit(tenant.requirePrincipal(),
+                request.sessionId(), request.idempotencyKey(), request.command()));
     }
 
     @PostMapping(WEB + "/continue")
     public ResponseEntity<JsonNode> webResume(TenantContext tenant, @Valid @RequestBody WebQuery request) {
-        return noStore(service.resume(tenant.tenantId(), tenant.requireActorId(), request.sessionId(), request.operationId(), false));
+        return noStore(service.resume(tenant.requirePrincipal(),
+                request.sessionId(), request.operationId(), false));
     }
 
     @PostMapping(WEB + "/recover-previous")
     public ResponseEntity<JsonNode> webRecover(TenantContext tenant, @Valid @RequestBody WebQuery request) {
-        return noStore(service.resume(tenant.tenantId(), tenant.requireActorId(), request.sessionId(), request.operationId(), true));
+        return noStore(service.resume(tenant.requirePrincipal(),
+                request.sessionId(), request.operationId(), true));
     }
 
     private static ResponseEntity<JsonNode> noStore(JsonNode value) { return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(value); }

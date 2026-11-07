@@ -17,7 +17,9 @@ public final class HarnessOwnership {
         return request != null
                 && "workspace".equals(request.getScope().getIsolationClass())
                 && request.isManagedContext()
-                && RuntimeProviderKinds.LOCAL_PROCESS.equals(request.getProvisionerKind())
+                && (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS
+                                .equals(request.getProvisionerKind())
+                        || WorkspaceExecutionProfile.isExternalWorkspaceRequest(request))
                 && WorkspaceExecutionProfile.admitsCapabilityDigest(request.getScope().getCapabilityDigest());
     }
 }

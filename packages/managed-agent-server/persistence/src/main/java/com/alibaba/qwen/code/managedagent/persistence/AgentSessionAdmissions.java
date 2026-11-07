@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
 import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -121,17 +122,76 @@ final class AgentSessionAdmissions {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
+        return insertSessionCommand(tenantId,
+                actorId == null ? null
+                        : SessionPrincipal.ofUser(tenantId, actorId),
+                operation, idempotencyKey, requestDigest, agentId,
+                requestedRevision, title, input, payloadDigest, modelConfig);
+    }
+
+    Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest) {
+        return insertSessionCommand(tenantId, principal, operation,
+                idempotencyKey, requestDigest, agentId, requestedRevision,
+                title, input, payloadDigest, null);
+    }
+
+    /**
+     * Ownership-enforcing creation of an unbound Session, with or without a
+     * model configuration. The ownership row lands in the same transaction
+     * as the Session, receipt and creation event; a missing principal fails
+     * closed rather than creating an unowned Session.
+     */
+    Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionModelConfig modelConfig) {
+        if (principal != null) {
+            ManagedSessionPrincipal.requireTenant(tenantId, principal);
+        }
         requireModelConfiguration(modelConfig);
         AgentSessionPolicies.AgentPin pin = sessionPolicies.resolveAgentPin(tenantId, agentId, requestedRevision,
                 false);
         requireCreationScope(tenantId, idempotencyKey, false);
         Admission admission = insertSession(tenantId, operation, idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
-                null, actorId, pin);
+                null, principal == null ? null : principal.userId(), pin, null,
+                false, null, principal);
         if (modelConfig != null) {
             modelConfigs.save(tenantId, admission.sessionId(), modelConfig);
         }
         return admission;
+    }
+
+    /** Requires that the principal owns the unbound Session exactly. */
+    void requireSessionOwnership(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        ManagedSessionPrincipal.requireOwnership(jdbc, tenantId, sessionId,
+                principal);
+    }
+
+    /** The read-only twin of {@link #requireSessionOwnership}. */
+    boolean ownsSession(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        return ManagedSessionPrincipal.owns(jdbc, tenantId, sessionId,
+                principal);
+    }
+
+    void requireSessionAuthority(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        ManagedSessionPrincipal.requireAuthority(jdbc, tenantId, sessionId,
+                principal);
+    }
+
+    void requireSessionReadAuthority(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        ManagedSessionPrincipal.requireReadAuthority(jdbc, tenantId, sessionId,
+                principal);
     }
 
     Admission insertWorkspaceSessionCommand(SessionCreationCommand command) {
@@ -829,6 +889,15 @@ final class AgentSessionAdmissions {
             String requestDigest, String agentId, String title, List<Map<String, Object>> input,
             String payloadDigest, ResolvedBinding resolved, String actorId, AgentSessionPolicies.AgentPin pin,
             WorkspaceCsiRegistration registration, boolean planMode, String modelId) {
+        return insertSession(tenantId, operation, idempotencyKey, requestDigest, agentId, title,
+                input, payloadDigest, resolved, actorId, pin, registration, planMode, modelId, null);
+    }
+
+    Admission insertSession(String tenantId, String operation, String idempotencyKey,
+            String requestDigest, String agentId, String title, List<Map<String, Object>> input,
+            String payloadDigest, ResolvedBinding resolved, String actorId, AgentSessionPolicies.AgentPin pin,
+            WorkspaceCsiRegistration registration, boolean planMode, String modelId,
+            SessionPrincipal principal) {
         ContextBinding workspace = resolved == null ? null
                 : resolved.binding();
         long now = clock.millis();
@@ -882,8 +951,17 @@ final class AgentSessionAdmissions {
                     payloadDigest, now);
         }
         if (resolved == null) {
+            // A present principal writes the durable ownership row; the legacy
+            // actorless arm (legacy_create) creates without one and stamps the
+            // command receipt with the nullable creator key.
+            if (principal != null) {
+                ManagedSessionPrincipal.insert(jdbc, tenantId, sessionId,
+                        principal, now);
+            }
             sessionCommands.insertCommand(tenantId, operation, idempotencyKey, requestDigest,
-                    sessionId, turnId, now);
+                    sessionId, turnId, "COMPLETED", null,
+                    principal == null ? actorKey
+                            : ManagedSessionPrincipal.actorKey(principal), now);
         } else {
             ManagedReceipts.insertCreation(jdbc, tenantId, actorKey,
                     idempotencyKey, requestDigest, sessionId, turnId, now);

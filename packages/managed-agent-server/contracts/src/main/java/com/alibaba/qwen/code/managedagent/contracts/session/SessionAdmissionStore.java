@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.contracts.session;
 
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionOptions;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
@@ -24,7 +25,7 @@ public interface SessionAdmissionStore {
             String idempotencyKey, String requestDigest, String agentId,
             String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest) {
-        return insertSessionCommand(tenantId, null, operation,
+        return insertSessionCommand(tenantId, (String) null, operation,
                 idempotencyKey, requestDigest, agentId, requestedRevision,
                 title, input, payloadDigest);
     }
@@ -44,6 +45,75 @@ public interface SessionAdmissionStore {
         }
         return insertSessionCommand(tenantId, actorId, operation, idempotencyKey,
                 requestDigest, agentId, requestedRevision, title, input, payloadDigest);
+    }
+
+    /**
+     * Ownership-enforcing creation of a non-Workspace Session. The
+     * implementation must write the ownership row in the same transaction
+     * as the Session, receipt and creation event.
+     */
+    public default Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest) {
+        throw new UnsupportedOperationException(
+                "Session ownership records are unavailable");
+    }
+
+    /**
+     * The ownership-enforcing creation with a model configuration. The
+     * default fails closed on a non-null configuration, exactly like the
+     * actor-carrying twin; the principal-only path keeps its own refusal.
+     */
+    public default Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            com.alibaba.qwen.code.managedagent.model.SessionModelConfig modelConfig) {
+        if (modelConfig != null) {
+            throw new UnsupportedOperationException("Session model configuration is unavailable");
+        }
+        return insertSessionCommand(tenantId, principal, operation, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest);
+    }
+
+    /** Requires that {@code principal} owns an unbound Session exactly. */
+    public default void requireSessionOwnership(String tenantId,
+            String sessionId, SessionPrincipal principal) {
+        throw new UnsupportedOperationException(
+                "Session ownership checks are unavailable");
+    }
+
+    /** The read-only twin of {@link #requireSessionOwnership}. */
+    public default boolean ownsSession(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        throw new UnsupportedOperationException(
+                "Session ownership checks are unavailable");
+    }
+
+    /**
+     * The unified write authority over an unbound Session; identical to
+     * {@link #requireSessionReadAuthority}. A present ownership row is the sole
+     * authority; a legacy Session without a row has no per-actor mutation gate
+     * and stays tenant-wide.
+     */
+    public default void requireSessionAuthority(String tenantId,
+            String sessionId, SessionPrincipal principal) {
+        throw new UnsupportedOperationException(
+                "Session ownership checks are unavailable");
+    }
+
+    /**
+     * The unified read authority over an unbound Session: a present ownership
+     * row is the sole authority; a legacy Session without a row stays
+     * tenant-wide readable.
+     */
+    public default void requireSessionReadAuthority(String tenantId,
+            String sessionId, SessionPrincipal principal) {
+        throw new UnsupportedOperationException(
+                "Session ownership checks are unavailable");
     }
 
     /**
@@ -147,6 +217,15 @@ public interface SessionAdmissionStore {
                 requestDigest, sessionId, input, payloadDigest);
     }
 
+    /** The principal-carrying Turn admission for an unbound Session. */
+    public default Admission insertTurnCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionPrincipal principal) {
+        throw new UnsupportedOperationException(
+                "Principal-scoped Turn commands are unavailable");
+    }
+
     public Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId);
@@ -157,6 +236,14 @@ public interface SessionAdmissionStore {
             String turnId, String actorId) {
         return insertCancelCommand(tenantId, operation, idempotencyKey,
                 requestDigest, sessionId, turnId);
+    }
+
+    /** The principal-carrying twin of the Turn admission. */
+    public default Admission insertCancelCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String turnId, SessionPrincipal principal) {
+        throw new UnsupportedOperationException(
+                "Principal-scoped cancel commands are unavailable");
     }
 
     public SessionMutationCommand beginSessionMutation(String tenantId,
@@ -171,6 +258,14 @@ public interface SessionAdmissionStore {
                 requestDigest, sessionId, kind);
     }
 
+    public default SessionMutationCommand beginSessionMutation(String tenantId,
+            String operation, String idempotencyKey, String requestDigest,
+            String sessionId, SessionMutationKind kind, String actorId,
+            SessionPrincipal principal) {
+        throw new UnsupportedOperationException(
+                "Principal-scoped Session mutations are unavailable");
+    }
+
     public SessionMutationCommand beginSessionRename(String tenantId, String idempotencyKey,
             String requestDigest, String sessionId, String title);
 
@@ -180,6 +275,13 @@ public interface SessionAdmissionStore {
             String title, String actorId) {
         return beginSessionRename(tenantId, idempotencyKey, requestDigest,
                 sessionId, title);
+    }
+
+    public default SessionMutationCommand beginSessionRename(String tenantId,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String title, String actorId, SessionPrincipal principal) {
+        throw new UnsupportedOperationException(
+                "Principal-scoped Session renames are unavailable");
     }
 
     public SessionRecord completeSessionRename(String tenantId, String idempotencyKey,

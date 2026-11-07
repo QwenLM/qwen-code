@@ -59,7 +59,7 @@ class ManagedUserMessageStoreTest {
 
     @BeforeEach
     void setUp() {
-        session = agents.createSession(TENANT, "create-" + UUID.randomUUID(),
+        session = agents.createSession(TENANT, ACTOR, "create-" + UUID.randomUUID(),
                 "qwen-code", null, "queue", Map.of(), List.of()).sessionId();
         ManagedAgentService queueAgents = mock(ManagedAgentService.class);
         when(queueAgents.supportsUserMessageQueue()).thenReturn(true);
@@ -168,9 +168,9 @@ class ManagedUserMessageStoreTest {
             holder.setAutoCommit(false);
             com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.lockPlacementDomain(holder, TENANT);
             try {
-                messages.startNext(TENANT, session, (tenant, actor, key, target, input) -> {
-                    var admission = store.insertTurnCommand(tenant, "queue-test", key, "digest", target,
-                            first.input(), "sha256:" + "0".repeat(64), actor);
+                messages.startNext(TENANT, session, (principal, key, target, input) -> {
+                    var admission = store.insertTurnCommand(principal.tenantId(), "queue-test", key, "digest", target,
+                            first.input(), "sha256:" + "0".repeat(64), principal);
                     return new com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission(
                             target, admission.turnId(), "ACCEPTED", false);
                 });

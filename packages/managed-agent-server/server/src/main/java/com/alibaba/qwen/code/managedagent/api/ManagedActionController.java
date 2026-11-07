@@ -38,13 +38,15 @@ public class ManagedActionController {
             @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "20") int limit,
             @RequestParam(name = "include_children", defaultValue = "false") boolean includeChildren) {
-        return actions.listPublic(tenant.tenantId(), tenant.actorId(), sessionId, cursor, limit, includeChildren);
+        return actions.listPublic(tenant.tenantId(), tenant.actorId(), sessionId,
+                cursor, limit, includeChildren);
     }
 
     @GetMapping("/v1/agents/sessions/{sessionId}/actions/{actionId}")
     public JsonNode get(
             TenantContext tenant, @PathVariable String sessionId, @PathVariable String actionId) {
-        return actions.get(tenant.tenantId(), tenant.actorId(), sessionId, actionId, false);
+        return actions.get(tenant.tenantId(), tenant.actorId(), sessionId,
+                actionId, false);
     }
 
     @PostMapping("/v1/agents/sessions/{sessionId}/actions/{actionId}/responses")
@@ -57,7 +59,7 @@ public class ManagedActionController {
         var admission =
                 actions.respond(
                         tenant.tenantId(),
-                        tenant.actorId(),
+                        tenant.principal(),
                         sessionId,
                         actionId,
                         idempotencyKey,
@@ -85,7 +87,8 @@ public class ManagedActionController {
     public JsonNode getWebShell(
             TenantContext tenant, @Valid @RequestBody WebShellActionGetRequest request) {
         return actions.get(
-                tenant.tenantId(), tenant.actorId(), request.sessionId(), request.actionId(), true);
+                tenant.tenantId(), tenant.actorId(), request.sessionId(),
+                request.actionId(), true);
     }
 
     @PostMapping("/api/agent/web-shell/v1/actions/respond")
@@ -99,7 +102,7 @@ public class ManagedActionController {
         var admission =
                 actions.respond(
                         tenant.tenantId(),
-                        tenant.actorId(),
+                        tenant.principal(),
                         request.sessionId(),
                         request.actionId(),
                         request.idempotencyKey(),

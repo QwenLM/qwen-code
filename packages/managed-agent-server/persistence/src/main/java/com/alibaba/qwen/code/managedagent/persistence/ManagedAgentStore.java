@@ -20,6 +20,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelSelection
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionOptions;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
@@ -190,6 +191,51 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
+    public Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest) {
+        return sessionAdmissions.insertSessionCommand(tenantId, principal, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionModelConfig modelConfig) {
+        return sessionAdmissions.insertSessionCommand(tenantId, principal, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig);
+    }
+
+    @Override
+    public void requireSessionOwnership(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        sessionAdmissions.requireSessionOwnership(tenantId, sessionId, principal);
+    }
+
+    @Override
+    public void requireSessionAuthority(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        sessionAdmissions.requireSessionAuthority(tenantId, sessionId, principal);
+    }
+
+    @Override
+    public void requireSessionReadAuthority(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        sessionAdmissions.requireSessionReadAuthority(tenantId, sessionId, principal);
+    }
+
+    @Override
+    public boolean ownsSession(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        return sessionAdmissions.ownsSession(tenantId, sessionId, principal);
+    }
+
+    @Override
+    @Transactional
     public Admission insertWorkspaceSessionCommand(SessionCreationCommand command) {
         return sessionAdmissions.insertWorkspaceSessionCommand(command);
     }
@@ -323,7 +369,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest) {
         return sessionCommands.insertTurnCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, input,
-                payloadDigest, null);
+                payloadDigest, (String) null);
     }
 
     @Transactional
@@ -334,12 +380,21 @@ public class ManagedAgentStore implements AgentStateStore {
         return sessionCommands.insertTurnCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, input, payloadDigest, actorId);
     }
 
+    @Override
+    @Transactional
+    public Admission insertTurnCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionPrincipal principal) {
+        return sessionCommands.insertTurnCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, input, payloadDigest, principal);
+    }
+
     @Transactional
     public Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId) {
         return sessionCommands.insertCancelCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId,
-                turnId, null);
+                turnId, (String) null);
     }
 
     @Transactional
@@ -351,9 +406,17 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
+    public Admission insertCancelCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String turnId, SessionPrincipal principal) {
+        return sessionCommands.insertCancelCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, turnId, principal);
+    }
+
+    @Override
+    @Transactional
     public SessionMutationCommand beginSessionRename(String tenantId, String key,
             String digest, String sessionId, String title) {
-        return sessionCommands.beginSessionRename(tenantId, key, digest, sessionId, title, null);
+        return sessionCommands.beginSessionRename(tenantId, key, digest, sessionId, title, (String) null);
     }
 
     @Override
@@ -361,6 +424,14 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionMutationCommand beginSessionRename(String tenantId, String key,
             String digest, String sessionId, String title, String actorId) {
         return sessionCommands.beginSessionRename(tenantId, key, digest, sessionId, title, actorId);
+    }
+
+    @Override
+    @Transactional
+    public SessionMutationCommand beginSessionRename(String tenantId,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String title, String actorId, SessionPrincipal principal) {
+        return sessionCommands.beginSessionRename(tenantId, idempotencyKey, requestDigest, sessionId, title, actorId, principal);
     }
 
     @Override
@@ -410,7 +481,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind) {
         return sessionCommands.beginSessionMutation(tenantId, operation, idempotencyKey, requestDigest, sessionId,
-                kind, null);
+                kind, (String) null);
     }
 
     @Transactional
@@ -418,6 +489,15 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind, String actorId) {
         return sessionCommands.beginSessionMutation(tenantId, operation, idempotencyKey, requestDigest, sessionId, kind, actorId);
+    }
+
+    @Override
+    @Transactional
+    public SessionMutationCommand beginSessionMutation(String tenantId,
+            String operation, String idempotencyKey, String requestDigest,
+            String sessionId, SessionMutationKind kind, String actorId,
+            SessionPrincipal principal) {
+        return sessionCommands.beginSessionMutation(tenantId, operation, idempotencyKey, requestDigest, sessionId, kind, actorId, principal);
     }
 
     @Transactional
@@ -768,6 +848,22 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState, String titleQuery) {
         return sessionQueries.listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId, limit, archiveState, titleQuery);
+    }
+
+    @Override
+    public SessionPage listSessions(String tenantId,
+            SessionPrincipal principal, Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState,
+            String titleQuery) {
+        return sessionQueries.listSessions(tenantId, principal, beforeCreatedAt, beforeSessionId, limit, archiveState, titleQuery);
+    }
+
+    @Override
+    public SessionPage listOwnedSessions(String tenantId,
+            SessionPrincipal principal, Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState,
+            String titleQuery) {
+        return sessionQueries.listOwnedSessions(tenantId, principal, beforeCreatedAt, beforeSessionId, limit, archiveState, titleQuery);
     }
 
     public Map<String, WebShellLifecycleOperation>

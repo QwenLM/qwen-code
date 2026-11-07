@@ -21,20 +21,25 @@ class TenantContextFilterTest {
     @Test
     void acceptsOnlyMatchingTrustedPrincipal() throws Exception {
         MockHttpServletRequest request = request("tenant-a");
-        request.setUserPrincipal(actor("tenant-a", "actor-a"));
+        request.setUserPrincipal(actor("tenant-a", "actor-a",
+                "subject-a"));
         MockFilterChain chain = new MockFilterChain();
         filter.doFilter(request, new MockHttpServletResponse(), chain);
         TenantContext context = (TenantContext) request.getAttribute(
                 TenantContextFilter.ATTRIBUTE);
         assertThat(context.requireActorId()).isEqualTo("actor-a");
+        assertThat(context.actorSubjectId()).isEqualTo("subject-a");
+        assertThat(context.principal().actorSubjectId()).isEqualTo("subject-a");
         assertThat(context.tenantId()).isEqualTo("tenant-a");
         assertThat(chain.getRequest()).isSameAs(request);
     }
 
     @Test
     void acceptsTrustedActorIdsAtTheUnicodeBoundary() throws Exception {
-        for (String actorId : new String[] {"alice@example.com", " ",
-                "𝄞".repeat(512)}) {
+        // The ownership columns bound UTF-8 bytes: 128 astral code points
+        // are exactly 512 bytes and must pass, like 512 ASCII characters.
+        for (String actorId : new String[] {"alice@example.com",
+                "a".repeat(512), "𝄞".repeat(128)}) {
             MockHttpServletRequest request = request("tenant-a");
             request.setUserPrincipal(actor("tenant-a", actorId));
             MockHttpServletResponse response = new MockHttpServletResponse();
@@ -68,7 +73,15 @@ class TenantContextFilterTest {
             throws ServletException, IOException {
         for (AuthenticatedTenantActor actor : new AuthenticatedTenantActor[] {
                 actor("tenant-b", "actor-a"), actor("tenant-a", "bad\nactor"),
-                actor("tenant-a", "𝄞".repeat(513))
+                // 512 astral code points are 2048 UTF-8 bytes: the principal
+                // would reject them, so the boundary must refuse them before
+                // any controller can commit a Session it cannot represent.
+                actor("tenant-a", "𝄞".repeat(512)),
+                actor("tenant-a", "𝄞".repeat(513)),
+                actor("tenant-a", "a".repeat(513)),
+                actor("tenant-a", " "),
+                actor("tenant-a", "actor-a", "subject\nsplit"),
+                actor("tenant-a", null, "subject-a")
         }) {
             MockHttpServletRequest request = request("tenant-a");
             request.setUserPrincipal(actor);
@@ -112,6 +125,11 @@ class TenantContextFilterTest {
 
     private static AuthenticatedTenantActor actor(String tenant,
             String actorId) {
+        return actor(tenant, actorId, null);
+    }
+
+    private static AuthenticatedTenantActor actor(String tenant,
+            String actorId, String actorSubjectId) {
         return new AuthenticatedTenantActor() {
             @Override
             public String getName() {
@@ -126,6 +144,11 @@ class TenantContextFilterTest {
             @Override
             public String actorId() {
                 return actorId;
+            }
+
+            @Override
+            public String actorSubjectId() {
+                return actorSubjectId;
             }
         };
     }

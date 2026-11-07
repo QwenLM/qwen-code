@@ -156,7 +156,8 @@ public class ManagedArtifactService {
 
     private SessionRecord session(TenantContext tenant, String sessionId) {
         tenant.requireActorId();
-        SessionRecord session = sessions.requireReadableSession(tenant.tenantId(), tenant.actorId(), sessionId);
+        SessionRecord session = sessions.requireReadableSession(
+                tenant.requirePrincipal(), sessionId);
         if (!settings.isEnabled() || !reader.supported() || session.workspace() == null
                 || "DELETING".equals(session.status())) {
             throw notFound();

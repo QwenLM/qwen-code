@@ -31,6 +31,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload;
+import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.BindingContext;
@@ -908,6 +910,22 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         return warm(harnessSessionId, null);
     }
 
+    /** 只读查询可信会话对应的当前 Workspace 绑定，不分配也不预热运行时。 */
+    public CompletionStage<RuntimeBindingRecord> findBindingForHarnessSession(
+            String tenantId, String harnessSessionId) {
+        requireOpen(closed);
+        String harnessId = BrokerValues.requireId(
+                harnessSessionId, "harnessSessionId");
+        return resolveScope(harnessId, false, null).thenApply(scope -> {
+            if (!scope.getTenantId().equals(tenantId)) {
+                throw conflict("runtime_session_conflict",
+                        "Harness Session belongs to another tenant");
+            }
+            return bindingRepository.findLatestForRequest(
+                    provisionRequest(scope, harnessId));
+        });
+    }
+
     public CompletionStage<RuntimeScope> capabilities(
             String harnessSessionId, RuntimeLifecycleAuthority authority) {
         requireOpen(closed);
@@ -1648,6 +1666,12 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                     && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
                         }
+                        // The digest was just computed and compared to the
+                        // receipt and the payload parsed and shape-checked
+                        // above; classify from those locals instead of
+                        // hashing and parsing the same bytes a second time.
+                        VerifiedDispatchPayload verifiedPayload =
+                                VerifiedDispatchPayload.of(digest, toolName);
                         if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
                                 && (v3 || record.getReference().containsKey("runtimeProtocol")
                                         || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
@@ -1714,7 +1738,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                             if (family != null) {
                                                 admitBackgroundProcess(context, current, family);
                                             }
-                                            executionDispatcher.beginDispatch(context, current, payload, grant);
+                                            executionDispatcher.beginDispatch(context, current, payload,
+                                                    grant, verifiedPayload);
                                             ToolExecutionRecord latest = executionRepository
                                                     .findByExecutionCallId(executionId);
                                             return latest == null ? current : latest;
@@ -1724,7 +1749,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                     });
                         }
                         if (shouldDriveDispatch(record)) {
-                            executionDispatcher.beginDispatch(context, record, payload);
+                            executionDispatcher.beginDispatch(context, record, payload,
+                                    null, verifiedPayload);
                         }
                         ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
                         return CompletableFuture.completedFuture(latest == null ? record : latest);
@@ -2594,6 +2620,292 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     /** Trusted maintenance of the saved generation; never resolves current authorization or provisions a replacement. */
     public CompletionStage<RuntimeBindingRecord> recoverBinding(String bindingId, long expectedGeneration) {
         return bindingProvisioning.recoverBinding(bindingId, expectedGeneration, false);
+    }
+
+    /** 已核原 endpoint 的宿主专用入口；快照版本过期或工具未决时不得进入恢复。 */
+    public CompletionStage<RuntimeBindingRecord> recoverExternalWorkspaceBinding(
+            String bindingId, long expectedGeneration, long expectedVersion) {
+        if (expectedVersion < 0) {
+            return failed(conflict("runtime_broker_recovery_blocked",
+                    "Invalid recovery snapshot"));
+        }
+        return recoverBinding(
+                bindingId, expectedGeneration, false, expectedVersion);
+    }
+
+    private boolean externalRecoveryEligible(RuntimeBindingRecord binding) {
+        return binding != null
+                && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
+                        .isExternalWorkspaceRequest(binding.getRequest())
+                && "workspace".equals(
+                        binding.getRequest().getScope().getIsolationClass())
+                && (binding.getState() == RuntimeBindingRecord.State.READY
+                        || binding.getState()
+                                == RuntimeBindingRecord.State.RECOVERY_BLOCKED)
+                && !binding.isDrainRequested() && binding.getLease() != null
+                && binding.getProvisionSeed() != null
+                && binding.getProvisionSeed().matches(binding.getLease())
+                && !retirementOwns(binding)
+                && !executionRepository.hasActiveByBinding(
+                        binding.getBindingId(), binding.getGeneration());
+    }
+
+    /**
+     * Close owns retirement after journal settlement. Observing its retired
+     * registration as journal loss would erase the clean-stop boundary. One
+     * Session's close never retires a shared binding; only storage retirement does.
+     */
+    private boolean retirementOwns(RuntimeBindingRecord binding) {
+        RuntimeProvisionRequest request = binding.getRequest();
+        String tenantId = request.getScope().getTenantId();
+        if (HarnessOwnership.sharesRuntimeSessions(request)) {
+            return request.getStorageId() != null
+                    && bindingRepository.isStorageFenced(tenantId, request.getStorageId(), null);
+        }
+        return "session".equals(request.getScope().getIsolationClass())
+                && (bindingRepository.isHarnessAdmissionClosed(tenantId, request.getIsolationKey())
+                        || request.getStorageId() != null
+                        && bindingRepository.isStorageFenced(tenantId, request.getStorageId(), null));
+    }
+
+    private CompletionStage<RuntimeBindingRecord> recoverBinding(String bindingId, long expectedGeneration, boolean lookupOnly) {
+        return recoverBinding(
+                bindingId, expectedGeneration, lookupOnly, null);
+    }
+
+    private CompletionStage<RuntimeBindingRecord> recoverBinding(
+            String bindingId, long expectedGeneration, boolean lookupOnly,
+            Long expectedVersion) {
+        requireOpen(closed);
+        RuntimeBindingRecord record = bindingRepository.findById(bindingId);
+        if (record == null || record.getGeneration() != expectedGeneration
+                || !provisioner.supportsKind(record.getRequest().getProvisionerKind())) {
+            return failed(conflict("runtime_broker_recovery_blocked", "Saved Runtime recovery is unavailable"));
+        }
+        if (expectedVersion != null
+                && (record.getVersion() != expectedVersion
+                        || !externalRecoveryEligible(record))) {
+            return failed(conflict("runtime_broker_recovery_blocked",
+                    "Recovery snapshot is stale or unsettled"));
+        }
+        if (!lookupOnly && record.getState() != RuntimeBindingRecord.State.LOST && retirementOwns(record)) {
+            return CompletableFuture.completedFuture(record);
+        }
+        if (!provisioner.supportsStartupRecovery(record.getResourceHandle())) {
+            return failed(conflict("runtime_broker_recovery_blocked", "Saved Runtime recovery is unavailable"));
+        }
+        if (!record.isActive()) {
+            return CompletableFuture.completedFuture(record);
+        }
+        CompletableFuture<BindingContext> reservation = new CompletableFuture<>();
+        AtomicReference<BindingContext> adopted = new AtomicReference<>();
+        if (bindingRegistry.reserveBinding(bindingId, reservation) != null) {
+            return failed(unavailable("runtime_reconcile_in_progress", "Runtime recovery is already in progress"));
+        }
+        RuntimeBindingRecord claimed;
+        try {
+            claimed = bindingRepository.claimOperation(bindingId, brokerOwnerId, operationLeaseDuration);
+        } catch (RuntimeException error) {
+            bindingRegistry.finishBindingOperation(bindingId, reservation);
+            reservation.completeExceptionally(error);
+            return failed(error);
+        }
+        CompletionStage<RuntimeBindingRecord> operation = safeStage(() -> {
+            if (claimed == null || claimed.getGeneration() != expectedGeneration) {
+                return failed(unavailable("runtime_reconcile_in_progress", "Another Broker owns Runtime recovery"));
+            }
+            // claimOperation 的原子版本递增必须紧接快照；恢复期间若有变更，
+            // 不能把这个绑定重新放回 READY。
+            if (expectedVersion != null
+                    && (claimed.getVersion() != expectedVersion + 1
+                            || !externalRecoveryEligible(claimed))) {
+                return failed(conflict("runtime_broker_recovery_blocked",
+                        "Recovery snapshot was fenced"));
+            }
+            if (expectedVersion != null) {
+                // 与工具 admission 共用 binding 行 CAS。先关闭新写，
+                // 再检查抢先进入的未决工具；失败时保持 BLOCKED。
+                RuntimeBindingRecord fenced =
+                        bindingRepository.compareAndSet(
+                                claimed,
+                                claimed.withState(
+                                        RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                                        claimed.getLease(),
+                                        clock.instant()));
+                if (fenced == null
+                        || executionRepository.hasActiveByBinding(
+                                fenced.getBindingId(),
+                                fenced.getGeneration())) {
+                    return failed(conflict("runtime_broker_recovery_blocked",
+                            "Recovery admission is unsettled"));
+                }
+            }
+            if (!lookupOnly && claimed.getState() != RuntimeBindingRecord.State.LOST && retirementOwns(claimed)) {
+                return CompletableFuture.completedFuture(claimed);
+            }
+            if (claimed.getState() == RuntimeBindingRecord.State.LOST) {
+                if (lookupOnly) {
+                    return failed(conflict("workspace_close_identity_unverified", "Original Hook Runtime is lost"));
+                }
+                return cleanupLost(claimed);
+            }
+            if (!canReconcile(claimed) && claimed.getState() != RuntimeBindingRecord.State.DRAINING) {
+                return failed(conflict("runtime_broker_recovery_blocked", "Saved Runtime cannot be observed"));
+            }
+            return renewingStep(claimed, () -> provisioner.reconcile(claimed.getRequest(), claimed.getProvisionSeed(),
+                    claimed.getResourceHandle(), claimed.getLease()))
+                    .thenCompose(observed -> {
+                        RuntimeBindingRecord current = renewRecoveryClaim(claimed);
+                        if (observed == null) {
+                            return CompletableFuture.completedFuture(current);
+                        }
+                        if (lookupOnly && observed.getOutcome() != RuntimeObservation.Outcome.READY) {
+                            return failed(conflict("workspace_close_identity_unverified", "Original Hook Runtime is unverified"));
+                        }
+                        if (observed.getOutcome() == RuntimeObservation.Outcome.NOT_FOUND
+                                && observed.getLossEvidence() != null) {
+                            RuntimeBindingRecord lost = bindingRepository.compareAndSet(current,
+                                    current.withRecoveryEvidence(observed.getLossEvidence(),
+                                            observed.getStopEvidence(), clock.instant()));
+                            return lost == null
+                                    ? failed(unavailable("runtime_provision_fenced", "Runtime recovery claim expired"))
+                                    : cleanupLost(lost);
+                        }
+                        if (observed.getOutcome() == RuntimeObservation.Outcome.READY
+                                && current.getState() != RuntimeBindingRecord.State.DRAINING) {
+                            return adoptObservation(bindingId, claimed.getOperationGeneration(), observed,
+                                    cleanupStepTimeoutMillis())
+                                    .thenApply(context -> {
+                                        adopted.set(context);
+                                        return context.record();
+                                    });
+                        }
+                        if (observed.getOutcome() == RuntimeObservation.Outcome.CONFLICT) {
+                            blockRecovery(current);
+                        }
+                        return CompletableFuture.completedFuture(bindingRepository.findById(bindingId));
+                    });
+        });
+        // The inner steps are each bounded and the claim is renewed between
+        // them, so the chain can legitimately span more than one lease; the
+        // outer backstop uses the same 4x deadline as reconciliation instead
+        // of cutting a healthy chain at exactly one lease.
+        return operation.toCompletableFuture().orTimeout(operationDeadlineMillis(), TimeUnit.MILLISECONDS)
+                .whenComplete((recovered, error) -> {
+                    if (claimed != null) {
+                        bindingRegistry.releaseOperationQuietly(bindingId, claimed.getOperationGeneration());
+                    }
+                    if (recovered != null && recovered.getState() == RuntimeBindingRecord.State.RELEASED) {
+                        bindingRegistry.forgetBinding(bindingId);
+                    }
+                    bindingRegistry.finishBindingOperation(bindingId, reservation);
+                    BindingContext healthy = error == null ? adopted.get() : null;
+                    if (healthy != null) {
+                        reservation.complete(healthy);
+                    } else {
+                        reservation.completeExceptionally(unavailable("runtime_reconciliation_required",
+                                "Maintenance observation completed; retry using current authorization"));
+                    }
+                });
+    }
+
+    private boolean blockRecovery(RuntimeBindingRecord claimed) {
+        return bindingRepository.compareAndSet(claimed, claimed.withState(
+                RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                claimed.getLease(), clock.instant())) != null;
+    }
+
+    /**
+     * Blocks recovery and answers whether the binding is now blocked. The
+     * deadline and the failure handler hold the same claim, so the one that
+     * writes second finds the block already there. A write or read that
+     * fails answers false, and the failure is kept on {@code cause}.
+     */
+    private boolean blockRecoveryQuietly(RuntimeBindingRecord claimed,
+            Throwable cause) {
+        try {
+            if (blockRecovery(claimed)) {
+                return true;
+            }
+            RuntimeBindingRecord latest = bindingRepository.findById(
+                    claimed.getBindingId());
+            return latest != null && latest.getState()
+                    == RuntimeBindingRecord.State.RECOVERY_BLOCKED;
+        } catch (RuntimeException failure) {
+            cause.addSuppressed(failure);
+            return false;
+        }
+    }
+
+    private void blockRecovery(String bindingId, long operationGeneration) {
+        RuntimeBindingRecord latest = bindingRepository.findById(bindingId);
+        if (latest != null && ownsOperation(latest, operationGeneration)
+                && latest.getState() == RuntimeBindingRecord.State.READY) {
+            blockRecovery(latest);
+        }
+    }
+
+    private boolean ownsOperation(RuntimeBindingRecord record,
+            long operationGeneration) {
+        return brokerOwnerId.equals(record.getOperationOwner())
+                && record.getOperationGeneration() == operationGeneration;
+    }
+
+    private long operationDeadlineNanos() {
+        long leaseNanos = operationLeaseDuration.toNanos();
+        return leaseNanos > Long.MAX_VALUE / 4
+                ? Long.MAX_VALUE : leaseNanos * 4;
+    }
+
+    private long operationDeadlineMillis() {
+        return Math.max(1, operationDeadlineNanos() / 1_000_000);
+    }
+
+    private static boolean validAttestation(RuntimeAttestation attestation,
+            RuntimeLease lease, RuntimeProvisionSeed seed,
+            RuntimeProvisionRequest request) {
+        return attestation != null
+                && lease.getRuntimeInstanceId().equals(
+                        attestation.getRuntimeInstanceId())
+                && seed.getGatewayIncarnation().equals(
+                        attestation.getRuntimeIncarnation())
+                && lease.getLeaseId().equals(attestation.getLeaseId())
+                && lease.getEpoch() == attestation.getEpoch()
+                && request.getScope().equals(attestation.getScope())
+                && java.util.Objects.equals(request.getStorageId(),
+                        attestation.getStorageId())
+                && seed.getProvisionRequestId().equals(
+                        attestation.getProvisionRequestId());
+    }
+
+    private record DurableProvision(RuntimeLease lease,
+            RuntimeResourceHandle handle) {
+    }
+
+    private record ReconcileStep(Kind kind, RuntimeObservation observation,
+            RuntimeBrokerException error) {
+        private enum Kind {
+            RETRY,
+            LOST,
+            BLOCKED,
+            READY
+        }
+
+        static ReconcileStep retry() {
+            return new ReconcileStep(Kind.RETRY, null, null);
+        }
+
+        static ReconcileStep lost(RuntimeObservation observation) {
+            return new ReconcileStep(Kind.LOST, observation, null);
+        }
+
+        static ReconcileStep blocked(RuntimeBrokerException error) {
+            return new ReconcileStep(Kind.BLOCKED, null, error);
+        }
+
+        static ReconcileStep ready(RuntimeObservation observation) {
+            return new ReconcileStep(Kind.READY, observation, null);
+        }
     }
 
     private RuntimeSessionRecord requireAcquireSessionRecord(SessionContext context) {

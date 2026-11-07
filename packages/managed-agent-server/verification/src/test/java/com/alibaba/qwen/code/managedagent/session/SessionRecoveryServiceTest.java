@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.RecoveryStatus;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
@@ -42,6 +43,11 @@ class SessionRecoveryServiceTest {
     private final HarnessConnector harness = mock(HarnessConnector.class);
     private final SessionRecord session = new SessionRecord("tenant", "session",
             "qwen-code", "title", "ACTIVE", "boot", "epoch", 1, 1, 1, 1, null, 1);
+    // The service resolves the String actor to a principal before calling the
+    // store; SessionPrincipal is a record, so these value-equal constants match
+    // the principal the service builds from ("tenant", "actor").
+    private static final SessionPrincipal ACTOR = SessionPrincipal.ofUser("tenant", "actor");
+    private static final SessionPrincipal FOREIGN = SessionPrincipal.ofUser("foreign", "actor");
     private JdbcTemplate jdbc;
     private SessionRecoveryService service;
 
@@ -54,7 +60,7 @@ class SessionRecoveryServiceTest {
                 + " head_kind VARCHAR, recovery_status VARCHAR, recovery_detail_code VARCHAR)");
         jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?)",
                 "tenant", "session", "MANAGED_SESSION", "READY", null);
-        when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(session);
+        when(sessions.requireReadableSession("tenant", ACTOR, "session")).thenReturn(session);
         when(store.findLatestTurns("tenant", List.of("session"))).thenReturn(Map.of());
         service = new SessionRecoveryService(sessions, store, coordinator, harness, new com.alibaba.qwen.code.managedagent.persistence.JdbcSessionRecoveryRepository(jdbc), mock(ManagedSessionStore.class));
     }
@@ -62,7 +68,7 @@ class SessionRecoveryServiceTest {
     @Test
     void anEmptyNeverExecutedSessionIsReadyWithoutLoadingAnything() {
         jdbc.update("DELETE FROM ma_session_head");
-        when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(
+        when(sessions.requireReadableSession("tenant", ACTOR, "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", "title", "ACTIVE",
                         null, null, 0, 0, 1, 1, null, 1));
         var recovery = service.query("tenant", "actor", "session");
@@ -76,7 +82,7 @@ class SessionRecoveryServiceTest {
     @ValueSource(strings = {"boot", "epoch", "both"})
     void aBoundSessionWithoutItsNativeHeadCannotUseEvenAWarmReadyCache(String identity) {
         jdbc.update("DELETE FROM ma_session_head");
-        when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(
+        when(sessions.requireReadableSession("tenant", ACTOR, "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", "title", "ACTIVE",
                         "epoch".equals(identity) ? null : "boot", "boot".equals(identity) ? null : "epoch",
                         0, 0, 1, 1, null, 1));
@@ -235,7 +241,7 @@ class SessionRecoveryServiceTest {
         turn("RUNNING", AgentStateStore.RUNTIME_RECOVERY_BLOCKED);
         doThrow(new ManagedAgentException(403,
                 "session_operation_forbidden", "Operator required"))
-                .when(sessions).requireRecoveryOperator(session, "actor");
+                .when(sessions).requireRecoveryOperator(session, ACTOR);
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.actions().recheck()).isFalse();
         assertThat(recovery.actions().cancel()).isFalse();
@@ -390,7 +396,7 @@ class SessionRecoveryServiceTest {
 
     @Test
     void foreignOrInvisibleSessionsNeverReachTheirEvidence() {
-        when(sessions.requireReadableSession("foreign", "actor", "session"))
+        when(sessions.requireReadableSession("foreign", FOREIGN, "session"))
                 .thenThrow(new ManagedAgentException(404,
                         "session_not_found", "Not found"));
         assertThatThrownBy(() -> service.query("foreign", "actor", "session"))

@@ -109,6 +109,11 @@ public abstract class DelegatingBindingRepository implements RuntimeBindingRepos
     }
 
     @Override
+    public RuntimeBindingRecord findLatestForRequest(RuntimeProvisionRequest request) {
+        return delegate.findLatestForRequest(request);
+    }
+
+    @Override
     public List<RuntimeBindingRecord> findActiveByIsolationKey(RuntimeScope scope,
             String isolationKey) {
         return delegate.findActiveByIsolationKey(scope, isolationKey);
