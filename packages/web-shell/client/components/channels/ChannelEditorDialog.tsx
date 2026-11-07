@@ -120,6 +120,7 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     deliverToBoundSessions:
       'channels.editor.field.github.deliverToBoundSessions',
     prWatchEvents: 'channels.editor.field.github.prWatchEvents',
+    prWatchLimit: 'channels.editor.field.github.prWatchLimit',
     boundSessionActions: 'channels.editor.field.github.boundSessionActions',
   },
   gitlab: {
@@ -144,11 +145,12 @@ const SHARED_SESSION_FIELD_KEYS = new Set([
   'multiSession',
   'instructions',
 ]);
-// One panel: watch events and action templates only mean something with
-// bound delivery enabled.
+// One panel: watch events, the watch limit, and action templates only mean
+// something with bound delivery enabled.
 const BOUND_SESSION_FIELD_KEYS = new Set([
   'deliverToBoundSessions',
   'prWatchEvents',
+  'prWatchLimit',
   'boundSessionActions',
 ]);
 

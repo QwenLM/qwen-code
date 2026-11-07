@@ -65,61 +65,96 @@ bindings):
 ### 1. Watch selection and budget (`packages/channels/github`)
 
 - New channel config field `prWatchLimit`:
-  - Descriptor: `kind: 'number'`, `exclusiveMinimum: 0`, `maximum: 500`,
-    `default: '30'`, description naming the per-poll API cost and the
-    `pollInterval` trade-off.
+  - Descriptor: `kind: 'number'`, `exclusiveMinimum: 0`, `maximum` and
+    `default` built from the adapter's exported `MAX_PR_WATCH_LIMIT` (500)
+    and `DEFAULT_PR_WATCH_LIMIT` (30) so the form bound and the effective
+    bound cannot drift; the description states the rate arithmetic (~60
+    requests/hour per watched PR at the 60 s default; a 5000/hour PAT
+    budget admits ~80 PRs; over budget, every watch pass aborts).
   - Adapter: a `prWatchLimit` getter clamps like the existing
-    `pollInterval` getter (invalid/unset → 30; fractional → raised to 1;
-    above 500 → clamped to 500). `MAX_WATCHED_PRS` becomes the default
-    constant, not the hard ceiling.
-- `runPrStateWatch` partitions the active set using the binding registry
-  state it already reads:
-  - **open**: binding state is neither `merged` nor `closed`;
-  - **terminal-pending**: binding state is `merged`/`closed` but the watch
-    entry has not observed `prState === 'closed'` yet.
-    Selection watches open PRs first (by `updatedAt` desc) up to the limit,
-    then fills any remaining budget with terminal-pending PRs (same order)
-    so they get their one terminal observation and leave the active set.
+    `pollInterval` getter (invalid/unset → 30; fractional → rounded up;
+    above 500 → clamped to 500). Hand-edited settings reach the getter
+    unchecked by the descriptor, so the clamp is load-bearing and tested.
+  - Validation: `validateBoundSessionConfig` rejects `prWatchLimit`
+    without `deliverToBoundSessions: true`, with the sibling wording.
+  - Web Shell: the field is registered in the editor's GitHub label map
+    and bound-session panel, with both locale catalogues translated.
+- `runPrStateWatch` partitions the active set:
+  - **open**: binding state is neither `merged` nor `closed`, and the
+    watch entry has not observed `prState === 'closed'` (a stale-open
+    registry must not let an observed-closed PR hold an open-tier slot);
+  - **terminal-pending**: everything else that still needs its terminal
+    observation.
+    Selection reserves a terminal slice inside the budget —
+    `min(terminalCount, max(1, ceil(limit * 0.2)))` — gives open PRs the
+    rest (by `updatedAt` desc), and lets terminal-pending PRs use any
+    further leftover. Without the reservation, `limit == openCount` would
+    starve the drain forever and the active set would grow with every
+    merge. Each drained binding leaves the active set for good, so the
+    reservation frees up once the backlog clears.
 - The cap warning keeps the `PR watch cap exceeded` prefix (pinned by
   tests) and fires whenever the budget cannot cover the whole active set:
   it reports `watched/active` counts, the configured limit, and the excluded
   keys (open and terminal-pending alike).
 - Terminal observation stays API-authoritative: no `state_change` is ever
-  synthesized from binding registry data. The registry only decides
-  _priority_, never event content.
+  synthesized from binding registry data. The registry and the watch
+  entry only decide _priority_, never event content. A genuinely reopened
+  PR gets one leftover-budget observation and returns to the open tier.
 
 ### 2. Background public-task runner (`packages/channels/github`)
 
 - A per-channel FIFO runner (concurrency 1) owns public-path
   `runInboundTask` execution. It follows the existing
-  `retryPendingFinalDeliveries` background-loop pattern: started in
-  `connect`, stopped by `disconnect`.
+  `retryPendingFinalDeliveries` background-loop pattern: started on
+  demand, retired by generation on `disconnect`/`connect`.
 - `dispatchEnvelope` public branch: claim the task durably (unchanged),
-  enqueue it, return `true`. The boolean now means "durably claimed or
-  retired", which is exactly what callers persist as dedupe keys; execution
-  outcome continues to flow through task-state transitions and recovery.
+  run the absence gate synchronously, then enqueue and return `true`.
+  The absence gate (incomplete binding snapshot cannot prove a PR is
+  unbound) must run at dispatch so a deferred event keeps the `false`
+  verdict the comment lane's first-contact body suppression depends on;
+  `runInboundTask` re-checks it for tasks recovery enqueues.
+- Gone-session public fallbacks (bound target vanished, absence
+  authoritative) clear the delivery durably and requeue through the same
+  runner (`requeued` verdict) instead of awaiting `handleInbound` in the
+  poll lane: they are full public turns, and running them inline both
+  head-of-line-blocks the poll and can steer-cancel another public turn
+  on a shared channel session.
 - Bound fan-out branch stays inline: delivery is a fast prompt POST whose
   verdict (delivered/deferred/retired) the dispatch return value and the
   cursor gate already depend on.
-- `recoverInboundTasks`: bound tasks run inline as today; recoverable
-  public tasks are enqueued instead of awaited.
+- `recoverInboundTasks` skips tasks in the runner's in-flight set BEFORE
+  any branch mutates them (the retarget branch would otherwise re-resolve
+  a backpressure-parked task whose public turn is running — the running
+  transition merges patches, so `backpressure: true` survives — and
+  deliver it bound a second time). A running task with no in-flight entry
+  is a genuine crash and is still recovered and charged. Bound tasks run
+  inline as today; other recoverable tasks are enqueued.
 - An in-flight set (queued + running task ids) prevents double execution
-  when a re-listed event re-claims a running task or a recovery pass
-  re-scans it. `claimInboundTask` already returns the existing record for
-  a live task; the runner skips ids it already owns.
+  when a recovery pass re-scans a queued task. On a same-instance
+  reconnect, the id the orphaned runner is still executing stays in the
+  set (the orphan's `finally` removes it); queued-but-unstarted ids are
+  dropped and re-enqueued by recovery from the durable store.
 - The runner isolates failures: `runInboundTask` already transitions
   errors to `failed`/backpressure/retirement; an unexpected throw is
-  journalled and the runner continues with the next task.
-- `disconnect` stops the runner from picking up new tasks. An in-flight
-  turn keeps today's semantics: the worker exits, the daemon session
-  survives, and the durable task is recovered by the next worker start.
-- The first-contact issue body feed gains a thread-level gate: while any
-  recoverable task for the same thread exists (a fresh claim or a retry in
-  the runner), the body is deferred to a later poll. Without the gate an
-  async body turn could overtake a still-retrying comment turn on the same
-  channel session and steer-cancel it. The body key is not recorded while
-  deferred, so no event is lost; the deferral is bounded by the task's own
-  retry/deferral horizon.
+  logged AND journaled as an inbound `failed` row once per task id (the
+  poll loop's per-thread catch no longer sees it), then the runner
+  continues with the next task.
+- `disconnect` retires the runner generation and resolves idle waiters.
+  The winding-down runner's restart hook only fires for the CURRENT
+  generation, so a retired queue is never drained after disconnect; the
+  tasks stay durable for the next connect's recovery. An in-flight turn
+  keeps today's semantics: the worker exits, the daemon session survives.
+- While a thread's in-flight public work held the cursor at poll start,
+  the comment/aggregate lanes skip re-fetching its comments and the
+  direct lane skips re-processing (snapshot, not live: a task claimed
+  during this poll must not suppress the same thread's later lanes, and
+  a crashed task that is not in flight must stay re-dispatchable). The
+  first-contact body feed is NOT gated: it claims once and the runner
+  serializes it behind any running comment turn. A deferral gate was
+  tried and removed — nothing reserves a deferred body, and the
+  end-of-poll cursor commit can mark the thread read once the blocking
+  task settles, after which first contact (`!lastReadAt`) is unreachable
+  and the body is lost permanently.
 
 ### Invariants preserved (why this is safe)
 
@@ -137,37 +172,53 @@ bindings):
 ## Files affected
 
 - `packages/channels/github/src/GithubAdapter.ts` — selection, limit
-  getter, runner, dispatch/recovery hand-off, disconnect.
+  getter, runner, dispatch/recovery hand-off, absence gate extraction,
+  gone-session requeue, held-thread fetch skip, disconnect/connect.
 - `packages/channels/github/src/index.ts` — `prWatchLimit` descriptor
-  field.
+  field built from the exported constants.
 - `packages/channels/github/src/GithubAdapter.test.ts` — new coverage;
   the `pollOnce` test helpers additionally await runner idle so existing
   public-path assertions keep their meaning.
-- `packages/cli` channel descriptor pin tests, if they enumerate GitHub
-  management fields.
+- `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`
+  and `packages/web-shell/client/i18n.tsx` — field registration and both
+  locale catalogues.
 - Docs: the GitHub channel guide's bound-session section gains the
   `prWatchLimit` knob and the non-blocking execution note.
 
 ## Design decisions and rationale
 
-1. **Open-first priority instead of a bigger fixed cap.** A larger hard
+1. **Open-first priority with a reserved terminal slice.** A larger hard
    cap only postpones starvation and spends rate budget on dead PRs.
-   Priority + terminal drain fixes the ordering defect at any budget.
+   Priority fixes the ordering defect; the reservation (20%, at least
+   one) guarantees the drain progresses even when open PRs fill the
+   limit, and frees up once the backlog clears.
 2. **Configurable limit, default unchanged (30).** Each watched PR costs
-   roughly one `pulls.get` per poll plus conditional Checks fetches; at
-   the 60 s default interval, 30 PRs already approach a meaningful share
-   of the 5000 req/h PAT budget. Operators with more open bindings raise
-   `prWatchLimit` (and `pollInterval`) deliberately. The watch pass
-   already fails fast on rate limits, so an over-budget configuration
-   degrades instead of hammering the API.
+   roughly one `pulls.get` per poll plus conditional Checks fetches —
+   ~60 requests/hour at the 60 s default, so a 5000 req/h PAT budget
+   admits ~80 PRs. Operators with more open bindings raise `prWatchLimit`
+   (and `pollInterval`) deliberately. The watch pass already fails fast
+   on rate limits, so an over-budget configuration degrades instead of
+   hammering the API; the arithmetic is stated in the descriptor and the
+   guide.
 3. **Concurrency 1 runner, not per-session parallelism.** The defect is
    liveness, not throughput. Serial execution preserves reply ordering
    and avoids bridge-level concurrent-prompt hazards documented in
-   `ChannelBase` (steer/chain-and-wait).
+   `ChannelBase` (steer/chain-and-wait). Every transition into public
+   execution goes through the runner, including gone-session fallbacks.
 4. **No binding-state shortcut for terminal observation.** Synthesizing
    `state_change` from registry data would break the edge-triggered
    contract (the registry can lag or lead the API). One real observation
-   per terminal PR is cheap and drains the set permanently.
+   per terminal PR is cheap and drains the set permanently. The watch
+   entry may tier a stale-open binding as terminal, never fabricate an
+   event.
+5. **No first-contact body deferral gate.** A deferred body is not
+   reserved by anything: once the blocking task settles, the end-of-poll
+   cursor commit can mark the thread read, and first contact
+   (`!lastReadAt`) becomes unreachable — permanent loss. The runner's
+   FIFO already serializes the body turn behind any running comment
+   turn, which is the property the gate was meant to protect. The
+   synchronous absence gate at dispatch preserves the lane's
+   false-verdict body suppression for backpressure-deferred comments.
 
 ## Constraints and risks
 
@@ -175,45 +226,57 @@ bindings):
   immediately after `await pollOnce()`. Centralizing the runner-idle wait
   in the test helpers keeps most assertions intact; tests that
   intentionally observe mid-flight state must opt out explicitly.
-- **Frozen-cursor polling cost.** While a long public turn runs, every
-  poll re-lists the notification window. This is the existing
-  recovery-state behavior, bounded by the window and dedupe; the win is
-  that watch and bound lanes keep flowing.
+- **Frozen-cursor polling cost.** While a long public turn runs, the
+  window re-lists every poll; the held-thread snapshot skips the
+  redundant per-thread comment fetches and direct-lane reprocessing, so
+  the request volume no longer scales with turn duration. Dispatch
+  dedupe is unchanged.
 - **Runner shutdown.** A turn in flight at `disconnect` is not cancelled
   by this change (same as today); recovery replays it at next start with
-  the existing attempt budget.
+  the existing attempt budget. The retired generation never restarts
+  the queue, and idle waiters resolve at disconnect.
 
 ## Validation plan
 
-- Unit tests (collocated): open-first selection; terminal drain; limit
-  clamping and descriptor acceptance; warning shape; runner hand-off,
-  FIFO order, in-flight dedupe, recovery enqueue, failure isolation,
-  disconnect stop; cursor gate unchanged while a public task runs.
+- Unit tests (collocated): open-first selection with the incident shape;
+  terminal reservation at `limit == openCount`; stale-open tiering;
+  limit clamping (over-ceiling, zero, non-finite) and descriptor
+  acceptance; validation prerequisite; warning shape; runner hand-off,
+  FIFO order, in-flight dedupe via a mid-turn recovery pass, recovery
+  retarget skip, gone-session requeue, same-instance reconnect,
+  disconnect stop + idle waiters, held-thread fetch skip, failure
+  journaling; cursor gate unchanged while a public task runs.
 - E2E (`.qwen/e2e-tests/github-channel-watch-coverage-async-tasks.md`):
   real daemon + local GitHub-compatible stub + local model endpoint, per
   the channel real-scenario harness. Baseline dry-run on the installed
   release must show both defects; the local build must pass all groups.
 - Mutation witnesses: revert open-first ordering, revert the enqueue
-  hand-off, and remove the in-flight dedupe set — each must turn a
-  dedicated test red.
+  hand-off, remove the recovery in-flight skip, remove the terminal
+  reservation, remove the disconnect generation guard — each must turn
+  a dedicated test red.
 
 ## Acceptance criteria
 
-- With >30 open bound PRs and default limit, the most recent 30 open PRs
-  are watched and no terminal-pending PR occupies an open slot; with
-  `prWatchLimit` raised to the open count, every open bound PR receives
+- With >30 open bound PRs and default limit, the most recent open PRs
+  are watched within the open share of the budget and terminal-pending
+  PRs drain through the reserved slice; with `prWatchLimit` raised to
+  the open count plus headroom, every open bound PR receives
   `head_change` delivery.
-- Terminal-pending PRs leave the active set after one observed poll; the
-  active count in the cap warning shrinks accordingly.
+- Terminal-pending PRs leave the active set after one observed poll,
+  even when open PRs fill the limit; the active count in the cap warning
+  shrinks accordingly.
 - While a public review turn runs for minutes, a bound PR's head change
-  is still delivered within one poll interval, and new notifications are
-  still claimed.
+  is still delivered within one poll interval, new notifications are
+  still claimed, and the held thread's comments are not re-fetched every
+  poll.
+- A first-contact body is never lost to a cursor commit; a deferred
+  (backpressure) comment still suppresses the body for that poll.
 - All existing delivery/recovery/backpressure tests pass (helpers await
   runner idle); lint, typecheck, and focused unit suites green.
 
 ## Open questions
 
-- None blocking. A future enhancement could reserve a small terminal
-  budget even when open PRs exceed the limit; today terminal drain uses
-  only leftover budget, which is sufficient because terminal-pending PRs
-  no longer block open coverage.
+- None blocking. A future enhancement could batch the PR state queries
+  to remove the per-PR fan-out entirely (raised in triage as the
+  preferred long-term shape); it is separate work with its own
+  rate-limit questions and is deliberately deferred.

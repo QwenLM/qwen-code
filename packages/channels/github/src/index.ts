@@ -6,6 +6,8 @@ import type { ChannelPlugin } from '@qwen-code/channel-base';
 import {
   GithubChannel,
   validateBoundSessionConfig,
+  DEFAULT_PR_WATCH_LIMIT,
+  MAX_PR_WATCH_LIMIT,
   PR_NOTIFICATION_REASONS,
   PR_WATCH_EVENTS,
 } from './GithubAdapter.js';
@@ -162,10 +164,10 @@ export const plugin: ChannelPlugin = {
         label: 'PR Watch Limit',
         kind: 'number',
         exclusiveMinimum: 0,
-        maximum: 500,
-        default: '30',
+        maximum: MAX_PR_WATCH_LIMIT,
+        default: String(DEFAULT_PR_WATCH_LIMIT),
         description:
-          'Maximum bound PRs watched per poll (requires Deliver To PR-Bound Sessions). Open PRs are watched first; merged/closed bindings drain with the leftover budget. Each watched PR costs about one pulls.get per poll, so raise Poll Interval when raising this. Kept between 1 and 500. Leave empty for 30.',
+          'Maximum bound PRs watched per poll (requires Deliver To PR-Bound Sessions and PR Watch Events). Open PRs are watched first; a reserved slice (20%, at least one) drains merged/closed bindings. Each watched PR costs about one pulls.get per poll — at the 60s default that is ~60 requests/hour per PR, so a 5000/hour PAT budget admits ~80 PRs; an over-budget configuration makes every watch pass abort on rate limits. Raise Poll Interval when raising this. Leave empty for the default.',
       },
       {
         key: 'boundSessionActions',

@@ -393,12 +393,13 @@ function isBoundActionKey(key: string): boolean {
  * conditional Checks fetches). Operators with more open bindings raise
  * `prWatchLimit` (and `pollInterval`) deliberately; the watch pass already
  * fails fast on rate limits, so an over-budget configuration degrades
- * instead of hammering the API.
+ * instead of hammering the API. Exported for the descriptor so the form
+ * bound and the effective bound cannot drift.
  */
-const DEFAULT_PR_WATCH_LIMIT = 30;
+export const DEFAULT_PR_WATCH_LIMIT = 30;
 
 /** Hard ceiling for the configurable watch fan-out. */
-const MAX_PR_WATCH_LIMIT = 500;
+export const MAX_PR_WATCH_LIMIT = 500;
 
 /**
  * After a head change, checks register asynchronously (queued or self-hosted
@@ -610,6 +611,7 @@ function isPrWatchEntryShape(value: unknown): value is PrWatchEntry {
 interface BoundSessionConfigFields {
   deliverToBoundSessions?: unknown;
   prWatchEvents?: unknown;
+  prWatchLimit?: unknown;
   boundSessionActions?: unknown;
 }
 
@@ -708,6 +710,12 @@ export function validateBoundSessionConfig(
     typeof config.deliverToBoundSessions !== 'boolean'
   ) {
     return `[Channel:${channelName}] deliverToBoundSessions must be a boolean.`;
+  }
+  if (
+    config.prWatchLimit !== undefined &&
+    config.deliverToBoundSessions !== true
+  ) {
+    return `prWatchLimit for channel ${channelName} requires deliverToBoundSessions: true.`;
   }
   try {
     normalizePrWatchEvents(config, channelName);
@@ -900,6 +908,7 @@ type BoundDeliveryResult =
   | { kind: 'delivered' }
   | { kind: 'retired'; reason: string; sessionId?: string }
   | { kind: 'public' }
+  | { kind: 'requeued' }
   | { kind: 'deferred' };
 
 function isOptionalStringArray(value: unknown): value is string[] | undefined {
@@ -1365,6 +1374,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private publicTaskRunnerGeneration = 0;
   private publicTaskWake: (() => void) | undefined;
   private publicTaskIdleWaiters: Array<() => void> = [];
+  /** The task the runner is executing right now (undefined when parked). */
+  private publicTaskRunningId: string | undefined;
+  /** Escaped runner failures already journaled, once per task id. */
+  private publicTaskFailureJournaled = new Set<string>();
   private pendingCursorUpdatedAt: string | undefined;
   private inboundPersistenceBlocked = false;
   /**
@@ -1565,11 +1578,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.inboundPersistenceBlocked = false;
     this.inboundRecoveryPending = true;
     // A reconnect starts a fresh runner generation; any runner left over
-    // from the previous connection exits after its current task.
+    // from the previous connection exits after its current task. Keep the
+    // id that orphaned runner is STILL executing in the in-flight set so
+    // recovery cannot run the same task a second time; the orphan's finally
+    // removes it. Queued-but-unstarted ids are dropped here and re-enqueued
+    // by recovery from the durable store.
     this.publicTaskRunnerGeneration += 1;
     this.publicTaskRunner = undefined;
     this.publicTaskQueue = [];
-    this.publicTasksInFlight.clear();
+    this.publicTasksInFlight = new Set(
+      this.publicTaskRunningId ? [this.publicTaskRunningId] : [],
+    );
     this.publicTaskWake = undefined;
     const idleWaiters = this.publicTaskIdleWaiters;
     this.publicTaskIdleWaiters = [];
@@ -1612,9 +1631,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.stopPollLoop();
     // Retire the runner generation: an idle runner wakes and exits, and a
     // runner mid-turn exits after that turn. The durable task stays
-    // recoverable for the next connection.
+    // recoverable for the next connection. Release idle waiters: with the
+    // queue retired, "idle" will never come from task completion.
     this.publicTaskRunnerGeneration += 1;
     this.publicTaskWake?.();
+    const idleWaiters = this.publicTaskIdleWaiters;
+    this.publicTaskIdleWaiters = [];
+    for (const resolve of idleWaiters) resolve();
     this.pendingFinalDeliveryRetryStopRequested = true;
     if (this.pendingFinalDeliveryRequestsActive === 0) {
       this.pendingFinalDeliveryRetryAbort?.abort();
@@ -2425,6 +2448,24 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           ? maxUpdatedAt
           : this.pendingCursorUpdatedAt;
     }
+    // Snapshot the threads whose in-flight work holds the cursor BEFORE the
+    // lanes run; see threadTaskHoldsCursor.
+    this.pollStartHeldThreads = new Set();
+    try {
+      for (const task of this.readInboundTasks()) {
+        if (
+          this.publicTasksInFlight.has(task.id) &&
+          this.isCursorBlockingTask(task)
+        ) {
+          this.pollStartHeldThreads.add(
+            `${task.source.chatId}|${task.source.threadId}`,
+          );
+        }
+      }
+    } catch {
+      // Store unreadable: fail open (lanes fetch normally); the claim path
+      // surfaces the persistence failure itself.
+    }
     let reasonFilterJournaled = 0;
     let reasonFilterCollapsed = 0;
     let transientHeld = false;
@@ -2851,6 +2892,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     ctx: NotificationContext,
     reason: 'review_requested' | 'assign',
   ): Promise<void> {
+    // Held thread: the trigger stays unclaimed and the frozen window
+    // re-lists it until the running task settles (no first-contact
+    // semantics here, so skipping the whole lane loses nothing).
+    if (this.threadHeldAtPollStart(ctx.chatId, ctx.threadId)) return;
     const trigger = await this.findDirectTrigger(ctx, reason);
     if (!trigger) return;
 
@@ -3050,6 +3095,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private async fetchNewComments(
     ctx: NotificationContext,
   ): Promise<GithubComment[]> {
+    // The thread's running task already claimed its comments; re-fetching
+    // every poll of the frozen window only spends the shared PAT budget.
+    if (this.threadHeldAtPollStart(ctx.chatId, ctx.threadId)) return [];
     const [owner, repo] = ctx.chatId.split('/');
     const comments = (await this.githubApi(
       () =>
@@ -3122,18 +3170,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const { chatId, threadId, issueNumber } = ctx;
     const bodyKey = `${chatId}|${threadId}`;
     if (this.cursor.dispatchedBodies?.includes(bodyKey)) return;
-    // A public turn for this thread may still be queued or running in the
-    // background runner (a fresh claim or a retry). Feeding the body now
-    // would let its turn overtake — and steer-cancel — the comment turn,
-    // so defer until the thread's durable work settles. The body key is
-    // not recorded, so a later poll feeds it.
-    const threadHasPendingWork = this.readInboundTasks().some(
-      (task) =>
-        task.source.chatId === chatId &&
-        task.source.threadId === threadId &&
-        this.isRecoverableInboundTask(task),
-    );
-    if (threadHasPendingWork) return;
+    // No deferral gate here: the body dispatch claims a public task that the
+    // background runner executes in FIFO order behind any comment turn already
+    // claimed for this thread, so the two can never overlap (and steer-cancel
+    // each other) on the channel session. Deferring the feed instead would
+    // risk losing the body permanently: nothing reserves it, and the
+    // end-of-poll cursor commit can mark the thread read once the blocking
+    // task settles, after which first contact is unreachable (!lastReadAt).
     // Fetch and dispatch failures reach pollOnce, which keeps the
     // notification unread when GitHub may answer differently next poll.
     const issue = await this.fetchIssueMeta(ctx);
@@ -3399,6 +3442,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // Awaiting the agent turn here would freeze the whole poll loop
     // (watch, bound delivery, other notifications) for the turn's duration.
     // A private-only task is retired inside runInboundTask, never published.
+    // The absence gate runs synchronously so a deferred event keeps the
+    // false verdict the lane's body-suppression semantics depend on.
+    if (this.applyPublicAbsenceGate(task)) return false;
     this.enqueuePublicTask(task);
     return true;
   }
@@ -3507,16 +3553,38 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           this.publicTaskWake = undefined;
           continue;
         }
+        let task: InboundTaskRecord | undefined;
+        this.publicTaskRunningId = id;
         try {
-          const task = this.readInboundTasks().find((t) => t.id === id);
+          task = this.readInboundTasks().find((t) => t.id === id);
           if (task) await this.runInboundTask(task);
+          this.publicTaskFailureJournaled.delete(id);
         } catch (err) {
           // runInboundTask owns failure transitions; an unexpected throw
           // here must not kill the runner or strand the remaining queue.
-          process.stderr.write(
-            `[Channel:${this.name}] public task runner error for ${sanitizeLogText(id, 128)}: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+          // Journal it once per task so the operator-visible timeline shows
+          // the failure (the poll loop's per-thread catch no longer sees it).
+          const message = sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            200,
           );
+          process.stderr.write(
+            `[Channel:${this.name}] public task runner error for ${sanitizeLogText(id, 128)}: ${message}\n`,
+          );
+          if (!this.publicTaskFailureJournaled.has(id)) {
+            this.publicTaskFailureJournaled.add(id);
+            this.recordChannelEvent({
+              type: 'inbound',
+              outcome: 'failed',
+              repository: task?.source.chatId,
+              thread: task?.source.threadId,
+              number: task?.issueNumber,
+              messageId: task?.source.messageId,
+              error: message,
+            });
+          }
         } finally {
+          this.publicTaskRunningId = undefined;
           this.publicTasksInFlight.delete(id);
           if (
             this.publicTaskQueue.length === 0 &&
@@ -3531,10 +3599,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     })().finally(() => {
       if (this.publicTaskRunner === runner) {
         this.publicTaskRunner = undefined;
-        // Work enqueued while this runner was winding down (or a retired
-        // generation's leftover queue) must not strand: start a runner for
-        // the current generation.
-        if (this.publicTaskQueue.length > 0) this.startPublicTaskRunner();
+        // Work enqueued while this runner was winding down must not strand,
+        // but a retired generation (disconnect/reconnect) must NOT start a
+        // new runner: the queued tasks stay durable for the next connect's
+        // recovery. Only the current generation may continue.
+        if (
+          generation === this.publicTaskRunnerGeneration &&
+          this.publicTaskQueue.length > 0
+        ) {
+          this.startPublicTaskRunner();
+        }
       }
     });
     this.publicTaskRunner = runner;
@@ -3554,6 +3628,51 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     await new Promise<void>((resolve) => {
       this.publicTaskIdleWaiters.push(resolve);
     });
+  }
+
+  /**
+   * The public absence gate: defer (or at the horizon retire) an unmatched
+   * PR event while the binding snapshot cannot prove absence. Returns true
+   * when the task must not execute now. Called synchronously at dispatch so
+   * the lane keeps its false-verdict semantics (a deferred comment suppresses
+   * the first-contact body this poll), and again in runInboundTask for tasks
+   * recovery enqueues after a re-resolve.
+   */
+  private applyPublicAbsenceGate(task: InboundTaskRecord): boolean {
+    const envelope = task.envelope;
+    if (!envelope) return false;
+    const bound = task.delivery?.kind === 'bound-session';
+    const isWatch = envelope.messageId?.startsWith('watch:') === true;
+    if (
+      bound ||
+      isWatch ||
+      !this.deliverToBoundSessions ||
+      envelope.threadId?.startsWith('pr:') !== true
+    ) {
+      return false;
+    }
+    if (
+      this.boundSnapshotTrusted &&
+      !this.boundRefreshFailed &&
+      !this.lastBindingsPartial
+    ) {
+      return false;
+    }
+    const deferCount = (task.deferCount ?? 0) + 1;
+    if (deferCount >= MAX_BOUND_DEFERRALS) {
+      this.retireBoundTask(
+        task,
+        `binding snapshot never completed after ${deferCount} deferrals; absence never established`,
+      );
+      return true;
+    }
+    this.transitionInboundTask(task.id, 'failed', {
+      error: 'binding snapshot incomplete; absence not established',
+      attempts: task.attempts ?? 0,
+      deferCount,
+      backpressure: true,
+    });
+    return true;
   }
 
   private async runInboundTask(task: InboundTaskRecord): Promise<boolean> {
@@ -3577,31 +3696,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // not stall (or dead-letter) behind a degraded binding scan, including
     // a permanent partial where a complete snapshot never lands. Known
     // targets (bound tasks) are unaffected and proceed immediately.
-    if (
-      !bound &&
-      !isWatch &&
-      this.deliverToBoundSessions &&
-      envelope.threadId?.startsWith('pr:') === true &&
-      (!this.boundSnapshotTrusted ||
-        this.boundRefreshFailed ||
-        this.lastBindingsPartial)
-    ) {
-      const deferCount = (task.deferCount ?? 0) + 1;
-      if (deferCount >= MAX_BOUND_DEFERRALS) {
-        this.retireBoundTask(
-          task,
-          `binding snapshot never completed after ${deferCount} deferrals; absence never established`,
-        );
-        return false;
-      }
-      this.transitionInboundTask(task.id, 'failed', {
-        error: 'binding snapshot incomplete; absence not established',
-        attempts: task.attempts ?? 0,
-        deferCount,
-        backpressure: true,
-      });
-      return false;
-    }
+    if (this.applyPublicAbsenceGate(task)) return false;
     const attempts = (task.attempts ?? 0) + 1;
     this.activeInboundTaskIdsByMessage.set(
       this.inboundMessageKey(envelope.chatId, envelope.messageId),
@@ -3631,6 +3726,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (bound || isWatch) {
         boundResult = await this.deliverToBoundSession(task, envelope);
         if (boundResult.kind === 'deferred') return false;
+        // The gone-session fallback requeued the task as public work: the
+        // runner owns execution and bookkeeping from here; this inline frame
+        // must not run the public post-run path against the still-queued task.
+        if (boundResult.kind === 'requeued') return true;
       } else if (
         this.boundRoleAware &&
         this.boundEventAlreadyDelivered(envelope)
@@ -3893,6 +3992,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
     for (const task of tasks) {
       if (!task.envelope) continue;
+      // Skip tasks this process already owns BEFORE any branch mutates them:
+      // the retarget branch below would otherwise re-resolve a backpressure
+      // parked task whose public turn is running in the background runner
+      // (the running transition merges patches, so backpressure: true
+      // survives) and deliver it bound a second time. A running task with no
+      // in-flight entry is a genuine crash and must still be recovered.
+      if (this.publicTasksInFlight.has(task.id)) continue;
       this.applyTaskDedupe(task.dedupe);
       if (
         this.watchReconcileBlocked &&
@@ -4077,6 +4183,28 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return this.readInboundTasks().some((task) =>
       this.isCursorBlockingTask(task),
     );
+  }
+
+  /**
+   * Threads whose in-flight public work already held the cursor when this
+   * poll's notification loop started. Snapshot, not live: a task claimed
+   * during this poll must not suppress the same thread's later lanes, and a
+   * crashed task that is not in flight must stay re-dispatchable (recovery
+   * may have failed this poll). While a thread is held, the frozen window
+   * re-lists it every poll; re-fetching its comments each time spends the
+   * shared PAT budget for nothing (dedupe already claimed them). The thread
+   * is re-read when its task settles. The first-contact body feed is NOT
+   * skipped: it claims once and the runner serializes it behind the running
+   * turn, so deferring it would only risk the cursor committing past an
+   * unclaimed body.
+   */
+  private pollStartHeldThreads = new Set<string>();
+
+  private threadHeldAtPollStart(
+    chatId: string,
+    threadId: string | undefined,
+  ): boolean {
+    return this.pollStartHeldThreads.has(`${chatId}|${threadId}`);
   }
 
   private isCursorBlockingTask(task: InboundTaskRecord): boolean {
@@ -5726,8 +5854,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (task.privateOnly === true) {
         return this.retirePrivateOnly(task, envelope);
       }
-      await this.handleInbound(envelope);
-      return { kind: 'public' };
+      // The fallback is a full public turn: serialize it through the same
+      // runner so it neither blocks the poll lane nor overlaps (and
+      // steer-cancels) another public turn on a shared channel session.
+      this.enqueuePublicTask(task);
+      return { kind: 'requeued' };
     }
     // The target was frozen at claim/detection time. Re-validate it against
     // the latest COMPLETE snapshot: a live rebind must not keep delivering
@@ -5972,8 +6103,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
       this.transitionInboundTask(task.id, 'running', { delivery: undefined });
       task.delivery = undefined;
-      await this.handleInbound(envelope);
-      return { kind: 'public' };
+      // Gone-session fallback is a full public turn: hand it to the serial
+      // runner instead of awaiting it in the poll lane (head-of-line block)
+      // or overlapping another public turn on a shared session (steer-cancel).
+      this.enqueuePublicTask(task);
+      return { kind: 'requeued' };
     }
     return { kind: 'delivered' };
   }
@@ -6207,7 +6341,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             chatId: identity.chatId,
             number: identity.number,
             updatedAt,
-            terminal: pr.state === 'merged' || pr.state === 'closed',
+            // Tiering only — observation stays API-authoritative. A binding
+            // still saying open while the watch already observed closed must
+            // not hold an open-tier slot (stale registry, e.g. refresh
+            // disabled); a genuinely reopened PR gets one leftover-budget
+            // observation and returns to the open tier, self-correcting.
+            terminal:
+              pr.state === 'merged' ||
+              pr.state === 'closed' ||
+              this.prWatchState.entries[key]?.prState === 'closed',
           });
         }
       }
@@ -6274,9 +6416,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     // Open bindings take priority over terminal-pending ones: a merged or
     // closed PR that the watch has not observed yet must never crowd a live
-    // PR out of the budget. Terminal-pending PRs drain with the leftover
-    // budget — each needs exactly one more observation before it leaves the
-    // active set for good, so the backlog shrinks instead of accumulating.
+    // PR out of the budget by recency alone. A slice of the budget is still
+    // reserved for terminal-pending bindings (20%, at least one): without
+    // headroom they would never receive their one terminal observation when
+    // open PRs fill the limit, and the active set would grow with every
+    // merge. Each drained binding leaves the active set for good, so the
+    // reservation frees up once the backlog clears.
     const limit = this.prWatchLimit;
     const byRecency = (
       a: [string, { updatedAt: string }],
@@ -6288,9 +6433,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const terminalEntries = [...active.entries()]
       .filter(([, candidate]) => candidate.terminal)
       .sort(byRecency);
-    const watched = openEntries.slice(0, limit);
+    const terminalReserved =
+      terminalEntries.length > 0
+        ? Math.min(terminalEntries.length, Math.max(1, Math.ceil(limit * 0.2)))
+        : 0;
+    const watched = openEntries.slice(0, Math.max(0, limit - terminalReserved));
+    const terminalSlots = Math.max(terminalReserved, limit - watched.length);
     watched.push(
-      ...terminalEntries.slice(0, Math.max(0, limit - watched.length)),
+      ...terminalEntries.slice(
+        0,
+        Math.min(terminalEntries.length, terminalSlots),
+      ),
     );
     if (watched.length < active.size) {
       // The cap deterministically excludes the oldest bindings every poll.
