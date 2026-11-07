@@ -4639,6 +4639,11 @@
       "description": "Settings to enable experimental features.",
       "type": "object",
       "properties": {
+        "agentView": {
+          "description": "Enable Agent View background sessions.",
+          "type": "boolean",
+          "default": false
+        },
         "generatedUi": {
           "description": "Show interactive views from bundled Generated UI in supported local sessions, such as Web Shell. Enabled by default; set to false to turn it off. Restart the owning session to apply changes.",
           "type": "boolean",

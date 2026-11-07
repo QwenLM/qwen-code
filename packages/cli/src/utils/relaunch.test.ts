@@ -16,6 +16,7 @@ import {
 } from 'vitest';
 import { EventEmitter } from 'node:events';
 import {
+  AGENT_VIEW_ROSTER_MESSAGE,
   RELAUNCH_EXIT_CODE,
   UPDATE_ON_EXIT_MESSAGE,
   UPDATE_RELAUNCH_EXIT_CODE,
@@ -735,6 +736,42 @@ describe('relaunchAppInChildProcess', () => {
 
       expect(onUpdateRelaunch).toHaveBeenCalledWith(false);
       expect(processExitSpy).toHaveBeenCalledWith(44);
+    });
+
+    it('opens the Agent View roster the child requested after it closes', async () => {
+      process.argv = ['/usr/bin/node', '/app/cli.js'];
+
+      const sessionChild = createMockChildProcess(0, false);
+      const rosterChild = createMockChildProcess(0, false);
+      mockedSpawn
+        .mockReturnValueOnce(sessionChild)
+        .mockReturnValueOnce(rosterChild);
+
+      const promise = relaunchAppInChildProcess([], []);
+
+      sessionChild.emit('message', {
+        type: AGENT_VIEW_ROSTER_MESSAGE,
+        cwd: '/work',
+      });
+      sessionChild.emit('close', 0);
+
+      await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledTimes(2));
+      expect(mockedSpawn.mock.calls[1]?.[0]).toBe(
+        mockedSpawn.mock.calls[0]?.[0],
+      );
+      expect(mockedSpawn.mock.calls[1]?.[1]?.slice(-4)).toEqual([
+        '/app/cli.js',
+        'agents',
+        '--cwd',
+        '/work',
+      ]);
+      expect(mockedSpawn.mock.calls[1]?.[2]).toMatchObject({
+        stdio: 'inherit',
+      });
+
+      rosterChild.emit('close', 7);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+      expect(processExitSpy).toHaveBeenCalledWith(7);
     });
 
     it('does not carry an update request across relaunches', async () => {

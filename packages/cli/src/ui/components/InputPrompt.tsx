@@ -152,6 +152,8 @@ export interface InputPromptProps {
   onEscapePromptChange?: (showPrompt: boolean) => void;
   onToggleShortcuts?: () => void;
   showShortcuts?: boolean;
+  /** Left arrow on an empty prompt backgrounds the session into Agent View. */
+  onOpenAgentView?: () => void;
   /**
    * Reports autocomplete-dropdown visibility specifically. Composer uses
    * this to hide the Footer / KeyboardShortcuts when the dropdown would
@@ -206,6 +208,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   onEscapePromptChange,
   onToggleShortcuts,
   showShortcuts,
+  onOpenAgentView,
   onSuggestionsVisibilityChange,
   onTabConsumerChange,
   vimHandleInput,
@@ -1234,6 +1237,23 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
+      if (
+        onOpenAgentView &&
+        key.name === 'left' &&
+        !key.ctrl &&
+        !key.meta &&
+        !key.shift &&
+        buffer.text === '' &&
+        !shellModeActive &&
+        !showCompletionSuggestions &&
+        !reverseSearchActive &&
+        !commandSearchActive &&
+        !isAttachmentMode
+      ) {
+        onOpenAgentView();
+        return true;
+      }
+
       // Hide shortcuts on any other key press
       if (showShortcuts && onToggleShortcuts) {
         onToggleShortcuts();
@@ -2031,6 +2051,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       commandSearchCompletion,
       onToggleShortcuts,
       showShortcuts,
+      onOpenAgentView,
       uiState,
       isAttachmentMode,
       attachments,

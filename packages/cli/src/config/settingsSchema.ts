@@ -4404,6 +4404,15 @@ const SETTINGS_SCHEMA = {
     description: 'Settings to enable experimental features.',
     showInDialog: false,
     properties: {
+      agentView: {
+        type: 'boolean',
+        label: 'Agent View',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description: 'Enable Agent View background sessions.',
+        showInDialog: true,
+      },
       generatedUi: {
         type: 'boolean',
         label: 'Generated UI',

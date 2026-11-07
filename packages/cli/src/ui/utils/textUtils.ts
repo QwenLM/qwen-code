@@ -374,6 +374,10 @@ export function sanitizeTerminalLine(value: string): string {
     .replace(/[\t\r\n]+/g, ' ');
 }
 
+export function cleanSingleLineText(str: string): string {
+  return sanitizeTerminalLine(str).replace(/\s+/g, ' ').trim();
+}
+
 /* Recursively traverses a JSON-like structure (objects, arrays, primitives)
  * and escapes all ANSI control characters found in any string values.
  *

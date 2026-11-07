@@ -10,6 +10,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import { aboutCommand } from '../ui/commands/aboutCommand.js';
 import { advisorCommand } from '../ui/commands/advisor-command.js';
 import { tasksCommand } from '../ui/commands/tasksCommand.js';
+import { backgroundCommand } from '../ui/commands/background-command.js';
 import { workflowsCommand } from '../ui/commands/workflowsCommand.js';
 import { agentsCommand } from '../ui/commands/agentsCommand.js';
 import { arenaCommand } from '../ui/commands/arenaCommand.js';
@@ -130,6 +131,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       advisorCommand,
       agentsCommand,
       tasksCommand,
+      backgroundCommand,
       this.config?.isWorkflowsEnabled() ||
       this.config?.isWorkflowModeSupported?.()
         ? workflowsCommand

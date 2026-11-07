@@ -483,6 +483,13 @@ describe('useSlashCommandProcessor', () => {
     ['direct builtin logout', 'logout', CommandKind.BUILT_IN, false, false],
     ['owned builtin logout', 'logout', CommandKind.BUILT_IN, true, true],
     ['same-name logout file command', 'logout', CommandKind.FILE, true, false],
+    [
+      'owned builtin background',
+      'background',
+      CommandKind.BUILT_IN,
+      true,
+      true,
+    ],
     ['same-name file command', 'restore', CommandKind.FILE, true, false],
     ['unrelated builtin', 'other', CommandKind.BUILT_IN, true, false],
   ] as const)(
