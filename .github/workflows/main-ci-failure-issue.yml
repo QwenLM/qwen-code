@@ -42,15 +42,23 @@ jobs:
   # finished failure summary to the privileged job as an output.
   analyze:
     name: 'Identify the failing tests'
+    # A `cancelled` conclusion is only a job timeout on main: the gate workflows
+    # cancel their own in-progress pull_request runs when a contributor pushes
+    # again, so admitting `cancelled` unscoped reported a superseded
+    # `Managed Agent gate` run as a timeout against that PR.
     if: >-
       ${{ github.repository == 'QwenLM/qwen-code' &&
-      github.event.workflow_run.conclusion == 'failure' &&
       ((github.event.workflow_run.head_branch == 'main' &&
+      (github.event.workflow_run.conclusion == 'failure' ||
+      github.event.workflow_run.conclusion == 'cancelled') &&
       (github.event.workflow_run.event == 'push' ||
       (github.event.workflow_run.event == 'schedule' &&
       contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]'), github.event.workflow.name)))) ||
-      (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') ||
-      (github.event.workflow.name == 'Managed Agent gate' &&
+      ((github.event.workflow_run.conclusion == 'failure' ||
+      github.event.workflow_run.conclusion == 'cancelled') &&
+      github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') ||
+      (github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow.name == 'Managed Agent gate' &&
       contains(fromJSON('["pull_request","pull_request_review"]'), github.event.workflow_run.event))) }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
@@ -66,6 +74,11 @@ jobs:
       infra_only: '${{ steps.infra.outputs.infra_only }}'
       pr_number: '${{ steps.destination.outputs.pr_number }}'
       file_issue: '${{ steps.destination.outputs.file_issue }}'
+      # Whether this run should be rerun rather than filed. Kept separate from
+      # `file_issue` because a timeout still inside its rerun budget is rerun
+      # *and* not filed; one flag gating both suppressed the dispatch too and
+      # left a timed-out main run neither rerun nor recorded.
+      rerun_pending: '${{ steps.destination.outputs.rerun_pending }}'
       comment_body: '${{ steps.summary.outputs.body }}'
       # Empty when the run named no failing test; that emptiness routes the
       # record to the workflow's aggregate issue downstream.
@@ -74,6 +87,18 @@ jobs:
       # The newer run at main's tip had not settled when this report was
       # prepared. The issue is still filed, with a note saying so.
       provisional: '${{ steps.live.outputs.provisional }}'
+      # 'timeout' when the trigger ended cancelled because a job hit its
+      # `timeout-minutes` cap, 'none' otherwise. A timed-out run has no
+      # failed job to analyze, so the writer reruns it instead of filing.
+      cancellation_kind: '${{ steps.live.outputs.cancellation_kind }}'
+      # 'true' once this timed-out run has already been rerun as many times as
+      # the workflow will pay for; the writer files it instead of dispatching
+      # another whole-run rerun that would time out again.
+      timeout_attempts_exhausted: '${{ steps.live.outputs.timeout_attempts_exhausted }}'
+      # 'true' when the timeout was read from a job annotation rather than
+      # guessed from a failed read. Only a read timeout authorizes the
+      # whole-matrix rerun; a guessed one is still reported.
+      timeout_annotations_readable: '${{ steps.live.outputs.timeout_annotations_readable }}'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -97,10 +122,79 @@ jobs:
           EVENT_NAME: '${{ github.event.workflow_run.event }}'
           HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+          CONCLUSION: '${{ github.event.workflow_run.conclusion }}'
         run: |-
           set -euo pipefail
           superseded=false
           provisional=false
+          cancellation_kind='none'
+          timeout_attempts_exhausted=false
+          # 'true' only when the annotations were read and one of them named
+          # the timeout. A timeout classified while this is false is a guess
+          # from a failed read, so it is reported but never buys a whole-matrix
+          # rerun.
+          timeout_annotations_readable=false
+          # Every attempt of a run that keeps exceeding a lane's
+          # `timeout-minutes` reruns the whole matrix, and its own completion
+          # re-enters here, so an unbounded retry never ends. Three buys TWO
+          # whole-matrix reruns before anything is filed: attempt 1 reruns,
+          # attempt 2 reruns again, and only attempt 3 files. One would file
+          # on the first repeat timeout and buy no rerun at all; the two
+          # reruns are what let a lane that died on a transient stall clear
+          # itself without a human. The cost is two full matrix runs (up to an
+          # hour of the offending lane each) per occurrence before the first
+          # report, which the PR body states.
+          TIMEOUT_RERUN_ATTEMPT_LIMIT=3
+          if [[ "${CONCLUSION:-}" == 'cancelled' ]]; then
+            # GitHub reports a job that hits its `timeout-minutes` cap as a
+            # cancelled run, indistinguishable at the run level from a
+            # deliberate concurrency supersede. The two need opposite
+            # treatment: a superseded run is replaced by the run that
+            # cancelled it and owns nothing, while a timed-out one is a real
+            # breakage whose only trace is this event. That is how #16214 sat
+            # unreported for weeks. The job annotations say which: only a
+            # timeout carries "The job has exceeded the maximum execution
+            # time". Reads fail open like every other one here — an
+            # unreadable annotation list is reported, and the repeating
+            # dedupe marker keeps a misclassified supersede to one comment.
+            annotations=''
+            annotations_readable=true
+            if jobs_json="$(
+              gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT:-1}/jobs?per_page=100" \
+                --paginate 2>/dev/null | jq -s '{jobs: [.[].jobs[]?]}'
+            )" && [[ -n "${jobs_json}" ]]; then
+              # A failed read and a job with no annotations both yield an empty
+              # string, and the two need opposite readings: an unreadable list
+              # says nothing about whether this run timed out, while an empty
+              # one from a job that answered positively says it did not. Track
+              # the read separately instead of letting `|| true` conflate them.
+              while IFS= read -r job_url; do
+                [[ -n "${job_url}" ]] || continue
+                if ! job_annotations="$(
+                  gh api --paginate \
+                    "repos/${REPO}/check-runs/${job_url##*/}/annotations" \
+                    --jq '[.[].message] | join("\n")' 2>/dev/null
+                )"; then
+                  annotations_readable=false
+                  continue
+                fi
+                annotations="${annotations}${job_annotations}"$'\n'
+              done < <(jq -r '.jobs[] | select(.conclusion == "cancelled") | .check_run_url // ""' <<< "${jobs_json}")
+            else
+              annotations_readable=false
+            fi
+            if grep -qiE 'exceeded the maximum execution time' <<< "${annotations}"; then
+              cancellation_kind='timeout'
+              timeout_annotations_readable='true'
+              echo "Run ${WORKFLOW_RUN_ID} was cancelled by a job timeout, not a supersede; reporting it."
+            elif [[ "${annotations_readable}" != 'true' ]]; then
+              echo "::warning::Could not read every cancelled job's annotations for run ${WORKFLOW_RUN_ID}; reporting it rather than assuming a supersede."
+              cancellation_kind='timeout'
+            else
+              superseded=true
+              echo "Run ${WORKFLOW_RUN_ID} was cancelled without a job timeout; a concurrent run superseded it and owns the result."
+            fi
+          fi
           if live_attempt="$(
             gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}" \
               --jq '.run_attempt'
@@ -120,11 +214,25 @@ jobs:
           # #15259 was filed after #15128 fixed its host-lock timeout.
           #
           # Only a SETTLED successor can own the result. The job gate above
-          # admits only `failure` conclusions, so a successor that ends
-          # cancelled, timed_out, skipped or startup_failure never re-enters
-          # this workflow; crediting its mere existence would drop the only
-          # report of a real regression. A completed success means the tree is
-          # green at the tip, and a completed failure reports itself.
+          # admits a `cancelled` run as well as a `failure` one — a cancelled
+          # one only as far as deciding whether it was a job timeout — but a
+          # successor that ends timed_out, skipped or startup_failure still
+          # never *reports* a result, so crediting its mere existence would
+          # drop the only report of a real regression. A completed success
+          # means the tree is green at the tip, and a completed failure
+          # reports itself.
+          #
+          # A successor that is itself `cancelled` is the one exception the
+          # order matters for: it now re-enters this workflow and is classified
+          # the same way, so it owns the result only once it has settled as
+          # either a timeout (which this workflow reports) or a supersede (which
+          # credits the run that cancelled it). `successor_owns` therefore
+          # stays false for it — the reason recorded here before this PR, that
+          # such a run never reports, no longer holds — and the run is marked
+          # provisional below only while the successor is unsettled. A settled
+          # cancelled successor leaves both flags false, so this run reports
+          # itself; that is the wrong answer for a chronic timeout lane, which
+          # is why the attempt bound exists rather than successor ownership.
           #
           # An unsettled successor proves nothing yet, and waiting for it is
           # not possible here: this job runs on a pool that queued it
@@ -188,8 +296,20 @@ jobs:
               echo "::warning::Could not read the tip of main; reporting this run as though it were still current."
             fi
           fi
+          # A timeout already rerun up to the limit is filed rather than
+          # rerun again: the matrix that keeps exceeding its cap would never
+          # stop otherwise.
+          if [[ "${cancellation_kind}" == 'timeout' ]] &&
+            [[ -n "${RUN_ATTEMPT:-}" ]] &&
+            (( RUN_ATTEMPT >= TIMEOUT_RERUN_ATTEMPT_LIMIT )); then
+            timeout_attempts_exhausted=true
+            echo "Run ${WORKFLOW_RUN_ID} timed out on attempt ${RUN_ATTEMPT}/${TIMEOUT_RERUN_ATTEMPT_LIMIT}; filing instead of rerunning."
+          fi
           echo "superseded=${superseded}" >> "${GITHUB_OUTPUT}"
           echo "provisional=${provisional}" >> "${GITHUB_OUTPUT}"
+          echo "cancellation_kind=${cancellation_kind}" >> "${GITHUB_OUTPUT}"
+          echo "timeout_attempts_exhausted=${timeout_attempts_exhausted}" >> "${GITHUB_OUTPUT}"
+          echo "timeout_annotations_readable=${timeout_annotations_readable}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Select the failure destination'
         id: 'destination'
@@ -201,10 +321,22 @@ jobs:
           HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
           RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
+          CANCELLATION_KIND: '${{ steps.live.outputs.cancellation_kind }}'
+          TIMEOUT_ATTEMPTS_EXHAUSTED: '${{ steps.live.outputs.timeout_attempts_exhausted }}'
+          TIMEOUT_ANNOTATIONS_READABLE: '${{ steps.live.outputs.timeout_annotations_readable }}'
+          PROVISIONAL: '${{ steps.live.outputs.provisional }}'
         run: |-
           set -euo pipefail
           pr_number=''
           file_issue=false
+          rerun_pending=false
+          # A timed-out run is rerun whole, so the occurrence is filed when that
+          # rerun also fails — not while it is still re-executing. Filing it now
+          # would record a red main for a head that is about to be retried.
+          timeout_pending_rerun=false
+          if [[ "${CANCELLATION_KIND:-}" == 'timeout' && "${TIMEOUT_ATTEMPTS_EXHAUSTED:-false}" != 'true' ]]; then
+            timeout_pending_rerun=true
+          fi
           # An allow-list, not "main and not a PR event": an event admitted
           # to the job later defaults to the PR lookup, never to filing a
           # main-regression issue for an unmerged head.
@@ -247,17 +379,64 @@ jobs:
           if [[ -z "${pr_number}" && "${file_issue}" != 'true' ]]; then
             echo "::warning::The admitted ${EVENT_NAME} run on ${HEAD_BRANCH} resolved to no PR and no issue; nothing will be reported."
           fi
+          if [[ "${timeout_pending_rerun}" == 'true' ]]; then
+            # What the allow-list above decided, before any timeout override:
+            # a destination that does not file (an open PR's dispatch) must
+            # not start filing just because this run timed out.
+            destination_files="${file_issue}"
+            # A provisional report is the only record of this occurrence: the
+            # head it tested is already replaced, and rerun_infra skips a
+            # provisional run, so deferring the filing to that rerun dropped
+            # the report entirely — the failure mode this workflow exists to
+            # prevent. File it instead, with the caveat the writer prefixes.
+            if [[ "${PROVISIONAL:-false}" == 'true' ]]; then
+              file_issue=true
+              echo "::warning::Timeout on a provisional report; filing it rather than deferring to an unrun rerun."
+            elif [[ "${TIMEOUT_ANNOTATIONS_READABLE:-false}" == 'true' ]]; then
+              if [[ "${destination_files}" == 'true' ]]; then
+                # rerun_infra reruns this run; its own completion reports the
+                # result. Suppress only the filing, not the dispatch — and
+                # file_issue is the gate for the dispatch in the non-timeout
+                # path, so the dispatch rides `rerun_pending` instead.
+                file_issue=false
+                # A timeout read from an annotation is unambiguous, so it buys
+                # the whole-matrix rerun.
+                rerun_pending=true
+                echo "Run timed out and has not exhausted its reruns; rerun_infra owns the outcome."
+              else
+                # Nobody to file for: keep the allow-list's decision. Buying a
+                # whole-matrix rerun here would spend `actions: write` on a
+                # destination that files nothing.
+                file_issue="${destination_files}"
+                rerun_pending=false
+                echo "::warning::Timed-out run resolves to no filing destination (PR #${pr_number:-none}); not rerunning the whole matrix."
+              fi
+            elif [[ "${destination_files}" == 'true' ]]; then
+              # A timeout inferred from an unreadable annotation list is still
+              # reported, but it must not buy a whole-matrix rerun: the read
+              # that would have told a timeout from a supersede failed, and
+              # replaying a superseded matrix is the expensive mistake.
+              file_issue=true
+              echo "::warning::Timeout inferred from an unreadable annotation list; filing it rather than rerunning the whole matrix."
+            else
+              file_issue="${destination_files}"
+              echo "::warning::Timeout on a run that resolves to no filing destination; nothing will be reported."
+            fi
+          fi
           echo "pr_number=${pr_number}" >> "${GITHUB_OUTPUT}"
           echo "file_issue=${file_issue}" >> "${GITHUB_OUTPUT}"
+          echo "rerun_pending=${rerun_pending}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Download failed job logs'
         id: 'download'
         if: "${{ steps.live.outputs.superseded != 'true' }}"
+
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           REPO: '${{ github.repository }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
           RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
+          CANCELLATION_KIND: '${{ steps.live.outputs.cancellation_kind }}'
         run: |-
           log_dir="${RUNNER_TEMP}/failed-logs"
           mkdir -p "${log_dir}"
@@ -298,20 +477,65 @@ jobs:
           # Both bodies read this list; the flag lets them say when it is short.
           echo "jobs_complete=${jobs_complete}" >> "${GITHUB_OUTPUT}"
 
+          # A job timeout cancels the whole run, so its siblings are
+          # concluded `cancelled` too and carry nothing. Admitting all of them
+          # would make a five-shard matrix report five failures for the one
+          # lane that exceeded its cap, bury the timeout line, and fetch every
+          # sibling's log inside this job's ten-minute budget. Admit a
+          # cancelled job only when its own annotation named the timeout —
+          # the same evidence the classifier used above.
+          timed_out_job_ids="${RUNNER_TEMP}/timed-out-job-ids"
+          : > "${timed_out_job_ids}"
+          # A cancelled job whose annotation read failed is dropped from both
+          # the download list and the rendered report, because neither can
+          # tell it from a collateral sibling. That must not be silent: the
+          # report then describes an incomplete set of cancelled jobs, and the
+          # body says so.
+          timed_out_annotations_missing=false
+          if [[ "${CANCELLATION_KIND:-}" == 'timeout' ]]; then
+            while IFS=$'\t' read -r job_name job_id job_check_run; do
+              [[ -n "${job_check_run}" ]] || continue
+              if ! job_annotations="$(
+                gh api --paginate \
+                  "repos/${REPO}/check-runs/${job_check_run##*/}/annotations" \
+                  --jq '[.[].message] | join("\n")' 2>/dev/null
+              )"; then
+                timed_out_annotations_missing=true
+                echo "::warning::Could not read the annotations of cancelled job ${job_name} (${job_id}); it is left out of the report."
+                continue
+              fi
+              if grep -qiE 'exceeded the maximum execution time' <<< "${job_annotations}"; then
+                printf '%s\n' "${job_id}" >> "${timed_out_job_ids}"
+              fi
+            done < <(
+              jq -r '.jobs[] | select(.conclusion == "cancelled") | [.name, (.id | tostring), (.check_run_url // "")] | @tsv' \
+                "${jobs_json}" 2>/dev/null
+            )
+          fi
+          echo "timed_out_annotations_missing=${timed_out_annotations_missing}" >> "${GITHUB_OUTPUT}"
+
           job_ids=()
           while IFS= read -r job_id; do
             job_ids+=("${job_id}")
           done < <(
             jq -r '.jobs[] | select(.conclusion == "failure") | .id' \
               "${jobs_json}" 2>/dev/null
+            cat "${timed_out_job_ids}"
           )
           echo "Failed jobs: ${#job_ids[@]}"
 
           # Even without test results, the jobs payload names the failed job
           # and step. A missing listing costs detail, never the failure report.
-          jq -r '.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure") | .name] | @tsv' \
-            "${jobs_json}" 2>/dev/null \
-            > "${RUNNER_TEMP}/failed-jobs.tsv" || true
+          # A cancelled sibling is named only when it timed out, for the same
+          # reason it is downloaded only then.
+          {
+            jq -r '.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .name] | @tsv' \
+              "${jobs_json}" 2>/dev/null
+            while IFS= read -r job_id; do
+              jq -r --arg id "${job_id}" '.jobs[] | select((.id | tostring) == $id) | [.name] + [(.steps // [])[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .name] | @tsv' \
+                "${jobs_json}" 2>/dev/null
+            done < "${timed_out_job_ids}"
+          } > "${RUNNER_TEMP}/failed-jobs.tsv" || true
 
           # gh >= 2.97.0 (GHSA-3m3g-3wcr-px46) refuses to print a response
           # carrying terminal escape sequences unless opted in, and the
@@ -398,14 +622,24 @@ jobs:
 
       - name: 'Build the PR failure summary'
         id: 'summary'
-        if: "${{ steps.destination.outputs.pr_number != '' || steps.destination.outputs.file_issue == 'true' }}"
+        # Same rule as file_issue's `if`, restricted to analyze's own outputs:
+        # a body must exist whenever that job can file, including the deferred
+        # timeout whose rerun could not be dispatched, or the fallback files an
+        # empty issue.
+        # A timed-out dispatch that resolves to an open PR is not rerun and is
+        # not filed (see `destination`), so the comment is its only record and
+        # the body must be built for it too. Superseded runs are excluded: they
+        # never reach `cancellation_kind == 'timeout'`.
+        if: "${{ success() && (steps.destination.outputs.file_issue == 'true' || steps.destination.outputs.rerun_pending == 'true' || (steps.live.outputs.cancellation_kind == 'timeout' && steps.destination.outputs.pr_number != '')) }}"
         env:
           WORKFLOW_NAME: '${{ github.event.workflow.name }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
           WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
           INFRA_ONLY: '${{ steps.infra.outputs.infra_only }}'
+          CANCELLATION_KIND: '${{ steps.live.outputs.cancellation_kind }}'
           JOBS_COMPLETE: '${{ steps.download.outputs.jobs_complete }}'
+          TIMED_OUT_ANNOTATIONS_MISSING: '${{ steps.download.outputs.timed_out_annotations_missing }}'
         run: |-
           helper='.github/scripts/ci/main-failure-signature.mjs'
           shopt -s nullglob
@@ -414,6 +648,8 @@ jobs:
             --jobs "${RUNNER_TEMP}/failed-jobs.tsv" "${logs[@]}" > "${RUNNER_TEMP}/analysis.json"
           node "${helper}" comment --analysis "${RUNNER_TEMP}/analysis.json" \
             --jobs-json "${RUNNER_TEMP}/run-jobs.json" --sha "${HEAD_SHA}" \
+            --cancellation-kind "${CANCELLATION_KIND}" \
+            --timed-out-job-ids "${RUNNER_TEMP}/timed-out-job-ids" \
             --run-id "${WORKFLOW_RUN_ID}" --run-url "${WORKFLOW_RUN_URL}" > "${RUNNER_TEMP}/pr-comment.md"
           delim="QWEN_CI_COMMENT_$(openssl rand -hex 16)"
           {
@@ -421,6 +657,12 @@ jobs:
             cat "${RUNNER_TEMP}/pr-comment.md"
             if [[ "${INFRA_ONLY}" == 'true' ]]; then
               echo 'GitHub runner infrastructure failed; this result does not identify a Java test regression.'
+            fi
+            if [[ "${CANCELLATION_KIND}" == 'timeout' ]]; then
+              echo 'This run was cancelled because a job exceeded its `timeout-minutes` cap. That is a real breakage — usually a lane that no longer finishes in its budget — not a concurrency supersede.'
+            fi
+            if [[ "${TIMED_OUT_ANNOTATIONS_MISSING}" == 'true' ]]; then
+              echo 'At least one cancelled job could not be inspected, so a lane that also exceeded its timeout may be missing from the list above.'
             fi
             if [[ "${JOBS_COMPLETE}" != 'true' ]]; then
               echo 'The job list could not be read in full, so this report may name fewer failing jobs than the run had.'
@@ -457,7 +699,10 @@ jobs:
   rerun_infra:
     name: 'Rerun infrastructure-only failures'
     needs: 'analyze'
-    if: "${{ needs.analyze.outputs.infra_only == 'true' && needs.analyze.outputs.file_issue == 'true' && needs.analyze.outputs.provisional != 'true' }}"
+    # A timed-out run is rerun on `rerun_pending`, not on `file_issue`: the
+    # destination clears `file_issue` precisely for the timeout that still has
+    # reruns left, so gating the dispatch on it skipped the rerun.
+    if: "${{ ((needs.analyze.outputs.infra_only == 'true' && needs.analyze.outputs.file_issue == 'true') || (needs.analyze.outputs.cancellation_kind == 'timeout' && needs.analyze.outputs.rerun_pending == 'true')) && needs.analyze.outputs.provisional != 'true' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
@@ -468,7 +713,16 @@ jobs:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           REPO: '${{ github.repository }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
+          CANCELLATION_KIND: '${{ needs.analyze.outputs.cancellation_kind }}'
         run: |-
+          if [[ "${CANCELLATION_KIND}" == 'timeout' ]]; then
+            # A timed-out run has no failed job for `rerun-failed-jobs` to
+            # select, so rerun the whole run. Its own completion re-enters
+            # this workflow and the break is filed then.
+            gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun"
+            echo "Run ${WORKFLOW_RUN_ID} was cancelled by a job timeout; reran it and filed no issue yet."
+            exit 0
+          fi
           gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs"
           echo "Every failed job of run ${WORKFLOW_RUN_ID} died on infrastructure; reran them and filed no issue."
 
@@ -483,7 +737,19 @@ jobs:
     # skipped need is not a success: file when the run is not
     # infrastructure-only, and file when the rerun itself could not be
     # dispatched — the issue is then the only record of a red main.
-    if: "${{ always() && needs.analyze.result == 'success' && needs.analyze.outputs.file_issue == 'true' && (needs.analyze.outputs.infra_only != 'true' || needs.rerun_infra.result != 'success') }}"
+    #
+    # A deferred timeout files on its rerun's failure just the same, and that
+    # case cannot be expressed as `file_issue == 'true'`: the destination
+    # leaves `file_issue` false for exactly the timeout whose filing the rerun
+    # inherits. Gating on the resolved flag alone made the fallback the
+    # comment above describes unreachable for the timeout path, so a dispatch
+    # that died mid-flight left no issue, no comment and no rerun.
+    #
+    # `== 'failure'` rather than `!= 'success'` on purpose: a skipped rerun is
+    # a provisional or unreadable-annotation run that files through its own
+    # path, and must not file a second time here. A job-level `if` can only
+    # read `needs.*`, so this expression is the whole rule.
+    if: "${{ always() && needs.analyze.result == 'success' && (needs.analyze.outputs.file_issue == 'true' || (needs.analyze.outputs.rerun_pending == 'true' && needs.rerun_infra.result == 'failure')) && (needs.analyze.outputs.infra_only != 'true' || needs.analyze.outputs.timeout_attempts_exhausted == 'true' || needs.rerun_infra.result == 'failure') }}"
     # Deliberately hosted, NOT the ECS pool: this job reports that CI broke,
     # and the pool being the REASON CI broke would queue the report behind
     # the very failure it documents.
@@ -975,8 +1241,15 @@ jobs:
     name: 'Report Java CI failure on the PR'
     needs: ['analyze', 'file_issue', 'rerun_infra']
     # A prepared summary survives issue-write errors. Only a successfully
-    # dispatched infrastructure rerun suppresses the comment.
-    if: "${{ always() && needs.analyze.outputs.comment_body != '' && needs.analyze.outputs.pr_number != '' && (needs.analyze.outputs.infra_only != 'true' || needs.rerun_infra.result != 'success') }}"
+    # dispatched rerun suppresses the comment, and a timeout still inside its
+    # rerun budget suppresses it too: that run is rerun whole and its own
+    # completion reports the outcome, so posting "failed" now would leave a red
+    # comment that a green rerun never retracts. Two paths reach here with no
+    # other writer: a rerun that could not be dispatched, and a timed-out
+    # dispatch that resolves to an open PR (never rerun, never filed because
+    # there is no filing destination). On the main-push dispatch there is no
+    # PR, so only the issue exists; on a merged PR's dispatch both writers run.
+    if: "${{ always() && (needs.analyze.outputs.rerun_pending != 'true' || needs.rerun_infra.result != 'success') && needs.analyze.outputs.comment_body != '' && needs.analyze.outputs.pr_number != '' && (needs.analyze.outputs.infra_only != 'true' || needs.rerun_infra.result != 'success') }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:

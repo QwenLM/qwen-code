@@ -402,22 +402,62 @@ function cappedTestLines(tests) {
   return lines;
 }
 
-export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
+export function renderFailureComment({
+  analysis,
+  occurrence,
+  jobs = [],
+  cancellationKind = 'none',
+  // Job ids the download step confirmed carried the timeout annotation. On a
+  // timeout the sibling lanes are concluded `cancelled` by GitHub, not failed,
+  // and their step conclusions cannot tell them from the lane that actually
+  // hit its cap (run 42227747366 has both shapes). Without this set the
+  // renderer names a sibling as a broken lane, which buries the timeout line
+  // the comment exists to carry. Undefined keeps the step-shape heuristic, so
+  // a caller that has no such set still renders something.
+  timedOutJobIds = undefined,
+}) {
   const code = (text) => `\`${String(text).replace(/[`\r\n]/g, ' ')}\``;
+  // A timeout cancels every sibling, but only the lane that hit its cap is
+  // the failure. The download step narrows the list the same way; without it
+  // here a five-shard matrix names five failures for one lane.
+  const timedOut =
+    timedOutJobIds === undefined
+      ? undefined
+      : new Set([...timedOutJobIds].map((id) => String(id)));
+  const reported = jobs.filter((job) => {
+    if (!['failure', 'cancelled'].includes(job.conclusion)) return false;
+    if (cancellationKind !== 'timeout') return true;
+    if (timedOut) {
+      // An explicit set is authoritative: a cancelled job is named only when
+      // it is the one that timed out.
+      return job.conclusion === 'failure' || timedOut.has(String(job.id));
+    }
+    if (job.conclusion === 'failure') return true;
+    // A sibling the timeout took down is cancelled mid-flight: every step is
+    // `success`, `skipped` or `cancelled`, with no failure of its own. The
+    // lane that hit its cap has a step that failed before the cancel, which is
+    // what marks it as the lane to name. (Run 42227747366 has both shapes.)
+    const steps = job.steps ?? [];
+    if (!steps.length) return true;
+    return steps.some(
+      (step) =>
+        !['success', 'skipped', 'pending', 'cancelled'].includes(
+          step.conclusion,
+        ),
+    );
+  });
   return [
     `<!-- qwen-managed-agent-ci-failure:${occurrence.runId} -->`,
     `### ${code(analysis.workflow)} failed`,
     '',
     `[Run ${occurrence.runId}](${occurrence.runUrl}) · commit ${code(occurrence.sha.slice(0, 12))}`,
     '',
-    ...jobs
-      .filter((job) => job.conclusion === 'failure')
-      .map((job) => {
-        const steps = (job.steps ?? [])
-          .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))
-          .map((step) => code(step.name));
-        return `- [${code(job.name)}](${job.html_url})${steps.length ? `: ${steps.join(', ')}` : ''}`;
-      }),
+    ...reported.map((job) => {
+      const steps = (job.steps ?? [])
+        .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))
+        .map((step) => code(step.name));
+      return `- [${code(job.name)}](${job.html_url})${steps.length ? `: ${steps.join(', ')}` : ''}`;
+    }),
     '',
     ...(analysis.tests.length
       ? [
@@ -591,6 +631,18 @@ function readJobs(path) {
   }
 }
 
+/** One id per line; a missing file reads as "no set", not as an empty one. */
+function readLines(path) {
+  try {
+    return readFileSync(path, 'utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return undefined;
+  }
+}
+
 export function runCli(argv) {
   const [command, ...rest] = argv;
   const { options, positional } = parseArgs(rest);
@@ -605,6 +657,10 @@ export function runCli(argv) {
           runUrl: options['run-url'],
         },
         jobs: readJobs(options['jobs-json']),
+        cancellationKind: options['cancellation-kind'] ?? 'none',
+        timedOutJobIds: options['timed-out-job-ids']
+          ? readLines(options['timed-out-job-ids'])
+          : undefined,
       }),
     );
     return;
