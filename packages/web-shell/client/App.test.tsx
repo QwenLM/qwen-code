@@ -12183,7 +12183,7 @@ function sessionRecapSetting(effective: boolean): DaemonSettingDescriptor {
   };
 }
 
-function recapAwayThresholdSetting(effective: number): DaemonSettingDescriptor {
+function recapAwayThresholdSetting(effective: unknown): DaemonSettingDescriptor {
   return {
     key: 'general.sessionRecapAwayThresholdMinutes',
     type: 'number',
@@ -12191,7 +12191,7 @@ function recapAwayThresholdSetting(effective: number): DaemonSettingDescriptor {
     category: 'General',
     requiresRestart: false,
     default: 5,
-    values: { effective },
+    values: { effective: effective as number },
   };
 }
 
@@ -26954,6 +26954,10 @@ describe('App session callbacks', () => {
         [sessionRecapSetting(true), recapAwayThresholdSetting(0)],
       ],
       ['negative', [sessionRecapSetting(true), recapAwayThresholdSetting(-3)]],
+      [
+        'non-numeric string',
+        [sessionRecapSetting(true), recapAwayThresholdSetting('abc')],
+      ],
     ];
     for (const [label, settings] of cases) {
       mockSessionActions.recapSession.mockReset();
@@ -27064,6 +27068,41 @@ describe('App session callbacks', () => {
     await flush();
     act(() => document.dispatchEvent(new Event('visibilitychange')));
     now += 6 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(mockSessionActions.recapSession).not.toHaveBeenCalled();
+
+    hidden = true;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    now += 10 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(mockSessionActions.recapSession).toHaveBeenCalledOnce();
+  });
+
+  it('honors a numeric string threshold the way the terminal does', async () => {
+    // Settings are served unvalidated, so a hand-edited "10" reaches the Web
+    // Shell as a string. The terminal's `awayThresholdMinutes > 0` coerces it;
+    // this pins the same reading here instead of the 5-minute fallback.
+    testState.settings = [
+      sessionRecapSetting(true),
+      recapAwayThresholdSetting('10'),
+    ];
+    const recap = deferred<{ sessionId: string; recap: string | null }>();
+    mockSessionActions.recapSession.mockReturnValue(recap.promise);
+    testState.blocks = [{}, {}, {}, {}];
+    let hidden = true;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    let now = 1;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    renderApp();
+    await flush();
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    now += 5 * 60 * 1000;
     hidden = false;
     act(() => document.dispatchEvent(new Event('visibilitychange')));
     expect(mockSessionActions.recapSession).not.toHaveBeenCalled();

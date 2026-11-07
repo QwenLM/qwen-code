@@ -13994,10 +13994,14 @@ export function App({
       (setting) => setting.key === 'general.showSessionRecap',
     )?.values.effective === true;
   const recapAwayThresholdMinutes = (() => {
-    const value = workspaceSettings.find(
+    const raw = workspaceSettings.find(
       (setting) => setting.key === 'general.sessionRecapAwayThresholdMinutes',
     )?.values.effective;
-    return typeof value === 'number' && value > 0 ? value : 5;
+    // Coerce the way the terminal's `awayThresholdMinutes > 0` does: settings
+    // are not type-validated on load, so a hand-edited "10" must mean 10 here
+    // too rather than silently falling back to the 5-minute default.
+    const value = typeof raw === 'number' ? raw : Number(raw);
+    return Number.isFinite(value) && value > 0 ? value : 5;
   })();
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
