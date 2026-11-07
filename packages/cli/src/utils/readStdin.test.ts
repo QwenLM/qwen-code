@@ -90,6 +90,26 @@ describe('readStdin', () => {
     vi.useRealTimers();
   });
 
+  it('should warn on stderr when warnOnTimeout is set and no input arrives before timeout', async () => {
+    vi.useFakeTimers();
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    const stderrSpy = vi.fn(() => true);
+    (process.stderr as { write: unknown }).write = stderrSpy;
+
+    try {
+      const promise = readStdin({ warnOnTimeout: true });
+      vi.advanceTimersByTime(500);
+
+      await expect(promise).resolves.toBe('');
+      expect(stderrSpy).toHaveBeenCalledWith(
+        'Warning: no stdin input received within 500ms; proceeding without stdin.\n',
+      );
+    } finally {
+      (process.stderr as { write: typeof originalWrite }).write = originalWrite;
+      vi.useRealTimers();
+    }
+  });
+
   it('should clear timeout once when data is received and resolve with data', async () => {
     const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout');
     mockStdin.read

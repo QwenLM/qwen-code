@@ -792,7 +792,7 @@ export async function main() {
       const isAcpMode = argv.acp || argv.experimentalAcp;
       let stdinData = '';
       if (!process.stdin.isTTY && inputFormat !== 'stream-json' && !isAcpMode) {
-        stdinData = await readStdin();
+        stdinData = await readStdin({ warnOnTimeout: Boolean(argv.prompt) });
       }
 
       // This function is a copy of the one from sandbox.ts
@@ -1663,7 +1663,7 @@ export async function main() {
     // In stream-json mode, stdin is used for protocol messages (control requests, etc.)
     // and should be consumed by StreamJsonInputReader instead
     if (inputFormat !== InputFormat.STREAM_JSON && !process.stdin.isTTY) {
-      const stdinData = await readStdin();
+      const stdinData = await readStdin({ warnOnTimeout: Boolean(input) });
       if (stdinData) {
         input = `${stdinData}\n\n${input}`;
       }
