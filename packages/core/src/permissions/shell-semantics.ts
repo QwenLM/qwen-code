@@ -35,7 +35,13 @@ import nodePath from 'node:path';
 import os from 'node:os';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { splitCompoundCommandSegments } from './rule-parser.js';
+import {
+  splitCompoundCommandSegments,
+  splitCompoundCommandSegmentsForReading,
+  readingEndsInOpenQuote,
+  type BackslashReading,
+  type CompoundCommandSegment,
+} from './rule-parser.js';
 
 const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
 
@@ -82,40 +88,266 @@ export interface ShellOperation {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * A shell word with its quoting provenance. `bare` is false when any part of
+ * the word was quoted or backslash-escaped. `bareChars` records that same fact
+ * per output character, so a quoted operator stays an operand while a bare
+ * operator after an empty quoted span remains a redirect. `trailingSyntax`
+ * keeps a glued empty target (`>''`) distinct from a separate operator.
+ */
+interface TokenProvenance {
+  unquotedGlob: boolean;
+  quotedTilde: boolean;
+  unquotedSyntax: boolean;
+}
+
+interface ShellToken extends TokenProvenance {
+  text: string;
+  bare: boolean;
+  bareChars: boolean[];
+  /** Output positions where quoting or escaping produced no character. */
+  quotedOffsets: number[];
+  /** Quote or escape syntax appeared before the first output character. */
+  leadingQuotedContent: boolean;
+  trailingSyntax: boolean;
+}
+
+/**
  * Tokenize a shell command string, respecting single/double quotes and
  * backslash escapes, splitting on unquoted whitespace.
  *
  * The input should be a single simple command (already split from compound
  * commands via `splitCompoundCommand`).
- *
- * Quote removal hides whether a `&` was typed bare: `>&1` duplicates a file
- * descriptor, but `>"&1"` and `>\&1` write a file named `&1`. When
- * `fdRedirects` is given, it receives the index of each token that starts
- * with `>&`, `1>&`, `2>&` or `<&` whose `>`/`<` and `&` were both unquoted.
- * Bash reads an unquoted `-` right after such an operator as "close" and the
- * rest of the word as an argument: `rm >&-notes.txt` closes stdout and
- * removes `notes.txt`. That rest becomes its own token after the redirect
- * token, and `fdCloses` receives the redirect token's index.
  */
-function tokenize(
-  command: string,
-  fdRedirects?: Set<number>,
-  fdCloses?: Set<number>,
-): string[] {
-  const tokens: string[] = [];
+function tokenizeDetailed(command: string): ShellToken[] {
+  const tokens: ShellToken[] = [];
   let current = '';
-  // One char per char of `current`: '1' if typed unquoted and unescaped.
-  let bare = '';
+  let bare = true;
+  let bareChars: boolean[] = [];
+  let quotedOffsets: number[] = [];
+  let trailingSyntax = false;
+  let sawQuotedContent = false;
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+  let unquotedGlob = false;
+  let quotedTilde = false;
+  let unquotedSyntax = false;
+
+  const record = (ch: string, quoted: boolean): void => {
+    if (current.length === 0 && ch === '~' && quoted) quotedTilde = true;
+    if (quoted) return;
+    if (/[*?[\]{}]/.test(ch)) unquotedGlob = true;
+    if (ch === '(' || ch === ')' || ch === '&') unquotedSyntax = true;
+  };
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    record(ch, inSingle || inDouble || escaped);
+
+    if (escaped) {
+      current += ch;
+      bareChars.push(false);
+      sawQuotedContent = true;
+      trailingSyntax = false;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && !inSingle) {
+      escaped = true;
+      bare = false;
+      quotedOffsets.push(current.length);
+      trailingSyntax = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      bare = false;
+      quotedOffsets.push(current.length);
+      sawQuotedContent = true;
+      trailingSyntax = true;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      bare = false;
+      quotedOffsets.push(current.length);
+      sawQuotedContent = true;
+      trailingSyntax = true;
+      continue;
+    }
+    if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
+      pushToken(
+        tokens,
+        current,
+        bare,
+        bareChars,
+        quotedOffsets,
+        trailingSyntax,
+        sawQuotedContent,
+        {
+          unquotedGlob,
+          quotedTilde,
+          unquotedSyntax,
+        },
+      );
+      current = '';
+      bare = true;
+      bareChars = [];
+      quotedOffsets = [];
+      trailingSyntax = false;
+      sawQuotedContent = false;
+      unquotedGlob = false;
+      quotedTilde = false;
+      unquotedSyntax = false;
+      continue;
+    }
+    current += ch;
+    bareChars.push(!inSingle && !inDouble);
+    trailingSyntax = false;
+  }
+  pushToken(
+    tokens,
+    current,
+    bare,
+    bareChars,
+    quotedOffsets,
+    trailingSyntax,
+    sawQuotedContent,
+    {
+      unquotedGlob,
+      quotedTilde,
+      unquotedSyntax,
+    },
+  );
+  return tokens;
+}
+
+function pushToken(
+  tokens: ShellToken[],
+  token: string,
+  bare: boolean,
+  bareChars: boolean[],
+  quotedOffsets: number[],
+  trailingSyntax: boolean,
+  sawQuotedContent: boolean,
+  provenance: TokenProvenance,
+): void {
+  // Right after an unquoted `>&`, `N>&` or `<&`, bash reads an unquoted `-`
+  // as "close the descriptor" and starts a new word after it: `rm >&-notes.txt`
+  // closes stdout and removes `notes.txt`. The redirect token keeps the whole
+  // word and the rest of the word follows it as an argument. The new word can
+  // close again (`rm >&->&-notes.txt`), and this loop walks the chain so a long
+  // one cannot overflow the stack. Only the first redirect keeps the whole
+  // word: the closes after it open no file.
+  let chained = false;
+  for (;;) {
+    const normalized = trimShellSyntax(token, bareChars);
+    let leadTrim = 0;
+    while (
+      leadTrim < token.length &&
+      token[leadTrim] === '(' &&
+      bareChars[leadTrim]
+    ) {
+      leadTrim++;
+    }
+    const normalizedBareChars = bareChars.slice(
+      leadTrim,
+      leadTrim + normalized.length,
+    );
+    const normalizedQuotedOffsets = quotedOffsets
+      .filter(
+        (offset) =>
+          offset >= leadTrim && offset <= leadTrim + normalized.length,
+      )
+      .map((offset) => offset - leadTrim);
+    // Empty quotes still form an operand (`cd ''` fails without moving), but a
+    // trailing backslash that consumed no character does not. Tracking actual
+    // quoted/escaped word syntax separately from `bare` keeps those states apart.
+    const push = (): void => {
+      if (normalized || (sawQuotedContent && !chained)) {
+        tokens.push({
+          text: normalized,
+          bare,
+          bareChars: normalizedBareChars,
+          quotedOffsets: normalizedQuotedOffsets,
+          leadingQuotedContent: normalizedQuotedOffsets[0] === 0,
+          trailingSyntax,
+          ...provenance,
+        });
+      }
+    };
+
+    const op = /^[12]?>&|^<&/.exec(normalized)?.[0];
+    // The `>`/`<` and the `&` must both be unquoted to be descriptor syntax.
+    const opIsSyntax =
+      !!op &&
+      normalizedBareChars.slice(op.length - 2, op.length).every(Boolean);
+    const closes =
+      opIsSyntax &&
+      normalized[op.length] === '-' &&
+      normalizedBareChars[op.length] === true;
+    if (!closes || normalized.length === op!.length + 1) {
+      push();
+      return;
+    }
+    if (!chained) {
+      push();
+      chained = true;
+    }
+    token = normalized.slice(op!.length + 1);
+    bareChars = normalizedBareChars.slice(op!.length + 1);
+    quotedOffsets = normalizedQuotedOffsets
+      .filter((offset) => offset >= op!.length + 1)
+      .map((offset) => offset - op!.length - 1);
+    trailingSyntax = false;
+    sawQuotedContent = false;
+  }
+}
+
+/**
+ * Strip grouping and background syntax from a word. The decision is per
+ * character, not per word: quoting any part of a word used to switch the whole
+ * trim off, so `'settings.json')` published the trailing `)` as part of the
+ * path and a Write deny rule on the real target stopped matching. Only
+ * punctuation that is itself quoted or escaped survives, so a quoted `)`
+ * operand and an interior `R&D` are left alone (#12280 R7-1).
+ */
+function trimShellSyntax(token: string, bareChars: boolean[]): string {
+  let start = 0;
+  let end = token.length;
+
+  while (start < end && token[start] === '(' && bareChars[start]) {
+    start++;
+  }
+  while (end > start) {
+    const ch = token[end - 1];
+    if ((ch !== ')' && ch !== '&') || !bareChars[end - 1]) break;
+    end--;
+  }
+
+  return token.slice(start, end);
+}
+
+function isBareBrace(token: ShellToken): boolean {
+  return token.bare && (token.text === '{' || token.text === '}');
+}
+
+function tokenize(command: string): string[] {
+  return tokenizeDetailed(command)
+    .filter((token) => token.text !== '' && !isBareBrace(token))
+    .map((token) => token.text);
+}
+
+/** Return the closing parenthesis of a shell substitution, or input length. */
+function findShellSubstitutionEnd(command: string, start: number): number {
+  let depth = 0;
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
 
-  for (let i = 0; i < command.length; i++) {
+  for (let i = start + 1; i < command.length; i++) {
     const ch = command[i]!;
-
     if (escaped) {
-      current += ch;
-      bare += '0';
       escaped = false;
       continue;
     }
@@ -131,87 +363,219 @@ function tokenize(
       inDouble = !inDouble;
       continue;
     }
-    if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
-      if (current) {
-        pushToken(tokens, current, bare, fdRedirects, fdCloses);
-        current = '';
-        bare = '';
-      }
+    if (inSingle || inDouble) continue;
+    if (ch === '(') {
+      depth++;
+    } else if (ch === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return command.length;
+}
+
+/**
+ * Cut the parts of a simple command `tokenize` cannot model but bash never
+ * passes to the command: `#` comments and `>(...)`/`<(...)` process
+ * substitutions. A `#` opens a comment only where bash would start a word
+ * (line start, or after a blank or metacharacter) outside quotes, and runs to
+ * the end of the line; a process substitution is one word however much
+ * whitespace or operator text its parens contain. `cd` operand counting runs
+ * on the cut text so leftover comment words or substitution fragments cannot
+ * read as extra operands and de-resolve a `cd` bash really performs (#12280
+ * R7-2). Anything `cd`-unrelated keeps the raw text.
+ */
+function cutShellCommentsAndProcessSubstitutions(command: string): string {
+  let out = '';
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+  let wordStart = true;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+
+    if (escaped) {
+      out += ch;
+      escaped = false;
+      wordStart = false;
       continue;
     }
-    current += ch;
-    bare += inSingle || inDouble ? '0' : '1';
+    if (ch === '\\' && !inSingle && command[i + 1] === '\n') {
+      // bash drops a `\<newline>` continuation outright, so a `#` opening the
+      // continuation line still starts a comment; emitting the pair as an
+      // escaped newline would hide that and leave the comment words reading
+      // as extra `cd` operands (#12280 R1-4). rule-parser consumes the same
+      // pair without emitting a boundary.
+      i++;
+      continue;
+    }
+    if (ch === '\\' && !inSingle) {
+      out += ch;
+      escaped = true;
+      wordStart = false;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      out += ch;
+      inSingle = !inSingle;
+      wordStart = false;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      out += ch;
+      inDouble = !inDouble;
+      wordStart = false;
+      continue;
+    }
+    if (inSingle || inDouble) {
+      out += ch;
+      continue;
+    }
+
+    if (ch === '#' && wordStart) {
+      while (i < command.length && command[i] !== '\n') {
+        i++;
+      }
+      if (i >= command.length) break;
+      // bash ends a `#` comment at the newline even when a backslash precedes
+      // it, while the segment splitter suppresses every `\<newline>` pair.
+      // walkCompoundCommand de-glues an odd trailing backslash out of comment
+      // text before splitting (normalizeShellCommentsForSplit), so the
+      // split already sees the boundary bash sees and this break is just the
+      // conservative exit. It returns the strict prefix before the `#`; the
+      // remainder is discarded, since gluing the next line's words onto this
+      // command would misread them as operands (#12280 R2-2).
+      let trailingBackslashes = 0;
+      for (let j = i - 1; j >= 0 && command[j] === '\\'; j--) {
+        trailingBackslashes++;
+      }
+      if (trailingBackslashes % 2 === 1) break;
+      out += '\n';
+      wordStart = true;
+      continue;
+    }
+    if ((ch === '$' || ch === '>' || ch === '<') && command[i + 1] === '(') {
+      const end = findShellSubstitutionEnd(command, i);
+      if (ch === '$') {
+        out += command.slice(i, end + 1);
+      } else {
+        // bash expands a process substitution to exactly one real word (an fd
+        // path), so erasing it under-counts the `cd` operands: `cd backup
+        // >(tee log)` fails with too many arguments and never moves the cwd
+        // (#12280 R2-1).
+        out += ' /dev/fd/63';
+      }
+      i = end;
+      wordStart = false;
+      continue;
+    }
+
+    wordStart = ' \t\n|&;()<>'.includes(ch);
+    out += ch;
   }
-  if (current) pushToken(tokens, current, bare, fdRedirects, fdCloses);
-  return tokens;
+  return out;
 }
 
-function pushToken(
-  tokens: string[],
-  token: string,
-  bare: string,
-  fdRedirects: Set<number> | undefined,
-  fdCloses?: Set<number>,
-): void {
-  // Right after an unquoted `>&`, `N>&` or `<&`, bash reads an unquoted `-`
-  // as "close the descriptor" and starts a new word after it:
-  // `rm >&-notes.txt` closes stdout and removes `notes.txt`. The redirect
-  // token keeps the whole word (see extractRedirects) and the rest of the
-  // word follows it as an argument. The new word can close again
-  // (`rm >&->&-notes.txt`); a loop handles that, so a long chain can't
-  // overflow the stack, and only the first redirect keeps the whole word,
-  // as on `main`: the closes after it open no file.
-  let chained = false;
-  for (;;) {
-    if (token === '{' || token === '}') return;
-    const normalized = trimShellSyntax(token, bare);
-    if (!normalized) return;
-    if (!fdRedirects) {
-      tokens.push(normalized);
-      return;
-    }
-    // trimShellSyntax only drops leading `(` and trailing `)`/`&`.
-    const start = /^\(*/.exec(token)![0].length;
-    const normBare = bare.slice(start, start + normalized.length);
-    const op = /^[12]?>&|^<&/.exec(normalized)?.[0];
-    if (!op || normBare.slice(op.length - 2, op.length) !== '11') {
-      tokens.push(normalized);
-      return;
-    }
-    const close = op.length;
-    const closes = normalized[close] === '-' && normBare[close] === '1';
-    if (!closes || normalized.length === close + 1) {
-      fdRedirects.add(tokens.length);
-      tokens.push(normalized);
-      return;
-    }
-    if (!chained) {
-      fdRedirects.add(tokens.length);
-      fdCloses?.add(tokens.length);
-      tokens.push(normalized);
-      chained = true;
-    }
-    token = normalized.slice(close + 1);
-    bare = normBare.slice(close + 1);
-  }
-}
+/**
+ * Normalize comment text before compound-command splitting. Drop the last
+ * backslash of an odd run at the end of a `#` comment line and, when selected,
+ * blank quote characters elsewhere in the comment without changing positions.
+ * bash ends a comment at the newline regardless of a preceding backslash, but
+ * the segment splitter suppresses every `\<newline>` pair as a continuation,
+ * so without this the comment and the following line arrive glued into one
+ * segment and the following line's commands (`cd`, writes) are cut away with
+ * the comment (#12280 R2-2). An even run means the final backslash is itself
+ * escaped and the continuation is real, so those pass through untouched. Quote
+ * characters in ordinary comment prose must not open a quoted blob that hides
+ * the newline and the following command's cwd.
+ */
+function normalizeShellCommentsForSplit(
+  command: string,
+  neutralizeCommentQuotes = !command.includes('\\'),
+): string {
+  let out = '';
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+  let wordStart = true;
 
-function trimShellSyntax(token: string, bare: string): string {
-  let start = 0;
-  let end = token.length;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
 
-  while (start < end && token[start] === '(') {
-    start++;
-  }
-  while (end > start) {
-    const ch = token[end - 1];
-    // A quoted or escaped `)` or `&` is part of the word: `>"x&"` writes
-    // `x&`, `>"notes)"` writes `notes)`.
-    if ((ch !== ')' && ch !== '&') || bare[end - 1] !== '1') break;
-    end--;
-  }
+    if (escaped) {
+      out += ch;
+      escaped = false;
+      wordStart = false;
+      continue;
+    }
+    if (ch === '\\' && !inSingle && command[i + 1] === '\n') {
+      // Keep the pair for span replay, but preserve word-startedness so a `#`
+      // opening the continuation line still starts a comment.
+      out += ch + command[i + 1]!;
+      i++;
+      continue;
+    }
+    if (ch === '\\' && !inSingle) {
+      out += ch;
+      escaped = true;
+      wordStart = false;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      out += ch;
+      inSingle = !inSingle;
+      wordStart = false;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      out += ch;
+      inDouble = !inDouble;
+      wordStart = false;
+      continue;
+    }
+    if (inSingle || inDouble) {
+      out += ch;
+      continue;
+    }
 
-  return token.slice(start, end);
+    if ((ch === '$' || ch === '>' || ch === '<') && command[i + 1] === '(') {
+      const end = findShellSubstitutionEnd(command, i);
+      out += command.slice(i, end + 1);
+      i = end;
+      wordStart = false;
+      continue;
+    }
+
+    if (ch === '#' && wordStart) {
+      // Quote state is inert inside a comment; only the ending newline and
+      // the backslash run before it matter.
+      let end = i;
+      while (end < command.length && command[end] !== '\n') {
+        end++;
+      }
+      let trailingBackslashes = 0;
+      for (let j = end - 1; j > i && command[j] === '\\'; j--) {
+        trailingBackslashes++;
+      }
+      const drop = trailingBackslashes % 2 === 1 ? end - 1 : -1;
+      for (let j = i; j < end; j++) {
+        if (j === drop) continue;
+        const commentChar = command[j]!;
+        out +=
+          neutralizeCommentQuotes &&
+          (commentChar === "'" || commentChar === '"')
+            ? ' '
+            : commentChar;
+      }
+      i = end - 1; // the loop's i++ lands on the newline, emitted normally
+      continue;
+    }
+
+    wordStart = ' \t\n|&;()<>'.includes(ch);
+    out += ch;
+  }
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -248,8 +612,13 @@ function isShellAbsolutePath(p: string): boolean {
   return p.startsWith('/') || /^[A-Za-z]:\//.test(p.replace(/\\/g, '/'));
 }
 
-function isEnvAssignmentToken(token: string): boolean {
-  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
+function isEnvAssignmentToken(token: string, bareChars?: boolean[]): boolean {
+  const match = /^[A-Za-z_][A-Za-z0-9_]*=/.exec(token);
+  if (!match) return false;
+  return (
+    bareChars === undefined ||
+    bareChars.slice(0, match[0].length).every(Boolean)
+  );
 }
 
 /**
@@ -278,6 +647,8 @@ function looksLikePath(s: string): boolean {
 interface RedirectResult {
   readFiles: string[];
   writeFiles: string[];
+  /** Operand prefixes recovered from redirect-shaped words. */
+  restoredPrefixes?: Set<string>;
 }
 
 /**
@@ -290,25 +661,6 @@ function isNetworkPseudoDevice(target: string): boolean {
 }
 
 /**
- * The file that `>&word`, `N>&word` or `<&word` opens, or undefined when it
- * only duplicates or closes a descriptor (`2>&1`, `>&2`, `<&0`, `2>&-`).
- *
- * `>&file` and `1>&file` write `file` (stdout and stderr). `2>&file` and
- * `<&file` are errors in bash; treating them as file operations keeps the
- * check strict. A `$`/backtick word may expand to a descriptor or a file, so
- * it keeps the literal `&word` write.
- */
-function fdRedirectFile(word: string): string | undefined {
-  if (/^(\d+|-)$/.test(word)) return undefined;
-  if (isDynamicShellPath(word)) return `&${word}`;
-  if (word === '/dev/null' || isNetworkPseudoDevice(word)) return undefined;
-  // An unquoted leading `-` never gets here (see `fdCloses`), so a `-` still
-  // here was quoted or escaped: `>&"-x"` writes the file `-x`, it isn't a flag.
-  if (word.startsWith('-') || looksLikePath(word)) return word;
-  return undefined;
-}
-
-/**
  * Extract I/O redirections from a token array.
  *
  * Modifies `tokens` in-place to remove redirect operators and their targets.
@@ -318,129 +670,235 @@ function fdRedirectFile(word: string): string | undefined {
  *   `> file`   `>> file`  `< file`   (with or without space)
  *   `2> file`  `2>> file` `&> file`  `&>> file`
  *   Combined forms: `>file`, `>>file`, `1>file`, `2>/dev/null`
- *
- * `fdRedirects` holds the indices that `tokenize` found to start with an
- * unquoted `>&`, `N>&` or `<&`, and `fdCloses` those of them that close the
- * descriptor with an unquoted `-` and pass the rest of the word on.
  */
+/**
+ * `>(...)` / `<(...)` fragments the tokenizer split at their inner spaces:
+ * bash expands the whole substitution to one fd path, so the fragment is not a
+ * file this analyzer can name and must not be reported as one.
+ */
+function isProcessSubstitutionFragment(
+  target: string,
+  bareChars: boolean[],
+): boolean {
+  const lead = target.startsWith('>(') || target.startsWith('<(') ? 1 : 0;
+  return target.startsWith('(', lead) && bareChars[lead] === true;
+}
+
+const REDIRECT_OPERATORS = [
+  '&>>',
+  '&>',
+  '<<<',
+  '<<-',
+  '<<',
+  '<>',
+  '>>',
+  '>|',
+  '>',
+  '<',
+] as const;
+
+interface RedirectTokenMatch {
+  operator: (typeof REDIRECT_OPERATORS)[number];
+  target: string;
+  targetInToken: boolean;
+  /** Per-character quoting of the target text, aligned with `target`. */
+  targetBareChars: boolean[];
+  prefix: string;
+  prefixIsOperand: boolean;
+}
+
+function parseRedirectToken(token: ShellToken): RedirectTokenMatch | null {
+  for (let start = 0; start < token.text.length; start++) {
+    const prefix = token.text.slice(0, start);
+    for (const operator of REDIRECT_OPERATORS) {
+      if (!token.text.startsWith(operator, start)) continue;
+      if (
+        !token.bareChars.slice(start, start + operator.length).every(Boolean)
+      ) {
+        continue;
+      }
+      const target = token.text.slice(start + operator.length);
+      const prefixHasQuotedContent = token.leadingQuotedContent;
+      return {
+        operator,
+        target,
+        targetInToken: target !== '' || token.trailingSyntax,
+        targetBareChars: token.bareChars.slice(start + operator.length),
+        prefix,
+        // A prefix is an operand to keep, not an fd specifier to drop, unless it
+        // is the bare `2` / `{fd}` spelling. Quoting an fd-ish prefix turns it
+        // back into a word, which is why the bare-chars test disqualifies it.
+        // Zero-width quoting before the operator also forms an empty operand.
+        prefixIsOperand:
+          (start > 0 || prefixHasQuotedContent) &&
+          (!/^(?:\d+|\{\w+\})$/.test(prefix) ||
+            !token.bareChars.slice(0, start).every(Boolean)),
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * The file a redirect target names, or undefined when it only duplicates or
+ * closes a descriptor.
+ *
+ * `>&word`, `N>&word` and `<&word` where the `&` was typed bare follow bash: a
+ * whole number or `-` names a descriptor and opens nothing (`2>&1`, `>&-`,
+ * `<&0`), `/dev/null` and the `/dev/tcp`/`/dev/udp` pseudo-devices open
+ * nothing, and anything else names a file without the `&` (`>&settings.json`
+ * writes `settings.json`, not `&settings.json`). A `$` or backtick word may
+ * expand to either, so it keeps the literal `&word` write.
+ *
+ * An unquoted `-` right after the `&` closes the descriptor and starts a new
+ * word, so the redirect token keeps the whole `&-word` as its file operation
+ * (`my-tool >&-notes.txt` is checked against `&-notes.txt`) while `notes.txt`
+ * goes on to the command. A `-` that is still there after quoting or escaping
+ * is part of the name instead (`>&"-x"` writes `-x`), and is reported without
+ * the flag check that would have dropped it.
+ *
+ * Quoting the `&` removes the syntax: `>"&1"` writes a file named `&1`, so the
+ * `&` is part of the name. Quoting only the word after a bare `&` does not
+ * matter to bash (`>&"1"` still duplicates fd 1), which is why the decision
+ * keys off the `&` and not off the whole target.
+ */
+function redirectTargetFile(
+  target: string,
+  match: RedirectTokenMatch,
+): string | undefined {
+  if (target.startsWith('&') && match.targetBareChars[0]) {
+    const word = target.slice(1);
+    const wordBare = match.targetBareChars.slice(1);
+    if (/^(?:\d+|-)$/.test(word)) return undefined;
+    if (word.includes('$') || word.includes('`')) return target;
+    if (word === '/dev/null' || isNetworkPseudoDevice(word)) return undefined;
+    // An unquoted `-` right after a bare `&` is "close the descriptor", and
+    // bash starts a new word after it. The redirect token keeps the whole
+    // `&-word` as the file operation (that is what `main` reported), while the
+    // word after the `-` goes on to the command as an argument.
+    if (word.startsWith('-') && wordBare[0]) return target;
+    // A `-` still at the start of the word here was quoted or escaped, so it
+    // is part of the name and not a flag: `>&"-x"` writes `-x`. The flag check
+    // would have dropped that write.
+    if (word.startsWith('-') || looksLikePath(word)) return word;
+    return undefined;
+  }
+  if (target === '/dev/null') return undefined;
+  if (
+    !looksLikePath(target) ||
+    isProcessSubstitutionFragment(target, match.targetBareChars) ||
+    isNetworkPseudoDevice(target)
+  ) {
+    return undefined;
+  }
+  return target;
+}
+
+/**
+ * The `&word` a token would name if its redirect operator were read straight
+ * through the quotes, or undefined when the token is not that shape.
+ *
+ * Only a word that really carries bare grouping or background syntax reaches
+ * this: that is the case where bash's reading and a quoting-oblivious reading
+ * come apart, and the check reports the conservative literal rather than
+ * picking one. A fully quoted word has no such syntax and stays an operand.
+ */
+function quoteHiddenFdOperand(token: ShellToken): string | undefined {
+  if (!token.unquotedSyntax) return undefined;
+  const target = /^(?:<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/.exec(
+    token.text,
+  )?.[1];
+  return target?.startsWith('&') ? target : undefined;
+}
+
 function extractRedirects(
   tokens: string[],
+  detailed: ShellToken[],
   cwd: string,
-  fdRedirects: ReadonlySet<number>,
-  fdCloses: ReadonlySet<number> = new Set(),
 ): RedirectResult {
   const readFiles: string[] = [];
   const writeFiles: string[] = [];
   const toRemove = new Set<number>();
+  const remainingPrefixes = new Map<number, string>();
 
   for (let i = 0; i < tokens.length; i++) {
-    const tok = tokens[i]!;
-
-    // ── `>&word`, `N>&word`, `<&word` with an unquoted `>&`/`<&` ─────────
-    const fdOp = fdRedirects.has(i)
-      ? /^(?:[12]?>&|<&)/.exec(tok)?.[0]
-      : undefined;
-    if (fdOp) {
-      toRemove.add(i);
-      // `>&-word`: bash passes `word` to the command, and only the command
-      // knows what it does with it. The parser doesn't know every command
-      // and drops numbers and `$` words as arguments (`tee >&-2` writes
-      // `2`), so the whole word also stays a file operation, as it was
-      // before `-` was split off.
-      const file = fdCloses.has(i)
-        ? `&${tok.slice(fdOp.length)}`
-        : fdRedirectFile(tok.slice(fdOp.length));
-      if (file !== undefined) {
-        (fdOp === '<&' ? readFiles : writeFiles).push(resolvePath(file, cwd));
+    const match = parseRedirectToken(detailed[i]!);
+    if (!match) {
+      // A bare `&` inside a word is what makes the two readings disagree:
+      // bash reads `2">"&1` as a background separator between `2">"` and `1`,
+      // while a quoting-oblivious reader sees `2>&1`. Rather than let one
+      // reading decide, keep the literal `&1` write so a deny rule still
+      // matches it. A fully quoted word (`cd '>y'`) has no bare syntax and is
+      // left alone as a plain operand.
+      const literal = quoteHiddenFdOperand(detailed[i]!);
+      if (literal !== undefined) {
+        writeFiles.push(resolvePath(literal, cwd));
       }
       continue;
     }
+    const combined = match.targetInToken;
+    const target = combined ? match.target : tokens[i + 1];
+    const removeOperator = (): void => {
+      if (match.prefixIsOperand) remainingPrefixes.set(i, match.prefix);
+      else toRemove.add(i);
+    };
 
-    // ── Separate-token redirect operators ─────────────────────────────────
-    if (tok === '>' || tok === '1>') {
-      const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
-        if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(resolvePath(target, cwd));
-        }
-        toRemove.add(i);
+    if (match.operator.startsWith('<<')) {
+      removeOperator();
+      if (!combined && target !== undefined) {
         toRemove.add(i + 1);
         i++;
       }
-    } else if (tok === '>>' || tok === '1>>') {
-      const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
-        if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(resolvePath(target, cwd));
-        }
-        toRemove.add(i);
-        toRemove.add(i + 1);
-        i++;
-      }
-    } else if (tok === '<<' || tok === '<<-') {
-      toRemove.add(i);
-      if (tokens[i + 1]) {
-        toRemove.add(i + 1);
-        i++;
-      }
-    } else if (tok === '<') {
-      const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
-        if (!isNetworkPseudoDevice(target)) {
-          readFiles.push(resolvePath(target, cwd));
-        }
-        toRemove.add(i);
-        toRemove.add(i + 1);
-        i++;
-      }
-    } else if (tok === '2>' || tok === '2>>' || tok === '&>' || tok === '&>>') {
-      // stderr / combined redirect — consume target
-      const target = tokens[i + 1];
-      if (target) {
-        if (
-          target !== '/dev/null' &&
-          looksLikePath(target) &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          writeFiles.push(resolvePath(target, cwd));
-        }
-        toRemove.add(i);
-        toRemove.add(i + 1);
-        i++;
-      }
+      continue;
     }
-    // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
-    else {
-      const m = tok.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/);
-      if (m) {
-        const op = m[1]!;
-        const target = m[2]!;
-        if (op.startsWith('<<')) {
-          toRemove.add(i);
-          continue;
-        }
-        if (
-          target !== '/dev/null' &&
-          looksLikePath(target) &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          if (op === '<') {
-            readFiles.push(resolvePath(target, cwd));
-          } else {
-            writeFiles.push(resolvePath(target, cwd));
-          }
-        }
-        toRemove.add(i);
-      }
+    if (target === undefined || target === '') continue;
+
+    removeOperator();
+    if (!combined) {
+      toRemove.add(i + 1);
+      i++;
     }
+    const file = redirectTargetFile(target, match);
+    if (file === undefined) continue;
+
+    const resolved = resolvePath(file, cwd);
+    if (match.operator === '<') readFiles.push(resolved);
+    else if (match.operator === '<>') {
+      readFiles.push(resolved);
+      writeFiles.push(resolved);
+    } else writeFiles.push(resolved);
   }
 
-  // Remove redirect tokens from the array in-place
-  const filtered = tokens.filter((_, idx) => !toRemove.has(idx));
+  const filtered = tokens.flatMap((token, index) => {
+    if (toRemove.has(index)) return [];
+    const prefix = remainingPrefixes.get(index);
+    return prefix === undefined ? [token] : [prefix];
+  });
+  const filteredDetailed = detailed.flatMap((token, index) => {
+    if (toRemove.has(index)) return [];
+    const prefix = remainingPrefixes.get(index);
+    if (prefix === undefined) return [token];
+    return [
+      {
+        ...token,
+        text: prefix,
+        bareChars: token.bareChars.slice(0, prefix.length),
+        quotedOffsets: token.quotedOffsets.filter(
+          (offset) => offset <= prefix.length,
+        ),
+      },
+    ];
+  });
   tokens.length = 0;
   tokens.push(...filtered);
+  detailed.length = 0;
+  detailed.push(...filteredDetailed);
 
-  return { readFiles, writeFiles };
+  return {
+    readFiles,
+    writeFiles,
+    restoredPrefixes: new Set(remainingPrefixes.values()),
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -572,7 +1030,11 @@ function isAttachedShortFlagValue(arg: string, flag: string): boolean {
 // Command handler helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-type CommandHandler = (args: string[], cwd: string) => ShellOperation[];
+type CommandHandler = (
+  args: string[],
+  cwd: string,
+  restoredPrefixes?: ReadonlySet<string>,
+) => ShellOperation[];
 
 /** Build read_file operations from positional path arguments. */
 function readOps(
@@ -1324,7 +1786,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
         filePath: resolvePath(p, cwd),
       })),
 
-  cp: (args, cwd) => {
+  cp: (args, cwd, restoredPrefixes) => {
     const targetDir = targetDirectoryPath(args, cwd);
     const flagsWithValue = new Set([
       '-S',
@@ -1340,7 +1802,9 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       '--copy-contents',
     ]);
     const positional = getPositionalArgs(args, flagsWithValue).filter(
-      looksLikePath,
+      (p) =>
+        looksLikePath(p) ||
+        (/^\d+$/.test(p) && restoredPrefixes?.has(p) === true),
     );
     if (positional.length === 0) return [];
     if (targetDir) {
@@ -1371,7 +1835,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     ];
   },
 
-  mv: (args, cwd) => {
+  mv: (args, cwd, restoredPrefixes) => {
     const targetDir = targetDirectoryPath(args, cwd);
     const flagsWithValue = new Set([
       '-S',
@@ -1383,7 +1847,9 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       '--context',
     ]);
     const positional = getPositionalArgs(args, flagsWithValue).filter(
-      looksLikePath,
+      (p) =>
+        looksLikePath(p) ||
+        (/^\d+$/.test(p) && restoredPrefixes?.has(p) === true),
     );
     if (targetDir && positional.length > 0) {
       return [
@@ -2041,19 +2507,30 @@ export function extractShellOperations(
   cwd: string,
 ): ShellOperation[] {
   if (!simpleCommand.trim()) return [];
+  const detailed = tokenizeDetailed(simpleCommand).filter(
+    (token) => token.text !== '' && !isBareBrace(token),
+  );
+  return extractShellOperationsFromTokens(detailed, cwd);
+}
 
-  const fdRedirects = new Set<number>();
-  const fdCloses = new Set<number>();
-  const tokens = tokenize(simpleCommand, fdRedirects, fdCloses);
+function extractShellOperationsFromTokens(
+  detailed: ShellToken[],
+  cwd: string,
+): ShellOperation[] {
+  const tokens = detailed.map((t) => t.text);
   if (tokens.length === 0) return [];
 
-  // Extract I/O redirections before dispatching to the command handler.
-  // This mutates `tokens` in-place by removing redirect tokens.
-  const { readFiles: redirectReads, writeFiles: redirectWrites } =
-    extractRedirects(tokens, cwd, fdRedirects, fdCloses);
+  // Extract I/O redirections before dispatching to the command handler. Both
+  // arrays are filtered together so prefix recursion can retain provenance.
+  const {
+    readFiles: redirectReads,
+    writeFiles: redirectWrites,
+    restoredPrefixes,
+  } = extractRedirects(tokens, detailed, cwd);
 
-  while (tokens[0] && isEnvAssignmentToken(tokens[0])) {
+  while (tokens[0] && isEnvAssignmentToken(tokens[0], detailed[0]?.bareChars)) {
     tokens.shift();
+    detailed.shift();
   }
 
   const cmdName = tokens[0];
@@ -2062,6 +2539,7 @@ export function extractShellOperations(
     return toRedirectOperations({
       readFiles: redirectReads,
       writeFiles: redirectWrites,
+      restoredPrefixes,
     });
   }
 
@@ -2087,7 +2565,7 @@ export function extractShellOperations(
         ) {
           startIdx++;
         }
-      } else if (isEnvAssignmentToken(t)) {
+      } else if (isEnvAssignmentToken(t, detailed[startIdx]?.bareChars)) {
         // Environment variable assignment: skip
         startIdx++;
       } else {
@@ -2104,16 +2582,16 @@ export function extractShellOperations(
       startIdx++;
     }
     if (startIdx < tokens.length) {
-      // Reconstruct the inner command and recurse
-      const innerCommand = tokens.slice(startIdx).join(' ');
-      ops.push(...extractShellOperations(innerCommand, cwd));
+      ops.push(
+        ...extractShellOperationsFromTokens(detailed.slice(startIdx), cwd),
+      );
     }
   } else {
     // ── Dispatch to the known-command handler ─────────────────────────────
     const handler = COMMANDS[cmdName];
     if (handler) {
       const args = tokens.slice(1);
-      ops.push(...handler(args, cwd));
+      ops.push(...handler(args, cwd, restoredPrefixes));
     }
     // Unknown commands: return no ops (safe — we don't guess what we don't know)
   }
@@ -2123,6 +2601,7 @@ export function extractShellOperations(
     ...toRedirectOperations({
       readFiles: redirectReads,
       writeFiles: redirectWrites,
+      restoredPrefixes,
     }),
   );
 
@@ -2163,53 +2642,210 @@ type CdResolution =
       redirects: RedirectResult;
     };
 
-function isDynamicShellPath(word: string): boolean {
-  return word.includes('$') || word.includes('`');
+function isDynamicShellPath(word: string, artifactSegment: boolean): boolean {
+  if (word.includes('$') || word.includes('`')) return true;
+  // A `cd` target in a segment only one quote reading produces is a quoting
+  // artifact of the split, not a real directory, so it must escalate like a
+  // `$`/backtick target instead of becoming a concrete cwd writes get
+  // attributed to (#12246 variant). What marks the artifact is the reading
+  // split, not the word's spelling, so no metacharacter is required (#12280
+  // R1-3, R2-1).
+  return artifactSegment;
+}
+
+// Redirect-looking cd operands are rejected conservatively even when their
+// operator spelling is glued to the target.
+const REDIRECT_OPERATOR_PREFIX =
+  /^(?:(?:\d+|&|\{\w+\})?(?:<<<|<<-?|>>|<>|>\||>|<))/;
+
+/**
+ * Drop every redirection a simple command carries so only real words remain
+ * for `cd` operand classification. This shares parseRedirectToken with the
+ * reporting path, but also drops dynamic targets, heredocs and fd duplication
+ * so none of them becomes a fake `cd` operand (#12280 R7-2, R6-2).
+ */
+function stripRedirectsForOperandCount(tokens: ShellToken[]): {
+  words: ShellToken[];
+  invalidRedirect: boolean;
+} {
+  const words: ShellToken[] = [];
+  let invalidRedirect = false;
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i]!;
+    const match = parseRedirectToken(tok);
+    if (!match) {
+      words.push(tok);
+      continue;
+    }
+    if (match.prefixIsOperand) {
+      words.push({
+        ...tok,
+        text: match.prefix,
+        bareChars: tok.bareChars.slice(0, match.prefix.length),
+        quotedOffsets: tok.quotedOffsets.filter(
+          (offset) => offset <= match.prefix.length,
+        ),
+      });
+    }
+    const redirectTarget = match.targetInToken
+      ? match.target
+      : tokens[i + 1]?.text;
+    if (!redirectTarget) invalidRedirect = true;
+    if (!match.targetInToken) i++;
+  }
+  return { words, invalidRedirect };
 }
 
 function resolveCdTargetCwd(
   command: string,
   cwd: string,
   cwdUnknown: boolean,
+  artifactSegment = false,
+  cdFunctionUnknown = false,
 ): CdResolution {
-  const fdRedirects = new Set<number>();
-  const fdCloses = new Set<number>();
-  const words = tokenize(command, fdRedirects, fdCloses);
-  const redirects = extractRedirects(words, cwd, fdRedirects, fdCloses);
+  const tokens = tokenizeDetailed(
+    cutShellCommentsAndProcessSubstitutions(command),
+  );
+  const { words, invalidRedirect } = stripRedirectsForOperandCount(tokens);
 
-  if (words[0] === 'popd') return { kind: 'dynamic', redirects };
-  if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
-
-  if (words[0] === 'pushd') {
-    if (words.length === 1) return { kind: 'dynamic', redirects };
-    if (/^[+-]\d+$/.test(words[1]!)) return { kind: 'dynamic', redirects };
-    if (words[1] === '-n') return { kind: 'dynamic', redirects };
+  // A leading bare brace is grouping syntax. Braces after the command stay in
+  // the operand list so `cd sub { }` cannot be mistaken for a successful cd.
+  if (words[0] && isBareBrace(words[0]) && words[0].text === '{') {
+    words.shift();
   }
 
-  // Skip POSIX `cd` flags (-L, -P, --, -e, -@) without consuming the special
-  // `cd -` (previous directory) which is non-static and should bail out.
+  let cdEnvironmentUnknown = false;
+  while (words[0] && isEnvAssignmentToken(words[0].text, words[0].bareChars)) {
+    cdEnvironmentUnknown ||= /^(?:HOME|CDPATH)=/.test(words[0].text);
+    words.shift();
+  }
+  while (words[0] && ['command', 'builtin'].includes(words[0].text)) {
+    const wrapper = words.shift()!.text;
+    while (wrapper === 'command' && words[0]?.text === '-p') {
+      words.shift();
+    }
+    if (words[0]?.text === '--') words.shift();
+  }
+
+  if (
+    words[0]?.text !== 'popd' &&
+    words[0]?.text !== 'cd' &&
+    words[0]?.text !== 'pushd'
+  ) {
+    return { kind: 'not-cd' };
+  }
+
+  const extractedRedirects = extractRedirects(
+    tokens.map((token) => token.text),
+    tokens,
+    cwd,
+  );
+  const redirects = {
+    readFiles: extractedRedirects.readFiles.filter(
+      (filePath) => !filePath.startsWith('/dev/fd/'),
+    ),
+    writeFiles: extractedRedirects.writeFiles.filter(
+      (filePath) => !filePath.startsWith('/dev/fd/'),
+    ),
+  };
+
+  if (words[0]?.text === 'popd') {
+    return { kind: 'dynamic', redirects };
+  }
+  if (invalidRedirect || cdEnvironmentUnknown || cdFunctionUnknown) {
+    return { kind: 'dynamic', redirects };
+  }
+
+  if (words[0]!.text === 'pushd') {
+    if (words.length === 1) return { kind: 'dynamic', redirects };
+    if (/^[+-]\d+$/.test(words[1]!.text)) return { kind: 'dynamic', redirects };
+    if (words[1]!.text === '-n') return { kind: 'dynamic', redirects };
+  }
+
+  // Skip the POSIX `cd` flags bash accepts (-L, -P, -e) without consuming the
+  // special `cd -` (previous directory) which is non-static and should bail
+  // out. `-@` is deliberately not accepted: bash 5.2.21 on Linux rejects it
+  // (`invalid option`, cwd unmoved) even though the usage string advertises
+  // it, so whitelisting it would certify $HOME for a `cd` bash refuses
+  // (#12280 R3-4).
   let targetIndex = 1;
+  let sawInvalidOption = false;
   while (
     targetIndex < words.length &&
-    words[targetIndex]!.startsWith('-') &&
-    words[targetIndex] !== '-' &&
-    words[targetIndex] !== '--'
+    words[targetIndex]!.text.startsWith('-') &&
+    words[targetIndex]!.text !== '-' &&
+    words[targetIndex]!.text !== '--'
   ) {
+    sawInvalidOption ||=
+      words[0]!.text !== 'cd' || !/^-[LPe]+$/.test(words[targetIndex]!.text);
     targetIndex++;
   }
-  if (words[targetIndex] === '--') {
+  if (words[targetIndex]?.text === '--') {
     targetIndex++;
+  }
+  if (sawInvalidOption) return { kind: 'dynamic', redirects };
+
+  // bash rejects a `cd` carrying more than one operand (`too many
+  // arguments`), so the cwd never moves; trusting words[targetIndex] there
+  // would attribute later writes to a directory the shell never entered
+  // (#12280 R7-2). Sits after redirect stripping so `cd x > /dev/null`
+  // still counts as one operand.
+  if (words.length > targetIndex + 1) return { kind: 'dynamic', redirects };
+
+  const target = words[targetIndex];
+  if (target === undefined) {
+    // A bare `cd` lands in $HOME, but only when the analysis can account for
+    // every word: a `cd` spelled by a quoting artifact of the split is not a
+    // command bash runs, so there is no directory to certify (#12280 R2-1).
+    const home = process.env['HOME'];
+    if (!home || artifactSegment) return { kind: 'dynamic', redirects };
+    return { kind: 'static', cwd: home, cwdUnknown: false, redirects };
+  }
+  if (
+    target.text === '-' ||
+    // An empty quoted operand is still an operand: `cd ''` errors without
+    // moving the cwd (#12280 R3-2).
+    target.text === '' ||
+    isDynamicShellPath(target.text, artifactSegment) ||
+    // A glued or quoted redirect-looking operand is not a directory this
+    // analysis can prove bash enters.
+    REDIRECT_OPERATOR_PREFIX.test(target.text) ||
+    // Any unquoted glob character expands at runtime, even if another part of
+    // the word was quoted. Fully quoted glob characters stay literal.
+    target.unquotedGlob ||
+    // Unquoted shell punctuation is syntax, not a literal path. Quoted or
+    // escaped punctuation at a position trimShellSyntax used to erase is not
+    // a directory this analysis certifies either; interior `R&D` stays valid.
+    target.unquotedSyntax ||
+    target.text.startsWith('(') ||
+    /[)&]$/.test(target.text) ||
+    target.text === '{' ||
+    target.text === '}' ||
+    // A quoted tilde, including one behind an empty quoted span, is a literal
+    // directory name rather than home expansion.
+    (target.text.startsWith('~') && target.leadingQuotedContent) ||
+    target.quotedTilde ||
+    // `~` and `~/…` expand via resolvePath below; the other tilde spellings
+    // (`~-`, `~+`, `~user`) expand to a directory bash picks at runtime
+    // (#12280 R3-3).
+    (target.text.startsWith('~') &&
+      target.text !== '~' &&
+      !target.text.startsWith('~/')) ||
+    // A process substitution expands to an fd path, and `cd /dev/fd/N` fails
+    // (`Not a directory`): the shell stays where it was (#12280 R1-6).
+    target.text.startsWith('/dev/fd/')
+  ) {
+    return { kind: 'dynamic', redirects };
   }
 
-  const target = words[targetIndex] ?? process.env['HOME'];
-  if (!target || target === '-' || isDynamicShellPath(target)) {
+  if (process.env['CDPATH'] && !isShellAbsolutePath(target.text)) {
     return { kind: 'dynamic', redirects };
   }
 
   return {
     kind: 'static',
-    cwd: resolvePath(target, cwd),
-    cwdUnknown: cwdUnknown && !isShellAbsolutePath(target),
+    cwd: resolvePath(target.text, cwd),
+    cwdUnknown: cwdUnknown && !isShellAbsolutePath(target.text),
     redirects,
   };
 }
@@ -2240,7 +2876,8 @@ function toRedirectOperations({
  * unwrapping shell wrappers (`bash -lc '...'`, `sh -c "..."`).
  *
  * Behaviour:
- *   - `splitCompoundCommand` produces the segment boundaries.
+ *   - `splitCompoundCommandSegments` produces the segment boundaries (the
+ *     per-reading splits below take over for backslash-bearing commands).
  *   - Literal `cd <dir>` segments shift the effective cwd for subsequent
  *     segments; redirects on a `cd` segment are reported from the cwd where
  *     that segment starts.
@@ -2250,7 +2887,18 @@ function toRedirectOperations({
  *   - Shell wrappers are unwrapped after the outer command is split, so
  *     wrapper suffixes remain visible while inner compound operators
  *     (`&&`, `;`, `|`) are still recursively discovered.
- *   - Operation order is preserved across segments.
+ *   - Operation order is preserved across segments within one quote reading.
+ *     Commands containing a backslash are walked under bash's
+ *     literal-backslash-in-single-quotes reading first; when that walk
+ *     cannot be trusted to have seen the whole command (it ended inside an
+ *     unterminated quote, or a `#` comment desynced the scanners), the union
+ *     split's extra operations are merged in (#12280 R7-3, R1-1), and when
+ *     it finds no operation at all a union-split fallback runs so a boundary
+ *     only the other reading sees can still surface a write (#12246)
+ *     without losing the cwd the bash-found boundaries establish (#12280
+ *     R9-2). This per-level decision is re-run on every unwrapped shell
+ *     payload, so wrapping a command in `bash -lc "…"` cannot hide
+ *     operations from it (#12280 R8-1).
  *
  * Single source of truth for compound shell analysis: both the
  * PermissionManager (matching `Edit/Write` rules against shell writes) and
@@ -2269,7 +2917,147 @@ export function extractShellOperationsAcrossCommand(
   command: string,
   cwd: string,
 ): ShellOperation[] {
-  return walkCompoundCommand(command, cwd, 0, false);
+  return walkWithBackslashGate(command, cwd, 0, false);
+}
+
+/**
+ * Walk one compound command level, deciding on THIS level's own text how the
+ * two quote readings contribute. The decision is re-run at every wrapper
+ * unwrap depth instead of inheriting the outermost reading, so a payload
+ * inside `bash -lc "…"` gets the same dual-reading treatment as the
+ * outermost command (#12280 R8-1). `depth` is threaded through so the
+ * MAX_SHELL_UNWRAP_DEPTH bound still holds.
+ */
+function walkWithBackslashGate(
+  command: string,
+  cwd: string,
+  depth: number,
+  initialCwdUnknown: boolean,
+  initialCdFunctionUnknown = false,
+): ShellOperation[] {
+  // The walks split stripHeredocBodies(command), so a backslash that only
+  // exists inside a heredoc body can never make the two readings diverge;
+  // gate on what the walks will see rather than on the raw command.
+  const stripped = stripHeredocBodies(command);
+  if (!stripped.includes('\\')) {
+    return walkCompoundCommand(
+      command,
+      cwd,
+      depth,
+      initialCwdUnknown,
+      undefined,
+      initialCdFunctionUnknown,
+    );
+  }
+  // The two quote readings can disagree on where the operators are when a
+  // backslash appears: the escape-everywhere reading sees terminators that
+  // bash's literal-backslash-in-single-quotes reading does not (and vice
+  // versa). Each reading is walked on its own; the union split's mixed
+  // boundaries would attribute writes to phantom cwds that no shell produces.
+  // The bash reading is authoritative, with two repairs:
+  //
+  // - When bash's scan of THIS level cannot be trusted to have seen the whole
+  //   command (it ran out of input still inside a quote, or a `#` comment the
+  //   scanners do not model desynced it), the operations past that point sit
+  //   inside what bash's reading treats as a quoted blob. A second walk's
+  //   operations are merged in, deduped (#12280 R7-3, R1-1). Gated on the
+  //   desync so a clean bash scan never publishes the phantoms the coarser
+  //   reading mines out of genuinely quoted text (#12280 R7-3 crossing).
+  // - When the bash walk found no operation at all, the fallback walk uses
+  //   the union split instead of the escape-everywhere split alone, so the
+  //   boundaries bash's reading already found (and the cwd they establish)
+  //   survive into the fallback; re-walking under the coarser reading from
+  //   the original cwd attributes the write to the wrong directory and drops
+  //   the cwd-unknown escalate flags (#12280 R9-2). The merge walk above uses
+  //   the union split for the same reason (#12280 R1-5).
+  //
+  // This per-level decision is re-run on every unwrapped shell payload, so
+  // wrapping a command in `bash -lc "…"` cannot hide operations from it
+  // (#12280 R8-1).
+  const bashOps = walkCompoundCommand(
+    command,
+    cwd,
+    depth,
+    initialCwdUnknown,
+    'bash',
+    initialCdFunctionUnknown,
+  );
+  if (bashOps.length > 0) {
+    // A comment apostrophe can re-close the quote the bash scan is stuck in,
+    // so the scan reports balanced while a real write sits inside what bash
+    // treats as a quoted blob; a comment anywhere the scanners do not model
+    // (#11882) therefore forces the merge too, not just an unclosed quote
+    // (#12280 R1-1).
+    const commentDesynced =
+      cutShellCommentsAndProcessSubstitutions(stripped) !== stripped;
+    if (!readingEndsInOpenQuote(stripped, 'bash') && !commentDesynced) {
+      return bashOps;
+    }
+    // The extra walk uses the union split, not the escape-everywhere reading
+    // alone: re-walking under the coarser reading from the original cwd
+    // attributes the writes it adds to the wrong directory and drops the
+    // cwd-unknown escalate flags, the same defect the fallback below avoids
+    // (#12280 R1-5, R9-2).
+    const extraOps = walkCompoundCommand(
+      command,
+      cwd,
+      depth,
+      initialCwdUnknown,
+      undefined,
+      initialCdFunctionUnknown,
+    );
+    return mergeShellOperations(bashOps, extraOps);
+  }
+  const unionOps = walkCompoundCommand(
+    command,
+    cwd,
+    depth,
+    initialCwdUnknown,
+    undefined,
+    initialCdFunctionUnknown,
+  );
+  if (unionOps.length > 0) return unionOps;
+  // A comment quote can hide every operation from both original readings. Only
+  // that empty result gets a neutralized retry, preserving the uncertainty
+  // flags and artifact evidence from non-empty conservative walks (#12280 R8-4).
+  return walkCompoundCommand(
+    command,
+    cwd,
+    depth,
+    initialCwdUnknown,
+    undefined,
+    initialCdFunctionUnknown,
+    true,
+  );
+}
+
+/**
+ * Union of two operation lists; the first copy of each operation wins, so the
+ * bash reading's cwd attribution beats the coarser escape-everywhere
+ * reading's. The escalation flags are unioned across copies instead: this
+ * merge only runs where the gate has already decided the bash scan cannot be
+ * trusted to have seen the whole command, so dropping the losing copy's
+ * `cwdUnknown`/`pathMayDependOnCwd` would certify certainty the analysis
+ * does not have (#12280 R2-3).
+ */
+function mergeShellOperations(
+  primary: ShellOperation[],
+  extra: ShellOperation[],
+): ShellOperation[] {
+  const key = (op: ShellOperation) =>
+    `${op.virtualTool}:${op.filePath ?? ''}:${op.domain ?? ''}`;
+  const merged = new Map<string, ShellOperation>();
+  for (const op of [...primary, ...extra]) {
+    const existing = merged.get(key(op));
+    if (existing) {
+      existing.cwdUnknown = existing.cwdUnknown || op.cwdUnknown;
+      existing.pathMayDependOnCwd =
+        existing.pathMayDependOnCwd || op.pathMayDependOnCwd;
+    } else {
+      merged.set(key(op), op);
+    }
+  }
+  return [...merged.values()];
 }
 
 function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
@@ -2386,19 +3174,113 @@ function getHeredocDelimiters(line: string): string[] {
   return delimiters;
 }
 
+/**
+ * Locate each segment's trimmed text inside the command, in order. Returns
+ * null when the segmentation cannot be replayed verbatim (callers then treat
+ * nothing as an artifact, the pre-escalation behavior).
+ */
+function segmentSpans(
+  segments: CompoundCommandSegment[],
+  text: string,
+): Array<{ start: number; end: number }> | null {
+  const spans: Array<{ start: number; end: number }> = [];
+  let from = 0;
+  for (const segment of segments) {
+    const start = text.indexOf(segment.command, from);
+    if (start === -1) return null;
+    spans.push({ start, end: start + segment.command.length });
+    from = start + segment.command.length;
+  }
+  return spans;
+}
+
+/**
+ * Per-segment quoting-artifact flags for `cd` classification. Directional on
+ * purpose (#12280 R7-1):
+ *
+ * - Under a single reading, a segment is an artifact only when the OTHER
+ *   reading cuts strictly inside this segment's span: a finer split there
+ *   means the segment's spelling spans an operator that reading cannot see.
+ *   Substring containment is not the test — an inert sibling segment whose
+ *   text happens to occur inside a `cd` target (`ls` inside `tools`) must not
+ *   mark a genuine directory (#12280 R1-2), and the other reading merely
+ *   failing to reproduce the segment proves nothing either: the accurate bash
+ *   segmentation of a genuine backslash-bearing directory is exactly what the
+ *   escape reading swallows into one quoted span.
+ * - Under the union split, a segment is an artifact when the authoritative
+ *   bash segmentation does not reproduce it at the same span: a `cd` target
+ *   only the union split produces must escalate to cwdUnknown instead of
+ *   becoming a trusted static cwd (#12280 R1-3). Matching is by `{start,end}`
+ *   span, not text: a union-only segment can repeat a genuine segment's text
+ *   verbatim (a second `cd .qwen` mined out of comment text) and text
+ *   membership would certify it (#12280 R2-1).
+ */
+function buildArtifactSegmentChecks(
+  stripped: string,
+  subCommands: CompoundCommandSegment[],
+  reading: BackslashReading | undefined,
+): boolean[] {
+  if (reading === undefined) {
+    if (!stripped.includes('\\')) return subCommands.map(() => false);
+    const bashSpans = segmentSpans(
+      splitCompoundCommandSegmentsForReading(stripped, 'bash'),
+      stripped,
+    );
+    const mySpans = segmentSpans(subCommands, stripped);
+    if (bashSpans === null || mySpans === null) {
+      return subCommands.map(() => false);
+    }
+    return mySpans.map(
+      (span) =>
+        !bashSpans.some((b) => b.start === span.start && b.end === span.end),
+    );
+  }
+
+  const otherCommands = splitCompoundCommandSegmentsForReading(
+    stripped,
+    reading === 'bash' ? 'escape-everywhere' : 'bash',
+  );
+  const mySpans = segmentSpans(subCommands, stripped);
+  const otherSpans = segmentSpans(otherCommands, stripped);
+  if (mySpans === null || otherSpans === null) {
+    return subCommands.map(() => false);
+  }
+  const otherEnds = otherSpans.map((span) => span.end);
+  return mySpans.map((span) =>
+    otherEnds.some((end) => span.start < end && end < span.end),
+  );
+}
+
 function walkCompoundCommand(
   command: string,
   cwd: string,
   depth: number,
   initialCwdUnknown: boolean,
+  reading?: BackslashReading,
+  initialCdFunctionUnknown = false,
+  neutralizeCommentQuotes?: boolean,
 ): ShellOperation[] {
-  const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
+  const stripped = normalizeShellCommentsForSplit(
+    stripHeredocBodies(command),
+    neutralizeCommentQuotes,
+  );
+  const subCommands = reading
+    ? splitCompoundCommandSegmentsForReading(stripped, reading)
+    : splitCompoundCommandSegments(stripped);
+  const artifactSegment = buildArtifactSegmentChecks(
+    stripped,
+    subCommands,
+    reading,
+  );
 
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;
   let cwdUnknown = initialCwdUnknown;
+  let cdFunctionUnknown = initialCdFunctionUnknown;
+  let cdFunctionExportedUnknown = initialCdFunctionUnknown;
+  let cdBuiltinUnknown = false;
 
-  for (const { command: sub, terminator } of subCommands) {
+  for (const [index, { command: sub, terminator }] of subCommands.entries()) {
     // `cd x & …` runs the `cd` in a background subshell, so it does not move
     // the cwd the following segments run in. Treating it as a foreground `cd`
     // would attribute their relative writes to the wrong directory — for
@@ -2406,7 +3288,25 @@ function walkCompoundCommand(
     // cwd, which is exactly where a protected settings file would be.
     const backgrounded = terminator === '&';
 
-    const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
+    cdFunctionUnknown ||=
+      /\b(?:function\s+(?:cd|pushd)\b|(?:cd|pushd)\s*\(\s*\))/.test(sub);
+    if (/\bexport\s+-f\s+(?:cd|pushd)\b/.test(sub)) {
+      cdFunctionExportedUnknown ||= cdFunctionUnknown;
+    }
+    if (/\bunset\s+-f\s+(?:cd|pushd)\b/.test(sub)) {
+      cdFunctionUnknown = false;
+      cdFunctionExportedUnknown = false;
+    }
+    if (/\benable\s+-n\s+(?:cd|pushd)\b/.test(sub)) {
+      cdBuiltinUnknown = true;
+    }
+    const cdTarget = resolveCdTargetCwd(
+      sub,
+      effectiveCwd,
+      cwdUnknown,
+      artifactSegment[index] ?? false,
+      cdFunctionUnknown || cdBuiltinUnknown,
+    );
     if (cdTarget.kind !== 'not-cd') {
       const redirectOps = toRedirectOperations(cdTarget.redirects);
       ops.push(
@@ -2426,16 +3326,19 @@ function walkCompoundCommand(
     }
 
     // Unwrap per segment, after the outer split, so wrapper suffixes like
-    // `bash -lc 'safe' && echo > file` are not discarded.
+    // `bash -lc 'safe' && echo > file` are not discarded. The unwrapped
+    // payload re-runs the reading decision on its own text instead of
+    // inheriting this level's reading (#12280 R8-1).
     if (depth < MAX_SHELL_UNWRAP_DEPTH) {
       const subUnwrapped = stripShellWrapper(sub);
       if (subUnwrapped !== sub) {
         ops.push(
-          ...walkCompoundCommand(
+          ...walkWithBackslashGate(
             subUnwrapped,
             effectiveCwd,
             depth + 1,
             cwdUnknown,
+            cdFunctionExportedUnknown,
           ),
         );
         continue;
