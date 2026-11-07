@@ -46,10 +46,23 @@ on:
   workflow_dispatch:
     inputs:
       branch_ref:
-        description: 'Branch to run on'
+        description: 'Branch to run on; the container PoC requires a full commit SHA'
         required: true
         default: 'main'
         type: 'string'
+      source_repository:
+        description: 'Source owner/repository for the Linux unit container PoC'
+        required: false
+        default: ''
+        type: 'string'
+      linux_unit_container:
+        description: 'Run the Linux unit build and shards in containers (PoC)'
+        required: true
+        default: 'false'
+        type: 'choice'
+        options:
+          - 'false'
+          - 'true'
       linux_runner:
         description: 'Linux runner to use for manual validation'
         required: true
@@ -424,10 +437,26 @@ jobs:
     needs: 'classify_pr'
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    container: '${{ (github.event_name == ''workflow_dispatch'' && github.event.inputs.linux_unit_container == ''true'') && fromJSON(''{"image":"node:22-bookworm","options":"--init --security-opt=no-new-privileges"}'') || null }}'
     timeout-minutes: 45
     permissions:
       contents: 'read'
     steps:
+      - name: 'Validate the container PoC source'
+        if: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true' }}"
+        env:
+          POC_REPOSITORY: '${{ github.event.inputs.source_repository }}'
+          POC_SHA: '${{ github.event.inputs.branch_ref }}'
+        run: |-
+          set -euo pipefail
+          [[ "${POC_REPOSITORY}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+            echo "::error::source_repository must be a GitHub owner/repository when linux_unit_container=true"
+            exit 1
+          }
+          [[ "${POC_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::branch_ref must be a lowercase 40-character commit SHA when linux_unit_container=true"
+            exit 1
+          }
       # Pre-checkout cleanup: a previous containerised job (e.g. qwen-triage
       # verify) may leave root-owned, read-only files anywhere in the workspace.
       # Restore ownership and write permission unconditionally so the checkout
@@ -579,6 +608,8 @@ jobs:
           # the tested tree is a descendant — but attribution breaks: red on a
           # clean commit, autofix filed against the wrong merge. `e2e.yml` pins
           # the event SHA by taking actions/checkout's default.
+          repository: "${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true' && (github.job == 'test_build' || github.job == 'test') && github.event.inputs.source_repository) || github.repository }}"
+          persist-credentials: "${{ !((github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true') && (github.job == 'test_build' || github.job == 'test')) }}"
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
           # Shallow: nothing here walks git history except on demand (the
           # verify guard below checks head.sha == HEAD; the size gate and its
@@ -599,6 +630,41 @@ jobs:
         with:
           expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
 
+      - name: 'Verify the container PoC checkout and isolation'
+        if: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true' && (github.job == 'test_build' || github.job == 'test') }}"
+        env:
+          POC_SHA: '${{ github.event.inputs.branch_ref }}'
+        run: |-
+          set -euo pipefail
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${POC_SHA}" ]] || {
+            echo "::error::The checked-out commit does not match the requested container PoC SHA"
+            exit 1
+          }
+          if git config --local --get-all 'http.https://github.com/.extraheader' | grep -q .; then
+            echo "::error::The container PoC checkout persisted a GitHub authentication header"
+            exit 1
+          fi
+          test -f /.dockerenv
+          test ! -S /var/run/docker.sock
+          test ! -S /run/docker.sock
+          grep -Eq '^NoNewPrivs:[[:space:]]+1$' /proc/self/status
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const status = readFileSync("/proc/self/status", "utf8");
+            const hex = status.match(/^CapEff:\s*([0-9a-f]+)$/m)?.[1];
+            if (!hex) throw new Error("CapEff is unavailable");
+            const capabilities = BigInt("0x" + hex);
+            for (const [name, bit] of [["SYS_ADMIN", 21n], ["SYS_PTRACE", 19n], ["NET_ADMIN", 12n]]) {
+              if ((capabilities & (1n << bit)) !== 0n) throw new Error(name + " is unexpectedly effective");
+            }
+          '
+          for endpoint in 169.254.169.254 100.100.100.200; do
+            code="$(curl --connect-timeout 2 --max-time 3 -sS -o /dev/null -w '%{http_code}' "http://${endpoint}/latest/meta-data/" || true)"
+            case "${code}" in
+              000|403) echo "Metadata endpoint ${endpoint} is blocked (HTTP ${code})" ;;
+              *) echo "::error::Metadata endpoint ${endpoint} returned HTTP ${code}; the container is not isolated from cloud metadata"; exit 1 ;;
+            esac
+          done
       - name: 'Use trusted CI profile'
         id: 'ci_profile'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -858,9 +924,9 @@ jobs:
             grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo || true
           } 2>/dev/null | tee -a "$DISK_SAMPLES" || true
 
-      # Last step, and a name distinct from the test and lint collectors:
-      # upload-artifact v4+ rejects duplicate names when several jobs fail in
-      # one run.
+      # Last diagnostic step, and a name distinct from the test and lint
+      # collectors: upload-artifact v4+ rejects duplicate names when several
+      # jobs fail in one run.
       - name: 'Upload disk-pressure samples'
         if: '${{ failure() }}'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
@@ -870,6 +936,26 @@ jobs:
           if-no-files-found: 'ignore'
           retention-days: 14
 
+      - name: 'Clean the container PoC workspace'
+        if: "${{ always() && github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true' }}"
+        env:
+          EXPECTED_WORKSPACE: '${{ github.workspace }}'
+        run: |-
+          set -euo pipefail
+          [[ -n "${EXPECTED_WORKSPACE}" && "${EXPECTED_WORKSPACE}" == /__w/*/* && ! -L "${EXPECTED_WORKSPACE}" ]] || {
+            echo "::error::Refusing to clean an unexpected PoC workspace: ${EXPECTED_WORKSPACE}"
+            exit 1
+          }
+          [[ "$(pwd -P)" == "${EXPECTED_WORKSPACE}" ]] || {
+            echo "::error::PoC cleanup must start in its checked-out workspace"
+            exit 1
+          }
+          find "${EXPECTED_WORKSPACE}" -mindepth 1 -maxdepth 1 -exec rm -rf -- '{}' +
+          if find "${EXPECTED_WORKSPACE}" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+            echo "::error::The PoC workspace still contains checkout files"
+            exit 1
+          fi
+          echo "PoC workspace is empty: ${EXPECTED_WORKSPACE}"
   # The required `Test (ubuntu-latest, Node 22.x)` check is `test_ubuntu`,
   # which passes only when the build and every shard below pass.
   test:
@@ -891,6 +977,7 @@ jobs:
     # lint/static in `lint_and_static`, unit tests here.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    container: '${{ (github.event_name == ''workflow_dispatch'' && github.event.inputs.linux_unit_container == ''true'') && fromJSON(''{"image":"node:22-bookworm","options":"--init --security-opt=no-new-privileges"}'') || null }}'
     # Every Vitest run takes one eighth of its suite's files (`--shard`): the
     # unsharded lane ran 45-59 minutes, almost all of it the CLI and core
     # suites one after the other. A shard keeps the old ceiling's headroom
@@ -907,6 +994,21 @@ jobs:
       checks: 'write'
       pull-requests: 'write'
     steps:
+      - name: 'Validate the container PoC source'
+        if: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true' }}"
+        env:
+          POC_REPOSITORY: '${{ github.event.inputs.source_repository }}'
+          POC_SHA: '${{ github.event.inputs.branch_ref }}'
+        run: |-
+          set -euo pipefail
+          [[ "${POC_REPOSITORY}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+            echo "::error::source_repository must be a GitHub owner/repository when linux_unit_container=true"
+            exit 1
+          }
+          [[ "${POC_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::branch_ref must be a lowercase 40-character commit SHA when linux_unit_container=true"
+            exit 1
+          }
       # Pre-checkout cleanup: a previous containerised job (e.g. qwen-triage
       # verify) may leave root-owned, read-only files anywhere in the workspace.
       # Restore ownership and write permission unconditionally so the checkout
@@ -1058,6 +1160,8 @@ jobs:
           # the tested tree is a descendant — but attribution breaks: red on a
           # clean commit, autofix filed against the wrong merge. `e2e.yml` pins
           # the event SHA by taking actions/checkout's default.
+          repository: "${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true' && (github.job == 'test_build' || github.job == 'test') && github.event.inputs.source_repository) || github.repository }}"
+          persist-credentials: "${{ !((github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true') && (github.job == 'test_build' || github.job == 'test')) }}"
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
           # Shallow: nothing here walks git history except on demand (the
           # verify guard below checks head.sha == HEAD; the size gate and its
@@ -1078,6 +1182,41 @@ jobs:
         with:
           expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
 
+      - name: 'Verify the container PoC checkout and isolation'
+        if: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true' && (github.job == 'test_build' || github.job == 'test') }}"
+        env:
+          POC_SHA: '${{ github.event.inputs.branch_ref }}'
+        run: |-
+          set -euo pipefail
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${POC_SHA}" ]] || {
+            echo "::error::The checked-out commit does not match the requested container PoC SHA"
+            exit 1
+          }
+          if git config --local --get-all 'http.https://github.com/.extraheader' | grep -q .; then
+            echo "::error::The container PoC checkout persisted a GitHub authentication header"
+            exit 1
+          fi
+          test -f /.dockerenv
+          test ! -S /var/run/docker.sock
+          test ! -S /run/docker.sock
+          grep -Eq '^NoNewPrivs:[[:space:]]+1$' /proc/self/status
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const status = readFileSync("/proc/self/status", "utf8");
+            const hex = status.match(/^CapEff:\s*([0-9a-f]+)$/m)?.[1];
+            if (!hex) throw new Error("CapEff is unavailable");
+            const capabilities = BigInt("0x" + hex);
+            for (const [name, bit] of [["SYS_ADMIN", 21n], ["SYS_PTRACE", 19n], ["NET_ADMIN", 12n]]) {
+              if ((capabilities & (1n << bit)) !== 0n) throw new Error(name + " is unexpectedly effective");
+            }
+          '
+          for endpoint in 169.254.169.254 100.100.100.200; do
+            code="$(curl --connect-timeout 2 --max-time 3 -sS -o /dev/null -w '%{http_code}' "http://${endpoint}/latest/meta-data/" || true)"
+            case "${code}" in
+              000|403) echo "Metadata endpoint ${endpoint} is blocked (HTTP ${code})" ;;
+              *) echo "::error::Metadata endpoint ${endpoint} returned HTTP ${code}; the container is not isolated from cloud metadata"; exit 1 ;;
+            esac
+          done
       - name: 'Use trusted CI profile'
         id: 'ci_profile'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -1517,6 +1656,26 @@ jobs:
           name: 'coverage-reports-22.x-ubuntu-latest-shard-${{ matrix.shard }}'
           path: 'packages/*/coverage'
 
+      - name: 'Clean the container PoC workspace'
+        if: "${{ always() && github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true' }}"
+        env:
+          EXPECTED_WORKSPACE: '${{ github.workspace }}'
+        run: |-
+          set -euo pipefail
+          [[ -n "${EXPECTED_WORKSPACE}" && "${EXPECTED_WORKSPACE}" == /__w/*/* && ! -L "${EXPECTED_WORKSPACE}" ]] || {
+            echo "::error::Refusing to clean an unexpected PoC workspace: ${EXPECTED_WORKSPACE}"
+            exit 1
+          }
+          [[ "$(pwd -P)" == "${EXPECTED_WORKSPACE}" ]] || {
+            echo "::error::PoC cleanup must start in its checked-out workspace"
+            exit 1
+          }
+          find "${EXPECTED_WORKSPACE}" -mindepth 1 -maxdepth 1 -exec rm -rf -- '{}' +
+          if find "${EXPECTED_WORKSPACE}" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+            echo "::error::The PoC workspace still contains checkout files"
+            exit 1
+          fi
+          echo "PoC workspace is empty: ${EXPECTED_WORKSPACE}"
   #
   # Lint & Static: the checks whose verdict depends only on the tree.
   #
@@ -1751,6 +1910,8 @@ jobs:
           # the tested tree is a descendant — but attribution breaks: red on a
           # clean commit, autofix filed against the wrong merge. `e2e.yml` pins
           # the event SHA by taking actions/checkout's default.
+          repository: "${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true' && (github.job == 'test_build' || github.job == 'test') && github.event.inputs.source_repository) || github.repository }}"
+          persist-credentials: "${{ !((github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true') && (github.job == 'test_build' || github.job == 'test')) }}"
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
           # Shallow: nothing here walks git history except on demand (the
           # verify guard below checks head.sha == HEAD; the size gate and its

@@ -1620,3 +1620,163 @@ describe('credential-free release fanout routing (#15465)', () => {
     });
   }
 });
+
+describe('manual Linux unit container PoC', () => {
+  const jobs = ['test_build', 'test'].map((name) => [name, ciDoc.jobs[name]]);
+  const inputs = ciDoc.on.workflow_dispatch.inputs;
+  const containerExpression = String(jobs[0][1].container);
+
+  function selectContainer(eventName, enabled) {
+    let expression = containerExpression
+      .replace(/^\$\{\{\s*/, '')
+      .replace(/\s*\}\}$/, '')
+      .replace(
+        "github.event_name == 'workflow_dispatch'",
+        String(eventName === 'workflow_dispatch'),
+      )
+      .replace(
+        "github.event.inputs.linux_unit_container == 'true'",
+        String(enabled),
+      );
+    let unresolved = false;
+    expression = expression.replace(/fromJSON\('([^']+)'\)/g, (_, json) => {
+      try {
+        return `(${JSON.stringify(JSON.parse(json))})`;
+      } catch {
+        unresolved = true;
+        return 'undefined';
+      }
+    });
+    assert.equal(unresolved, false, expression);
+    assert.doesNotMatch(expression, /github\.|fromJSON\(/);
+    return new Function(`return (${expression});`)();
+  }
+
+  it('selects a hardened container only for the opt-in dispatch', () => {
+    assert.equal(inputs.linux_unit_container.default, 'false');
+    assert.deepEqual(inputs.linux_unit_container.options, ['false', 'true']);
+    assert.equal(inputs.source_repository.default, '');
+    for (const [name, job] of jobs) {
+      assert.equal(String(job.container), containerExpression, name);
+      assert.equal(selectContainer('pull_request', false), null, name);
+      assert.equal(selectContainer('workflow_dispatch', false), null, name);
+      assert.deepEqual(selectContainer('workflow_dispatch', true), {
+        image: 'node:22-bookworm',
+        options: '--init --security-opt=no-new-privileges',
+      });
+    }
+    assert.equal(ciDoc.jobs.lint_and_static.container, undefined);
+    assert.equal(ciDoc.jobs.integration_no_ak.container, undefined);
+  });
+
+  it('validates a public repository and exact SHA before checkout', () => {
+    for (const [name, job] of jobs) {
+      const step = job.steps[0];
+      assert.equal(step.name, 'Validate the container PoC source', name);
+      assert.equal(
+        step.if,
+        "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true' }}",
+      );
+      const run = spawnSync('bash', ['-c', step.run], {
+        env: {
+          POC_REPOSITORY: '2SinceJuly/qwen-code',
+          POC_SHA: '2905dccbe45ed2917b28c7de6a935d031546ee43',
+        },
+        encoding: 'utf8',
+      });
+      assert.equal(run.status, 0, `${name}: ${run.stderr}`);
+      for (const [key, value] of [
+        ['POC_REPOSITORY', 'owner/repo; exit 1'],
+        ['POC_REPOSITORY', 'https://example.test/owner/repo'],
+        ['POC_REPOSITORY', ''],
+        ['POC_SHA', 'main'],
+        ['POC_SHA', '2905dcc'],
+        ['POC_SHA', '2905DCCBE45ED2917B28C7DE6A935D031546EE43'],
+      ]) {
+        const invalid = spawnSync('bash', ['-c', step.run], {
+          env: {
+            POC_REPOSITORY: '2SinceJuly/qwen-code',
+            POC_SHA: '2905dccbe45ed2917b28c7de6a935d031546ee43',
+            [key]: value,
+          },
+          encoding: 'utf8',
+        });
+        assert.notEqual(invalid.status, 0, `${name}: accepted ${key}=${value}`);
+      }
+    }
+  });
+
+  it('scopes the external checkout and isolation probes to the two contained jobs', () => {
+    const probeCount = Object.values(ciDoc.jobs)
+      .flatMap((job) => job.steps)
+      .filter(
+        (step) =>
+          step.name === 'Verify the container PoC checkout and isolation',
+      ).length;
+    assert.equal(probeCount, 2);
+    for (const [name, job] of jobs) {
+      const checkout = job.steps.find((step) => step.name === 'Checkout');
+      assert.ok(checkout, name);
+      assert.match(
+        checkout.with.repository,
+        /github\.event\.inputs\.linux_unit_container == 'true'/,
+      );
+      assert.match(checkout.with.repository, /github\.job == 'test_build'/);
+      assert.match(checkout.with.repository, /github\.job == 'test'/);
+      assert.equal(
+        checkout.with['persist-credentials'],
+        "${{ !((github.event_name == 'workflow_dispatch' && github.event.inputs.linux_unit_container == 'true') && (github.job == 'test_build' || github.job == 'test')) }}",
+      );
+      const probe = job.steps.find(
+        (step) =>
+          step.name === 'Verify the container PoC checkout and isolation',
+      );
+      assert.ok(probe, name);
+      assert.ok(job.steps.indexOf(checkout) < job.steps.indexOf(probe), name);
+      assert.match(probe.if, /github\.job == 'test_build'/);
+      assert.match(probe.if, /github\.job == 'test'/);
+      for (const fragment of [
+        'git rev-parse --verify',
+        'http.https://github.com/.extraheader',
+        '/.dockerenv',
+        '/var/run/docker.sock',
+        '^NoNewPrivs:',
+        'SYS_ADMIN',
+        'SYS_PTRACE',
+        'NET_ADMIN',
+        '169.254.169.254',
+        '100.100.100.200',
+        '000|403',
+      ]) {
+        assert.ok(probe.run.includes(fragment), `${name}: missing ${fragment}`);
+      }
+    }
+  });
+
+  it('cleans the checkout only after every result-upload step', () => {
+    for (const [name, job] of jobs) {
+      const cleanup = job.steps.at(-1);
+      assert.equal(cleanup.name, 'Clean the container PoC workspace', name);
+      assert.match(
+        cleanup.if,
+        /always\(\) && github\.event_name == 'workflow_dispatch'/,
+      );
+      for (const fragment of [
+        '/__w/*/*',
+        'pwd -P',
+        '-mindepth 1 -maxdepth 1',
+        '-print -quit',
+      ]) {
+        assert.ok(cleanup.run.includes(fragment), `${name}: ${fragment}`);
+      }
+      for (const [index, step] of job.steps.entries()) {
+        if (String(step.uses).includes('actions/upload-artifact')) {
+          assert.ok(
+            index < job.steps.length - 1,
+            `${name}: upload moved after cleanup`,
+          );
+        }
+      }
+    }
+  });
+});
