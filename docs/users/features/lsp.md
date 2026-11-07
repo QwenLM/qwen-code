@@ -529,13 +529,27 @@ Workspace symbols, file diagnostics, and workspace diagnostics instead
 aggregate results from all ready servers. Every operation except
 `workspaceSymbol` accepts `serverName` to target one server. The value must
 exactly match the registered name shown by `/lsp`: the `command` value when one
-is configured, otherwise the language key. A name that matches no ready server
-returns an empty result rather than an error. `workspaceSymbol` always searches
-all ready servers.
+is configured, otherwise the language key. A name that matches no configured or
+ready server fails the operation with an error instead of returning an empty
+result: `No LSP server named <name> is configured or running` for an unknown
+name, or `No LSP server is ready to provide <operation>` for a configured server
+that is not ready. Only a query that reaches ready servers and finds nothing
+returns an empty result. `incomingCalls` and `outgoingCalls` need exactly one
+ready server (the named one, or the call hierarchy item's server) and otherwise
+report a stale call hierarchy item error. `workspaceSymbol` always searches all
+ready servers.
 
 ### Q: Does LSP work in sandbox mode?
 
-Yes, subject to the sandbox environment. Qwen Code starts `stdio` language
+It depends on the sandbox mode.
+
+The tool execution sandbox (`tools.executionSandbox`) cannot be combined with
+LSP. Starting Qwen Code with `--experimental-lsp` while it is configured fails
+with `tools.executionSandbox does not yet support ACP, worktree management, LSP,
+MCP, extensions or provisional workspaces.` See [Sandbox](./sandbox.md).
+
+A whole-CLI sandbox (a container or similar environment that runs the entire
+CLI) works, subject to that environment. Qwen Code starts `stdio` language
 servers as child processes of the current CLI process, so when the CLI runs in
 a sandbox the server binary and its dependencies must also be available there.
 For `tcp` and `socket` transports without `command`, Qwen Code connects to an
