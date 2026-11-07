@@ -215,7 +215,7 @@ final class RuntimeBindingProvisioning {
             return failed(unavailable("runtime_binding_unavailable",
                     "Runtime binding is not available"));
         }
-        if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(request) && record.getResourceHandle() != null) {
+        if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(request) && record.getResourceHandle() != null && record.getLease() != null && record.getAttestationGeneration() > 0) {
             return reconcileBinding(record);
         }
         CompletableFuture<BindingContext> created =
