@@ -249,6 +249,7 @@ vi.mock('./ChatPane', () => ({
         data-report-catalog-turn-completion={
           props.reportCatalogTurnCompletion ? 'true' : 'false'
         }
+        data-session-rename={props.onSessionRenameConfirmed ? 'true' : 'false'}
         data-voice-user-revision={String(props.voiceUserRevision ?? 0)}
         data-voice-workspace-count={String(props.voiceWorkspaces?.length ?? 0)}
       >
@@ -759,6 +760,19 @@ describe('SplitView', () => {
     expect(
       panes().every(
         (pane) => pane.getAttribute('data-slash-handler') === 'true',
+      ),
+    ).toBe(true);
+  });
+
+  it('forwards the host session rename confirm to every pane', () => {
+    render({
+      sessionIds: ['s1', 's2'],
+      onSessionRenameConfirmed: vi.fn(),
+    });
+
+    expect(
+      panes().every(
+        (pane) => pane.getAttribute('data-session-rename') === 'true',
       ),
     ).toBe(true);
   });

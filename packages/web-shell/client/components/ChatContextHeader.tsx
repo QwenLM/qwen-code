@@ -6,6 +6,7 @@ import {
   LayersIcon,
   PanelRightIcon,
 } from 'lucide-react';
+import { useInlineSessionRename } from '../hooks/useInlineSessionRename';
 import { useI18n } from '../i18n';
 import { LocalControlQrButton } from './LocalControlQrButton';
 import styles from './ChatContextHeader.module.css';
@@ -50,6 +51,16 @@ interface ChatContextHeaderProps {
   onOpenContextUsage?: () => void;
   /** Shows the Local Control QR entry; hidden when omitted. */
   onOpenLocalControlSettings?: () => void;
+  /**
+   * Makes a string `content` title renamable in place: a single click (or
+   * Enter/Space on the focused title) opens an inline editor. Supplied only
+   * by a caller whose title names `sessionId`; `rename` persists the name and
+   * reports its own errors. Omitted, the title stays plain text.
+   */
+  titleRename?: {
+    sessionId: string;
+    rename: (displayName: string) => Promise<unknown>;
+  };
 }
 
 export function ChatContextHeader({
@@ -69,6 +80,7 @@ export function ChatContextHeader({
   onOpenTokenUsage,
   onOpenContextUsage,
   onOpenLocalControlSettings,
+  titleRename,
 }: ChatContextHeaderProps) {
   const { t } = useI18n();
   const workspaceLabel = workspaceName ?? t('sidebar.noWorkspace');
@@ -76,6 +88,13 @@ export function ChatContextHeader({
   const workspaceAriaLabel = workspaceName
     ? t('workspace.paneLabel', { name: workspaceName })
     : workspaceLabel;
+
+  const titleText = typeof content === 'string' ? content : '';
+  const sessionRename = useInlineSessionRename({
+    label: titleText,
+    sessionKey: titleRename?.sessionId,
+    onSave: titleRename?.rename,
+  });
 
   return (
     <header className={styles.header} data-testid="chat-context-header">
@@ -113,7 +132,24 @@ export function ChatContextHeader({
           </Tooltip>
         </TooltipProvider>
       )}
-      <div className={styles.content}>{content}</div>
+      <div className={styles.content}>
+        {sessionRename.editing ? (
+          <input
+            className={styles.titleRenameInput}
+            aria-label={`${t('sessionTitle.rename')}: ${titleText}`}
+            data-web-shell-pane-title-input
+            autoFocus
+            maxLength={256}
+            {...sessionRename.inputProps}
+          />
+        ) : sessionRename.titleProps ? (
+          <span title={titleText} {...sessionRename.titleProps}>
+            {titleText}
+          </span>
+        ) : (
+          content
+        )}
+      </div>
       {location && (
         <div className="mr-2 flex min-w-0 max-w-[40%] shrink items-center">
           {location}
