@@ -120,7 +120,10 @@ first committing to an answer or discarding the question.
   panel, the activity catalog) or another browser tab, so the binding is
   validated at the read site: a click confirms the child is still in the
   parent's active side-task list and forgets it otherwise, rather than trusting
-  the persisted id. One entry per parent supersedes the resolved question's
+  the persisted id. When the open same-id tab is bound to a different child
+  than the validated binding (a tab restored from another browser tab's copy),
+  the upsert replaces it so the pane attaches to the active child instead of
+  keeping an unloadable pane. One entry per parent supersedes the resolved question's
   association, keeping the store bounded; re-recording a parent moves it to the
   newest key slot so the oldest-first eviction never drops a live, frequently
   used parent. The tab id stays short because the pane derives its daemon

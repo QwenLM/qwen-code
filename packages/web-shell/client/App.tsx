@@ -5806,12 +5806,13 @@ export function App({
       };
       setArtifactPanelTabs((tabs) => {
         if (!tabs.some((item) => item.id === id)) return [...tabs, tab];
-        // Reusing a known child keeps the existing tab. A fresh draft (no child
-        // to attach) replaces a stale same-id tab: the read-site check may have
-        // forgotten an archived child while its tab still carries the old
-        // sessionId, and keeping it would re-focus an unloadable pane instead of
-        // provisioning a fresh child. The id stays the same (clientId budget).
-        if (existingChildSessionId) return tabs;
+        // A same-id tab that reaches this point is bound to a different child
+        // than the one being reopened: the openTab lookup above already focused
+        // any tab showing existingChildSessionId, so a survivor carries a stale
+        // sessionId (an archived child the read-site check forgot, or a binding
+        // copied from another browser tab). Replace it so the pane attaches to
+        // the right child instead of re-focusing an unloadable pane. The id
+        // stays the same (clientId budget).
         return tabs.map((item) => (item.id === id ? tab : item));
       });
       setActiveArtifactPanelTabId(id);

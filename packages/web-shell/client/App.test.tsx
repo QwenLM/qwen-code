@@ -35274,6 +35274,75 @@ describe('App session callbacks', () => {
     ).toContain('details-side-task-2');
   });
 
+  it('replaces a restored details tab bound to a different child than the binding', async () => {
+    // F2: a binding copied from another browser tab (or read on reload) can name
+    // an active child while the persisted same-id tab still shows a different,
+    // archived child. The openTab lookup matches by sessionId, so it misses the
+    // stale tab; the upsert must replace it rather than keep an unloadable pane.
+    window.localStorage.setItem(
+      'qwen-code-web-shell-details-children',
+      JSON.stringify({ v: 1, 'session-1': { 'req-1': 'details-new' } }),
+    );
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'side-task:details:req-1',
+          tabs: [
+            {
+              id: 'side-task:details:req-1',
+              kind: 'side_task',
+              title: 'Details side task',
+              sessionId: 'details-old',
+              parentSessionId: 'session-1',
+              workspaceCwd: '/tmp/project',
+            },
+          ],
+        },
+      }),
+    );
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockDetailsChildActive('details-new');
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    // The restored tab is bound to the archived details-old; confirm the seed.
+    const restored = testState.latestArtifactPanelProps?.tabs.find(
+      (tab) => tab.id === 'side-task:details:req-1',
+    );
+    expect(restored).toEqual(
+      expect.objectContaining({ sessionId: 'details-old' }),
+    );
+
+    await act(async () => {
+      await testState.latestAskUserQuestionOnAskDetails!();
+    });
+    await flush();
+
+    // The click reuses the active details-new: the stale same-id tab must be
+    // replaced, not kept bound to details-old, and no new child is provisioned.
+    const sideTaskTabs = (
+      testState.latestArtifactPanelProps?.tabs ?? []
+    ).filter((tab) => tab.kind === 'side_task');
+    expect(sideTaskTabs).toHaveLength(1);
+    expect(sideTaskTabs[0]).toEqual(
+      expect.objectContaining({
+        id: 'side-task:details:req-1',
+        sessionId: 'details-new',
+      }),
+    );
+    expect(mockWorkspace.client.createSideTaskSession).not.toHaveBeenCalled();
+  });
+
   it('does not open a details tab when the question resolves during the liveness check', async () => {
     // F1: the read-site query is async; if the question is answered/ignored
     // during the round-trip, the continuation must not add a details tab.
