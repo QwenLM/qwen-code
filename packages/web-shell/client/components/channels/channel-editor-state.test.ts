@@ -12,6 +12,7 @@ import type {
 import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
+  GITHUB_RESERVED_URL_PATHS,
   invalidRepositoryGroupEntries,
   isRepoFilterActive,
   normalizeRepositoryFilterInput,
@@ -3011,23 +3012,47 @@ describe('GitHub repository event filter', () => {
     });
 
     it('does not shorten non-repository GitHub URLs', () => {
-      // orgs/community looks like owner/repo but is an organization page;
-      // shortening it would silently filter a nonexistent repository.
-      expect(
-        normalizeRepositoryFilterInput(
-          'https://github.com/orgs/community, https://github.com/settings/profile',
-        ),
-      ).toBe(
-        'https://github.com/orgs/community, https://github.com/settings/profile',
-      );
-      expect(
-        validateChannelEditorDraft(
-          REPO_FILTER,
-          filterDraft('allowlist', 'https://github.com/orgs/community'),
-          [],
-        ),
-      ).toEqual({ repoFilter: 'invalidRepoId' });
+      // Regression pins for the measured verify-round shapes: each of these
+      // once shortened to a plausible-but-nonexistent owner/repo that both
+      // validators accepted — fatal under an allowlist. Removing a root from
+      // GITHUB_RESERVED_URL_PATHS must fail here, not only in the enumeration
+      // below (which iterates the set and cannot see a removal).
+      const hostile = [
+        'https://github.com/orgs/community',
+        'https://github.com/settings/profile',
+        'https://github.com/apps/renovate',
+        'https://github.com/features/copilot',
+        'https://github.com/trending/typescript',
+        'https://github.com/pricing/enterprise',
+      ];
+      for (const url of hostile) {
+        expect(normalizeRepositoryFilterInput(url)).toBe(url);
+        expect(
+          validateChannelEditorDraft(
+            REPO_FILTER,
+            filterDraft('allowlist', url),
+            [],
+          ),
+        ).toEqual({ repoFilter: 'invalidRepoId' });
+      }
     });
+
+    it.each([...GITHUB_RESERVED_URL_PATHS])(
+      'rejects every reserved GitHub area root: %s',
+      (root) => {
+        // Enumerates the whole guard set so a newly added root is covered the
+        // moment it lands, instead of waiting for a hand-picked fixture.
+        const url = `https://github.com/${root}/some-page`;
+        expect(normalizeRepositoryFilterInput(url)).toBe(url);
+        expect(
+          validateChannelEditorDraft(
+            REPO_FILTER,
+            filterDraft('blocklist', url),
+            [],
+          ),
+        ).toEqual({ repoFilter: 'invalidRepoId' });
+      },
+    );
 
     it('lowercases and deduplicates plain entries', () => {
       expect(

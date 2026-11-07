@@ -112,10 +112,14 @@ Flat fields (not one object field) because the Web Shell editor cannot edit
     with optional `.git`, trailing slash, query, fragment, or
     `/pull/123`-style suffix) to `owner/repo`, deduplicates, joins with `, `.
     A URL whose first path segment is a reserved GitHub area (`orgs`,
-    `settings`, `notifications`, ...) is not a repository URL: it passes
+    `apps`, `settings`, `trending`, ...) is not a repository URL: it passes
     through unchanged so validation rejects it instead of silently filtering
-    a nonexistent repository. Other non-URL entries pass through unchanged
-    so validation can name them.
+    a nonexistent repository. The area list is best-effort by construction —
+    a denylist of GitHub's top-level paths cannot be complete, and a future
+    area can reintroduce the hazard until it is added. An enumerated test
+    over the exported set keeps every listed root rejected, and explicit
+    regression pins fail if a known root is removed. Other non-URL entries
+    pass through unchanged so validation can name them.
   - Validation (github only): when `repoFilterMode` is active, an empty list
     is `repoFilterRequired`; entries that still fail the repository regex
     after normalization are `invalidRepoId`. When the mode is `off`, the list

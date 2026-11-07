@@ -103,27 +103,58 @@ const GITHUB_REPOSITORY_URL_RE =
  * repositories. Shortening one would silently filter a nonexistent
  * repository — fatal under an allowlist — so these URLs pass through
  * unchanged and validation rejects them by name instead.
+ *
+ * Best-effort by construction: a denylist of GitHub's top-level paths cannot
+ * be complete, and a future GitHub area can reintroduce the hazard until it
+ * is added here. The enumerated test over this set keeps every listed root
+ * rejected; the residual risk is documented in the design doc.
+ *
+ * Exported so the test can enumerate every member instead of sampling a few.
  */
-const GITHUB_RESERVED_URL_PATHS = new Set([
+export const GITHUB_RESERVED_URL_PATHS = new Set([
+  'about',
+  'account',
+  'accounts',
+  'apps',
+  'codespaces',
+  'collections',
+  'contact',
+  'customer-stories',
+  'discussions',
+  'enterprise',
+  'events',
+  'explore',
+  'features',
+  'followers',
+  'following',
+  'issues',
+  'join',
+  'login',
+  'logout',
+  'marketplace',
+  'mobile',
+  'new',
+  'notifications',
   'orgs',
   'organizations',
-  'users',
-  'settings',
-  'notifications',
-  'marketplace',
-  'explore',
-  'topics',
-  'collections',
-  'sponsors',
-  'events',
-  'accounts',
-  'search',
-  'issues',
+  'password_reset',
+  'premium-support',
+  'pricing',
   'pulls',
-  'discussions',
-  'codespaces',
-  'enterprise',
+  'readme',
+  'search',
+  'security',
+  'sessions',
+  'settings',
+  'signup',
+  'site',
+  'sponsors',
+  'stars',
   'team',
+  'topics',
+  'trending',
+  'users',
+  'watching',
 ]);
 
 /**

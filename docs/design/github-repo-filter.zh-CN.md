@@ -98,10 +98,13 @@ Allowed repositories」下面。没有黑名单，而且访问策略的框架让
   - `normalizeRepositoryFilterInput(value)` —— 按逗号拆分、trim、小写，把
     GitHub web URL（`https://github.com/owner/repo`，可带 `.git`、尾斜杠、
     query、fragment 或 `/pull/123` 式后缀）缩短为 `owner/repo`，去重后用
-    `, ` 连接。首段路径是 GitHub 保留区域（`orgs`、`settings`、
-    `notifications` 等）的 URL 不是仓库 URL：原样通过，让校验拒绝它，
-    而不是静默地去过滤一个不存在的仓库。其他非 URL 条目也原样通过，
-    让校验能点名它们。
+    `, ` 连接。首段路径是 GitHub 保留区域（`orgs`、`apps`、`settings`、
+    `trending` 等）的 URL 不是仓库 URL：原样通过，让校验拒绝它，
+    而不是静默地去过滤一个不存在的仓库。这份区域清单在构造上就是尽力
+    而为——对 GitHub 顶层路径做黑名单不可能穷尽，未来新增的区域在被补进
+    清单之前会重新引入该隐患。对导出集合的枚举测试保证每个已列根路径都
+    被拒绝，显式回归钉保证已知根路径被移除时测试变红。其他非 URL 条目
+    也原样通过，让校验能点名它们。
   - 校验（仅 github）：`repoFilterMode` 生效时，空列表为
     `repoFilterRequired`；归一化后仍不匹配仓库正则的条目为
     `invalidRepoId`。mode 为 `off` 时不校验列表，与运行时的「关闭即忽略」

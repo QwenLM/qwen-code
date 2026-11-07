@@ -4553,6 +4553,28 @@ describe('GithubChannel', () => {
       expect(events.at(-1)).not.toHaveProperty('repository');
     });
 
+    it('journals repo_filter, not reason_filter, when both gates exclude a notification', async () => {
+      // Pins the documented ordering: the repository filter runs before the
+      // reason filter, so a notification excluded by both is journaled under
+      // repo_filter. Swapping the two blocks flips this row to reason_filter.
+      await initWithoutLoop({
+        repoFilterMode: 'blocklist',
+        repoFilter: ['owner/repo'],
+        reasonFilter: ['mention'],
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({ reason: 'comment' }),
+      ]);
+
+      await pollOnce();
+
+      expect(
+        readChannelEvents()
+          .filter((event) => event['type'] === 'inbound')
+          .map((event) => event['reason']),
+      ).toEqual(['repo_filter']);
+    });
+
     it('rejects an active mode with an empty list', async () => {
       await expect(
         connectWithRepoFilter({ repoFilterMode: 'allowlist', repoFilter: [] }),
@@ -15380,6 +15402,37 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       await pollOnce();
 
       expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+    });
+
+    it('delivers watch events for a repository the notification filter excludes', async () => {
+      // Pins the documented boundary: the repository filter governs
+      // notification intake only. A bound PR's state watch events bypass it,
+      // so blocklisting the repository must not silence its watch delivery.
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          prWatchEvents: ['ci_failure'],
+          repoFilterMode: 'blocklist',
+          repoFilter: ['owner/repo'],
+        },
+        { boundSessions },
+      );
+      mockPull({});
+      mockNotificationsOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+      mockNotificationsOnce([]);
+      mockChecks([
+        { status: 'completed', conclusion: 'failure', name: 'build' },
+      ]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        'CI failed on head sha-1',
+      );
     });
 
     it('fires ci_failure once per head and not again for the same head', async () => {
