@@ -47,6 +47,7 @@ async function install(
     tasks?: DaemonScheduledTask[];
     capable?: boolean;
     multiWorkspace?: boolean;
+    omitWorkspaces?: boolean;
     channelsFail?: boolean;
     contactsFail?: boolean;
     deferPrimaryContacts?: boolean;
@@ -93,6 +94,7 @@ async function install(
       },
     ],
   });
+  if (options.omitWorkspaces) delete scenario.capabilities.workspaces;
   await installMockDaemon(page, scenario, { baseURL });
   const tasks = new Map<string, DaemonScheduledTask[]>([
     ['primary', options.tasks ?? []],
@@ -154,14 +156,28 @@ async function install(
           json: {
             users: [],
             groups: contactsVisible
-              ? ['chat-1', 'chat-2'].map((id) => ({
-                  channelName,
-                  id: secondary ? `secondary-${id}` : id,
-                  label: 'Release team',
-                  lastObservedAt: '2026-11-07T00:00:00Z',
-                  users: [],
-                  topics: [],
-                }))
+              ? [
+                  ...['chat-1', 'chat-2'].map((id) => ({
+                    channelName,
+                    id: secondary ? `secondary-${id}` : id,
+                    label: 'Release team',
+                    lastObservedAt: '2026-11-07T00:00:00Z',
+                    users: [],
+                    topics: [],
+                  })),
+                  ...(!secondary
+                    ? [
+                        {
+                          channelName: 'ops-bot',
+                          id: 'ops-chat',
+                          label: 'Operations team',
+                          lastObservedAt: '2026-11-07T00:00:00Z',
+                          users: [],
+                          topics: [],
+                        },
+                      ]
+                    : []),
+                ]
               : [],
           },
         });
@@ -244,6 +260,9 @@ test('creates, preserves, changes and explicitly clears scheduled delivery @smok
   await expect(
     page.getByRole('combobox', { name: 'Suggested destination', exact: true }),
   ).toContainText('chat-2');
+  await expect(
+    page.getByRole('combobox', { name: 'Suggested destination', exact: true }),
+  ).not.toContainText('ops-bot');
   await page.screenshot({ path: info.outputPath('delivery-create.png') });
   await page
     .getByRole('button', { name: 'Create', exact: true })
@@ -266,6 +285,12 @@ test('creates, preserves, changes and explicitly clears scheduled delivery @smok
   await expect(
     page.getByRole('combobox', { name: 'Destination type', exact: true }),
   ).toHaveValue('chat');
+  await expect(
+    page.getByRole('combobox', { name: 'Suggested destination', exact: true }),
+  ).toContainText('ops-chat');
+  await expect(
+    page.getByRole('combobox', { name: 'Suggested destination', exact: true }),
+  ).not.toContainText('release-bot');
   await page.getByRole('button', { name: 'Create', exact: true }).click();
   await expect(page.getByRole('alert')).toHaveText(
     'Choose a Channel and enter a destination ID.',
@@ -279,7 +304,7 @@ test('creates, preserves, changes and explicitly clears scheduled delivery @smok
     path: '/scheduled-tasks',
     body: { delivery, sessionMode: 'persistent' },
   });
-  await expect(page.getByTestId('scheduled-tasks-page')).toContainText(
+  await expect(page.getByTestId('scheduled-task-delivery')).toContainText(
     'chat-1',
   );
   await page.screenshot({ path: info.outputPath('delivery-saved-card.png') });
@@ -334,11 +359,38 @@ test('creates, preserves, changes and explicitly clears scheduled delivery @smok
   await expect.poll(() => state.writes.length).toBe(4);
   expect(state.writes[3]!.body.delivery).toBeNull();
   await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expect(page.getByTestId('scheduled-task-delivery')).toHaveCount(0);
   await expect(page.getByTestId('scheduled-tasks-page')).not.toContainText(
     'Delivery off',
   );
   await page.screenshot({ path: info.outputPath('delivery-cleared-card.png') });
   expect(errors).toEqual([]);
+});
+
+test('uses the primary cwd when bootstrap capabilities omit workspaces @smoke', async ({
+  page,
+  baseURL,
+}, info) => {
+  const state = await install(page, baseURL!, { omitWorkspaces: true });
+  await createForm(page);
+  await selectDelivery(page);
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(1);
+  expect(state.writes[0]).toMatchObject({
+    method: 'POST',
+    path: '/scheduled-tasks',
+    body: { delivery, sessionMode: 'persistent' },
+  });
+  expect(state.reads).toContain(
+    `/workspaces/${encodeURIComponent(primaryCwd)}/channels`,
+  );
+  expect(state.reads).toContain('/workspace/channel/observed-contacts');
+  await expect(page.getByTestId('scheduled-task-delivery')).toContainText(
+    'release-bot · Chat · chat-1',
+  );
+  await page.screenshot({
+    path: info.outputPath('delivery-bootstrap-primary.png'),
+  });
 });
 
 test('requires an explicit resolution of per-run delivery and supports mobile layout @smoke', async ({

@@ -12,7 +12,11 @@ Issue #16516 要求开放 daemon 已有能力：将成功完成的 persistent �
 
 表单提供关闭投递，或选择频道实例及用户/群目标 ID。已观察联系人仅提供可选候选，并且仅在选择投递目标后加载；标签同时展示频道名、目标类型和原始 ID，以区分同名目标。允许手工填写 ID，因为发现不是授权。即使发现失败或 daemon 不再声明投递能力，卡片仍显示保存的频道、类型和 ID。没有保存目标的卡片不显示投递行。
 
-已配置 Channel 复用支持工作区的现有 Channel hook。为现有 observed-contacts 路由增加 Web Shell 动作，与任务变更使用同一个显式工作区 ID。仅将顶层用户和群作为候选，线程/话题不是投递目标类型。表单切换工作区时清除草稿目标，并使旧发现结果失效。编辑固定在任务所属工作区。工作区缺失或不受信任时不能悄悄回退至其他工作区。
+已配置 Channel 复用支持工作区的现有 Channel hook。为现有 observed-contacts 路由增加 Web Shell 动作，与任务变更使用同一个显式工作区 ID。仅将顶层用户和群作为候选，线程/话题不是投递目标类型。
+
+在表单内选择其他工作区时，清除草稿投递目标及模型/会话分组选择，使旧发现结果失效，并保留名称、提示词和调度配置。编辑固定在任务所属工作区。如果外部传入的锁定工作区或主工作区身份发生变化，则关闭表单并丢弃整个草稿，避免将其保存到错误的工作区。
+
+完成初始化的 daemon 能力响应始终在 `workspaces` 中包含主工作区，即使只有一个项目。独立托管的 WebShellWithProviders 可能收到含 `workspaceCwd`、但没有 `workspaces` 数组的启动期能力响应。将该显式主工作区 cwd 传给表单，仅用于主工作区目标的回退。其他工作区缺失或不受信任时，不能回退至主工作区。
 
 以 `channel_delivery` 控制编辑，以 `workspace_channel_observed_contacts` 控制发现。能力丢失、频道缺失、联系人过期或请求失败均保留已保存值，显示易懂的加载、失败、空列表和不可用状态。只有成功加载的频道列表才能确认已保存的频道不存在；初始状态、加载中或请求失败均不代表频道缺失。能力丢失后不能静默忽略已修改的草稿。用户可以放弃未保存的投递修改，恢复原目标（新建任务时恢复为不投递），然后保存表单中的其他修改，而不发送投递更新。
 
@@ -24,7 +28,7 @@ Issue #16516 要求开放 daemon 已有能力：将成功完成的 persistent �
 
 ## 验证与验收
 
-聚焦动作测试验证路由作用域和错误处理。表单及浏览器覆盖创建、编辑、清除、已存目标往返、同名身份显示、手工 ID、联系人/Channel 缺失、失败、工作区切换及过期响应、能力开关和 per-run 限制。无投递任务保持原有请求行为。运行格式、lint、构建、类型检查及相关单元/浏览器测试。实际结果和环境限制写入本地 E2E 报告与 PR 草稿；不根据模拟浏览器测试宣称平台真实收到消息。
+聚焦动作测试验证路由作用域和错误处理。表单及浏览器覆盖创建、编辑、清除、已存目标往返、同名身份显示、不同频道的候选隔离、手工 ID、联系人/Channel 缺失、失败、工作区切换及过期响应、仅含主工作区 cwd 的启动期能力响应、能力开关和 per-run 限制。无投递任务保持原有请求行为，且不显示投递行。运行格式、lint、构建、类型检查及相关单元/浏览器测试。实际结果和环境限制写入本地 E2E 报告与 PR 草稿；不根据模拟浏览器测试宣称平台真实收到消息。
 
 ## 待定事项与后续工作
 
@@ -34,4 +38,4 @@ Issue #16516 要求开放 daemon 已有能力：将成功完成的 persistent �
 
 通过仓库 Playwright 测试环境及拦截的 daemon 响应验证：[修改前](assets/scheduled-task-channel-delivery/before.png)、[投递表单](assets/scheduled-task-channel-delivery/after-details.png)、[保存后的任务](assets/scheduled-task-channel-delivery/after-card.png)及[移动端限制和长 ID](assets/scheduled-task-channel-delivery/mobile.png)。这些截图展示 UI，不代表真实平台收件。
 
-还针对打包后的 CLI 验证了由 `@smoke` 选中的全部 6 个投递场景，包括[明确去除首尾空白](assets/scheduled-task-channel-delivery/after-whitespace.png)及[清除投递后的卡片](assets/scheduled-task-channel-delivery/after-cleared-card.png)。
+针对打包后的 CLI 的浏览器验证还覆盖了[明确去除首尾空白](assets/scheduled-task-channel-delivery/after-whitespace.png)及[清除投递后的卡片](assets/scheduled-task-channel-delivery/after-cleared-card.png)。

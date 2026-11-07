@@ -180,11 +180,13 @@ interface ScheduledTasksDialogProps {
   /** Open a task's bound session — its transcript IS the task's run history.
    * When absent, tasks fall back to the inline fire-timestamp list. */
   onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
-  /** Registered workspaces on a multi-workspace daemon (from capabilities).
+  /** Registered workspaces from daemon capabilities.
    * When more than one is present the page aggregates every trusted workspace's
    * tasks (each card tagged with its workspace) and the New-task form offers a
    * workspace picker. Absent or a single entry → the plain primary-only view. */
   workspaces?: DaemonWorkspaceCapability[];
+  /** Explicit primary cwd for capabilities without a workspace list. */
+  primaryWorkspaceCwd?: string;
   /** Forces all task operations through this workspace's route. */
   lockedWorkspace?: DaemonWorkspaceCapability;
   currentSession?: DaemonSessionSummary;
@@ -648,6 +650,7 @@ export function ScheduledTasksDialog({
   onCreateViaChat,
   onOpenSession,
   workspaces,
+  primaryWorkspaceCwd,
   lockedWorkspace,
   currentSession,
   currentSessionSchedulingAvailable,
@@ -772,7 +775,9 @@ export function ScheduledTasksDialog({
   const formWorkspaceMissing =
     formWorkspaceId !== undefined &&
     (!formWorkspace || (!formWorkspace.primary && !formWorkspace.trusted));
-  const formWorkspaceCwd = formWorkspace?.cwd;
+  const formWorkspaceCwd =
+    formWorkspace?.cwd ??
+    (formWorkspaceId === undefined ? primaryWorkspaceCwd : undefined);
   const [builder, setBuilder] = useState<BuilderState>(DEFAULT_BUILDER);
   useEffect(() => {
     if (!currentSessionSchedulingAvailable) {
@@ -1218,7 +1223,8 @@ export function ScheduledTasksDialog({
 
   const workspaceIdentity = JSON.stringify([
     lockedWorkspace?.cwd,
-    workspaceList.find((workspace) => workspace.primary)?.cwd,
+    workspaceList.find((workspace) => workspace.primary)?.cwd ??
+      primaryWorkspaceCwd,
   ]);
   const previousWorkspaceIdentity = useRef(workspaceIdentity);
   useEffect(() => {
@@ -2253,7 +2259,11 @@ export function ScheduledTasksDialog({
                 </div>
               )}
               {task.delivery && (
-                <div className={styles.cardPrompt} title={deliveryLabel}>
+                <div
+                  className={styles.cardPrompt}
+                  data-testid="scheduled-task-delivery"
+                  title={deliveryLabel}
+                >
                   {deliveryLabel}
                 </div>
               )}
