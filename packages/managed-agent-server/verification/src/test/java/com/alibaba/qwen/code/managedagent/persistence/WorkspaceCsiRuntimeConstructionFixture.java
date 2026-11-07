@@ -35,8 +35,8 @@ public final class WorkspaceCsiRuntimeConstructionFixture {
         var created = com.alibaba.qwen.code.managedagent.persistence.PrivateCsiFixture.create(jdbc, manager, json, properties,
                 new com.alibaba.qwen.code.managedagent.contracts.workspace.PrivateCsiSession.Request(registration, "actor", "create", null, null,
                         new WorkspaceSelection("workspace", ".")));
-        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         return new TransactionTemplate(manager).execute(status -> managed.requireCsiRequest(registration, created.sessionId()));
     }
 }

@@ -23,8 +23,8 @@ class ManagedReceiptScopeTest {
             ManagedSchema.initialize(fixture.source());
             var jdbc = new ManagedSchemaJdbcTemplate(fixture.source());
             var tx = new TransactionTemplate(new DataSourceTransactionManager(fixture.source()));
-            var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                    new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             for (int size : List.of(384, 385, 512)) {
                 String tenant = "tenant-" + size;
                 String actor = new WorkspaceActor(tenant, "😀".repeat(size)).getActorId();

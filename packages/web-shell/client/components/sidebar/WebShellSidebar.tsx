@@ -79,6 +79,7 @@ import {
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useBrand, useBrandName } from '../../brandContext';
 import { useI18n } from '../../i18n';
+import { MAX_SPLIT_PANES } from '../../utils/splitUrl';
 import { McpAppGeneratedUiOwnerContext } from '../../mcpAppHostContext';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
@@ -168,6 +169,7 @@ import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
   SIDEBAR_SESSION_PREVIEW_LIMIT,
+  WEB_SHELL_SESSION_SOURCE_TYPE,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
 import { UpdateControl } from './UpdateControl';
@@ -296,6 +298,7 @@ export type WebShellSidebarPrimaryNavItem =
   | 'agents'
   | 'plugins'
   | 'channels'
+  | 'channelEvents'
   | 'live'
   | 'scheduledTasks'
   | 'prWatches'
@@ -345,6 +348,7 @@ export const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[]
     'agents',
     'plugins',
     'channels',
+    'channelEvents',
     'live',
     'scheduledTasks',
     'prWatches',
@@ -360,6 +364,7 @@ export type WebShellSidebarSessionActionItem =
   | 'export'
   | 'delete'
   | 'pin'
+  | 'split'
   | 'archive';
 
 /** Subset of action items that have working inline (hover-button) handlers. */
@@ -379,7 +384,7 @@ export interface WebShellSidebarSessionActionsOptions {
    * archive a session.
    * Only items that also pass their built-in visibility condition are rendered.
    * Only items with working inline handlers are accepted
-   * (details/group/archive are dropdown-only).
+   * (details/group/archive/split are dropdown-only).
    * Recent sessions use dedicated Pin and Archive buttons instead of this
    * layout; the items policy still controls whether those actions are enabled.
    * Archived rows use Export and Restore inline, independently of this option.
@@ -388,7 +393,7 @@ export interface WebShellSidebarSessionActionsOptions {
 }
 
 export const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionActionItem[] =
-  ['details', 'rename', 'group', 'export', 'delete', 'pin', 'archive'];
+  ['details', 'rename', 'group', 'export', 'delete', 'pin', 'archive', 'split'];
 
 const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
   ['pin'];
@@ -463,6 +468,9 @@ interface WebShellSidebarProps {
   onOpenAgents?: (view?: 'agents' | 'squads' | 'runtime') => void;
   onOpenPlugins: () => void;
   onOpenChannels: () => void;
+  /** Opens the cross-Channel event timeline; absent when the host does not
+   * offer it. */
+  onOpenChannelEvents?: () => void;
   onOpenLive?: () => void;
   onLiveVoiceSlotChange?: (element: HTMLDivElement | null) => void;
   onOpenManagedSessions?: () => void;
@@ -482,6 +490,8 @@ interface WebShellSidebarProps {
   /** Opens the Workspaces overview panel (table of registered workspaces). */
   onOpenWorkspacesOverview?: () => void;
   onOpenSplitView: () => void;
+  onAddSessionToSplitView?: (sessionId: string) => void;
+  splitSessionIds?: readonly string[];
   /** Whether to offer the in-window split view (large screens only). */
   canOpenSplitView?: boolean;
   onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
@@ -613,9 +623,12 @@ function getWorkspaceName(workspaceCwd: string | undefined): string {
   return parts.at(-1) ?? workspaceCwd;
 }
 
-function getSessionLabel(session: DaemonSessionSummary): string {
+function getSessionLabel(
+  session: DaemonSessionSummary,
+  untitledLabel?: string,
+): string {
   const displayName = session.displayName?.trim();
-  return displayName || session.sessionId.slice(0, 8);
+  return displayName || untitledLabel || session.sessionId.slice(0, 8);
 }
 
 function getCompactSessionLabel(session: DaemonSessionSummary): string {
@@ -1123,6 +1136,7 @@ export function WebShellSidebar({
   onOpenAgents,
   onOpenPlugins,
   onOpenChannels,
+  onOpenChannelEvents,
   onOpenLive,
   onLiveVoiceSlotChange,
   onOpenManagedSessions,
@@ -1135,6 +1149,8 @@ export function WebShellSidebar({
   canOpenSessionsOverview,
   onOpenWorkspacesOverview,
   onOpenSplitView,
+  onAddSessionToSplitView,
+  splitSessionIds,
   canOpenSplitView,
   onNewSession,
   onNewStandaloneSession,
@@ -1280,6 +1296,8 @@ export function WebShellSidebar({
       (primaryNavItems.has('plugins') ||
         (primaryNavItems.has('agents') && Boolean(onOpenAgents)) ||
         primaryNavItems.has('channels') ||
+        (primaryNavItems.has('channelEvents') &&
+          Boolean(onOpenChannelEvents)) ||
         (showLive && primaryNavItems.has('live') && Boolean(onOpenLive)) ||
         primaryNavItems.has('scheduledTasks') ||
         (primaryNavItems.has('prWatches') && Boolean(onOpenPrWatches)) ||
@@ -1315,6 +1333,8 @@ export function WebShellSidebar({
     primaryNavItems.has('channels');
   const channelView =
     channelNavigationEnabled && activePage === 'channels' && !homePreviewOpen;
+  const channelEventsNavigationEnabled =
+    projectFeaturesEnabled && primaryNavItems.has('channelEvents');
   const liveNavigationEnabled =
     railLayout &&
     projectFeaturesEnabled &&
@@ -1989,10 +2009,21 @@ export function WebShellSidebar({
   }, [workspace.client, lockedWorkspaceCwd, activityEnabled]);
   const toggleActivity = useCallback(() => {
     if (!activityEnabled) return;
+    if (!activityOpen) {
+      setSearchOpen(false);
+      setSearchQuery('');
+    }
     setActivityOpen((value) => !value);
     if (collapsed) onCollapsedChange(false);
     if (homeHidden) onOpenHome?.();
-  }, [activityEnabled, collapsed, homeHidden, onCollapsedChange, onOpenHome]);
+  }, [
+    activityEnabled,
+    activityOpen,
+    collapsed,
+    homeHidden,
+    onCollapsedChange,
+    onOpenHome,
+  ]);
   useEffect(() => {
     if (!activityEnabled) return;
     const listener = (event: KeyboardEvent) => {
@@ -5006,7 +5037,7 @@ export function WebShellSidebar({
         (livePresence.coordinator?.sessionId === session.sessionId ||
           (livePresence.callId !== undefined &&
             session.sourceId === `realtime_voice:${livePresence.callId}`));
-      const label = getSessionLabel(session);
+      const label = getSessionLabel(session, t('sidebar.untitledSession'));
       const stamp = session.updatedAt || session.createdAt;
       // Rows stay text-only; the precise date lives in the hover popover.
       const time = stamp ? formatDateTime(stamp) : '';
@@ -5315,12 +5346,38 @@ export function WebShellSidebar({
           ? t('sidebar.currentDeleteDisabled')
           : undefined;
       const showGroup = !standalone && canOrganizeSession(session, 'group');
+      // Archived sessions cannot load into a split pane (they leave an empty
+      // pane), so the sidebar withholds the split action for them.
+      const showSplit =
+        !standalone &&
+        !isArchived &&
+        (session.sourceType === undefined ||
+          session.sourceType === WEB_SHELL_SESSION_SOURCE_TYPE) &&
+        canOpenSplitView &&
+        Boolean(onAddSessionToSplitView) &&
+        sessionActionItems.has('split') &&
+        canUseWorkspaceQualifiedActions(resolveSessionWorkspaceScope(session));
+      const splitAtCapacity =
+        (splitSessionIds?.length ?? 0) >= MAX_SPLIT_PANES &&
+        !splitSessionIds?.includes(session.sessionId);
+      // A pane that is already in the open split: adding it again is a
+      // no-op, so offer the same disabled treatment as the capacity case.
+      const splitAlreadyOpen = Boolean(
+        splitSessionIds?.includes(session.sessionId),
+      );
+      // Current session with the split closed: the click would seed a
+      // one-pane split of the session being viewed — a dead end, so disable
+      // it like the archive sibling does for the current session. While the
+      // split is open (splitSessionIds set), appending the current session
+      // is a legitimate add and stays enabled.
+      const splitCurrentDisabled = isCurrent && !splitSessionIds;
       const inlineActionCount =
         Number(showPin && inlineActionItems.has('pin')) +
         Number(showRename && inlineActionItems.has('rename')) +
         Number(showExport && inlineActionItems.has('export')) +
         Number(showDelete && inlineActionItems.has('delete'));
       const showMoreActions =
+        showSplit ||
         (showPin && !inlineActionItems.has('pin')) ||
         showArchive ||
         (showRename && !inlineActionItems.has('rename')) ||
@@ -5329,7 +5386,8 @@ export function WebShellSidebar({
         (showDelete && !inlineActionItems.has('delete'));
       const showDefaultActions =
         !recent &&
-        (showPin ||
+        (showSplit ||
+          showPin ||
           showArchive ||
           showRename ||
           showExport ||
@@ -5634,6 +5692,33 @@ export function WebShellSidebar({
                           onCloseAutoFocus={handleSessionMenuCloseAutoFocus}
                         >
                           <DropdownMenuGroup>
+                            {showSplit && (
+                              <DropdownMenuItem
+                                disabled={
+                                  busy ||
+                                  splitAtCapacity ||
+                                  splitAlreadyOpen ||
+                                  splitCurrentDisabled
+                                }
+                                title={
+                                  splitAtCapacity
+                                    ? t('sidebar.splitAtCapacity', {
+                                        max: MAX_SPLIT_PANES,
+                                      })
+                                    : splitAlreadyOpen
+                                      ? t('sidebar.splitAlreadyOpen')
+                                      : splitCurrentDisabled
+                                        ? t('sidebar.splitCurrentDisabled')
+                                        : undefined
+                                }
+                                onSelect={() =>
+                                  onAddSessionToSplitView?.(session.sessionId)
+                                }
+                              >
+                                <Columns2Icon />
+                                {t('sidebar.addToSplitView')}
+                              </DropdownMenuItem>
+                            )}
                             {showPin && !inlineActionItems.has('pin') && (
                               <DropdownMenuItem
                                 disabled={busy}
@@ -5736,6 +5821,8 @@ export function WebShellSidebar({
       canRenameSession,
       canUnarchiveSession,
       canMutateSessionArchive,
+      canOpenSplitView,
+      canUseWorkspaceQualifiedActions,
       cancelRename,
       completedUnreadIds,
       contentSearchHits,
@@ -5762,12 +5849,15 @@ export function WebShellSidebar({
       onSelectCurrentSession,
       openGroupMenuFromAnchor,
       currentSessionActive,
+      onAddSessionToSplitView,
+      resolveSessionWorkspaceScope,
       saveRename,
       searchQuery,
       sessionActionItems,
       inlineActionItems,
       livePresence,
       startRename,
+      splitSessionIds,
       t,
     ],
   );
@@ -6267,6 +6357,60 @@ export function WebShellSidebar({
     standaloneSessionsVisible,
     t,
   ]);
+  const searchEnabled = !liveView && !hideProjectHeader;
+  // The activity panel replaces the session list, so a query typed there
+  // filters rows the panel never shows.
+  const topRowSearchVisible =
+    searchEnabled &&
+    !activityOpen &&
+    (!collapsed || mobileOpen || homePreviewOpen);
+  // A narrow column cannot fit a usable field beside the icon buttons, so
+  // there the field drops to a full-width row under the brand row instead.
+  const topRowColumnWidth =
+    sidebarWidth - (railLayout ? SIDEBAR_RAIL_WIDTH : 0);
+  const inlineTopRowSearch =
+    topRowSearchVisible && !mobileOpen && topRowColumnWidth >= 285;
+  // The top row owns the search control whenever it is visible. Hosts that
+  // hide the brand row, and the collapsed strip (whose session list lives in
+  // a popover), fall back to the older Projects-header placement.
+  const searchInProjectHeader =
+    !shouldRenderBrand || (!railLayout && collapsed && !mobileOpen);
+  const renderSearchField = (className?: string) => (
+    <div className={cx(styles.projectSearch, className)}>
+      <SearchIcon aria-hidden="true" />
+      <Input
+        value={searchQuery}
+        placeholder={t('sidebar.searchPlaceholder')}
+        aria-label={t('sidebar.search')}
+        autoFocus
+        onChange={(event) => setSearchQuery(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            setSearchQuery('');
+            setSearchOpen(false);
+          }
+        }}
+      />
+    </div>
+  );
+  const renderSearchToggle = (className: string) => (
+    <button
+      type="button"
+      className={className}
+      title={t('sidebar.search')}
+      aria-label={t('sidebar.search')}
+      aria-expanded={searchOpen}
+      onClick={() => {
+        setSearchOpen((open) => {
+          if (open) setSearchQuery('');
+          return !open;
+        });
+        setProjectsExpanded(true);
+      }}
+    >
+      <SearchIcon size={18} strokeWidth={1.5} />
+    </button>
+  );
   const primaryNavigation = hasScrollingPrimaryNav && (
     <div className={styles.primaryNav}>
       {projectFeaturesEnabled &&
@@ -6319,6 +6463,27 @@ export function WebShellSidebar({
             <MessagesSquareIcon size={16} strokeWidth={1.2} />
           </span>
           {!collapsed && !railLayout && <span>{t('sidebar.channels')}</span>}
+        </button>
+      )}
+      {channelEventsNavigationEnabled && onOpenChannelEvents && (
+        <button
+          className={styles.pluginButton}
+          type="button"
+          title={railLayout ? undefined : t('sidebar.channelEvents')}
+          aria-label={t('sidebar.channelEvents')}
+          aria-current={
+            railLayout && activePage === 'channel-events' ? 'page' : undefined
+          }
+          onClick={() =>
+            openNavigation(onOpenChannelEvents, channelEventsNavigationEnabled)
+          }
+        >
+          <span className={styles.navIcon}>
+            <ActivityIcon size={16} strokeWidth={1.2} />
+          </span>
+          {!collapsed && !railLayout && (
+            <span>{t('sidebar.channelEvents')}</span>
+          )}
         </button>
       )}
       {liveNavigationEnabled && onOpenLive && (
@@ -7187,9 +7352,35 @@ export function WebShellSidebar({
           }}
         >
           {sectionView && (
-            <div className={styles.sectionHeader}>
-              {t(liveView ? 'sidebar.live' : 'sidebar.channels')}
-            </div>
+            <>
+              <div className={styles.sectionHeader}>
+                {t(liveView ? 'sidebar.live' : 'sidebar.channels')}
+                {channelView && searchEnabled && shouldRenderBrand && (
+                  <div
+                    className={cx(
+                      styles.topRowActions,
+                      searchOpen &&
+                        inlineTopRowSearch &&
+                        styles.topRowActionsSearching,
+                    )}
+                  >
+                    {searchOpen &&
+                      inlineTopRowSearch &&
+                      renderSearchField(styles.topRowSearchField)}
+                    {renderSearchToggle(styles.searchToggle)}
+                  </div>
+                )}
+              </div>
+              {channelView &&
+                searchEnabled &&
+                shouldRenderBrand &&
+                searchOpen &&
+                !inlineTopRowSearch && (
+                  <div className={styles.topRowSearchRow}>
+                    {renderSearchField()}
+                  </div>
+                )}
+            </>
           )}
           {liveView &&
             !homeHidden &&
@@ -7201,57 +7392,84 @@ export function WebShellSidebar({
               />
             )}
           {!sectionView && shouldRenderBrand && (
-            <div className={styles.topRow}>
-              {branding?.render ? (
-                branding.render()
-              ) : (
-                <>
-                  <span className={styles.brandLogo} aria-hidden="true">
-                    {brand.logo ||
-                      (brand.logoDataUri ? (
-                        // `key` remounts on a new URI: after one decode failure,
-                        // the failed state must not stick to the next logo.
-                        <BrandLogoImage
-                          key={brand.logoDataUri}
-                          dataUri={brand.logoDataUri}
-                        />
-                      ) : (
-                        <IconQwenLogo />
-                      ))}
-                  </span>
-                  {(!collapsed || mobileOpen || homePreviewOpen) && (
-                    <span className={styles.brandName}>{brandName}</span>
-                  )}
-                </>
-              )}
-              {activityEnabled && (!railLayout || !collapsed || mobileOpen) && (
-                <button
-                  type="button"
+            <>
+              <div className={styles.topRow}>
+                {branding?.render ? (
+                  searchOpen && inlineTopRowSearch ? null : (
+                    branding.render()
+                  )
+                ) : (
+                  <>
+                    <span className={styles.brandLogo} aria-hidden="true">
+                      {brand.logo ||
+                        (brand.logoDataUri ? (
+                          // `key` remounts on a new URI: after one decode
+                          // failure, the failed state must not stick to the
+                          // next logo.
+                          <BrandLogoImage
+                            key={brand.logoDataUri}
+                            dataUri={brand.logoDataUri}
+                          />
+                        ) : (
+                          <IconQwenLogo />
+                        ))}
+                    </span>
+                    {(!collapsed || mobileOpen || homePreviewOpen) &&
+                      !(searchOpen && inlineTopRowSearch) && (
+                        <span className={styles.brandName}>{brandName}</span>
+                      )}
+                  </>
+                )}
+                <div
                   className={cx(
-                    'ml-auto relative rounded-lg p-2 hover:bg-accent',
-                    styles.activityToggle,
+                    styles.topRowActions,
+                    searchOpen &&
+                      inlineTopRowSearch &&
+                      styles.topRowActionsSearching,
                   )}
-                  aria-label={t(
-                    activityOpen ? 'activity.close' : 'activity.open',
-                  )}
-                  title={`${t(activityOpen ? 'activity.close' : 'activity.open')} (⌥⌘U / Ctrl+Alt+U)`}
-                  aria-pressed={activityOpen}
-                  onClick={toggleActivity}
                 >
-                  <BellIcon size={18} strokeWidth={1.5} />
-                  {activityEntries.some(
-                    (entry) =>
-                      isActivityEligible(entry, activityPreferences) &&
-                      activityNeedsAttention(entry),
-                  ) && (
-                    <span
-                      className="absolute right-1 top-1 size-1.5 rounded-full bg-primary"
-                      data-activity-attention
-                    />
-                  )}
-                </button>
+                  {topRowSearchVisible &&
+                    searchOpen &&
+                    inlineTopRowSearch &&
+                    renderSearchField(styles.topRowSearchField)}
+                  {activityEnabled &&
+                    (!railLayout || !collapsed || mobileOpen) && (
+                      <button
+                        type="button"
+                        className={cx(
+                          'relative rounded-lg p-2 hover:bg-accent',
+                          styles.activityToggle,
+                        )}
+                        aria-label={t(
+                          activityOpen ? 'activity.close' : 'activity.open',
+                        )}
+                        title={`${t(activityOpen ? 'activity.close' : 'activity.open')} (⌥⌘U / Ctrl+Alt+U)`}
+                        aria-pressed={activityOpen}
+                        onClick={toggleActivity}
+                      >
+                        <BellIcon size={18} strokeWidth={1.5} />
+                        {activityEntries.some(
+                          (entry) =>
+                            isActivityEligible(entry, activityPreferences) &&
+                            activityNeedsAttention(entry),
+                        ) && (
+                          <span
+                            className="absolute right-1 top-1 size-1.5 rounded-full bg-primary"
+                            data-activity-attention
+                          />
+                        )}
+                      </button>
+                    )}
+                  {topRowSearchVisible &&
+                    renderSearchToggle(styles.searchToggle)}
+                </div>
+              </div>
+              {topRowSearchVisible && searchOpen && !inlineTopRowSearch && (
+                <div className={styles.topRowSearchRow}>
+                  {renderSearchField()}
+                </div>
               )}
-            </div>
+            </>
           )}
           {!sectionView && primaryNavItems.has('newTask') && (
             <div
@@ -7429,6 +7647,7 @@ export function WebShellSidebar({
                     )}
                     client={workspace.client}
                     editingSessionId={editingSessionIdForSections}
+                    untitledSessionLabel={t('sidebar.untitledSession')}
                     pendingSession={
                       livePresence &&
                       (!livePresence.coordinator ||
@@ -7545,21 +7764,9 @@ export function WebShellSidebar({
                           <FolderKanbanIcon />
                         </button>
                       )}
-                    <button
-                      className={styles.projectsHeaderAction}
-                      type="button"
-                      title={t('sidebar.search')}
-                      aria-label={t('sidebar.search')}
-                      onClick={() => {
-                        setSearchOpen((open) => {
-                          if (open) setSearchQuery('');
-                          return !open;
-                        });
-                        setProjectsExpanded(true);
-                      }}
-                    >
-                      <SearchIcon />
-                    </button>
+                    {searchEnabled &&
+                      searchInProjectHeader &&
+                      renderSearchToggle(styles.projectsHeaderAction)}
                     {!channelView &&
                       !lockedWorkspaceCwd &&
                       onOpenAddWorkspace && (
@@ -7576,24 +7783,13 @@ export function WebShellSidebar({
                   </div>
                 </div>
               )}
-              {!liveView && searchOpen && !hideProjectHeader && (
-                <div className={styles.projectSearch}>
-                  <SearchIcon aria-hidden="true" />
-                  <Input
-                    value={searchQuery}
-                    placeholder={t('sidebar.searchPlaceholder')}
-                    aria-label={t('sidebar.search')}
-                    autoFocus
-                    onChange={(event) => setSearchQuery(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Escape') {
-                        setSearchQuery('');
-                        setSearchOpen(false);
-                      }
-                    }}
-                  />
-                </div>
-              )}
+              {searchEnabled &&
+                searchOpen &&
+                searchInProjectHeader &&
+                renderSearchField()}
+              {/* Managed 历史由外部 App Host 注入，不受本地 Workspaces
+                  折叠状态控制；否则折叠分组会把仍有效的 Managed 会话一起隐藏。 */}
+              {!channelView && !liveView && managedWorkspaces}
               <div
                 className="flex flex-col"
                 hidden={liveView || !projectsExpanded}
@@ -7615,7 +7811,6 @@ export function WebShellSidebar({
                   {!hideProjectHeader && <WorkspaceHostHeading />}
                   <div className={styles.workspacePicker}>
                     <div className={styles.workspaceList}>
-                      {!channelView && managedWorkspaces}
                       {orderedProjectWorkspaces.map((ws) => (
                         <Fragment key={ws.id}>
                           <WorkspaceSection
@@ -7637,6 +7832,7 @@ export function WebShellSidebar({
                             }
                             client={workspace.client}
                             editingSessionId={editingSessionIdForSections}
+                            untitledSessionLabel={t('sidebar.untitledSession')}
                             reloadToken={workspaceSessionsReloadToken}
                             untrustedLabel={t('sidebar.workspaceUntrusted')}
                             readOnlyLabel={t('sidebar.workspaceReadOnly')}
