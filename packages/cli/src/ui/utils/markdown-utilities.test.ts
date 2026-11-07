@@ -20,6 +20,13 @@ describe('markdown-utilities', () => {
       expect(findLastSafeSplitPoint(content)).toBe(24); // After the second \n\n
     });
 
+    it('should split on the paragraph boundary despite an inline fence marker', () => {
+      // Issue #13309: an inline `~~~` is prose, not a block fence, so the
+      // paragraph boundary after it stays a valid split point.
+      const content = 'First para with `~~~` inline.\n\nSecond para.';
+      expect(findLastSafeSplitPoint(content)).toBe(content.indexOf('Second'));
+    });
+
     it('should return content.length if no safe split point is found', () => {
       const content = 'longstringwithoutanysafesplitpoint';
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
