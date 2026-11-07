@@ -80,6 +80,7 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.n
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.referenceString;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.renewalDelayMillis;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireSameSession;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sameReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sshNoStartReceipt;
@@ -112,90 +113,10 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     public Map<String, Object> personalMcpToken(String leaseId, String token, Map<String, Object> body) {
         requireOpen(closed);
-        var issuer = mcpTokenIssuer;
-        if (issuer == null) {
-            throw new RuntimeBrokerException(409, "managed_mcp_oauth_unavailable", "Personal MCP authorization is unavailable.", false);
-        }
-        Set<String> required = Set.of("protocolVersion", "bindingId", "generation", "epoch", "harnessSessionId",
-                "configRevision", "serverId", "credentialId", "credentialGeneration", "executionActorKey", "resourceUri");
-        var allowed = new java.util.HashSet<>(required);
-        allowed.add("runtimeSessionId");
-        if (!body.keySet().containsAll(required) || !allowed.containsAll(body.keySet())
-                || !Long.valueOf(1).equals(BrokerValues.exactLong(body.get("protocolVersion")))
-                || !(body.get("executionActorKey") instanceof String actor) || !actor.matches("[a-f0-9]{64}")) {
-            throw invalid("runtime_broker_invalid_request", "Invalid personal MCP token request.");
-        }
-        long generation = mcpTokenCounter(body.get("generation"), 1);
-        long epoch = mcpTokenCounter(body.get("epoch"), 0);
-        long configRevision = mcpTokenCounter(body.get("configRevision"), 1);
-        long credentialGeneration = mcpTokenCounter(body.get("credentialGeneration"), 1);
-        if (!(body.get("resourceUri") instanceof String resource) || resource.isBlank() || resource.length() > 4096
-                || resource.indexOf('\0') >= 0) {
-            throw invalid("runtime_broker_invalid_request", "Invalid personal MCP resource.");
-        }
-        String bindingId = JsonCodec.requiredString(body, "bindingId", "MCP token");
-        RuntimeBindingRecord binding = bindingRepository.findById(bindingId);
-        requireMcpTokenLease(binding, generation, leaseId, epoch, token);
-        RuntimeScope scope = binding.getRequest().getScope();
-        String claimedHarness = JsonCodec.requiredString(body, "harnessSessionId", "MCP token");
-        RuntimeSessionRecord runtimeSession = null;
-        String harness;
-        if (body.containsKey("runtimeSessionId")) {
-            String runtimeId = JsonCodec.requiredString(body, "runtimeSessionId", "MCP token");
-            runtimeSession = sessionRepository.findHistorical(scope.getTenantId(), claimedHarness, runtimeId);
-            if (runtimeSession == null || runtimeSession.getState() != RuntimeSessionRecord.State.READY
-                    || !bindingId.equals(runtimeSession.getBindingId()) || runtimeSession.getRuntimeGeneration() != generation
-                    || !scope.equals(runtimeSession.getSession().getScope())) {
-                throw conflict("managed_mcp_owner_unavailable", "The original MCP Runtime Session is unavailable.");
-            }
-            harness = runtimeSession.getSession().getHarnessSessionId();
-        } else if ("session".equals(scope.getIsolationClass())) {
-            harness = binding.getRequest().getIsolationKey();
-        } else {
-            throw conflict("managed_mcp_owner_unavailable", "A shared Runtime needs an original MCP Runtime Session.");
-        }
-        if (!harness.equals(claimedHarness)) {
-            throw conflict("managed_mcp_owner_unavailable", "The MCP Runtime belongs to another Session.");
-        }
-        bindingRepository.requireHarnessAdmission(binding.getRequest(), scope, harness, null);
-        if (!provisioner.isUsable(binding.getLease())) {
-            throw conflict("managed_mcp_owner_unavailable", "The original MCP Runtime is unavailable.");
-        }
-        Map<String, Object> normalized = new java.util.LinkedHashMap<>(body);
-        normalized.put("configRevision", configRevision);
-        normalized.put("credentialGeneration", credentialGeneration);
-        String accessToken = issuer.issue(scope, harness, BrokerValues.immutableMap(normalized));
-        requireMcpTokenLease(bindingRepository.findById(bindingId), generation, leaseId, epoch, token);
-        bindingRepository.requireHarnessAdmission(binding.getRequest(), scope, harness, null);
-        if (runtimeSession != null) {
-            var current = sessionRepository.findHistorical(scope.getTenantId(), harness, runtimeSession.getRuntimeSessionId());
-            if (current == null || !current.sameIdentity(runtimeSession) || current.getState() != RuntimeSessionRecord.State.READY) {
-                throw conflict("managed_mcp_owner_unavailable", "The original MCP Runtime Session changed.");
-            }
-        }
-        if (accessToken == null || accessToken.isBlank() || accessToken.length() > 64 * 1024) {
-            throw conflict("managed_mcp_oauth_unavailable", "Personal MCP authorization is unavailable.");
-        }
-        return Map.of("protocolVersion", 1, "accessToken", accessToken);
+        return RuntimeMcpTokenRequests.issue(bindingRepository, sessionRepository,
+                provisioner, mcpTokenIssuer, leaseId, token, body);
     }
 
-    private static long mcpTokenCounter(Object value, long minimum) {
-        Long parsed = value instanceof String text && text.matches("0|[1-9][0-9]{0,15}") ? Long.parseLong(text) : BrokerValues.exactLong(value);
-        if (parsed == null || parsed < minimum || parsed > 9_007_199_254_740_991L) {
-            throw invalid("runtime_broker_invalid_request", "Invalid personal MCP token generation.");
-        }
-        return parsed;
-    }
-
-    private static void requireMcpTokenLease(RuntimeBindingRecord binding, long generation, String leaseId, long epoch, String token) {
-        if (binding == null || binding.getGeneration() != generation || binding.getState() != RuntimeBindingRecord.State.READY
-                || binding.isDrainRequested() || binding.getLease() == null || !binding.getLease().getLeaseId().equals(leaseId)
-                || binding.getLease().getEpoch() != epoch || token == null
-                || !java.security.MessageDigest.isEqual(binding.getLease().getToken().getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                        token.getBytes(java.nio.charset.StandardCharsets.UTF_8))) {
-            throw new RuntimeBrokerException(401, "managed_mcp_token_unauthorized", "Original Runtime authentication failed.", false);
-        }
-    }
     private final RuntimeProvisioner provisioner;
     private final RuntimeTransport transport;
     private final RuntimeBindingRepository bindingRepository;
@@ -2778,17 +2699,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             // such as one without a storage ID, rather than fall back.
             throw new RuntimeBrokerException(400, "runtime_placement_invalid",
                     "Runtime placement is invalid", false, exception);
-        }
-    }
-
-    private static void requireSameSession(RuntimeSession actual,
-            RuntimeSession requested) {
-        if (!actual.getHarnessSessionId().equals(
-                requested.getHarnessSessionId())
-                || !actual.getTurnKind().equals(requested.getTurnKind())
-                || !actual.getScope().equals(requested.getScope())) {
-            throw conflict("runtime_session_conflict",
-                    "runtimeSessionId belongs to another Session identity");
         }
     }
 

@@ -17,6 +17,14 @@ import java.util.Set;
 public final class ManagedMcpOAuthAdmission {
     private ManagedMcpOAuthAdmission() {}
 
+    public static void requireActorForUpdate(JdbcTemplate jdbc, String tenant, String session, String actor) {
+        jdbc.queryForObject(
+                "SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id ="
+                        + " ? AND session_kind = 'PUBLIC' FOR UPDATE",
+                String.class, tenant, session);
+        requireActor(jdbc, tenant, session, actor);
+    }
+
     public static void requireActor(
             JdbcTemplate jdbc, String tenant, String session, String actor) {
         String owner = actor(jdbc, tenant, session);

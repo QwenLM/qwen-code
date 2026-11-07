@@ -22,6 +22,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -100,6 +101,13 @@ final class AgentSessionPolicies {
 
     static final Pattern DEFINITION_REVISION = Pattern.compile(
             "^[1-9][0-9]{0,17}$");
+
+    static void requireAgentRevision(String revision) {
+        if (StringUtils.isBlank(revision) || revision.length() > 128) {
+            throw new IllegalArgumentException(
+                    "qwen.managed-agent.agent-revision must contain 1-128 characters");
+        }
+    }
 
     static ManagedAgentException workspaceExecutionUnavailable() {
         return new ManagedAgentException(409,
@@ -216,8 +224,7 @@ final class AgentSessionPolicies {
     }
 
     SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
-        ManagedMcpOAuthAdmission.requireActor(jdbc, tenantId, sessionId, actorId);
+        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId, actorId);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
             throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
         }
@@ -532,8 +539,7 @@ final class AgentSessionPolicies {
     WebShellModelChangeResult changeSessionModel(String tenantId, String actorId,
             String sessionId, String key, String digest, String modelId, long expectedRevision,
             boolean supported) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
-        ManagedMcpOAuthAdmission.requireActor(jdbc, tenantId, sessionId, actorId);
+        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId, actorId);
         if (session.workspace() == null) {
             throw new ManagedAgentException(400, "unsupported_feature",
                     "Model selection requires a Workspace Session");
@@ -607,8 +613,7 @@ final class AgentSessionPolicies {
             String sessionId, String key, String digest, String mode, long expectedRevision,
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
             boolean liveSupported, Map<String, List<String>> requestedRules, boolean rulesSupported, boolean autoSupported) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
-        ManagedMcpOAuthAdmission.requireActor(jdbc, tenantId, sessionId, actorId);
+        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId, actorId);
         if (session.workspace() == null) {
             throw new ManagedAgentException(400, "unsupported_feature",
                     "Approval selection requires a Workspace Session");

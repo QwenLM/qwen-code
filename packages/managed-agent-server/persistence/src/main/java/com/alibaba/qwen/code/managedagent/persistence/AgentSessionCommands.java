@@ -76,8 +76,7 @@ final class AgentSessionCommands {
         // installation and physical fencing, and nothing later in this
         // transaction takes the guard. The Session lock comes first, so this
         // transaction's snapshot is taken after it.
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
-        ManagedMcpOAuthAdmission.requireActor(jdbc, tenantId, sessionId, actorId);
+        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId, actorId);
         sessionPolicies.requirePublicChildImmutable(session);
         // A bound Session's later Turn needs the same deployment opt-in as
         // its initial one; the service admits any caller holding OPERATOR

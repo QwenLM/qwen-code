@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
@@ -30,6 +31,17 @@ final class RuntimeBrokerSupport {
             "prepared", "executing", "cancel_requested", "settled",
             "unknown");
     static final int MAX_CAS_ATTEMPTS = 16;
+
+    static void requireSameSession(RuntimeSession actual,
+            RuntimeSession requested) {
+        if (!actual.getHarnessSessionId().equals(
+                requested.getHarnessSessionId())
+                || !actual.getTurnKind().equals(requested.getTurnKind())
+                || !actual.getScope().equals(requested.getScope())) {
+            throw conflict("runtime_session_conflict",
+                    "runtimeSessionId belongs to another Session identity");
+        }
+    }
 
     static <T> CompletionStage<T> safeStage(
             Supplier<CompletionStage<T>> supplier) {
