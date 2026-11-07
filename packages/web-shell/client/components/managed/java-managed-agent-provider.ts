@@ -409,40 +409,36 @@ export function createJavaManagedAgentProvider(
           { sessionId, taskId, after: request.after, limit: request.limit },
           request.signal,
         ),
-      ...(options.productScope?.trim()
-        ? {
-            cancel: {
-              async submit(sessionId, taskId, command) {
-                return requireTaskCancelOperation(
-                  await client.cancelTask(
-                    {
-                      sessionId,
-                      taskId,
-                      idempotencyKey: command.idempotencyKey,
-                      requestId: managedRequestId(),
-                    },
-                    command.signal,
-                  ),
-                  sessionId,
-                  taskId,
-                );
+      cancel: {
+        async submit(sessionId, taskId, command) {
+          return requireTaskCancelOperation(
+            await client.cancelTask(
+              {
+                sessionId,
+                taskId,
+                idempotencyKey: command.idempotencyKey,
+                requestId: managedRequestId(),
               },
-              async query(sessionId, taskId, operationId, request) {
-                const operation = requireTaskCancelOperation(
-                  await client.queryOperation(
-                    { sessionId, operationId },
-                    request.signal,
-                  ),
-                  sessionId,
-                  taskId,
-                );
-                if (operation.operationId !== operationId)
-                  throw new Error('Task cancel operation identity mismatch');
-                return operation;
-              },
-            },
-          }
-        : {}),
+              command.signal,
+            ),
+            sessionId,
+            taskId,
+          );
+        },
+        async query(sessionId, taskId, operationId, request) {
+          const operation = requireTaskCancelOperation(
+            await client.queryOperation(
+              { sessionId, operationId },
+              request.signal,
+            ),
+            sessionId,
+            taskId,
+          );
+          if (operation.operationId !== operationId)
+            throw new Error('Task cancel operation identity mismatch');
+          return operation;
+        },
+      },
     },
     approvalChange: {
       async queryOptions(sessionId, request) {
