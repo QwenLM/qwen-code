@@ -88,6 +88,7 @@ import { ManagedChildSessionView } from './ManagedChildSessionView';
 import { useManagedTaskCancel } from './use-managed-task-cancel';
 import { TodoFullList } from '../messages/TodoView';
 import { getLatestSuccessfulTodos } from '../../utils/todos';
+import { getShadowAwareActiveElement } from '../../utils/dom';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
@@ -862,7 +863,9 @@ function ManagedSessionsContent({
     const composer = composerContainerRef.current?.querySelector(
       '[contenteditable="true"], textarea:not([disabled])',
     );
-    const parked = document.activeElement;
+    // document.activeElement retargets to the shadow host in portal mode; read
+    // the focused node from the page wrapper's own root instead.
+    const parked = getShadowAwareActiveElement(pageRef.current);
     // hostSessionOnly renders no list, so the fallback below parks focus on the
     // page wrapper; the latch accepts the node it parked on itself, so a user
     // who merely clicked inside that pane is still recognised as having moved
@@ -2916,7 +2919,7 @@ function ManagedSessionsContent({
                 clientId,
                 root: sessionId,
                 child,
-                trigger: document.activeElement,
+                trigger: getShadowAwareActiveElement(pageRef.current),
               })
             }
             cancel={taskCancel}
