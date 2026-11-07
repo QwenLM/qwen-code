@@ -1970,7 +1970,11 @@ describe('platform lanes — a failing nightly is visible', () => {
     const cond = String(failureIssue.jobs.analyze.if);
     expect(cond).toContain("workflow_run.event == 'schedule'");
     expect(cond).toContain("workflow_run.head_branch == 'main'");
-    expect(cond).toContain("workflow_run.conclusion == 'failure'");
+    // The gate admits failure and timeout-backed cancelled runs (#16272); the
+    // live step discriminates a real timeout from a concurrency supersede.
+    expect(cond).toContain(
+      'contains(fromJSON(\'["failure","cancelled"]\'), github.event.workflow_run.conclusion)',
+    );
   });
 });
 
