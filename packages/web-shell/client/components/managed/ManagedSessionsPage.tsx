@@ -41,6 +41,7 @@ import {
   getManagedClientId,
   managedRequestId,
 } from './managed-session-storage';
+import { getComposerPlaceholderKey } from '../../utils/composerInputState';
 import { useManagedFileReferences } from './use-managed-file-references';
 import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
 import { useManagedSession } from './use-managed-session';
@@ -372,9 +373,11 @@ function ManagedSessionsContent({
   // 不新增宿主 API；此前只有 WelcomeHeader 被消费，导致 Managed 与 ordinary 呈现两套外壳。
   const {
     renderWelcomeHeader,
+    renderWelcomeFooter,
     renderComposerFooter: CustomComposerFooter,
     showManagedSessionHeader = true,
     alignManagedChatWithHost = false,
+    composerPlaceholders,
   } = useWebShellCustomization();
   const recoveryText = useManagedRecoveryText();
   const home = hostSessionOnly || navigationTarget !== undefined;
@@ -2020,6 +2023,8 @@ function ManagedSessionsContent({
                   onSelectSession(createdId, createdWorkspaceId);
                 }}
                 onAbandoned={() => setListRevision((current) => current + 1)}
+                renderWelcomeHeader={renderWelcomeHeader}
+                alignManagedChatWithHost={alignManagedChatWithHost}
               />
             )}
           {latestSuccessfulTodos !== undefined &&
@@ -2066,16 +2071,26 @@ function ManagedSessionsContent({
                     !detail.loading &&
                     !summary?.failure
                       ? (() => {
+                          // Mirror App's welcomeHeaderProps: real workspace
+                          // values, not literal placeholders, so a host renderer
+                          // that branches on cwd/mode behaves the same here.
                           const welcomeProps = {
                             version: '',
-                            cwd: '',
+                            cwd: summary?.workspace?.cwdRelative ?? '',
                             currentModel: displayedModel,
-                            currentMode: '',
+                            currentMode: summary?.approvalMode ?? '',
                           };
-                          return renderWelcomeHeader ? (
-                            renderWelcomeHeader(welcomeProps)
-                          ) : (
-                            <WelcomeHeader {...welcomeProps} />
+                          return (
+                            <>
+                              {renderWelcomeHeader ? (
+                                renderWelcomeHeader(welcomeProps)
+                              ) : (
+                                <WelcomeHeader {...welcomeProps} />
+                              )}
+                              {/* Same pairing App keeps on the ordinary path:
+                                  a host that supplies both slots gets both. */}
+                              {renderWelcomeFooter?.(welcomeProps)}
+                            </>
                           );
                         })()
                       : undefined
@@ -2621,10 +2636,26 @@ function ManagedSessionsContent({
                 }
                 disabled={composerDisabled}
                 placeholderText={t(
-                  active && userMessages.supported
-                    ? 'managed.queue.placeholder'
-                    : alignManagedChatWithHost
-                      ? 'splitView.composerPlaceholder'
+                  alignManagedChatWithHost
+                    ? (() => {
+                        // Resolve exactly like the ordinary composer in App:
+                        // the host override map wins per state, otherwise the
+                        // localized default for that state. A running turn is
+                        // "processing", not a managed-only queue hint.
+                        const state =
+                          Boolean(active) || busy ? 'processing' : 'idle';
+                        const custom = composerPlaceholders?.[state];
+                        return custom?.trim()
+                          ? custom
+                          : t(
+                              getComposerPlaceholderKey({
+                                isPreparingPrompt: busy,
+                                isStreaming: Boolean(active),
+                              }),
+                            );
+                      })()
+                    : active && userMessages.supported
+                      ? 'managed.queue.placeholder'
                       : 'managed.prompt',
                 )}
               />

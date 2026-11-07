@@ -32,7 +32,10 @@ import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Spinner } from './ui/spinner';
 import { WorkspaceUnavailableState } from './WorkspaceUnavailableState';
 import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
-import { managedSelectionFromRoute } from './managed/managed-session-storage';
+import {
+  hasManagedLocalTarget,
+  managedSelectionFromRoute,
+} from './managed/managed-session-storage';
 
 function surfaceTheme(theme: WebShellTheme | undefined): WebShellTheme {
   return theme ?? WebShellThemeId.Dark;
@@ -54,24 +57,6 @@ function withChrome(
     theme: props.theme ?? theme,
     language: props.language ?? language,
   };
-}
-
-/**
- * 宿主省略 `urlNavigation` 时这条路径上没有路由，选择态只能由宿主自己给的目标决定：
- * 只要带了显式本地目标就是本地视图，门禁不得豁免。
- */
-function hasLocalTarget(props: {
-  sessionId?: string;
-  workspaceId?: string;
-  workspaceCwd?: string;
-  sessionContext?: DaemonProductSessionContext;
-}): boolean {
-  return (
-    props.sessionId !== undefined ||
-    props.workspaceId !== undefined ||
-    props.workspaceCwd !== undefined ||
-    props.sessionContext !== undefined
-  );
 }
 
 interface WorkspaceSessionProviderProps {
@@ -346,7 +331,12 @@ function WorkspaceSessionProviderWorkspace({
     appProps.managedAgentProvider !== undefined &&
     managedSelectionFromRoute(
       navigation?.route,
-      hasLocalTarget({ sessionId, workspaceId, workspaceCwd, sessionContext }),
+      hasManagedLocalTarget({
+        sessionId,
+        workspaceId,
+        workspaceCwd,
+        sessionContext,
+      }),
     ).open;
   // Keep an unscoped session mounted when a later refresh fails.
   if (
@@ -632,7 +622,7 @@ function StandaloneSessionGate({
     appProps.managedAgentProvider !== undefined &&
     managedSelectionFromRoute(
       navigation?.route,
-      hasLocalTarget({
+      hasManagedLocalTarget({
         ...workspaceProviderProps,
         sessionId,
         sessionContext,

@@ -5,7 +5,13 @@ import {
 import { useManagedFileReferences } from './use-managed-file-references';
 import { useManagedSkills } from './use-managed-skills';
 import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import shellStyles from '../../App.module.css';
 import { useI18n } from '../../i18n';
 import { useManagedRecoveryText } from './managed-recovery-messages';
@@ -18,7 +24,7 @@ import { ManagedWorktreePopover } from './ManagedWorktreePopover';
 import { ChatEditor } from '../ChatEditor';
 import type { WorkspaceSelectorOption } from '../WorkspaceSelector';
 import { HostLabel } from '../workspaces/HostLabel';
-import { WelcomeHeader } from '../WelcomeHeader';
+import { WelcomeHeader, type WelcomeHeaderProps } from '../WelcomeHeader';
 import { AddWorkspaceDialog } from '../dialogs/AddWorkspaceDialog';
 import { WorkspaceExecutionSelect } from '../workspaces/WorkspaceExecutionSelect';
 import type {
@@ -225,6 +231,8 @@ export function WorkspaceBindingCreator({
   creationSkills,
   handoff,
   onOpenHandoffSource,
+  renderWelcomeHeader,
+  alignManagedChatWithHost = false,
 }: {
   provider: ManagedAgentProvider;
   workspaceCreationOpen?: boolean;
@@ -243,6 +251,17 @@ export function WorkspaceBindingCreator({
   creationSkills?: ManagedCreationSkillsSource;
   handoff?: import('./managed-recovery-handoff').ManagedRecoveryHandoff;
   onOpenHandoffSource?: () => void;
+  /**
+   * Host welcome renderer for the creation surface, passed through from the
+   * managed page so the first screen a user reaches does not keep the built-in
+   * brand header while the session view shows the host's.
+   */
+  renderWelcomeHeader?: (props: WelcomeHeaderProps) => ReactNode;
+  /**
+   * Mirrors the managed composer: aligned hosts get the ordinary placeholder,
+   * not the managed-only prompt copy.
+   */
+  alignManagedChatWithHost?: boolean;
 }) {
   const { t } = useI18n();
   const recoveryText = useManagedRecoveryText();
@@ -1719,12 +1738,21 @@ export function WorkspaceBindingCreator({
       {directInput && (
         <div className={shellStyles.chatPane} data-managed-standard-chat>
           <div className={shellStyles.content}>
-            <WelcomeHeader
-              version=""
-              cwd=""
-              currentModel={agentId}
-              currentMode=""
-            />
+            {renderWelcomeHeader ? (
+              renderWelcomeHeader({
+                version: '',
+                cwd: '',
+                currentModel: agentId,
+                currentMode: '',
+              })
+            ) : (
+              <WelcomeHeader
+                version=""
+                cwd=""
+                currentModel={agentId}
+                currentMode=""
+              />
+            )}
           </div>
           <div className={shellStyles.footer}>
             {fileReferences.error && <p role="alert">{fileReferences.error}</p>}
@@ -1979,7 +2007,11 @@ export function WorkspaceBindingCreator({
               isPreparing={
                 busy || fileReferences.busy || loading || optionsLoading
               }
-              placeholderText={t('managed.prompt')}
+              placeholderText={
+                alignManagedChatWithHost
+                  ? t('splitView.composerPlaceholder')
+                  : t('managed.prompt')
+              }
               onSubmit={(text, images, files, commit, metadata) => {
                 void createOrRead(text, commit, images, files, metadata);
                 return false;

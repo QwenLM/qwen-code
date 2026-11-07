@@ -27,6 +27,7 @@ import type {
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 import type { WebShellTheme } from './themeContext';
+import type { ComposerPlaceholderState } from './utils/composerInputState';
 
 export type MarkdownContentSource = 'assistant' | 'thinking';
 
@@ -727,7 +728,9 @@ export interface WebShellCustomization {
    *
    * 宿主已有自己的外壳与能力表达：控件不可用即灰掉，不额外解释。
    * 置 true 后 Managed 会：
-   * - placeholder 改用与普通会话相同的 `splitView.composerPlaceholder`
+   * - placeholder 改用与普通会话相同的解析口径
+   *   （`composerPlaceholders?.[state] ?? t(getComposerPlaceholderKey(state))`，
+   *   进行中的会话同样按 processing 态对齐，而不是停在 managed 队列提示）
    * - 不再渲染「模型已固定 / 审批模式已固定 / 请新建任务后发送」这类解释文案
    *   （能力仍由后端 capabilities 决定并静默禁用，不放宽任何限制）
    */
@@ -753,6 +756,14 @@ export interface WebShellCustomization {
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
+  /**
+   * Main-composer copy by semantic state, mirrored for the managed composer
+   * when `alignManagedChatWithHost` is on. Omitted or blank entries retain the
+   * localized default for that state.
+   */
+  composerPlaceholders?: Readonly<
+    Partial<Record<ComposerPlaceholderState, string>>
+  >;
   /**
    * Satisfied / not-satisfied marks on each completed assistant turn. Omit the
    * object to leave Web Shell's answer footer unchanged.

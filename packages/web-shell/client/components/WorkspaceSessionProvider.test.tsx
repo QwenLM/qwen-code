@@ -749,6 +749,63 @@ describe('WorkspaceSessionProvider targets', () => {
     expect(mocks.providerMounts).toBe(1);
   });
 
+  it('keeps the managed view exempt when the daemon workspace errors', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    mocks.workspace = {
+      status: 'error',
+      capabilities: undefined,
+      error: new Error('daemon down'),
+      refreshCapabilities: vi.fn(async () => undefined),
+    };
+    await renderManagedShell({ lockWorkspaceCwd: '/work/locked' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The managed view owns its error surfaces; the daemon's full-page
+    // workspace error must not take it over.
+    expect(mocks.providerMounts).toBe(1);
+    expect(container.textContent).not.toContain(
+      'The workspace service could not be reached.',
+    );
+  });
+
+  it('keeps the managed view exempt while daemon capabilities load', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    mocks.workspace = {
+      status: 'connecting',
+      capabilities: undefined,
+      refreshCapabilities: vi.fn(async () => undefined),
+    };
+    await renderManagedShell({ lockWorkspaceCwd: '/work/locked' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The capabilities spinner belongs to local sessions; the managed view
+    // mounts immediately instead of waiting on the daemon.
+    expect(mocks.providerMounts).toBe(1);
+    expect(container.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it('renders the local view for a route-less host with a resolvable local target', async () => {
+    window.history.replaceState(null, '', '/');
+    await renderManagedShellWithoutNavigation({
+      sessionId: 'session-a',
+      workspaceCwd: '/work/a',
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The daemon session provider mounts (gates kept, workspace resolves), and
+    // the app receives the local target — it must not classify the view as the
+    // managed home and cover the local session.
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: 'session-a',
+      workspaceCwd: '/work/a',
+    });
+    expect(container.textContent).toBe('/work/a');
+  });
+
   it('drops an unavailable explicit context for a primary new session', async () => {
     await act(async () => {
       root.render(

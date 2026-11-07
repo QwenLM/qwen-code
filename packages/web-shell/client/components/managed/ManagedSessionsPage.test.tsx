@@ -4408,10 +4408,41 @@ describe('ManagedSessionsPage', () => {
   );
 
   it('aligns managed composer copy with the host when asked', async () => {
+    const observation = {
+      modelId: 'actual-model',
+      inputTokens: 250,
+      contextWindowSize: 1000,
+      observedAt: 12,
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        agentId: 'agent-a',
+        modelContext: observation,
+        approvalMode: 'default',
+        capabilities: { canSend: false, canCancel: false },
+      }),
+    );
     mocks.client.getTranscript.mockResolvedValue({
       events: [],
       lastEventId: 0,
     });
+    // Baseline: without the flag the hints render, so the suppression below is
+    // what removes them — not an empty fixture.
+    await render('s1', 'en', provider, null, true, {}, {});
+    const label = container
+      .querySelector('textarea')
+      ?.getAttribute('aria-label');
+    expect(label).toContain('Message the managed agent');
+    expect(container.textContent).toContain('model is fixed');
+    expect(container.textContent).toContain(
+      'does not support changing its approval policy',
+    );
+
+    await act(async () => root.unmount());
+    container.remove();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
     await render(
       's1',
       'en',
@@ -4423,14 +4454,60 @@ describe('ManagedSessionsPage', () => {
         alignManagedChatWithHost: true,
       },
     );
-    // 与普通会话同一个 placeholder，不再是 managed 专属文案
-    const label = container
+    // 与普通会话同一个 placeholder（idle 态默认），不再是 managed 专属文案
+    const alignedLabel = container
       .querySelector('textarea')
       ?.getAttribute('aria-label');
-    expect(label).not.toContain('Message the managed agent');
-    expect(label).toContain('Message this session');
+    expect(alignedLabel).not.toContain('Message the managed agent');
+    expect(alignedLabel).toContain('Type a message');
     // 能力解释文案按宿主口径不渲染（控件仍由 capabilities 静默禁用）
     expect(container.textContent).not.toContain('model is fixed');
+    expect(container.textContent).not.toContain(
+      'does not support changing its approval policy',
+    );
+  });
+
+  it('aligns the running-state placeholder and honors host overrides', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { phase: 'running' }),
+    );
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        alignManagedChatWithHost: true,
+        composerPlaceholders: {
+          idle: 'Ask about this repo',
+          processing: 'Working on it…',
+        },
+      },
+    );
+    // 宿主 override 优先于默认对齐文案；运行态也走同一解析，不停留在队列提示。
+    expect(container.querySelector('textarea')?.getAttribute('aria-label'))
+      .toBe('Working on it…');
+
+    await act(async () => root.unmount());
+    container.remove();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      { alignManagedChatWithHost: true },
+    );
+    // 无 override 的运行态：与普通会话同一个 processing 文案，而不是托管队列提示。
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).toContain('Processing. New messages will be queued.');
   });
 
   it('hides the managed session header when the host already shows identity', async () => {
@@ -4475,15 +4552,81 @@ describe('ManagedSessionsPage', () => {
       events: [],
       lastEventId: 0,
     });
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        approvalMode: 'yolo',
+        workspace: {
+          workspaceId: 'ws-a',
+          cwdRelative: 'services/api',
+          state: 'ready',
+          contextRevision: 1,
+        },
+      }),
+    );
     const renderWelcomeHeader = vi.fn(() => <div>HOST-WELCOME</div>);
-    await render('s1', 'en', provider, null, true, {}, { renderWelcomeHeader });
+    const renderWelcomeFooter = vi.fn(() => <div>HOST-WELCOME-FOOTER</div>);
+    await render('s1', 'en', provider, null, true, {}, {
+      renderWelcomeHeader,
+      renderWelcomeFooter,
+    });
     expect(renderWelcomeHeader).toHaveBeenCalled();
+    // Host renderers get real session values, not literal placeholders.
+    expect(renderWelcomeHeader).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwd: 'services/api',
+        currentMode: 'yolo',
+      }),
+    );
     expect(container.textContent).toContain('HOST-WELCOME');
+    // The footer slot pairs with the header on the empty state, like App.
+    expect(renderWelcomeFooter).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: 'services/api' }),
+    );
+    expect(container.textContent).toContain('HOST-WELCOME-FOOTER');
     // 宿主接管后不再叠加内置欢迎文案。
     expect(container.textContent).not.toContain('Welcome to');
   });
 
+  it('passes host customization through to the workspace-binding creation screen', async () => {
+    provider.workspaceBinding = {
+      agentId: 'agent-a',
+      modelPresets: [{ agentId: 'agent-a', label: 'agent-a' }],
+      list: vi.fn(async () => []),
+      get: vi.fn(),
+      createEmpty: vi.fn(),
+      createSession: vi.fn(
+        async () => ({ sessionId: 's-created' }) as never,
+      ),
+    };
+    const renderWelcomeHeader = vi.fn(() => <div>HOST-CREATION-WELCOME</div>);
+    await render(undefined, 'en', provider, null, true, {}, {
+      renderWelcomeHeader,
+      alignManagedChatWithHost: true,
+    });
+    expect(renderWelcomeHeader).toHaveBeenCalled();
+    expect(container.textContent).toContain('HOST-CREATION-WELCOME');
+    expect(container.textContent).not.toContain('Welcome to');
+    // The aligned composer copy reaches the creation screen too.
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).toContain('Message this session');
+  });
+
   it('renders the host composer footer instead of managed fixed-model hints', async () => {
+    const observation = {
+      modelId: 'actual-model',
+      inputTokens: 250,
+      contextWindowSize: 1000,
+      observedAt: 12,
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        agentId: 'agent-a',
+        modelContext: observation,
+        approvalMode: 'default',
+        capabilities: { canSend: false, canCancel: false },
+      }),
+    );
     const CustomFooter = vi.fn(() => <div>HOST-FOOTER</div>);
     await render(
       's1',
@@ -4496,8 +4639,11 @@ describe('ManagedSessionsPage', () => {
     );
     expect(CustomFooter).toHaveBeenCalled();
     expect(container.textContent).toContain('HOST-FOOTER');
-    // 宿主接管该区域后，托管默认「模型已固定」提示不再叠加。
+    // 宿主接管该区域后，托管默认「模型已固定 / 审批策略固定」提示不再叠加。
     expect(container.textContent).not.toContain('model is fixed');
+    expect(container.textContent).not.toContain(
+      'does not support changing its approval policy',
+    );
   });
 
   it('falls back to the built-in welcome header without host customization', async () => {

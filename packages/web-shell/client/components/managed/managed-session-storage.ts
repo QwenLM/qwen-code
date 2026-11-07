@@ -41,8 +41,10 @@ export function managedSelectionFromUrl(defaultOpen = false): {
  * managed home (anything but a chat page with an explicit session target).
  * `managed=0` and every explicit local session target keep the daemon view.
  *
- * Keep this rule in one place: `WorkspaceSessionProvider` sits above `App`
- * and wraps both branches, so it must classify the view exactly like App does.
+ * Keep this rule in one place: `WorkspaceSessionProvider` sits above `App` and
+ * wraps both branches, so it must classify the view exactly like App does. Both
+ * call sites pass the host's local target (`hasLocalTarget`) — App derives it
+ * from its own props — so a route-less host can never split the classification.
  */
 export function managedSelectionFromRoute(
   route: { page: string; sessionId?: string } | undefined,
@@ -55,6 +57,25 @@ export function managedSelectionFromRoute(
     route === undefined
       ? !hasLocalTarget
       : route.page !== 'chat' || !route.sessionId,
+  );
+}
+
+/**
+ * An explicit local session target — a session id, a workspace reference, or a
+ * session context — keeps the daemon view even when no route exists to say so
+ * (a host that omits `urlNavigation`).
+ */
+export function hasManagedLocalTarget(props: {
+  sessionId?: string;
+  workspaceId?: string;
+  workspaceCwd?: string;
+  sessionContext?: unknown;
+}): boolean {
+  return Boolean(
+    props.sessionId ||
+      props.workspaceId ||
+      props.workspaceCwd ||
+      props.sessionContext,
   );
 }
 
