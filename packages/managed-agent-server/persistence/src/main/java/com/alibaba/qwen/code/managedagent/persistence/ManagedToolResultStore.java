@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.EventProjectionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -35,10 +35,10 @@ public class ManagedToolResultStore
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
-    private final AgentStateStore sessions;
+    private final EventProjectionStore sessions;
 
     public ManagedToolResultStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
-            AgentStateStore sessions) {
+            EventProjectionStore sessions) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(manager);
         this.sessions = sessions;
@@ -119,7 +119,7 @@ public class ManagedToolResultStore
                                                         + " (SELECT 1 FROM ma_session s WHERE"
                                                         + " s.tenant_id = ma_operation.tenant_id"
                                                         + " AND s.session_id ="
-                                                        + " ma_operation.session_id AND s.csi_guard"
+                                                        + " ma_operation.session_id AND s.is_csi_guard"
                                                         + " = TRUE) AND state = ? AND "
                                                         + due
                                                         + " <= "
@@ -146,12 +146,14 @@ public class ManagedToolResultStore
                             for (var candidate : rows) {
                                 String tenant = (String) candidate.get("tenant_id");
                                 String session = (String) candidate.get("session_id");
-                                ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
-                                        jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+                                // No tenant publication guard: a pinned Session is
+                                // skipped, and an ordinary one orders on its root and
+                                // head before the operation row, as collection does
+                                // (design 2026-11-04-managed-publication-tenant-guards, C2).
                                 if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
                                     continue;
                                 }
-                                ToolPublicationRetentionStore.lockSession(jdbc, tenant, session);
+                                ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(jdbc, tenant, session);
                                 var current =
                                         jdbc.queryForList(
                                                 "SELECT " + ManagedSchemaProjection.OPERATION.columns() + ", claim_until AS claim_until_epoch FROM ma_operation WHERE operation_key = ? AND operation_kind = 'TOOL_RESULT_PROJECTION' FOR UPDATE",
@@ -241,12 +243,11 @@ public class ManagedToolResultStore
                             }
                             String tenant = (String) rows.getFirst().get("tenant_id");
                             String session = (String) rows.getFirst().get("session_id");
-                            ManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
-                                    jdbc, tenant, ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+                            // As in claim: no tenant publication guard.
                             if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
                                 return false;
                             }
-                            ToolPublicationRetentionStore.lockSession(jdbc, tenant, session);
+                            ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(jdbc, tenant, session);
                             var row =
                                     jdbc.queryForMap(
                                             "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND operation_id = ? FOR UPDATE",
@@ -316,7 +317,7 @@ public class ManagedToolResultStore
                             if (!admitsLegacyProjection(claim)) {
                                 return false;
                             }
-                            ToolPublicationRetentionStore.lockGenericSession(
+                            ManagedLegacySessionGuard.requireLegacyMutation(
                                     jdbc, source.tenantId(), source.sessionId());
                             var retired =
                                     jdbc.query(
@@ -472,7 +473,7 @@ public class ManagedToolResultStore
         var rows =
                 jdbc.query(
                         "SELECT state, producer_phase, binding_digest, admission_resource_id,"
-                            + " receipt_sequence, receipt_revision, CASE WHEN quarantined THEN 1"
+                            + " receipt_sequence, receipt_revision, CASE WHEN is_quarantined THEN 1"
                             + " ELSE 0 END AS quarantine_mark FROM ma_output_capture WHERE"
                             + " scope_key = ? AND tenant_id = ? AND workspace_id = ? AND session_id"
                             + " = ? AND publication_id = ? FOR UPDATE",

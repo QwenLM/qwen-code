@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
@@ -229,10 +230,14 @@ class Issue13181QueryBudgetTest {
                 + " (?, 'workspace', ?, 'OPERATOR')", tenant,
                 "actor".getBytes(StandardCharsets.UTF_8));
         String sessionId = fixture.tx.execute(status -> fixture.store
-                .insertWorkspaceSessionCommand(tenant, "actor",
-                        "sse-" + UUID.randomUUID(), "digest", "qwen-code",
-                        null, null, List.of(), null,
-                        new WorkspaceSelection("workspace", "."))).sessionId();
+                .insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(tenant)
+                        .actorId("actor")
+                        .idempotencyKey("sse-" + UUID.randomUUID())
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build())).sessionId();
         long after = fixture.store.requireSession(tenant, sessionId)
                 .lastSequence();
         int events = 20;
@@ -441,10 +446,15 @@ class Issue13181QueryBudgetTest {
             String key = "ws-" + index + "-" + UUID.randomUUID();
             String title = "w-" + index;
             boundIds.add(fixture.tx.execute(status -> fixture.store
-                    .insertWorkspaceSessionCommand(bound, "actor", key,
-                            "digest", "qwen-code", null, title,
-                            List.of(), null,
-                            new WorkspaceSelection("workspace", "."))).sessionId());
+                    .insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                            .tenantId(bound)
+                            .actorId("actor")
+                            .idempotencyKey(key)
+                            .requestDigest("digest")
+                            .agentId("qwen-code")
+                            .title(title)
+                            .selection(new WorkspaceSelection("workspace", "."))
+                            .build())).sessionId());
         }
         // One workspace session opts out of yolo: its actions capability
         // must differ from the other rows'. Another holds a completed close:
@@ -553,10 +563,15 @@ class Issue13181QueryBudgetTest {
             String key = "ws-" + index + "-" + UUID.randomUUID();
             String title = "w-" + index;
             ids.add(fixture.tx.execute(status -> fixture.store
-                    .insertWorkspaceSessionCommand(tenant, creator, key,
-                            "digest", "qwen-code", null, title,
-                            List.of(), null,
-                            new WorkspaceSelection(workspace, ".")))
+                    .insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                            .tenantId(tenant)
+                            .actorId(creator)
+                            .idempotencyKey(key)
+                            .requestDigest("digest")
+                            .agentId("qwen-code")
+                            .title(title)
+                            .selection(new WorkspaceSelection(workspace, "."))
+                            .build()))
                     .sessionId());
         }
         // An eighth session whose creator has no access row at all — the
@@ -567,10 +582,15 @@ class Issue13181QueryBudgetTest {
                 + " 'workspace', ?, 'OPERATOR')", tenant,
                 "ghost".getBytes(StandardCharsets.UTF_8));
         ids.add(fixture.tx.execute(status -> fixture.store
-                .insertWorkspaceSessionCommand(tenant, "ghost",
-                        "ws-ghost-" + UUID.randomUUID(), "digest",
-                        "qwen-code", null, "w-ghost", List.of(), null,
-                        new WorkspaceSelection("workspace", ".")))
+                .insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(tenant)
+                        .actorId("ghost")
+                        .idempotencyKey("ws-ghost-" + UUID.randomUUID())
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .title("w-ghost")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build()))
                 .sessionId());
         fixture.jdbc.update("DELETE FROM ma_workspace_access"
                 + " WHERE tenant_id = ? AND workspace_id = X'776f726b7370616365'"
@@ -740,7 +760,14 @@ class Issue13181QueryBudgetTest {
         String readRow = fixture.createCwdSessions(tenant, 1).getFirst();
         fixture.jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-2', 1, 'storage-2', 'Workspace 2', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace-2', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
-        String operateRow = fixture.tx.execute(status -> fixture.store.insertWorkspaceSessionCommand(tenant, "actor", UUID.randomUUID().toString(), "digest", "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace-2", "."))).sessionId();
+        String operateRow = fixture.tx.execute(status -> fixture.store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor")
+                .idempotencyKey(UUID.randomUUID().toString())
+                .requestDigest("digest")
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace-2", "."))
+                .build())).sessionId();
         fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'READER')", tenant, "other".getBytes(StandardCharsets.UTF_8));
         fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace-2', ?, 'OPERATOR')", tenant, "other".getBytes(StandardCharsets.UTF_8));
         fixture.ledger.reset();
@@ -942,7 +969,7 @@ class Issue13181QueryBudgetTest {
     void asynchronousVerificationHeartbeatsAndStatusAvoidJournalBodyReads() {
         Fixture fixture = new Fixture();
         PublicationFixture publication = publicationFixture(fixture);
-        byte[] bytes = new byte[] {1, 2, 3, 4};
+        byte[] bytes = new byte[16];
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
             public void putIfAbsent(String key, byte[] input) {}
@@ -973,7 +1000,7 @@ class Issue13181QueryBudgetTest {
             public void validateConfiguration() {}
         };
         ToolPublicationDataStore data = new ToolPublicationDataStore(fixture.jdbc, fixture.manager,
-                publication.store(), publication.sessions(), bucket, Duration.ofSeconds(10), Duration.ofMillis(300),
+                publication.store(), publication.sessions(), bucket, Duration.ofSeconds(10), Duration.ofSeconds(2),
                 new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
         data.publishSegment(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat",
                 "stdout", 0, bytes, null, true);
@@ -1536,8 +1563,8 @@ class Issue13181QueryBudgetTest {
                 properties.setModelCatalog(List.of(option));
                 when(harness.supportsModelSelection()).thenReturn(true);
             }
-            store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, clock, hub::publish,
-                    registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, clock, hub::publish,
+                    registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             service = new ManagedAgentService(store, new RequestDigests(),
                     mock(HarnessCoordinator.class),
                     harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
@@ -1548,7 +1575,14 @@ class Issue13181QueryBudgetTest {
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
             List<String> ids = new ArrayList<>();
             for (int index = 0; index < count; index++) {
-                ids.add(tx.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor", UUID.randomUUID().toString(), "digest", "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", "."))).sessionId());
+                ids.add(tx.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(tenant)
+                        .actorId("actor")
+                        .idempotencyKey(UUID.randomUUID().toString())
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build())).sessionId());
             }
             return ids;
         }

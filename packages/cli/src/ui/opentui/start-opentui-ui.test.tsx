@@ -93,7 +93,9 @@ const mocks = vi.hoisted(() => {
           setText: (text: string) => void;
           submitDraft?: (text: string) => Promise<void>;
           invalidateImportedInput?: () => void;
+          restoreSubmission?: (submission: { text: string }) => void;
         } | null;
+        returned?: { text: string };
       };
     } | null,
     seedPromptCount: null as ((count: number) => void) | null,
@@ -777,6 +779,33 @@ describe('startOpenTuiUI fallback contract', () => {
       expect(mocks.state.liveOptions).toMatchObject({
         dualOutput: mocks.state.runtime.dualOutputBridge,
       });
+    });
+  });
+
+  it('hands a prompt the live turn returns to the composer, or keeps it until one mounts', async () => {
+    await withEntryApp(() => {
+      const handle = mocks.state.appProps!.composerHandle!;
+      const onPromptReturned = (
+        mocks.state.liveOptions as {
+          onPromptReturned: (submission: { text: string }) => void;
+        }
+      ).onPromptReturned;
+      handle.current = null;
+      onPromptReturned({ text: 'held' });
+      expect(handle.returned).toEqual({ text: 'held' });
+
+      handle.returned = undefined;
+      const restoreSubmission = vi.fn();
+      handle.current = {
+        getText: () => '',
+        setText: vi.fn(),
+        restoreSubmission,
+      };
+      onPromptReturned({ text: 'dropped' });
+      expect(restoreSubmission).toHaveBeenCalledExactlyOnceWith({
+        text: 'dropped',
+      });
+      expect(handle.returned).toBeUndefined();
     });
   });
 

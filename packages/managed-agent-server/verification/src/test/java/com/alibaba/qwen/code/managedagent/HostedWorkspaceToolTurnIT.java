@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
@@ -253,6 +254,23 @@ class HostedWorkspaceToolTurnIT {
         });
     }
 
+    static void holdExecutionResults(EmbeddedRuntimeBroker broker, String harnessSessionId,
+            CompletableFuture<Void> gate) {
+        Object service = ReflectionTestUtils.getField(broker, "service");
+        Object dispatcher = ReflectionTestUtils.getField(service, "executionDispatcher");
+        RuntimeTransport transport = (RuntimeTransport) ReflectionTestUtils.getField(dispatcher, "transport");
+        RuntimeTransport gated = (RuntimeTransport) Proxy.newProxyInstance(RuntimeTransport.class.getClassLoader(),
+                new Class<?>[] {RuntimeTransport.class}, (proxy, method, args) -> {
+                    Object result = method.invoke(transport, args);
+                    if (method.getName().equals("execute")
+                            && ((RuntimeSession) args[1]).getHarnessSessionId().equals(harnessSessionId)) {
+                        return ((CompletionStage<?>) result).thenCombine(gate, (value, ignored) -> value);
+                    }
+                    return result;
+                });
+        ReflectionTestUtils.setField(dispatcher, "transport", gated);
+    }
+
     private void runDriver(List<String> cases, String driverName) throws Exception {
         boolean latency = driverName.equals("latency");
         boolean unicode = driverName.equals("shell-unicode");
@@ -371,14 +389,24 @@ class HostedWorkspaceToolTurnIT {
                         WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
                 jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                         + " VALUES (?, ?, ?, 'OPERATOR')", tenant, workspaceId, "actor".getBytes(StandardCharsets.UTF_8));
-                var created = store.insertWorkspaceSessionCommand(tenant, "actor", "create-" + index,
-                        "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
-                        new WorkspaceSelection(workspaceId, "child"));
+                var created = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(tenant)
+                        .actorId("actor")
+                        .idempotencyKey("create-" + index)
+                        .requestDigest("sha256:" + "a".repeat(64))
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection(workspaceId, "child"))
+                        .build());
                 String profile = operatorRecovery ? (index < 2 ? "hosted-workspace-shell/1" : "hosted-workspace-files/1")
                         : !unicode && !shellOutput && (faults || index < 2) ? "hosted-workspace-files/1" : "hosted-workspace-shell/1";
-                String secondary = operatorRecovery ? store.insertWorkspaceSessionCommand(tenant, "actor", "secondary-" + index,
-                        "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
-                        new WorkspaceSelection(workspaceId, "child")).sessionId() : "";
+                String secondary = operatorRecovery ? store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(tenant)
+                        .actorId("actor")
+                        .idempotencyKey("secondary-" + index)
+                        .requestDigest("sha256:" + "a".repeat(64))
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection(workspaceId, "child"))
+                        .build()).sessionId() : "";
                 sessions.add(Map.of("sessionId", created.sessionId(), "workspaceId", workspaceId,
                         "toolProfile", profile, "secondarySessionId", secondary,
                         "directory", workspaces.get(index).resolve("child").toString(), "fault", cases.get(index)));
@@ -393,9 +421,14 @@ class HostedWorkspaceToolTurnIT {
                 }
             }
             System.out.println("W1_PHYSICAL_GUARD=" + verifiedRecovery);
-            String secondarySessionId = faults || latency ? "" : store.insertWorkspaceSessionCommand(tenant, "actor", "create-secondary",
-                    "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
-                    new WorkspaceSelection(sessions.getFirst().get("workspaceId").toString(), "child")).sessionId();
+            String secondarySessionId = faults || latency ? "" : store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("actor")
+                    .idempotencyKey("create-secondary")
+                    .requestDigest("sha256:" + "a".repeat(64))
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection(sessions.getFirst().get("workspaceId").toString(), "child"))
+                    .build()).sessionId();
             Path config = temporary.resolve("driver.json");
             Path resultFile = temporary.resolve("shell-output.json");
             EmbeddedRuntimeBroker broker = spring.getBean(EmbeddedRuntimeBroker.class);
@@ -408,18 +441,7 @@ class HostedWorkspaceToolTurnIT {
             });
             if (faults && cases.contains("status")) {
                 String statusSession = sessions.get(cases.indexOf("status")).get("sessionId").toString();
-                Object service = ReflectionTestUtils.getField(broker, "service");
-                RuntimeTransport transport = (RuntimeTransport) ReflectionTestUtils.getField(service, "transport");
-                RuntimeTransport gated = (RuntimeTransport) Proxy.newProxyInstance(RuntimeTransport.class.getClassLoader(),
-                        new Class<?>[] {RuntimeTransport.class}, (proxy, method, args) -> {
-                            Object result = method.invoke(transport, args);
-                            if (method.getName().equals("execute")
-                                    && ((RuntimeSession) args[1]).getHarnessSessionId().equals(statusSession)) {
-                                return ((CompletionStage<?>) result).thenCombine(statusGate, (value, ignored) -> value);
-                            }
-                            return result;
-                        });
-                ReflectionTestUtils.setField(service, "transport", gated);
+                holdExecutionResults(broker, statusSession, statusGate);
             }
             HostedCancellationProbe cancellationProbe = cancellations
                     ? new HostedCancellationProbe(jdbc, tenant, sessions, broker, gateServer) : null;
@@ -503,7 +525,7 @@ class HostedWorkspaceToolTurnIT {
                                     .isEqualTo("中文😀é\\ud800");
                             for (String sessionId : List.of(sessions.get(index).get("sessionId").toString(), secondarySessionId)) {
                                 var publications = jdbc.queryForList("SELECT state, producer_phase,"
-                                        + " CASE WHEN accepted_complete THEN 1 ELSE 0 END AS complete"
+                                        + " CASE WHEN is_accepted_complete THEN 1 ELSE 0 END AS complete"
                                         + " FROM ma_output_capture WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
                                 if (cases.contains("o2")) {
                                     assertThat(publications).hasSize(1);
@@ -662,7 +684,7 @@ class HostedWorkspaceToolTurnIT {
                 tenant, storageId);
         assertThat(physical).isNotBlank();
         Map<String, Object> member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id,"
-                + " session_state, execution_storage_key, execution_exclusive FROM ma_runtime_session"
+                + " session_state, execution_storage_key, is_rewind_pending FROM ma_runtime_session"
                 + " WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?",
                 tenant, session.get("sessionId"), report.path("promptId").asText());
         boolean released = storeFaults ? fault.equals("turn-reply") : List.of("prepare", "start", "release").contains(fault);
@@ -676,7 +698,7 @@ class HostedWorkspaceToolTurnIT {
         boolean retained = !storeFaults && fault.equals("prepare-twice");
         assertThat(member.get("execution_storage_key")).as(fault + " execution membership")
                 .isEqualTo(retained ? physical : null);
-        assertThat(member.get("execution_exclusive")).isEqualTo(false);
+        assertThat(member.get("is_rewind_pending")).isEqualTo(false);
         if (retained) {
             assertThat(member.get("binding_id")).isEqualTo(executions.getFirst().get("binding_id"));
             assertThat(member.get("runtime_generation")).isEqualTo(executions.getFirst().get("runtime_generation"));

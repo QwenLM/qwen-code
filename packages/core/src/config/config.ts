@@ -14,6 +14,11 @@ import type { RequestLifecycleEvent } from '../telemetry/request-lifecycle.js';
 import { getInvocationContext } from '../utils/invocation-context.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
+import {
+  SUBSCRIPTION_MODELS_CACHED,
+  subscriptionModelUnavailable,
+} from '../qwen/subscription-models.js';
+import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
 import {
   captureReasoningSnapshot,
@@ -169,6 +174,10 @@ import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
+import {
+  AUTO_MEMORY_SKILL_NAME,
+  MainSessionAutoMemoryPolicy,
+} from '../skills/auto-memory-skill.js';
 import {
   authoredSkillName,
   skillRestrictionNames,
@@ -1329,6 +1338,8 @@ export interface ConfigParameters {
   outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
+  /** Whether to refresh the models.dev catalog during initialization. */
+  modelCatalogRefreshEnabled?: boolean;
   /**
    * If true, disables the per-session FileReadCache short-circuit
    * (file_unchanged placeholder). Useful for sessions that may undergo
@@ -1448,6 +1459,12 @@ export interface ConfigParameters {
   /** Consent gate for the propose_goal tool; see ProposeGoalTool. */
   modelProposedGoals?: ModelProposedGoalsMode;
   artifactEnabled?: boolean;
+  /**
+   * False for hosts that expose no `record_artifact` tool and forward no
+   * artifact metadata, such as tool workers. Unlike `artifactEnabled`, the
+   * artifact env flags cannot turn recording back on.
+   */
+  artifactRecordingSupported?: boolean;
   artifactAutoOpen?: boolean;
   artifactPublisher?: 'local' | 'host' | 'oss';
   artifactHost?: ArtifactHostConfig;
@@ -1542,6 +1559,42 @@ export interface ConfigParameters {
    * discovery layer must not connect them. See issue #4615.
    */
   pendingMcpServers?: string[];
+  /**
+   * Settings-file project hooks have no approval bound to their current
+   * configuration (pending or rejected); `getProjectHooks()` withholds them
+   * until `setProjectHooksPendingApproval(false)`. `undefined` means the
+   * session does not gate them (bare, safe, all hooks off).
+   */
+  projectHooksPendingApproval?: boolean;
+  /** The withheld block was rejected, not just left undecided. */
+  projectHooksRejected?: boolean;
+  /**
+   * The current project hooks block carries a stored approval. Unlike
+   * `projectHooksPendingApproval === false`, this never doubles as "nothing
+   * to approve": callers set it only for a genuine `approved` decision, so
+   * execution authority survives the YOLO exemption (where the pending flag
+   * is undefined) without mistaking an empty workspace for an approval.
+   */
+  projectHooksApproved?: boolean;
+  /**
+   * The raw workspace hooks block for display only, supplied when the
+   * settings layer withheld the workspace scope (feature on, folder
+   * untrusted). Never reaches the registry: `getProjectHooks()` reads
+   * `projectHooks`, this feeds only `getTrustWithheldProjectHooks()`.
+   */
+  projectHooksDisplayOnly?: Record<string, unknown>;
+  /**
+   * The exact hooks block this session's approval gate covers, with the
+   * workspace env that can change what those hooks do. Lets an embedder
+   * hash the reviewed subject itself (the approval store lives outside
+   * core) instead of trusting a block re-read later.
+   */
+  projectHooksApprovalSubject?: {
+    hooks: Record<string, unknown>;
+    env: { files: Record<string, unknown>; settings: unknown };
+  };
+  /** Started with `--yolo`: the gate is off only while the mode stays YOLO. */
+  projectHooksYoloExempt?: boolean;
   noBrowser?: boolean;
   folderTrustFeature?: boolean;
   folderTrust?: boolean;
@@ -2289,6 +2342,8 @@ export interface ConfigInitializeOptions {
    * need config services (hooks, tools, MCP) before a real session exists.
    */
   skipLlmInitialization?: boolean;
+  /** Load hooks without starting a filesystem subscription for bootstrap configs. */
+  skipFileWatching?: boolean;
   /** @deprecated Use `skipLlmInitialization`; retained until a future major release. */
   skipGeminiInitialization?: boolean;
   /**
@@ -2937,7 +2992,9 @@ export class Config {
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
-  private contentGenerator!: ContentGenerator;
+  private contentGenerator?: ContentGenerator;
+  private subscriptionPlan?: 'plus' | 'pro';
+  private subscriptionModelIdentity?: string;
   private readonly initialAuthType?: AuthType;
   private initialResolvedAuthType?: AuthType;
   private readonly embeddingModel: string;
@@ -3028,6 +3085,12 @@ export class Config {
   private readonly cliAllowedMcpServerNames?: string[];
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
+  private projectHooksPendingApproval?: boolean;
+  private projectHooksRejected: boolean;
+  private projectHooksApproved: boolean;
+  private readonly projectHooksDisplayOnly?: Record<string, unknown>;
+  private readonly projectHooksApprovalSubject?: ConfigParameters['projectHooksApprovalSubject'];
+  private readonly projectHooksYoloExempt: boolean;
   private readonly mcpToolIdleTimeoutMs: number;
   /**
    * Guards against concurrent MCP reconcile passes (hot-reload watcher vs.
@@ -3063,8 +3126,18 @@ export class Config {
   private promptToolSnapshot: ReadonlySet<string> | undefined;
   private promptAgentReachable = false;
 
-  /** Stable managed-memory policy, separate from the changing catalog. */
+  /**
+   * Stable managed-memory policy, separate from the changing catalog. Empty
+   * while the legacy main-session policy below is in effect.
+   */
   private autoMemoryPrompt = '';
+  /**
+   * The legacy main-session policy, resolved per reading Config: whether it
+   * points at the bundled `auto-memory` reference depends on the reader's
+   * route to the Skill tool (#16291). Set only by a legacy refresh, cleared by
+   * every path that sets `autoMemoryPrompt` instead.
+   */
+  private mainSessionAutoMemoryPolicy: MainSessionAutoMemoryPolicy | undefined;
   private autoMemoryContext = '';
   private memoryRecallMode: MemoryRecallMode = 'legacy';
   private memoryCorpusRevision = '';
@@ -3093,13 +3166,14 @@ export class Config {
   private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
+  private readonly modelCatalogRefreshEnabled: boolean;
   private readonly fileReadCacheDisabled: boolean;
   private activeTodoReminders = new Map<string, string>();
   private activeTodoWorkChainOwners = new Map<string, string>();
   private activeTodoReminderTurns = new Map<string, number>();
   private activeTodoPlanWriterOwner: string | undefined;
   private llmClient!: LlmClient;
-  private baseLlmClient!: BaseLlmClient;
+  private baseLlmClient?: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
   private readonly fileFiltering: {
     respectGitIgnore: boolean;
@@ -3196,6 +3270,7 @@ export class Config {
   private readonly unifiedAgentLoopEnabled: boolean = false;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
+  private readonly artifactRecordingSupported: boolean = true;
   private artifactSnapshotsEnabled = false;
   private readonly artifactAutoOpen: boolean = true;
   private readonly artifactPublisher: 'local' | 'host' | 'oss' = 'local';
@@ -3513,6 +3588,12 @@ export class Config {
     this.cliAllowedMcpServerNames = params.cliAllowedMcpServerNames;
     this.excludedMcpServers = params.excludedMcpServers;
     this.pendingMcpServers = params.pendingMcpServers;
+    this.projectHooksPendingApproval = params.projectHooksPendingApproval;
+    this.projectHooksRejected = params.projectHooksRejected ?? false;
+    this.projectHooksApproved = params.projectHooksApproved ?? false;
+    this.projectHooksDisplayOnly = params.projectHooksDisplayOnly;
+    this.projectHooksApprovalSubject = params.projectHooksApprovalSubject;
+    this.projectHooksYoloExempt = params.projectHooksYoloExempt ?? false;
     const envTimeout = process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'];
     const parsedEnv = envTimeout !== undefined ? Number(envTimeout) : NaN;
     this.mcpToolIdleTimeoutMs =
@@ -3562,6 +3643,7 @@ export class Config {
       email: 'qwen-coder@alibabacloud.com',
     };
     this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
+    this.modelCatalogRefreshEnabled = params.modelCatalogRefreshEnabled ?? true;
     // A Managed session reads in its Runtime worker, so this process could
     // neither elide a repeated read nor prove the read an edit requires.
     this.fileReadCacheDisabled =
@@ -3651,6 +3733,7 @@ export class Config {
     this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled ?? false;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
+    this.artifactRecordingSupported = params.artifactRecordingSupported ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
     this.artifactPublisher = params.artifactPublisher ?? 'local';
     this.artifactHost = params.artifactHost;
@@ -4231,7 +4314,9 @@ export class Config {
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
-    void refreshModelCatalog();
+    if (this.modelCatalogRefreshEnabled && this.usageStatisticsEnabled) {
+      void refreshModelCatalog();
+    }
     options?.signal?.throwIfAborted();
     // Omni multimodal support declares ffmpeg/ffprobe as hard runtime
     // prerequisites: fail fast at startup with an actionable message
@@ -4300,7 +4385,9 @@ export class Config {
         (!options?.skipHooks && !this.getDisableAllHooks()))
     ) {
       this.hookSystem = new HookSystem(this, options?.managedHookDispatcher);
-      await this.hookSystem.initialize();
+      await this.hookSystem.initialize({
+        skipFileWatching: options?.skipFileWatching,
+      });
       this.debugLogger.debug('Hook system initialized');
 
       // Initialize MessageBus for hook execution
@@ -4363,6 +4450,28 @@ export class Config {
                     signal,
                   );
                   break;
+                case 'FileChanged': {
+                  const filePath = input['file_path'];
+                  const event = input['event'];
+                  if (
+                    typeof filePath !== 'string' ||
+                    !path.isAbsolute(filePath) ||
+                    (event !== 'add' &&
+                      event !== 'change' &&
+                      event !== 'unlink')
+                  ) {
+                    throw new Error('Invalid FileChanged hook input');
+                  }
+                  const changed = await hookSystem.fireFileChangedEvent(
+                    filePath,
+                    event,
+                    signal,
+                  );
+                  result = changed.finalOutput
+                    ? createHookOutput('FileChanged', changed.finalOutput)
+                    : undefined;
+                  break;
+                }
                 case 'Stop': {
                   // Extract context usage data from input with runtime validation
                   const contextUsageData = buildContextUsage(
@@ -5528,6 +5637,7 @@ export class Config {
     if (this.isSafeMode()) {
       this.setUserMemory('');
       this.autoMemoryPrompt = '';
+      this.mainSessionAutoMemoryPolicy = undefined;
       this.autoMemoryContext = '';
       this.setMemoryFileCount(0);
       this.setContextFilePaths([]);
@@ -5719,26 +5829,27 @@ export class Config {
           userSection.memoryDir,
           teamSection?.memoryDir,
         );
+        this.mainSessionAutoMemoryPolicy = undefined;
       } else {
-        const policy = this.memoryManager.buildAutoMemoryPrompt(
-          memoryDir,
-          managedAutoMemoryIndex,
-          userSection,
-          teamSection,
-          { includeIndexes: false },
-        );
         const catalog = buildAutoMemoryIndexContext(
           memoryDir,
           managedAutoMemoryIndex,
           userSection,
           teamSection,
         );
-        this.autoMemoryPrompt = policy;
+        this.autoMemoryPrompt = '';
+        this.mainSessionAutoMemoryPolicy = new MainSessionAutoMemoryPolicy({
+          memoryDir,
+          indexContent: managedAutoMemoryIndex,
+          userSection,
+          teamSection,
+        });
         this.autoMemoryContext = catalog;
       }
     } else {
       this.setUserMemory(memoryContent);
       this.autoMemoryPrompt = '';
+      this.mainSessionAutoMemoryPolicy = undefined;
       this.autoMemoryContext = '';
     }
     this.setMemoryFileCount(fileCount);
@@ -5831,10 +5942,46 @@ export class Config {
     return this.contextRuleExcludes;
   }
 
-  getContentGenerator(): ContentGenerator {
-    return (
-      getRuntimeContentGenerator()?.contentGenerator ?? this.contentGenerator
-    );
+  getContentGenerator(options: {
+    allowUninitialized: true;
+  }): ContentGenerator | undefined;
+  getContentGenerator(): ContentGenerator;
+  getContentGenerator(options?: {
+    allowUninitialized: true;
+  }): ContentGenerator | undefined {
+    const generator =
+      getRuntimeContentGenerator()?.contentGenerator ?? this.contentGenerator;
+    if (!generator && !options?.allowUninitialized) {
+      throw new Error('Not signed in. Run /auth to sign in.');
+    }
+    return generator;
+  }
+
+  getSubscriptionPlan(): 'plus' | 'pro' | undefined {
+    return this.subscriptionPlan;
+  }
+
+  setSubscriptionPlan(plan: 'plus' | 'pro' | undefined): void {
+    this.subscriptionPlan = plan;
+  }
+
+  clearAuth(): void {
+    this.backgroundTaskRegistry.abortAll({
+      notify: false,
+      persistedStatus: 'cancelled',
+    });
+    resetPreloadedContentGenerator(this.contentGenerator);
+    this.baseLlmClient?.clearPerModelGeneratorCache();
+    this.contentGenerator = undefined;
+    this.baseLlmClient = undefined;
+    this.contentGeneratorConfig = { model: '' };
+    this.contentGeneratorConfigSources = {};
+    this.initialResolvedAuthType = undefined;
+    this.subscriptionPlan = undefined;
+    this.subscriptionModelIdentity = undefined;
+    this.modelsConfig.clearAuth();
+    this.toolRegistry?.unregisterTool(ToolNames.WEB_SEARCH);
+    this.notifyModelChangeListeners();
   }
 
   /**
@@ -6000,10 +6147,33 @@ export class Config {
     this.initialResolvedAuthType = undefined;
   }
 
+  async refreshSubscriptionModels(signal?: AbortSignal) {
+    const session = new QwenSubscriptionSession();
+    const identity = session.getIdentity();
+    this.subscriptionModelIdentity = undefined;
+    const result = await this.modelsConfig.refreshSubscriptionModels(signal);
+    if (identity && session.getIdentity() === identity) {
+      this.subscriptionModelIdentity = identity;
+    }
+    const previous = this.warnings.indexOf(SUBSCRIPTION_MODELS_CACHED);
+    if (previous !== -1) this.warnings.splice(previous, 1);
+    if (result.cached) this.warnings.push(SUBSCRIPTION_MODELS_CACHED);
+    this.notifyModelChangeListeners();
+    return result;
+  }
+
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
+    return this.rebuildContentGenerator(authMethod, isInitialAuth, true);
+  }
+
+  private async rebuildContentGenerator(
+    authMethod: AuthType,
+    isInitialAuth: boolean | undefined,
+    refreshSubscriptionModels: boolean,
+  ) {
     const hookOwner = captureHookExecutionOwner(this, null);
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
       authMethod = this.initialResolvedAuthType ?? authMethod;
@@ -6027,6 +6197,20 @@ export class Config {
     const priorReasoningEffort = priorReasoning
       ? priorReasoning.effort
       : undefined;
+
+    if (authMethod === AuthType.QWEN_SUBSCRIPTION) {
+      const { models } = refreshSubscriptionModels
+        ? await this.refreshSubscriptionModels()
+        : {
+            models: this.modelsConfig
+              .getAvailableModelsForAuthType(authMethod)
+              .map((model) => model.id),
+          };
+      const selected = this.modelsConfig.getModel();
+      if (selected && !models.includes(selected)) {
+        throw new Error(subscriptionModelUnavailable(selected));
+      }
+    }
 
     // Sync modelsConfig state for this auth refresh.
     const modelId = this.modelsConfig.getModel();
@@ -6106,6 +6290,16 @@ export class Config {
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
+
+    if (
+      this.initialized &&
+      this.toolRegistry &&
+      !this.shellExecutionSandbox &&
+      this.sessionExecutionEngine !== 'managed'
+    ) {
+      await this.syncWebSearchToolRegistration(this.toolRegistry);
+      await this.llmClient?.setTools();
+    }
 
     // Fire auth_success notification hook (supports both interactive & non-interactive)
     const messageBus = this.getMessageBus();
@@ -7340,10 +7534,12 @@ export class Config {
 
   /**
    * Return a higher-priority static DashScope knob that shadows the current
-   * global effort on qwen3.8-max, so interactive callers can report the
-   * effective outcome instead of confirming a tier that will not reach the
-   * wire. The provider resolves extra_body before samplingParams before the
-   * unified reasoning setting; same-layer explicit effort still wins budget.
+   * global effort on the tiered-effort Qwen families (qwen3.8-max, the
+   * invitation-only latest-series previews, and qwen4), so interactive
+   * callers can report the effective outcome instead of confirming a tier
+   * that will not reach the wire. The provider resolves extra_body before
+   * samplingParams before the unified reasoning setting; same-layer explicit
+   * effort still wins budget.
    */
   getReasoningEffortOverride(): ReasoningEffortOverride | undefined {
     const cfg = this.getContentGeneratorConfig();
@@ -7585,6 +7781,8 @@ export class Config {
   ): Promise<void> {
     this.initialResolvedAuthType = undefined;
     if (!this.contentGeneratorConfig) {
+      if (authType === AuthType.QWEN_SUBSCRIPTION)
+        await this.refreshAuth(authType);
       return;
     }
 
@@ -7707,7 +7905,17 @@ export class Config {
     // we captured off the still-intact live contentGeneratorConfig above. This is
     // a no-op when the new model disables thinking (`reasoning: false`), since
     // setReasoningEffort() skips that case and never silently re-enables it.
-    await this.refreshAuth(authType);
+    const reuseSubscriptionModels =
+      authType === AuthType.QWEN_SUBSCRIPTION &&
+      this.contentGeneratorConfig.authType === authType &&
+      this.subscriptionModelIdentity !== undefined &&
+      new QwenSubscriptionSession().getIdentity() ===
+        this.subscriptionModelIdentity;
+    if (reuseSubscriptionModels) {
+      await this.rebuildContentGenerator(authType, undefined, false);
+    } else {
+      await this.refreshAuth(authType);
+    }
     if (priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }
@@ -7864,6 +8072,7 @@ export class Config {
       `${this.sessionId}.runtime.json`,
       `${this.sessionId}.worktree.json`,
       `${this.sessionId}.pr.json`,
+      `${this.sessionId}.title.json`,
     ].map((fileName) => ({
       from: path.join(oldChatsDir, fileName),
       to: path.join(newChatsDir, fileName),
@@ -8037,6 +8246,7 @@ export class Config {
     this.backgroundTaskRegistry.disposeResidentAgents();
     this.targetDir = expected;
     this.cwd = expected;
+    await this.hookSystem?.refreshFileWatchingForWorkingDirectory();
     resetPreloadedContentGenerator(this.contentGenerator);
     await this.refreshCurrentRuntimeStatus(expected);
     this.workspaceContext.applyRootDirectories(workspaceDirectories);
@@ -8062,6 +8272,7 @@ export class Config {
     // reassigns it, and the stale text keeps routing to search_memory while
     // the reset mode leaves that tool undeclared.
     this.autoMemoryPrompt = '';
+    this.mainSessionAutoMemoryPolicy = undefined;
     this.autoMemoryContext = '';
 
     let memoryRefreshError: unknown;
@@ -8256,6 +8467,9 @@ export class Config {
   private async shutdownResourcesOnce(): Promise<void> {
     let resourceError: unknown;
     try {
+      if (Object.hasOwn(this, 'hookSystem')) {
+        await this.hookSystem?.close();
+      }
       this.memoryManager.cancelMigrations();
       this.clearSessionRestoreProjection();
       // Drop this session's project-dir registry entry. It is registered during
@@ -8287,6 +8501,20 @@ export class Config {
           ),
         );
         this.goalRuntime?.dispose();
+      }
+
+      // Stop this session's language servers before the rest of the
+      // cleanup. A session Config holds its client before initialization
+      // completes (loadCliConfig starts servers, then installs the client),
+      // so gating on `initialized` would skip teardown exactly for the
+      // sessions that die during startup; the daemon stays up and those
+      // servers are the leak from #14751. Derived Configs never receive a
+      // client, so the guard is the client itself. Kept out of the shared
+      // try below so a stop() rejection can't skip the remaining cleanup.
+      try {
+        await this.lspClient?.stop?.();
+      } catch (lspStopError) {
+        this.debugLogger.error('Error stopping LSP client:', lspStopError);
       }
 
       if (this.initialized) {
@@ -8506,6 +8734,18 @@ export class Config {
       skill.level === 'bundled' &&
       skill.name === 'generated-ui' &&
       !this.getBundledGeneratedUiStatus().enabled
+    ) {
+      return false;
+    }
+    // The auto-memory reference only serves the legacy managed auto-memory
+    // policy; without it, or under the structured protocol (`manage_memory`,
+    // no direct file access), the skill would be listed on every request for
+    // nothing.
+    if (
+      skill.level === 'bundled' &&
+      skill.name === AUTO_MEMORY_SKILL_NAME &&
+      (!this.getManagedAutoMemoryEnabled() ||
+        this.getMemoryRecallMode() !== 'legacy')
     ) {
       return false;
     }
@@ -8954,6 +9194,49 @@ export class Config {
     );
   }
 
+  isProjectHooksPendingApproval(): boolean {
+    return this.projectHooksPendingApproval === true;
+  }
+
+  /**
+   * The hooks block this session's approval gate covers, as loaded at
+   * startup. An approval decision carrying a hash must match this exact
+   * subject; a different hash names a block nobody here reviewed.
+   */
+  getProjectHooksApprovalSubject():
+    | ConfigParameters['projectHooksApprovalSubject']
+    | undefined {
+    return this.projectHooksApprovalSubject;
+  }
+
+  isProjectHooksApprovalGated(): boolean {
+    return (
+      this.projectHooksPendingApproval !== undefined &&
+      !(
+        this.projectHooksYoloExempt &&
+        this.getApprovalMode() === ApprovalMode.YOLO
+      )
+    );
+  }
+
+  /**
+   * Set by the CLI when the user decides on the project hooks mid-session
+   * (approval dialog, `/hooks` reload). Takes effect on the next hook reload.
+   */
+  setProjectHooksPendingApproval(pending: boolean, rejected = false): void {
+    this.projectHooksPendingApproval = pending;
+    this.projectHooksRejected = rejected;
+    // A mid-session decision supersedes the startup approval state: clearing
+    // the gate here means the user just approved this exact block.
+    this.projectHooksApproved = !pending && !rejected;
+  }
+
+  isProjectHooksRejected(): boolean {
+    return (
+      this.projectHooksPendingApproval === true && this.projectHooksRejected
+    );
+  }
+
   addMcpServers(servers: Record<string, MCPServerConfig>): void {
     this.assertGeneratedUiServerNotReplaced(servers);
     if (this.shellExecutionSandbox && Object.keys(servers).length)
@@ -9390,8 +9673,20 @@ export class Config {
     this.promptAgentReachable = reachable;
   }
 
-  /** Managed-memory policy for the system prompt, without legacy indexes. */
+  /**
+   * Managed-memory policy for the system prompt, without legacy indexes.
+   *
+   * In legacy mode the main-session policy is resolved for the Config it is
+   * read through, so a subagent's derived Config with no route to the Skill
+   * tool gets the full policy rather than the session's pointer (#16291).
+   */
   getAutoMemoryPrompt(): string {
+    if (
+      this.memoryRecallMode === 'legacy' &&
+      this.mainSessionAutoMemoryPolicy !== undefined
+    ) {
+      return this.mainSessionAutoMemoryPolicy.forConfig(this);
+    }
     return this.autoMemoryPrompt;
   }
 
@@ -10560,6 +10855,7 @@ export class Config {
   }
 
   isRecordArtifactEnabled(): boolean {
+    if (!this.artifactRecordingSupported) return false;
     if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
     if (this.sdkMode) return false;
     if (process.env['QWEN_CODE_ENABLE_ARTIFACT'] === '1') return true;
@@ -11729,17 +12025,115 @@ export class Config {
 
   /**
    * Get project-level hooks configuration.
-   * Returns hooks from workspace settings, only in trusted folders.
+   * Returns hooks from workspace settings, only in explicitly trusted folders.
    * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    return this.projectHooksPendingApproval === true
+      ? undefined
+      : this.readProjectHooks();
+  }
+
+  /**
+   * The project hooks block `getProjectHooks()` withholds while approval is
+   * pending or rejected. Reads the raw block, not the execution accessor, so
+   * the listing can name the approval reason even when the trust gate would
+   * also withhold it.
+   */
+  getWithheldProjectHooks():
+    | { [K in HookEventName]?: HookDefinition[] }
+    | undefined {
+    return this.projectHooksPendingApproval === true
+      ? this.readProjectHooksBlock()
+      : undefined;
+  }
+
+  /**
+   * The project hooks block the interactive trust gate withholds, for the
+   * `/hooks` listing only — it shows what is configured but switched off.
+   * Never feed this to the registry; `getProjectHooks()` is the execution
+   * accessor. `undefined` when the trust gate is not what withholds them.
+   */
+  getTrustWithheldProjectHooks():
+    | { [K in HookEventName]?: HookDefinition[] }
+    | undefined {
     if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
-    // Only return project hooks if workspace is trusted
-    if (!this.isTrustedFolder()) {
+    if (this.isExplicitlyTrustedFolder()) {
       return undefined;
     }
+    // A cleared approval gate serves the block (approved, or nothing to
+    // approve); the listing must not add a second, trust-disabled copy.
+    // Exception: when the settings layer withheld the whole workspace
+    // scope, the execution block is empty and the display-only copy is the
+    // only record of what is configured — it must surface even though the
+    // gate reads "cleared" for the empty block.
+    if (
+      this.isProjectHooksApprovalCleared() &&
+      this.readProjectHooksBlock() !== undefined
+    ) {
+      return undefined;
+    }
+    // The settings layer drops the workspace scope entirely when the feature
+    // is on and the folder untrusted; the display-only copy keeps the listing
+    // able to show what is configured but withheld.
+    return (
+      this.readProjectHooksBlock() ??
+      (this.projectHooksDisplayOnly as
+        | { [K in HookEventName]?: HookDefinition[] }
+        | undefined)
+    );
+  }
+
+  /**
+   * Whether the approval gate lets the project hooks block through: the gate
+   * is active and not withholding. `pending === false` covers BOTH a genuine
+   * approval and "no approvable object" (the CLI passes false when the
+   * workspace contributes no hooks, e.g. an untrusted folder with the trust
+   * feature on). In the latter case the block is empty, so execution is
+   * unaffected — but diagnostic surfaces must not read this as "approved";
+   * ask `getProjectHooks()` whether the hooks actually load.
+   */
+  private isProjectHooksApprovalCleared(): boolean {
+    // A genuine stored approval is execution authority on its own — it
+    // survives the YOLO exemption (where the pending flag is undefined).
+    // The legacy cleared-gate reading stays for callers that only clear the
+    // pending flag, but the explicit approved flag never doubles as
+    // "nothing to approve".
+    return (
+      this.projectHooksApproved ||
+      (this.isProjectHooksApprovalGated() &&
+        this.projectHooksPendingApproval === false)
+    );
+  }
+
+  private readProjectHooks():
+    | { [K in HookEventName]?: HookDefinition[] }
+    | undefined {
+    if (this.getBareMode() || this.isSafeMode()) {
+      return undefined;
+    }
+    // Repo-supplied hooks run with either authority: a cleared approval gate
+    // (an approved block, or no approvable object — then the block is empty),
+    // or explicit folder trust. Approval is the finer grant — it authorizes
+    // these hooks, not the folder's other executable settings — so the trust
+    // gate must not swallow it. Without an approval, explicit trust is
+    // required in EVERY mode: a disabled folder-trust feature never
+    // authorizes repo hooks, headless included. Embedders enable the feature
+    // and record their managed directories in the trust store, or approve.
+    if (
+      !this.isProjectHooksApprovalCleared() &&
+      !this.isExplicitlyTrustedFolder()
+    ) {
+      return undefined;
+    }
+    return this.readProjectHooksBlock();
+  }
+
+  private readProjectHooksBlock():
+    | { [K in HookEventName]?: HookDefinition[] }
+    | undefined {
     // The legacy merged `hooks` stands in only when no scope was supplied.
     const hooks =
       this.projectHooks ?? (this.hasScopedHooks() ? undefined : this.hooks);
@@ -11756,8 +12150,12 @@ export class Config {
       return undefined;
     }
     // The legacy merged `hooks` stands in only when no scope was supplied.
+    // It may carry workspace hooks, so it shares the project approval gate.
     const hooks =
-      this.userHooks ?? (this.hasScopedHooks() ? undefined : this.hooks);
+      this.userHooks ??
+      (this.hasScopedHooks() || this.projectHooksPendingApproval === true
+        ? undefined
+        : this.hooks);
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
   }
 
@@ -11804,6 +12202,18 @@ export class Config {
     projectHooks?: Record<string, unknown>;
     hooks?: Record<string, unknown>;
   }): void {
+    // Under command-line YOLO the gate is exempt and the `/hooks` reload
+    // does not re-derive the decision, so a replaced block must not keep
+    // the old block's approval authority. Fail-closed by design: an
+    // approval-only block stops until the session leaves YOLO (the
+    // mode-change listener re-applies the store) or restarts.
+    if (
+      this.projectHooksYoloExempt &&
+      this.getApprovalMode() === ApprovalMode.YOLO &&
+      hooks.projectHooks !== this.projectHooks
+    ) {
+      this.projectHooksApproved = false;
+    }
     this.systemHooks = hooks.systemHooks;
     this.userHooks = hooks.userHooks;
     this.projectHooks = hooks.projectHooks;
@@ -11911,6 +12321,13 @@ export class Config {
     }
 
     return this.trustedFolder ?? !this.folderTrust;
+  }
+
+  isExplicitlyTrustedFolder(): boolean {
+    const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+    return (
+      (this.folderTrust || ideTrust !== undefined) && this.isTrustedFolder()
+    );
   }
 
   setIdeMode(value: boolean): void {
@@ -13038,6 +13455,36 @@ export class Config {
     }
   }
 
+  private async syncWebSearchToolRegistration(
+    registry: ToolRegistry,
+    forSubAgent = false,
+  ): Promise<void> {
+    registry.unregisterTool(ToolNames.WEB_SEARCH);
+    const hasExplicitBackend =
+      !!this.webSearchSettings?.model?.trim() ||
+      !!this.webSearchSettings?.baseUrl;
+    if (
+      this.getBareMode() ||
+      this.isSafeMode() ||
+      this.getDisabledTools().has(ToolNames.WEB_SEARCH) ||
+      this.webSearchSettings?.enabled === false ||
+      (hasExplicitBackend && this.webSearchSettings?.enabled !== true)
+    )
+      return;
+    const { evaluateWebSearchGate } = await import('../tools/web-search.js');
+    const gate = evaluateWebSearchGate(this);
+    if (gate.ok) {
+      await this.registerLazyTool(registry, ToolNames.WEB_SEARCH, async () => {
+        const { WebSearchTool } = await import('../tools/web-search.js');
+        return new WebSearchTool(this);
+      });
+      await registry.ensureTool(ToolNames.WEB_SEARCH);
+    } else if (!gate.silent && !this.webSearchNoticeEmitted && !forSubAgent) {
+      this.webSearchNoticeEmitted = true;
+      this.warnings.push(gate.notice);
+    }
+  }
+
   private async syncAdvisorToolRegistration(
     registry: ToolRegistry,
   ): Promise<void> {
@@ -13200,34 +13647,7 @@ export class Config {
       // only when the tool was actually asked for; a provider with no search
       // backend fails silently (`gate.silent`), since warning about a feature
       // the user never configured is noise.
-      const hasExplicitWebSearchBackend =
-        !!this.webSearchSettings?.model?.trim() ||
-        !!this.webSearchSettings?.baseUrl;
-      if (
-        !this.getBareMode() &&
-        !this.isSafeMode() &&
-        this.webSearchSettings?.enabled !== false &&
-        (this.webSearchSettings?.enabled === true ||
-          !hasExplicitWebSearchBackend)
-      ) {
-        const { evaluateWebSearchGate } = await import(
-          '../tools/web-search.js'
-        );
-        const gate = evaluateWebSearchGate(this);
-        if (gate.ok) {
-          await registerLazy(ToolNames.WEB_SEARCH, async () => {
-            const { WebSearchTool } = await import('../tools/web-search.js');
-            return new WebSearchTool(this);
-          });
-        } else if (
-          !gate.silent &&
-          !this.webSearchNoticeEmitted &&
-          !options?.forSubAgent
-        ) {
-          this.webSearchNoticeEmitted = true;
-          this.warnings.push(gate.notice);
-        }
-      }
+      await this.syncWebSearchToolRegistration(registry, options?.forSubAgent);
     };
 
     const environment = this.getExecutionEnvironment();

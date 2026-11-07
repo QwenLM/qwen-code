@@ -57,11 +57,10 @@ public class HarnessPlacementStoreTest {
         jdbc = new ReleaseFaultJdbc(source);
         tx = new TransactionTemplate(new DataSourceTransactionManager(source));
         placements = new HarnessPlacementStore(jdbc);
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
         var properties = new ManagedAgentProperties();
         properties.getSessionStore().setBindingKey("0123456789abcdef0123456789abcdef");
         credentials = new WriterCredentialPolicy(properties);
-        store.setCredentials(credentials);
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc, credentials);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'qwen-code', 1, 1)", TENANT, SESSION);
     }

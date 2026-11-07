@@ -1,4 +1,5 @@
 import { DaemonConnectionBanner } from './components/DaemonConnectionBanner.js';
+import { ProjectHooksApprovalCard } from './components/ProjectHooksApprovalCard.js';
 import { useDaemonAvailability } from './daemon/availability-context.js';
 import { isDaemonUnavailableError } from './daemon/availability.js';
 import {
@@ -29,6 +30,7 @@ import {
 } from './hooks/useMessageNavigation';
 import { ConversationSearch } from './components/ConversationSearch';
 import { useWebShellNavigation } from './navigation';
+import { isCoarsePointerDevice } from './hooks/useIsTouchComposer';
 import { isWebShellPage, type WebShellPage } from './utils/navigationUrl';
 import { getSourceEntries } from './components/sources/sourceEntries';
 import { openSourceEntry } from './components/panels/SourcesSection';
@@ -71,6 +73,7 @@ import {
   useWorkspace,
   useWorkspaceActions,
   useWorkspaceEventSignals,
+  type DaemonContextMemoryDetail,
   type DaemonSessionActions,
   type DaemonSessionNotice,
   type DaemonSessionOwnerSnapshot,
@@ -117,8 +120,16 @@ import type {
 import { isGoalGateBlocked as isGoalGateBlockedFor } from './utils/goalGate';
 import { cancelledTurnProducedNothing } from './utils/cancelledTurn';
 import { useDaemonPromptSettled } from './daemon/session/DaemonSessionProvider';
-import { keepWorkspaceSplitSessionIds } from './utils/standalone-session-routing';
+import {
+  keepWorkspaceSplitSessionIds,
+  type SplitSessionClassification,
+  type SplitSessionOutcome,
+} from './utils/standalone-session-routing';
 import { setBoundedMapEntry } from './utils/bounded-map';
+import {
+  buildWaitingActivity,
+  buildWaitingTokenUsage,
+} from './utils/waitingActivity';
 import { type SessionGitIntent } from './components/GitModePopover';
 import { gitModeIntentMustReset } from './utils/gitModeIntent';
 import { LocalControlQrButton } from './components/LocalControlQrButton';
@@ -189,6 +200,7 @@ import {
   ChatEditor,
   type ComposerToolbarAction,
 } from './components/ChatEditor';
+import { getWorkflowModeMessages } from './components/workflow-mode-messages';
 import {
   mapRestoredInputAnnotationsAfterTextChange,
   type ComposerSubmitCommit,
@@ -203,6 +215,11 @@ import { SessionRecoveryBanner } from './components/SessionRecoveryBanner';
 import composerStatusStyles from './components/ComposerStatusStack.module.css';
 import { GoalEditDialog } from './components/dialogs/GoalEditDialog';
 import { StreamingStatus } from './components/StreamingStatus';
+import {
+  WaitingMinigame,
+  WaitingMinigameButton,
+} from './components/WaitingMinigame';
+import { readWaitingGamesEnabled } from './utils/waitingGamesConfig';
 import {
   ToastHost,
   TOAST_REQUEST_EVENT,
@@ -312,6 +329,10 @@ import {
   useArtifactWorkspaceTarget,
 } from './components/artifacts/useArtifactWorkspaceTarget';
 import {
+  readContextInstructionFile,
+  type ContextInstructionFileContent,
+} from './components/artifacts/readContextInstructionFile';
+import {
   getArtifactsByTurn,
   getFileChangesByTurn,
   getScheduledTasksByTurn,
@@ -335,6 +356,7 @@ import { buildGoalControlRequest } from './utils/goalControlRequest';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
+import { ChannelEventsPage } from './components/channels/ChannelEventsPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
 import {
   McpAppHostContext,
@@ -435,6 +457,7 @@ import {
 } from './hooks/useMessages';
 import { useSessionSources } from './hooks/useSessionSources';
 import { useContextCompressionReconcile } from './hooks/useContextCompressionReconcile';
+import { useSubscriptionLogout } from './hooks/useSubscriptionLogout';
 import type { SessionSource } from '@qwen-code/sdk/daemon';
 import { useSessionArtifacts } from './hooks/useSessionArtifacts';
 import { useSessionArtifactsChange } from './hooks/useSessionArtifactsChange';
@@ -689,7 +712,9 @@ function getArtifactPanelTabStops(
   );
 }
 const DEFAULT_COMPOSER_TOOLBAR_ACTIONS = [
+  'addMenu',
   'approvalMode',
+  'workflowMode',
   'contextUsage',
   'model',
   'widthMode',
@@ -725,6 +750,7 @@ function availableSkillInfos(status: {
     name: string;
     description?: string;
     argumentHint?: string;
+    extensionName?: string;
   }>;
 }): SkillInfo[] {
   return (status.skills ?? [])
@@ -733,6 +759,7 @@ function availableSkillInfos(status: {
       name: skill.name,
       description: skill.description ?? '',
       ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
+      ...(skill.extensionName ? { extensionName: skill.extensionName } : {}),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -1361,6 +1388,7 @@ export type SessionChangeEvent =
   | { type: 'turn_complete'; sessionId: string; error?: Error };
 
 export interface WebShellApi {
+  refreshModels: () => Promise<void>;
   /** 按持久化记录 ID 定位当前会话消息，包含尚未渲染的历史。宿主先切换会话。 */
   navigateToMessage: (
     request: WebShellMessageNavigationRequest,
@@ -1426,6 +1454,11 @@ export interface WebShellProps {
     sessionId?: string;
     sessionName?: string;
   }) => void;
+  /** Called when the active model connection changes. */
+  onModelChange?: (
+    modelId: string | undefined,
+    authType: string | undefined,
+  ) => void;
   /** Called after a new session is created. Session setup waits up to 30 seconds. */
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
   /** Explicit Managed Agent backend. Omit to keep the daemon provider unchanged. */
@@ -1855,6 +1888,7 @@ const NON_WORKSPACE_BLOCKED_COMMANDS = new Set([
   'extensions',
   'goal',
   'log',
+  'logout',
   'memory',
   'mcp',
   'prs',
@@ -3462,6 +3496,7 @@ export function App({
   askUserFreeTextLabel,
   onSessionIdChange,
   onSessionInfoChange,
+  onModelChange,
   onSessionCreated,
   managedAgentProvider,
   theme: providedTheme,
@@ -4819,6 +4854,25 @@ export function App({
   }, []);
 
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
+  const waitingMinigameActivity = useMemo(
+    () => buildWaitingActivity(messages),
+    [messages],
+  );
+  const waitingMinigameTokens = useMemo(
+    () =>
+      buildWaitingTokenUsage(
+        messages,
+        connection.tokenUsage ?? {},
+        connection.tokenCount,
+        connection.contextWindow,
+      ),
+    [
+      messages,
+      connection.tokenUsage,
+      connection.tokenCount,
+      connection.contextWindow,
+    ],
+  );
   const messagesRef = useRef(messages);
   const [failedPrompt, setFailedPrompt] = useState<FailedPrompt | null>(null);
   const failedPromptRef = useRef<FailedPrompt | null>(failedPrompt);
@@ -8042,6 +8096,48 @@ export function App({
     },
     [],
   );
+  const openMemoryFilePreview = useCallback(
+    async (file: DaemonContextMemoryDetail, fileWorkspaceCwd: string) => {
+      const absolutePath = file.absolutePath;
+      if (!absolutePath) return;
+      let result: ContextInstructionFileContent;
+      try {
+        const client = workspace.client;
+        if (!client) {
+          throw new Error('The workspace for this file is not available.');
+        }
+        result = await readContextInstructionFile(
+          client,
+          workspace.capabilities,
+          fileWorkspaceCwd,
+          absolutePath,
+        );
+      } catch (err) {
+        pushToast('error', err instanceof Error ? err.message : String(err));
+        return;
+      }
+      if (result.truncated) {
+        pushToast('warning', t('contextUsage.previewTruncated'));
+      }
+      const tab: ArtifactPanelTab = {
+        id: `memory-file:${absolutePath}`,
+        kind: 'file',
+        title: file.path,
+        workspacePath: absolutePath,
+        previewContent: result.content,
+        previewOnly: true,
+        ...(fileWorkspaceCwd ? { workspaceCwd: fileWorkspaceCwd } : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelOpen(true);
+    },
+    [workspace, pushToast, t],
+  );
   const closeArtifactPanel = useCallback(() => {
     setArtifactPanelOpen(false);
     // Reset fullscreen in the same commit: while it stays true the covered
@@ -8304,6 +8400,8 @@ export function App({
       : null;
   const pendingApprovalRef = useRef(pendingApproval);
   pendingApprovalRef.current = canActOnPendingApproval ? pendingApproval : null;
+  const [projectHooksApprovalActive, setProjectHooksApprovalActive] =
+    useState(false);
   // True exactly when an actionable approval overlay (ToolApproval or
   // AskUserQuestion) is on screen. Single source of truth for the three places
   // that must treat the composer as dormant while an approval owns the keyboard:
@@ -8311,7 +8409,9 @@ export function App({
   // dialogOpen prop.
   const approvalOverlayActive =
     !managedMode &&
-    (pendingToolApproval !== null || pendingAskUserApproval !== null);
+    (pendingToolApproval !== null ||
+      pendingAskUserApproval !== null ||
+      projectHooksApprovalActive);
   const approvalOverlayActiveRef = useRef(approvalOverlayActive);
   approvalOverlayActiveRef.current =
     approvalOverlayActive ||
@@ -8816,7 +8916,20 @@ export function App({
   );
   const statusBarRef = useRef<StatusBarHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
+  const locateWaitingActivity = useCallback((messageId: string) => {
+    messageListRef.current?.scrollToMessage(messageId);
+  }, []);
   const editorRef = useRef<EditorHandle | null>(null);
+  const chatFocusBlockedRef = useRef(false);
+  const focusChatAfterNavigation = useCallback(() => {
+    if (chatFocusBlockedRef.current) return;
+    // Keep touch navigation accessible without opening the soft keyboard.
+    if (isCoarsePointerDevice()) {
+      chatPaneRef.current?.focus({ preventScroll: true });
+    } else {
+      editorRef.current?.focus();
+    }
+  }, []);
   const restoreConversationSearchFocus = useCallback(() => {
     editorRef.current?.focus();
   }, []);
@@ -8918,6 +9031,14 @@ export function App({
       failedPromptRetryIsCurrent &&
       (!failedPromptRetry.admitted || failedPromptRetry.settled),
   );
+  const waitingMinigameVisible =
+    !suppressFailedPromptRetryStreaming &&
+    (streamingState !== 'idle' || sessionHasActivePrompt);
+  const waitingGamesEnabled = useMemo(() => readWaitingGamesEnabled(), []);
+  const [waitingMinigameOpen, setWaitingMinigameOpen] = useState(false);
+  useEffect(() => {
+    if (!waitingMinigameVisible) setWaitingMinigameOpen(false);
+  }, [waitingMinigameVisible]);
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
   streamingStateRef.current = streamingState;
   // Cleared in three places: the session-switch effect, the drain loop, and
@@ -10015,6 +10136,26 @@ export function App({
   // Generation recorded when the latest classification started; differs from
   // the live generation only while a superseded classification is in flight.
   const splitClassificationStartGenerationRef = useRef(0);
+  // Publish/clear contract: a pending open is published when a classification
+  // starts (beginSplitClassification) and cleared when that generation settles
+  // (settlePendingSplitOpen). It is honoured only while its generation equals
+  // the live splitClassificationGenerationRef — navigation bumps that ref to
+  // cancel a pending selection. Do not clear it on the controlled effect's
+  // early returns: merging into a not-yet-classified controlled request is
+  // intended.
+  const pendingSplitOpenRef = useRef<{
+    generation: number;
+    sessionIds: string[];
+  } | null>(null);
+  // State mirror of the live pending open's ids, so the sidebar can render
+  // disabled/title during the opening window, when mainView is not 'split' yet
+  // and the real splitSessionIds is not handed over. Written and cleared
+  // alongside pendingSplitOpenRef; surfaced only while its generation is the
+  // live one (navigation invalidates it the same way it supersedes the ref).
+  const [pendingSplitPaneIds, setPendingSplitPaneIds] = useState<{
+    generation: number;
+    sessionIds: string[];
+  } | null>(null);
   splitSessionIdsRef.current = splitSessionIds;
   const previousSplitSessionIdsRef = useRef<string[]>(splitSessionIds);
   useEffect(() => {
@@ -10089,6 +10230,7 @@ export function App({
     | 'plugins'
     | 'agents'
     | 'channels'
+    | 'channel-events'
     | 'live'
     | 'workspaces'
     | null
@@ -10161,7 +10303,16 @@ export function App({
   }, [workspaceContextActive]);
   useEffect(() => {
     if (workspaceContextActive) return;
-    splitClassificationGenerationRef.current += 1;
+    // A first open started from the sidebar owns the live generation until
+    // navigation supersedes it; bumping here would silently kill the in-flight
+    // classification the click just began, so cancellation (the bump) is
+    // skipped while a pending open is live. The teardown below still runs.
+    if (
+      pendingSplitOpenRef.current?.generation !==
+      splitClassificationGenerationRef.current
+    ) {
+      splitClassificationGenerationRef.current += 1;
+    }
     if (!projectFeaturesAvailable) setSplitSessionIds([]);
     if (
       !projectFeaturesAvailable &&
@@ -10237,6 +10388,7 @@ export function App({
         | 'plugins'
         | 'agents'
         | 'channels'
+        | 'channel-events'
         | 'live'
         | 'workspaces',
     ) => {
@@ -10383,6 +10535,9 @@ export function App({
     sidebarRailEnabled &&
     sidebarOptions.showLive &&
     sidebarOptions.primaryNav?.items?.includes('live') !== false;
+  const channelNavigationEnabled =
+    projectFeaturesAvailable &&
+    (sidebarOptions.primaryNav?.items?.includes('channelEvents') ?? true);
   useEffect(() => {
     setSidebarSection((current) =>
       liveSidebarEnabled && connection.sessionContext?.kind === 'live'
@@ -10530,7 +10685,9 @@ export function App({
         ? 'scheduledTasks'
         : page === 'pr-watches'
           ? 'prWatches'
-          : page;
+          : page === 'channel-events'
+            ? 'channelEvents'
+            : page;
     const allowed =
       page === 'chat' ||
       (page === 'settings'
@@ -10540,6 +10697,7 @@ export function App({
         : projectFeaturesAvailable &&
           (page !== 'live' || liveSidebarEnabled) &&
           (page !== 'pr-watches' || prWatchesAvailable) &&
+          (page !== 'channel-events' || channelNavigationEnabled) &&
           (hostSidebar?.primaryNav?.items?.some(
             (item) => item === primaryItem,
           ) ??
@@ -10553,6 +10711,7 @@ export function App({
     setActivePanel(
       nextPage === 'plugins' ||
         nextPage === 'channels' ||
+        nextPage === 'channel-events' ||
         nextPage === 'live' ||
         nextPage === 'settings'
         ? nextPage
@@ -10577,6 +10736,7 @@ export function App({
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
     prWatchesAvailable,
+    channelNavigationEnabled,
     workspaceCapabilitiesReady,
   ]);
   useEffect(() => {
@@ -10601,20 +10761,120 @@ export function App({
     setForceMobileDrawer(true);
     setMobileDrawerOpen(true);
   }, [showChat, sidebarOptions.enabled]);
+  // Memoized per-id split classification. A merged re-open during a pending
+  // window must not re-fetch ids already classified (in flight or settled);
+  // transient failures are dropped so a retry re-classifies them. The memo is
+  // cleared on the same identities sanitizeSplitSessionIds is rebuilt on, so a
+  // daemon switch never reuses the previous target's answers. Entries that
+  // are still in flight when their open is cancelled by navigation are
+  // dropped at the next begin (see beginSplitClassification), so a re-open
+  // never waits on the cancelled open's classification.
+  const splitSessionClassificationRef = useRef<
+    Map<string, { promise: Promise<SplitSessionOutcome>; settled: boolean }>
+  >(new Map());
+  useEffect(() => {
+    splitSessionClassificationRef.current.clear();
+  }, [workspace.client, workspace.capabilities]);
+  const isSplitEligibleSession = useCallback(
+    (sessionId: string): Promise<SplitSessionOutcome> => {
+      const memo = splitSessionClassificationRef.current;
+      const cached = memo.get(sessionId);
+      if (cached) return cached.promise;
+      if (
+        !workspace.capabilities?.features?.includes(
+          STANDALONE_SESSIONS_CAPABILITY,
+        )
+      ) {
+        // Capability-absent fast path: every id is eligible, nothing to cache.
+        return Promise.resolve('workspace');
+      }
+      const outcome = workspace.client.getStandaloneSession(sessionId).then(
+        () => 'standalone' as const,
+        (error) =>
+          (isStandaloneSessionNotFoundError(error)
+            ? 'workspace'
+            : 'failed') as SplitSessionOutcome,
+      );
+      const entry = { promise: outcome, settled: false };
+      outcome.then((result) => {
+        entry.settled = true;
+        if (result === 'failed') memo.delete(sessionId);
+      });
+      memo.set(sessionId, entry);
+      return outcome;
+    },
+    [workspace.capabilities, workspace.client],
+  );
+  // Publishes a pending open when a split classification starts: bumps the
+  // generation refs, records the requested ids as the live pending open, and
+  // un-settles the split view so pane-bound reclaim waits for the decision.
+  // A pending open already superseded by navigation drops its still-in-flight
+  // classifications (see below). Returns the new generation.
+  const beginSplitClassification = useCallback(
+    (requested: readonly string[]) => {
+      // A pending open that is no longer on the live generation was
+      // superseded by navigation before it settled: its in-flight
+      // classifications are orphaned (the daemon call may never resolve),
+      // and a new open reusing them would stall, so drop the still-in-flight
+      // entries. Settled outcomes stay reusable; a live pending open (merged
+      // sidebar re-open) keeps its in-flight promises so the merged list
+      // doesn't re-classify.
+      const supersededPending = pendingSplitOpenRef.current;
+      if (
+        supersededPending &&
+        supersededPending.generation !==
+          splitClassificationGenerationRef.current
+      ) {
+        const memo = splitSessionClassificationRef.current;
+        for (const [id, entry] of memo) {
+          if (!entry.settled) memo.delete(id);
+        }
+      }
+      const generation = splitClassificationGenerationRef.current + 1;
+      splitClassificationGenerationRef.current = generation;
+      splitClassificationStartGenerationRef.current = generation;
+      const pending =
+        requested.length > 0
+          ? { generation, sessionIds: [...requested] }
+          : null;
+      pendingSplitOpenRef.current = pending;
+      setPendingSplitPaneIds(pending);
+      // A new decision is pending: un-settle so reclaim waits for it. The
+      // empty-request branch settles without classifying.
+      if (requested.length > 0) setSplitViewSettled(false);
+      return generation;
+    },
+    [],
+  );
+  // Clears the pending open when its generation settles; no-op once a newer
+  // generation (or navigation) has superseded it.
+  const settlePendingSplitOpen = useCallback((generation: number) => {
+    if (pendingSplitOpenRef.current?.generation === generation) {
+      pendingSplitOpenRef.current = null;
+    }
+    setPendingSplitPaneIds((current) =>
+      current?.generation === generation ? null : current,
+    );
+  }, []);
   const sanitizeSplitSessionIds = useCallback(
-    async (sessionIds: readonly string[]): Promise<string[]> => {
+    async (
+      sessionIds: readonly string[],
+    ): Promise<SplitSessionClassification> => {
       const requested = Array.from(new Set(sessionIds.filter(Boolean))).slice(
         0,
         MAX_SPLIT_PANES,
       );
-      if (requested.length === 0) return [];
+      if (requested.length === 0) {
+        return { kept: [], transientFailures: [] };
+      }
       return keepWorkspaceSplitSessionIds(
         workspace.client,
         workspace.capabilities,
         requested,
+        isSplitEligibleSession,
       );
     },
-    [workspace.capabilities, workspace.client],
+    [isSplitEligibleSession, workspace.capabilities, workspace.client],
   );
   // Open the in-window split view showing 2+ sessions side by side. `splitSessionIds`
   // is the live pane set — SplitView mirrors add/remove back into it via
@@ -10633,12 +10893,7 @@ export function App({
       const requested = Array.from(
         new Set((sessionIds ?? []).filter(Boolean)),
       ).slice(0, MAX_SPLIT_PANES);
-      const generation = splitClassificationGenerationRef.current + 1;
-      splitClassificationGenerationRef.current = generation;
-      splitClassificationStartGenerationRef.current = generation;
-      // A new decision is pending: un-settle so reclaim waits for it. The
-      // empty-request branch below settles without classifying.
-      if (requested.length > 0) setSplitViewSettled(false);
+      const generation = beginSplitClassification(requested);
       if (requested.length === 0) {
         const currentWorkspaceSessionId =
           connection.sessionId !== undefined &&
@@ -10658,7 +10913,8 @@ export function App({
         setSplitViewSettled(true);
         return;
       }
-      void sanitizeSplitSessionIds(requested).then((sanitized) => {
+      void sanitizeSplitSessionIds(requested).then((result) => {
+        settlePendingSplitOpen(generation);
         if (splitClassificationGenerationRef.current !== generation) {
           // Superseded: settle only when no newer classification started,
           // otherwise the newer one owns the decision.
@@ -10671,19 +10927,28 @@ export function App({
           return;
         }
         setSplitViewSettled(true);
-        if (sanitized.length === 0) {
+        if (result.transientFailures.length > 0) {
+          // A named session was lost to a transient (non-404) classification
+          // error: say so instead of opening a partial split silently.
+          pushToast('info', t('session.splitAddFailed'));
+        }
+        if (result.kept.length === 0) {
           return;
         }
-        setSplitSessionIds(sanitized);
+        setSplitSessionIds(result.kept);
         setMainView('split');
       });
     },
     [
+      beginSplitClassification,
       connection.sessionContext,
       connection.sessionId,
       connection.workspaceCwd,
+      pushToast,
       sanitizeSplitSessionIds,
+      settlePendingSplitOpen,
       showChat,
+      t,
       projectFeaturesAvailable,
     ],
   );
@@ -10696,6 +10961,26 @@ export function App({
   const externalSplitControlled = externalSplitSessionIds !== undefined;
   const onSplitSessionIdsChangeRef = useRef(onSplitSessionIdsChange);
   onSplitSessionIdsChangeRef.current = onSplitSessionIdsChange;
+  // The pane list a fresh split seeds with when the user picks no explicit
+  // sessions: the current session, but only in a workspace context — a
+  // standalone/live session is its own pane and must not be duplicated.
+  const splitSeedIds = useCallback(
+    () =>
+      workspaceContextActive && connection.sessionId
+        ? [connection.sessionId]
+        : [],
+    [connection.sessionId, workspaceContextActive],
+  );
+  const requestSplitWithIds = useCallback(
+    (ids: string[]) => {
+      if (externalSplitControlled) {
+        onSplitSessionIdsChangeRef.current?.(ids);
+      } else {
+        openSplitView(ids);
+      }
+    },
+    [externalSplitControlled, openSplitView],
+  );
   const requestOpenSplitView = useCallback(() => {
     if (!projectFeaturesAvailable) return;
     if (!externalSplitControlled) {
@@ -10704,16 +10989,12 @@ export function App({
     }
     if (!workspaceContextActive && splitSessionIds.length === 0) return;
     const requested =
-      splitSessionIds.length > 0
-        ? splitSessionIds
-        : workspaceContextActive && connection.sessionId
-          ? [connection.sessionId]
-          : [];
+      splitSessionIds.length > 0 ? splitSessionIds : splitSeedIds();
     onSplitSessionIdsChangeRef.current?.(requested);
   }, [
-    connection.sessionId,
     externalSplitControlled,
     openSplitView,
+    splitSeedIds,
     splitSessionIds,
     projectFeaturesAvailable,
     workspaceContextActive,
@@ -10723,12 +11004,7 @@ export function App({
     const requested = externalSplitSignature
       ? externalSplitSignature.split('\0')
       : [];
-    const generation = splitClassificationGenerationRef.current + 1;
-    splitClassificationGenerationRef.current = generation;
-    splitClassificationStartGenerationRef.current = generation;
-    // A new decision is pending: un-settle so reclaim waits for it. The
-    // empty-request branch below settles without classifying.
-    if (requested.length > 0) setSplitViewSettled(false);
+    const generation = beginSplitClassification(requested);
     if (requested.length > 0 && cockpitViewRequested()) {
       updateCockpitLocation(false, true);
     }
@@ -10752,7 +11028,8 @@ export function App({
       setSplitViewSettled(true);
       return;
     }
-    void sanitizeSplitSessionIds(requested).then((sanitized) => {
+    void sanitizeSplitSessionIds(requested).then((result) => {
+      settlePendingSplitOpen(generation);
       if (splitClassificationGenerationRef.current !== generation) {
         if (
           splitClassificationStartGenerationRef.current !==
@@ -10763,13 +11040,19 @@ export function App({
         return;
       }
       setSplitViewSettled(true);
-      setSplitSessionIds((previous) =>
-        areSessionIdsEqual(previous, sanitized) ? previous : sanitized,
-      );
-      if (!areSessionIdsEqual(requested, sanitized)) {
-        onSplitSessionIdsChangeRef.current?.(sanitized);
+      if (result.transientFailures.length > 0) {
+        // A named session was lost to a transient (non-404) classification
+        // error: say so instead of opening a partial split silently.
+        pushToast('info', t('session.splitAddFailed'));
       }
-      if (sanitized.length > 0) {
+      const kept = result.kept;
+      setSplitSessionIds((previous) =>
+        areSessionIdsEqual(previous, kept) ? previous : kept,
+      );
+      if (!areSessionIdsEqual(requested, kept)) {
+        onSplitSessionIdsChangeRef.current?.(kept);
+      }
+      if (kept.length > 0) {
         setActivePanel((previous) => (previous === null ? previous : null));
         setMainView((previous) => (previous === 'split' ? previous : 'split'));
       } else {
@@ -10777,11 +11060,15 @@ export function App({
       }
     });
   }, [
+    beginSplitClassification,
     externalSplitControlled,
     externalSplitSignature,
     effectiveSessionContext,
     projectFeaturesAvailable,
+    pushToast,
     sanitizeSplitSessionIds,
+    settlePendingSplitOpen,
+    t,
     workspace.status,
     workspaceCapabilitiesReady,
   ]);
@@ -10798,6 +11085,44 @@ export function App({
       onSplitSessionIdsChangeRef.current?.(sessionIds);
     },
     [closeUsageTabs, externalSplitControlled],
+  );
+  const addSessionToSplitView = useCallback(
+    (sessionId: string) => {
+      if (!isLargeScreen || !projectFeaturesAvailable) return;
+      const pending = pendingSplitOpenRef.current;
+      // Only merge an opening request that navigation has not superseded.
+      const previous =
+        pending?.generation === splitClassificationGenerationRef.current
+          ? pending.sessionIds
+          : mainView === 'split'
+            ? splitSessionIds
+            : undefined;
+      if (
+        previous &&
+        (previous.includes(sessionId) || previous.length >= MAX_SPLIT_PANES)
+      ) {
+        return;
+      }
+      closeMobileDrawer();
+      if (mainView === 'split' && previous) {
+        handleSplitPanesChange([...previous, sessionId]);
+        return;
+      }
+      const requested = Array.from(
+        new Set([...(previous ?? splitSeedIds()), sessionId]),
+      );
+      requestSplitWithIds(requested);
+    },
+    [
+      closeMobileDrawer,
+      handleSplitPanesChange,
+      isLargeScreen,
+      mainView,
+      projectFeaturesAvailable,
+      requestSplitWithIds,
+      splitSeedIds,
+      splitSessionIds,
+    ],
   );
   const notifyControlledSplitClose = useCallback(() => {
     if (externalSplitControlled) {
@@ -10981,17 +11306,17 @@ export function App({
     externalSplitControlled,
     sessionActions,
   ]);
-  // Land focus on the composer after a shrink-driven split close so keyboard
+  // Land focus in the chat after a shrink-driven split close so keyboard
   // users aren't dropped onto <body> — but not when the chat now shows an
   // approval overlay (it owns the keyboard) or a panel (it manages focus).
   useEffect(() => {
     if (mainView !== 'chat' || !focusComposerAfterSplitCloseRef.current) return;
     focusComposerAfterSplitCloseRef.current = false;
-    if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
-  }, [mainView, activePanel, approvalOverlayActive]);
+    if (!activePanel && !approvalOverlayActive) focusChatAfterNavigation();
+  }, [mainView, activePanel, approvalOverlayActive, focusChatAfterNavigation]);
   // The Settings / Daemon Status panel is a view, not a modal, so it lacks
   // DialogShell's focus trap/restore. Move focus into a panel when it opens (or
-  // when switching directly between panels) and back to the composer when it
+  // when switching directly between panels) and back to the chat when it
   // closes, so keyboard users aren't stranded on an element that is hidden.
   const panelBackRef = useRef<HTMLButtonElement | null>(null);
   const panelHeadingRef = useRef<HTMLHeadingElement | null>(null);
@@ -11025,23 +11350,23 @@ export function App({
       // than depending on that DOM coincidence.
       panelBackRef.current?.focus();
     } else if (prev) {
-      // Panel just closed. Return focus to the composer — unless an approval
+      // Panel just closed. Return focus to the chat — unless an approval
       // overlay is what forced it closed (see the effect below): that overlay
       // drives its own keyboard handling and ToolApproval ignores keys from
       // editable targets, so focusing the composer here would swallow its
       // shortcuts and leave the user unable to respond by keyboard.
       if (!approvalOverlayActive) {
-        editorRef.current?.focus();
+        focusChatAfterNavigation();
       }
     } else if (wasApprovalActive && !approvalOverlayActive) {
       // The panel was auto-closed for an approval (prev was consumed to null on
       // that render, editor focus skipped). Now the approval has resolved with
-      // no panel to return to, so restore the composer here. (useComposerCore's
+      // no panel to return to, so restore chat focus here. (useComposerCore's
       // dialogOpen effect also refocuses on this transition; this keeps the
       // panel focus effect self-contained instead of relying on that.)
-      editorRef.current?.focus();
+      focusChatAfterNavigation();
     }
-  }, [activePanel, approvalOverlayActive]);
+  }, [activePanel, approvalOverlayActive, focusChatAfterNavigation]);
   // A pending approval (a gated tool call or an AskUserQuestion) renders its
   // overlay in the chat footer, which is hidden (display:none) while a panel is
   // shown. Left alone, the turn would hang behind Settings/Status with no
@@ -11467,6 +11792,15 @@ export function App({
       sessionName: sessionDisplayName,
     });
   }, [connection.sessionId, onSessionInfoChange, sessionDisplayName]);
+  const currentModelAuthType = connection.context?.state._meta?.['authType'];
+  useEffect(() => {
+    onModelChange?.(
+      connection.currentModel,
+      typeof currentModelAuthType === 'string'
+        ? currentModelAuthType
+        : undefined,
+    );
+  }, [connection.currentModel, currentModelAuthType, onModelChange]);
   const [currentMode, setCurrentMode] = useState('default');
   const [planExecutionMode, setPlanExecutionMode] = useState('default');
   const executionMode =
@@ -11652,11 +11986,18 @@ export function App({
           creationSessionContext?.kind === 'workspace'
             ? creationSessionContext.cwd
             : undefined;
+        const draftProviders = connectionRef.current.providers;
+        // Reapplying the effective workspace default would save it again,
+        // potentially overwriting a different default in user settings.
+        const useWorkspaceDefault =
+          !reasoningEffort &&
+          draftProviders?.workspaceCwd === catalogWorkspaceCwd &&
+          draftProviders?.current?.modelId === modelId;
         try {
           await createAndAttachSessionForPrompt({
             sessionActions: sessionActions as typeof sessionActions &
               SessionActionsWithCreate,
-            modelId,
+            modelId: useWorkspaceDefault ? undefined : modelId,
             reasoningEffort,
             modeId,
             planMode,
@@ -12690,6 +13031,7 @@ export function App({
   // this daemon composer; its shortcuts must not reach the Local session.
   const interactionBlocked =
     managedMode || dialogOpen || mainView !== 'chat' || artifactPanelFullscreen;
+  chatFocusBlockedRef.current = interactionBlocked;
   const mainVoiceTarget = useMemo(
     () =>
       workspaceContextActive
@@ -13640,6 +13982,24 @@ export function App({
   // stable — pull it out so callbacks can depend on the function alone without
   // re-creating on every render (and without an exhaustive-deps warning).
   const reloadProviders = providersState.reload;
+  const {
+    available: subscriptionAvailable,
+    handleCommand: handleSubscriptionLogout,
+  } = useSubscriptionLogout({
+    t,
+    onCommand: (text) =>
+      invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError),
+    workspaceCwd: workspaceContextActive
+      ? getComposerWorkspaceCwd()
+      : undefined,
+    isBlocked: () =>
+      streamingStateRef.current !== 'idle' ||
+      sessionHasActivePromptRef.current ||
+      isGoalGateBlocked(),
+    onBlocked: blockCommand,
+    onNotice: pushToast,
+    onError: reportError,
+  });
   const [modelActionBusy, setModelActionBusy] = useState(false);
   const modelActionTokenRef = useRef(0);
   useLayoutEffect(() => {
@@ -14267,6 +14627,10 @@ export function App({
     });
   }, [brandResolved, brandNameValue, brandLogoUri]);
 
+  const uiLanguageWorkspaceCwd =
+    effectiveSessionContext?.kind === 'live'
+      ? (workspace.capabilities?.workspaceCwd ?? workspace.workspaceCwd)
+      : getComposerWorkspaceCwd();
   const handleSettingsLanguageChange = useCallback(
     (nextLanguage: WebShellLanguage, scope: 'user' | 'workspace' = 'user') => {
       if (sessionWriteBlocked) return;
@@ -14277,18 +14641,12 @@ export function App({
       // row on the Workspace tab there; keep this guard for a scope that was
       // picked before the session context settled.
       const effectiveScope = sessionIsStandalone ? 'user' : scope;
-      // Forward the settings tab's scope to the command so a Workspace-tab edit
-      // persists to workspace settings instead of always writing user scope
-      // (the /language command otherwise defaults to user). The command still
-      // switches the daemon's live locale so command descriptions re-localize —
-      // which a plain scoped settings write wouldn't do.
-      const scopeFlag =
-        effectiveScope === 'workspace' ? ' --project' : ' --global';
-      const command = `/language ui ${nextLanguage}${scopeFlag}`;
       const refreshSettings = async () => {
         if (!owner.current.isCurrent()) return;
         await Promise.all([
-          sessionActions.refreshCommands(),
+          ...(connectionRef.current.sessionId
+            ? [sessionActions.refreshCommands()]
+            : []),
           reloadWorkspaceSettings(),
         ]);
       };
@@ -14310,16 +14668,28 @@ export function App({
         setSelectedLanguage(nextLanguage);
         onLanguageResolvedRef.current?.(nextLanguage);
       }
-      sendPrompt(command, undefined, undefined, {
-        ownerRef: owner,
-        suppressSessionTitle: true,
-      })
-        .then(() => {
+      workspaceActions
+        .setUiLanguage(
+          nextLanguage === 'zh-CN' ? 'zh' : nextLanguage,
+          effectiveScope,
+          uiLanguageWorkspaceCwd,
+        )
+        .then((result) => {
           if (!owner.current.isCurrent()) return;
+          const appliedLanguage =
+            languageSettingToWebShellLanguage(result.language) ??
+            normalizeLanguage(result.language);
+          if (!hostControlsLanguage && appliedLanguage !== nextLanguage) {
+            setSelectedLanguage(appliedLanguage);
+            onLanguageResolvedRef.current?.(appliedLanguage);
+          }
           if (effectiveScope === 'user') {
             // A user-scoped choice becomes the host's persisted opinion. A
             // workspace choice remains settings-owned for that workspace.
-            handleLanguageChange(nextLanguage);
+            handleLanguageChange(appliedLanguage);
+          }
+          if (result.refresh.failed > 0) {
+            pushToast('warning', t('language.refreshFailed'));
           }
           return refreshSettings().catch((error: unknown) => {
             if (!owner.current.isCurrent()) return;
@@ -14342,12 +14712,15 @@ export function App({
       reportError,
       providedLanguage,
       sessionWriteBlocked,
-      sendPrompt,
+      workspaceActions,
+      uiLanguageWorkspaceCwd,
       selectedLanguage,
       sessionActions,
       sessionOwnerGuard,
       sessionIsStandalone,
       isGoalGateBlocked,
+      pushToast,
+      t,
     ],
   );
 
@@ -15389,21 +15762,25 @@ export function App({
 
   const composerFocusRequestRef = useRef(0);
   const sessionOpenInvocationRef = useRef(0);
-  const scheduleComposerFocus = useCallback((sessionId?: string) => {
-    const request = ++composerFocusRequestRef.current;
-    window.setTimeout(() => {
-      if (
-        request !== composerFocusRequestRef.current ||
-        approvalOverlayActiveRef.current ||
-        (sessionId !== undefined &&
-          connectionRef.current.sessionId !== sessionId)
-      ) {
-        return;
-      }
-      editorRef.current?.focus();
-    }, 0);
-    return request;
-  }, []);
+  const scheduleChatFocus = useCallback(
+    (focus: () => void, sessionId?: string) => {
+      const request = ++composerFocusRequestRef.current;
+      window.setTimeout(() => {
+        if (
+          request !== composerFocusRequestRef.current ||
+          approvalOverlayActiveRef.current ||
+          chatFocusBlockedRef.current ||
+          (sessionId !== undefined &&
+            connectionRef.current.sessionId !== sessionId)
+        ) {
+          return;
+        }
+        focus();
+      }, 0);
+      return request;
+    },
+    [],
+  );
   const createNewSession = useCallback(
     async (
       intent: NewSessionIntent,
@@ -15580,7 +15957,7 @@ export function App({
         ).clearSession(
           dropSessionContextOnClear ? { dropSessionContext: true } : undefined,
         );
-        focusRequest = scheduleComposerFocus();
+        focusRequest = scheduleChatFocus(() => editorRef.current?.focus());
         await clearPromise;
         if (
           sessionOpenInvocationRef.current === invocation &&
@@ -15617,7 +15994,7 @@ export function App({
       reportError,
       refreshWorkspaceBrand,
       refreshWorkspaceCapabilities,
-      scheduleComposerFocus,
+      scheduleChatFocus,
       setPendingSessionContext,
       sessionActions,
       showChat,
@@ -16529,6 +16906,8 @@ export function App({
 
   const shellApi = useMemo<WebShellApi>(
     () => ({
+      refreshModels: () =>
+        sessionActions.refreshModels(undefined, { reloadProviders: false }),
       navigateToMessage,
       openSplitView: () => {
         closeMobileDrawer();
@@ -16545,6 +16924,7 @@ export function App({
       respondToPendingPermission,
     }),
     [
+      sessionActions,
       navigateToMessage,
       closeMobileDrawer,
       createNewSession,
@@ -17089,13 +17469,14 @@ export function App({
       !sessionWriteBlocked
     ) {
       setSidebarSwitchingSessionId(null);
-      scheduleComposerFocus(sidebarSwitchingSessionId);
+      scheduleChatFocus(focusChatAfterNavigation, sidebarSwitchingSessionId);
     }
   }, [
     connection.catchingUp,
     connection.loadingTranscript,
     connection.sessionId,
-    scheduleComposerFocus,
+    focusChatAfterNavigation,
+    scheduleChatFocus,
     sessionWriteBlocked,
     sidebarSwitchingSessionId,
   ]);
@@ -17380,8 +17761,8 @@ export function App({
       return;
     }
     focusComposerAfterCockpitCloseRef.current = false;
-    if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
-  }, [activePanel, approvalOverlayActive, mainView]);
+    if (!activePanel && !approvalOverlayActive) focusChatAfterNavigation();
+  }, [activePanel, approvalOverlayActive, mainView, focusChatAfterNavigation]);
   useEffect(() => {
     if (navigationRef.current && navigationRef.current.route.page !== 'chat')
       return;
@@ -18048,9 +18429,9 @@ export function App({
       ) {
         return false;
       }
-      // The host's documented slash-command override runs first; only when
-      // it declines does the policy consume a model-setup command — still
-      // ahead of daemon dispatch through the hidden-command forward below.
+      // Account commands must pass login and model checks before host overrides.
+      const subscriptionHandled = handleSubscriptionLogout(text);
+      if (subscriptionHandled !== undefined) return subscriptionHandled;
       if (
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
@@ -18392,7 +18773,7 @@ export function App({
           }
           if (cmd === 'language') {
             const args = text.slice(match[0].length).trim();
-            const [subCommand, languageArg] = args.split(/\s+/);
+            const [subCommand] = args.split(/\s+/);
             if (!args) {
               store.dispatch([
                 {
@@ -18413,6 +18794,17 @@ export function App({
               return true;
             }
             if (subCommand?.toLowerCase() === 'ui') {
+              const projectScope = /(?:^|\s)--project(?:\s|$)/.test(args);
+              const globalScope = /(?:^|\s)--global(?:\s|$)/.test(args);
+              if (projectScope && globalScope) {
+                pushToast('error', t('language.usage'));
+                return true;
+              }
+              const languageArg = args
+                .slice(subCommand.length)
+                .replace(/(?:^|\s)--project(?:\s|$)/, ' ')
+                .replace(/(?:^|\s)--global(?:\s|$)/, ' ')
+                .trim();
               if (!languageArg) {
                 store.dispatch([
                   {
@@ -18438,61 +18830,15 @@ export function App({
                 pushToast('error', t('language.invalid'));
                 return true;
               }
-              const owner = { current: sessionOwnerGuard.capture() };
-              const previousLanguage = selectedLanguage;
-              // The daemon sync is what keeps the agent answering in the
-              // language the chrome just switched to, so when it cannot run
-              // (turn in flight, or a Goal owning the session) refuse the
-              // command instead of switching the UI alone — the language
-              // picker treats the identical condition the same way.
               if (commandBlocked) return blockCommand();
-              setSelectedLanguage(nextLanguage);
-              if (providedLanguage === undefined) {
-                onLanguageResolvedRef.current?.(nextLanguage);
+              if (projectScope && !uiLanguageWorkspaceCwd) {
+                pushToast('info', t('session.workspaceActionUnavailable'));
+                return true;
               }
-              {
-                const deferComposerCommit =
-                  Boolean(
-                    prepareSubmitRef.current || onSubmitBeforeRef.current,
-                  ) || createSessionPromiseRef.current !== null;
-                const clearComposerOnPromptStart =
-                  !connectionRef.current.sessionId || deferComposerCommit;
-                sendPrompt(
-                  `/language ui ${nextLanguage}`,
-                  undefined,
-                  undefined,
-                  {
-                    ownerRef: owner,
-                    suppressSessionTitle: true,
-                    clearComposerOnPromptStart,
-                    commitComposerAccepted: clearComposerOnPromptStart
-                      ? commitComposerAccepted
-                      : undefined,
-                  },
-                )
-                  .then(() => {
-                    if (!owner.current.isCurrent()) return;
-                    handleLanguageChange(nextLanguage);
-                    return sessionActions
-                      .refreshCommands()
-                      .catch((error: unknown) => {
-                        if (!owner.current.isCurrent()) return;
-                        reportError(
-                          error,
-                          'Failed to refresh commands after /language',
-                        );
-                      });
-                  })
-                  .catch((error: unknown) => {
-                    if (!owner.current.isCurrent()) return;
-                    setSelectedLanguage(previousLanguage);
-                    if (providedLanguage === undefined) {
-                      onLanguageResolvedRef.current?.(previousLanguage);
-                    }
-                    reportError(error, 'Failed to sync /language command');
-                  });
-                return clearComposerOnPromptStart ? false : true;
-              }
+              handleSettingsLanguageChange(
+                nextLanguage,
+                projectScope ? 'workspace' : 'user',
+              );
               return true;
             }
           }
@@ -19188,7 +19534,9 @@ export function App({
 
                 let formattedAuth = '';
                 if (authSource) {
-                  if (
+                  if (authSource === 'qwen-subscription') {
+                    formattedAuth = 'Qwen Subscription';
+                  } else if (
                     authSource.startsWith('oauth') ||
                     authSource === 'qwen-oauth'
                   ) {
@@ -19453,10 +19801,12 @@ export function App({
       sessionWorktree,
       gitHubPrsSupported,
       handleGoalSlashCommand,
+      handleSubscriptionLogout,
       handleThemeChange,
       handleSetMode,
       setComposerMode,
-      handleLanguageChange,
+      handleSettingsLanguageChange,
+      uiLanguageWorkspaceCwd,
       blockCommand,
       createSideTask,
       sideTasksAvailable,
@@ -19469,7 +19819,6 @@ export function App({
       runVisibleBtw,
       reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
-      providedLanguage,
       selectedLanguage,
       setPendingModel,
       selectWelcomeModel,
@@ -20121,6 +20470,7 @@ export function App({
     handleCancel,
     handleCycleMode,
     artifactPanelFullscreen,
+    waitingMinigameOpen,
   });
   escLiveRef.current = {
     streamingState,
@@ -20132,6 +20482,7 @@ export function App({
     handleCancel,
     handleCycleMode,
     artifactPanelFullscreen,
+    waitingMinigameOpen,
   };
 
   // Clear a half-armed two-press whenever the streaming/idle boundary flips — the
@@ -20223,6 +20574,11 @@ export function App({
         }
         return;
       }
+
+      // The open waiting minigame owns Escape: its own window listener
+      // collapses the board. Don't also arm the two-press stream cancel
+      // behind it, or a second Escape would stop the turn by surprise.
+      if (live.waitingMinigameOpen) return;
 
       // Streaming takes priority over clearing text (queued prompts stay intact
       // and drain after the turn settles); see decideEscapeIntent for the rules.
@@ -20365,6 +20721,104 @@ export function App({
       store,
       t,
     ],
+  );
+
+  const subscriptionModelRefreshes = useRef(new Map<string, string>());
+  const refreshSubscriptionModels = useCallback(() => {
+    const { status, sessionId, workspaceCwd, currentModel } =
+      connectionRef.current;
+    const key = getLogicalSessionKey(sessionId, workspaceCwd);
+    const modelId = key && subscriptionModelRefreshes.current.get(key);
+    if (
+      status !== 'connected' ||
+      !key ||
+      !modelId ||
+      currentModel !== modelId
+    ) {
+      return;
+    }
+    const owner = sessionOwnerGuard.capture({ includeRecovery: true });
+    if (!owner.isCurrent()) return;
+    return sessionActions
+      .refreshModels(
+        (target) => {
+          if (
+            getLogicalSessionKey(target.sessionId, target.workspaceCwd) !== key
+          )
+            throw new Error('Session changed.');
+        },
+        { reloadProviders: false },
+      )
+      .then(() => {
+        const current = connectionRef.current;
+        if (
+          owner.isCurrent() &&
+          current.status === 'connected' &&
+          getLogicalSessionKey(current.sessionId, current.workspaceCwd) ===
+            key &&
+          current.currentModel === modelId &&
+          subscriptionModelRefreshes.current.get(key) === modelId
+        ) {
+          subscriptionModelRefreshes.current.delete(key);
+        }
+      })
+      .catch(() => {
+        // The model picker's refresh remains available if this read fails.
+      });
+  }, [sessionActions, sessionOwnerGuard]);
+  useEffect(() => {
+    void refreshSubscriptionModels();
+  }, [
+    connection.currentModel,
+    connection.status,
+    logicalSessionKey,
+    refreshSubscriptionModels,
+  ]);
+
+  const activateSessionSubscriptionModel = useCallback(
+    async (
+      workspaceCwd: string | undefined,
+      sessionId: string,
+      modelId: string,
+    ) => {
+      const key = getLogicalSessionKey(sessionId, workspaceCwd);
+      const isTarget = () => {
+        const current = connectionRef.current;
+        return (
+          getLogicalSessionKey(current.sessionId, current.workspaceCwd) === key
+        );
+      };
+      if (!key || !isTarget()) {
+        throw new DOMException('Subscription target changed.', 'AbortError');
+      }
+      if (connectionRef.current.status === 'connected') {
+        await sessionActions.setModel(modelId);
+      } else {
+        // The daemon can switch a live session while its event stream reconnects.
+        await workspace.client.setSessionModel(sessionId, modelId);
+      }
+      if (!isTarget()) return;
+      subscriptionModelRefreshes.current.set(key, modelId);
+      await refreshSubscriptionModels();
+    },
+    [refreshSubscriptionModels, sessionActions, workspace.client],
+  );
+
+  const handleWorkflowModeChange = useCallback(
+    (requested: boolean) => {
+      if (sessionWriteBlockedRef.current || !connectionRef.current.sessionId) {
+        return;
+      }
+      const owner = sessionOwnerGuard.capture();
+      void sessionActions.setWorkflowMode(requested).catch((error: unknown) => {
+        if (owner.isCurrent())
+          reportError(
+            error,
+            getWorkflowModeMessages(selectedLanguage).updateFailed,
+          );
+      });
+    },
+    [reportError, sessionActions, sessionOwnerGuard, selectedLanguage],
   );
 
   const handleReasoningEffort = useCallback(
@@ -20889,11 +21343,20 @@ export function App({
       mergeCommands(
         retainedCommands,
         refreshedSkillCommands,
-        getLocalCommands(t, { sideTaskAvailable: sideTasksAvailable }),
+        getLocalCommands(t, {
+          sideTaskAvailable: sideTasksAvailable,
+          subscriptionAvailable,
+        }),
         [...additionalSlashCommands],
       ),
       t,
     )
+      .filter(
+        (command) =>
+          subscriptionAvailable ||
+          !['logout', 'upgrade'].includes(command.name) ||
+          Boolean(command.source && command.source !== 'builtin-command'),
+      )
       .filter(
         (command) =>
           workspaceContextActive ||
@@ -20921,6 +21384,7 @@ export function App({
       });
   }, [
     additionalSlashCommands,
+    subscriptionAvailable,
     modelManagementPolicy.allowAdd,
     connection.commands,
     connection.sessionId,
@@ -21739,6 +22203,7 @@ export function App({
     onSelectTab: selectArtifactPanelTab,
     onCloseTab: closeArtifactPanelTab,
     onOpenFilePreview: openFilePreview,
+    onOpenMemoryFile: openMemoryFilePreview,
     onOpenFiles: filesAvailable ? openFilesPanel : undefined,
     onReferenceFile:
       workspaceContextActive && !dialogOpen && mainView === 'chat'
@@ -22112,23 +22577,22 @@ export function App({
             />
           )}
           {modelManagementPolicy.allowAdd && showAuthDialog && (
-            <DialogShell
-              title={t('auth.title')}
-              size="lg"
+            <AuthMessage
+              dialog
+              standalone={isDesktopShell() && sessionIsStandalone}
+              allowAdd={modelManagementPolicy.allowAdd}
+              getWorkspaceCwd={getComposerWorkspaceCwd}
+              onModelActivated={selectWelcomeModel}
+              activateSessionSubscriptionModel={activateSessionSubscriptionModel}
+              onMessage={(text, type = 'status') => {
+                store.dispatch([
+                  type === 'error'
+                    ? { type: 'error', text }
+                    : { type: 'status', promptId: `local-command:${crypto.randomUUID()}`, text },
+                ]);
+              }}
               onClose={handleCloseAuthDialog}
-            >
-              <AuthMessage
-                allowAdd={modelManagementPolicy.allowAdd}
-                onMessage={(text, type = 'status') => {
-                  store.dispatch([
-                    type === 'error'
-                      ? { type: 'error', text }
-                      : { type: 'status', promptId: `local-command:${crypto.randomUUID()}`, text },
-                  ]);
-                }}
-                onClose={handleCloseAuthDialog}
-              />
-            </DialogShell>
+            />
           )}
           {projectFeaturesAvailable && showFallbacksDialog && (
             <DialogShell
@@ -22454,6 +22918,14 @@ export function App({
                       });
                     }
                   }}
+                  onOpenChannelEvents={
+                    channelNavigationEnabled
+                      ? () => {
+                          closeMobileDrawer();
+                          openPanel('channel-events');
+                        }
+                      : undefined
+                  }
                   onOpenManagedSessions={
                     managedAgentProvider
                       ? () => {
@@ -22492,6 +22964,15 @@ export function App({
                   canOpenSessionsOverview={canOpenSessionsOverview}
                   onOpenSplitView={openSplitViewFromSidebar}
                   canOpenSplitView={canOpenSplitView}
+                  onAddSessionToSplitView={addSessionToSplitView}
+                  splitSessionIds={
+                    mainView === 'split'
+                      ? splitSessionIds
+                      : pendingSplitPaneIds?.generation ===
+                          splitClassificationGenerationRef.current
+                        ? pendingSplitPaneIds.sessionIds
+                        : undefined
+                  }
                   theme={selectedTheme}
                   onThemeChange={(theme) => {
                     handleThemeChange(theme);
@@ -22547,6 +23028,10 @@ export function App({
                     managedAgentProvider ? setManagedNavigationSearch : undefined
                   }
                   currentSessionActive={!managedMode}
+                  onSessionArchived={(sessionId, workspaceCwd) => {
+                    closeUsageTabs([sessionId]);
+                    void handleCurrentSessionRemoved({ sessionId, workspaceCwd });
+                  }}
                   onNewStandaloneSession={() =>
                     createNewSession({ kind: 'global' })
                   }
@@ -22905,6 +23390,7 @@ export function App({
             <div
               ref={chatPaneRef}
               data-testid="chat-pane-container"
+                tabIndex={-1}
               className={[
                 styles.chatPane,
                 mainView !== 'chat' ? styles.chatPaneShowingPage : undefined,
@@ -23235,6 +23721,7 @@ export function App({
                       <PluginManagerPage
                         onClose={returnToChat}
                         onUseSkill={handleUseSkill}
+                        showBackButton={!navigationRailVisible}
                         initialFocusRef={pluginTabRef}
                         initialTab={pluginInitialTab}
                         skillsWorkspaceCwd={skillsSourceCwd}
@@ -23255,6 +23742,15 @@ export function App({
                       <ChannelsManagerPage
                         onClose={
                           channelSidebarEnabled && navigationRailVisible
+                            ? undefined
+                            : returnToChat
+                        }
+                        initialFocusRef={panelHeadingRef}
+                      />
+                    ) : activePanel === 'channel-events' ? (
+                      <ChannelEventsPage
+                        onClose={
+                          channelNavigationEnabled && navigationRailVisible
                             ? undefined
                             : returnToChat
                         }
@@ -23948,6 +24444,11 @@ export function App({
                                     ? openCurrentContextUsagePanel
                                     : undefined
                                 }
+                                onOpenMemoryFile={
+                                  contextUsageAvailable
+                                    ? openMemoryFilePreview
+                                    : undefined
+                                }
                                 loadingTranscript={connection.loadingTranscript}
                                 catchingUp={connection.catchingUp}
                                 hasOlderHistory={transcriptHistory.hasMore}
@@ -24231,6 +24732,18 @@ export function App({
                           />
                         </div>
                       )}
+                      {/* Workspace-level hooks trust decision uses the same
+                          approval slot and card as tool approvals; it is not
+                          a session permission request. */}
+                      {!managedMode &&
+                        !pendingToolApproval &&
+                        mainView === 'chat' && (
+                          <div className={styles.approvalOverlay}>
+                            <ProjectHooksApprovalCard
+                              onActiveChange={setProjectHooksApprovalActive}
+                            />
+                          </div>
+                        )}
                       {pendingAskUserApproval && mainView === 'chat' && (
                         <div
                           data-testid="approval-overlay"
@@ -24403,6 +24916,16 @@ export function App({
                             </span>
                           </div>
                         )}
+                        {waitingMinigameVisible && (
+                          <WaitingMinigame
+                            open={waitingMinigameOpen}
+                            onClose={() => setWaitingMinigameOpen(false)}
+                            activity={waitingMinigameActivity}
+                            tokenUsage={waitingMinigameTokens}
+                            onSelectActivity={locateWaitingActivity}
+                            gamesEnabled={waitingGamesEnabled}
+                          />
+                        )}
                         {streamingState !== 'idle' ||
                         sessionHasActivePrompt ? (
                           suppressFailedPromptRetryStreaming ? null : (
@@ -24417,6 +24940,14 @@ export function App({
                               backgroundLabel={
                                 connection.backgroundTurn?.label ??
                                 connection.backgroundTurn?.kind
+                              }
+                              trailing={
+                                <WaitingMinigameButton
+                                  open={waitingMinigameOpen}
+                                  onToggle={() =>
+                                    setWaitingMinigameOpen((value) => !value)
+                                  }
+                                />
                               }
                             />
                           )
@@ -24744,6 +25275,20 @@ export function App({
                           }
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
+                          workflowMode={connection.workflowMode}
+                          workflowModeStatus={
+                            managedMode
+                              ? undefined
+                              : !connection.sessionId
+                                ? 'unbound'
+                                : sessionWriteBlocked ||
+                                    connection.catchingUp ||
+                                    connection.status !== 'connected'
+                                  ? 'syncing'
+                                  : (connection.workflowModeStatus ?? 'unknown')
+                          }
+                          workflowModePending={connection.workflowModePending}
+                          onWorkflowModeChange={handleWorkflowModeChange}
                           reasoning={displayedReasoning}
                           onSelectReasoningEffort={
                             hasAuthoritativeReasoningContext

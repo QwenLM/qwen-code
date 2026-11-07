@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.workspace;
 
 import com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGit;
 import com.alibaba.qwen.code.managedagent.adapters.workspace.ChildWorktreeGitTest;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceException;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceProvider;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
@@ -703,7 +704,7 @@ class ChildWorkspaceServiceTest {
         assertThat(parked.state()).isEqualTo(ChildWorkspaceStore.PREPARING);
         assertThat(parked.attempts()).isZero();
         assertThat(parked.nextRetryAt()).isEqualTo(clock.get() + ChildWorkspaceService.BUSY_DELAY_MS);
-        assertThat(parked.lastError()).contains("held by another tool turn");
+        assertThat(parked.lastError()).contains("Workspace is not available for this operation");
         assertThat(root.resolve(ChildWorktreeGit.CONTAINER)).doesNotExist();
 
         service.scan();
@@ -1222,9 +1223,9 @@ class ChildWorkspaceServiceTest {
     void theScanTheMigrationGateAndTheHoldSweepReadThroughIndexes() {
         // None of the three tables is pruned: each read must key on what it
         // filters, not scan the accumulated history.
-        assertThat(indexColumns("ma_operation", "ix_ma_operation_due"))
+        assertThat(indexColumns("ma_operation", "idx_ma_operation_due"))
                 .containsExactly("operation_kind", "delivery_state", "available_at");
-        assertThat(indexColumns("ma_operation", "ix_ma_operation_storage"))
+        assertThat(indexColumns("ma_operation", "idx_ma_operation_storage"))
                 .containsExactly("storage_key", "operation_kind", "state");
         assertThat(indexColumns("ma_storage_owner", "idx_execution_lease_maintenance"))
                 .containsExactly("maintenance_id");
@@ -1310,8 +1311,14 @@ class ChildWorkspaceServiceTest {
                 WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
-        var created = sessions.insertWorkspaceSessionCommand(tenant, "actor", "create", "sha256:" + "a".repeat(64),
-                "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", cwd));
+        var created = sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor")
+                .idempotencyKey("create")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", cwd))
+                .build());
         return sessions.findSessionById(created.sessionId()).orElseThrow();
     }
 
@@ -1335,7 +1342,7 @@ class ChildWorkspaceServiceTest {
                 }
                 if (calls.incrementAndGet() > budget) {
                     throw new RuntimeBrokerException(409, "workspace_busy",
-                            "Workspace storage is held by another tool turn.", true);
+                            "Workspace is not available for this operation.", true);
                 }
                 return storageRoot;
             }

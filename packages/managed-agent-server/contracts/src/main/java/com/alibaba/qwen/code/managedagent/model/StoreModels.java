@@ -23,7 +23,17 @@ public final class StoreModels {
             long replayFloorSequence, long createdAt, long updatedAt,
             Long deletedAt, long version, ContextBinding workspace,
             String approvalMode, String toolProfile,
-            String agentDefinitionDigest, int publicChildAgentsVersion) {
+            String agentDefinitionDigest, int publicChildAgentsVersion, String modelConfigDigest) {
+        public SessionRecord(String tenantId, String sessionId, String agentId, String agentRevision,
+                String title, String status, String harnessBootId, String harnessEventEpoch,
+                long harnessLastEventId, long lastSequence, long replayFloorSequence,
+                long createdAt, long updatedAt, Long deletedAt, long version, ContextBinding workspace,
+                String approvalMode, String toolProfile, String agentDefinitionDigest, int publicChildAgentsVersion) {
+            this(tenantId, sessionId, agentId, agentRevision, title, status, harnessBootId,
+                    harnessEventEpoch, harnessLastEventId, lastSequence, replayFloorSequence,
+                    createdAt, updatedAt, deletedAt, version, workspace, approvalMode, toolProfile,
+                    agentDefinitionDigest, publicChildAgentsVersion, null);
+        }
         public SessionRecord(String tenantId, String sessionId, String agentId, String agentRevision,
                 String title, String status, String harnessBootId, String harnessEventEpoch,
                 long harnessLastEventId, long lastSequence, long replayFloorSequence,
@@ -64,7 +74,7 @@ public final class StoreModels {
                     harnessEventEpoch, harnessLastEventId, lastSequence,
                     replayFloorSequence, createdAt, updatedAt, deletedAt,
                     version, workspace, approvalMode, toolProfile,
-                    agentDefinitionDigest, publicChildAgentsVersion);
+                    agentDefinitionDigest, publicChildAgentsVersion, modelConfigDigest);
         }
     }
 
