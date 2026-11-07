@@ -346,8 +346,9 @@ event.
 **Templates.** Values are operator instruction templates with `%repo%`,
 `%pr%`, `%url%`, `%title%`, `%event%`, `%sender%`, and `%role%` variables;
 `%%` renders a literal `%`, and an unknown `%foo%` stays literal so typos are
-visible. Substituted GitHub values are sanitized and capped at 200 code
-points with a visible marker. The rendered instruction appears in a labeled
+visible. Substituted GitHub values are sanitized, and `%title%` and
+`%sender%` are also capped at 200 code points with a visible marker. The
+rendered instruction appears in a labeled
 `[Operator instruction — trusted, from this channel's configuration]` block;
 the untrusted-data warning explicitly covers the substituted values. Example
 for a review / verify / fix split across three workspaces:
