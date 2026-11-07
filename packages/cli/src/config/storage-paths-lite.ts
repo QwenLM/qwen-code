@@ -292,27 +292,33 @@ function isInstalledAdministratorFile(candidate: string): boolean {
   }
 }
 
+// The system layer each path override moves, named by its platform file.
+const SYSTEM_PATH_OVERRIDE_LAYERS = {
+  QWEN_CODE_SYSTEM_SETTINGS_PATH: 'settings.json',
+  QWEN_CODE_SYSTEM_DEFAULTS_PATH: 'system-defaults.json',
+} as const;
+
+type SystemPathOverrideName = keyof typeof SYSTEM_PATH_OVERRIDE_LAYERS;
+
 /**
- * The administrator file installed at a platform default location: the
- * system settings file or, failing that, the system defaults file beside it.
- * An entry at the platform path counts only while its root ownership can be
- * proven (see `isInstalledAdministratorFile`); it is then the proof that the
- * system layers are managed and a path override must not move them
- * elsewhere. On Windows no entry counts: `C:\ProgramData` lets ordinary
- * users create subdirectories they own, and Node exposes no ACL to tell a
- * planted entry from an installed one, so an override keeps being honored
- * there.
+ * The administrator file installed at the platform default location of one
+ * system layer (`settings.json` or `system-defaults.json`). An entry at the
+ * platform path counts only while its root ownership can be proven (see
+ * `isInstalledAdministratorFile`); it is then the proof that this layer is
+ * managed and a path override must not move it elsewhere. Each layer is
+ * judged on its own file: an installed defaults file says nothing about the
+ * settings layer, and vetoing an override on it would drop a trusted
+ * settings file for an absent one. On Windows no entry counts:
+ * `C:\ProgramData` lets ordinary users create subdirectories they own, and
+ * Node exposes no ACL to tell a planted entry from an installed one, so an
+ * override keeps being honored there.
  */
-function findInstalledAdministratorFile(): string | undefined {
+function findInstalledAdministratorFile(
+  layerFile: (typeof SYSTEM_PATH_OVERRIDE_LAYERS)[SystemPathOverrideName],
+): string | undefined {
   if (os.platform() === 'win32') return undefined;
-  const candidates = [
-    getPlatformSystemFilePath('settings.json'),
-    getPlatformSystemFilePath('system-defaults.json'),
-  ];
-  for (const candidate of candidates) {
-    if (isInstalledAdministratorFile(candidate)) return candidate;
-  }
-  return undefined;
+  const candidate = getPlatformSystemFilePath(layerFile);
+  return isInstalledAdministratorFile(candidate) ? candidate : undefined;
 }
 
 const warnedIgnoredOverrides = new Set<string>();
@@ -336,8 +342,9 @@ function warnIgnoredOverride(name: string, message: string): void {
  * the path it was set to, and why. `not-administrator-controlled` means the
  * file it names is not an administrator file, so the platform default is
  * used instead and the operator policy the variable names is dropped;
- * `administrator-file-installed` means an administrator file is installed at
- * the platform default, which the override may not move.
+ * `administrator-file-installed` means the administrator file of the layer
+ * the variable moves is installed at its platform default, which the
+ * override may not move, so that file is read instead.
  */
 export interface IgnoredSystemPathOverride {
   name: string;
@@ -355,13 +362,16 @@ type SystemPathOverrideDecision =
 
 /**
  * The resolver's decision for one configured system layer: only while no
- * administrator file is installed and the file it names is trusted (see
- * `isSystemSettingsPathTrusted`) may it replace the layer.
+ * administrator file is installed for that layer and the file it names is
+ * trusted (see `isSystemSettingsPathTrusted`) may it replace the layer.
  */
 function systemPathOverrideDecision(
+  name: SystemPathOverrideName,
   configured: string,
 ): SystemPathOverrideDecision {
-  const administratorFile = findInstalledAdministratorFile();
+  const administratorFile = findInstalledAdministratorFile(
+    SYSTEM_PATH_OVERRIDE_LAYERS[name],
+  );
   if (administratorFile !== undefined) {
     return {
       honored: false,
@@ -386,13 +396,12 @@ export function ignoredSystemPathOverrides(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
 ): IgnoredSystemPathOverride[] {
   const ignored: IgnoredSystemPathOverride[] = [];
-  for (const name of [
-    'QWEN_CODE_SYSTEM_SETTINGS_PATH',
-    'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
-  ]) {
+  for (const name of Object.keys(
+    SYSTEM_PATH_OVERRIDE_LAYERS,
+  ) as SystemPathOverrideName[]) {
     const configured = readEnvironmentVariable(env, name);
     if (!configured) continue;
-    const decision = systemPathOverrideDecision(configured);
+    const decision = systemPathOverrideDecision(name, configured);
     if (!decision.honored) {
       ignored.push({ name, configured, reason: decision.reason });
     }
@@ -401,10 +410,10 @@ export function ignoredSystemPathOverrides(
 }
 
 function isSystemPathOverrideHonored(
-  name: string,
+  name: SystemPathOverrideName,
   configured: string,
 ): boolean {
-  const decision = systemPathOverrideDecision(configured);
+  const decision = systemPathOverrideDecision(name, configured);
   if (decision.honored) return true;
   if (decision.reason === 'administrator-file-installed') {
     warnIgnoredOverride(
@@ -428,8 +437,8 @@ function isSystemPathOverrideHonored(
 
 /**
  * The system settings file. `QWEN_CODE_SYSTEM_SETTINGS_PATH` replaces the
- * platform default only while no administrator file is installed and the
- * file it names is a root-owned regular file (Unix) or stays inside the
+ * platform default only while no administrator settings file is installed
+ * there and the file it names is a root-owned regular file (Unix) or stays inside the
  * system-wide settings directory (Windows); otherwise the platform default
  * is used and a one-shot warning names the variable and the reason.
  */
@@ -451,12 +460,14 @@ export function getSystemSettingsPath(
 
 /**
  * The system defaults file. `QWEN_CODE_SYSTEM_DEFAULTS_PATH` replaces it
- * only while no administrator file is installed and the file it names is
- * trusted. A rejected override falls back to the platform default beside the
- * platform settings file, never beside the (possibly relocated) settings
- * override, so the rejected path cannot be re-derived as the layer; with no
- * defaults override at all, the layer sits beside wherever the settings
- * layer resolved.
+ * only while no administrator defaults file is installed at the platform
+ * default and the file it names is trusted. A rejected override falls back
+ * to the platform default beside the platform settings file, never beside
+ * the (possibly relocated) settings override, so the rejected path cannot be
+ * re-derived as the layer; with no defaults override at all, an installed
+ * administrator defaults file stays the layer, and otherwise the layer sits
+ * beside wherever the settings layer resolved — a settings override cannot
+ * carry an installed defaults file away with it.
  */
 export function getSystemDefaultsPath(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
@@ -474,6 +485,10 @@ export function getSystemDefaultsPath(
   if (configured) {
     return getPlatformSystemFilePath('system-defaults.json');
   }
+  const installedDefaults = findInstalledAdministratorFile(
+    'system-defaults.json',
+  );
+  if (installedDefaults !== undefined) return installedDefaults;
   return path.join(
     path.dirname(getSystemSettingsPath(env)),
     'system-defaults.json',

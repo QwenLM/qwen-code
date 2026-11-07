@@ -167,6 +167,9 @@ describe('system settings path overrides while an administrator file is installe
 
   it('keeps both layers in the platform directory when both overrides are set', () => {
     install('/etc/qwen-code/settings.json');
+    install('/etc/qwen-code/system-defaults.json');
+    trust(settingsOverride);
+    trust(defaultsOverride);
     const env = {
       QWEN_CODE_SYSTEM_SETTINGS_PATH: settingsOverride,
       QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaultsOverride,
@@ -181,10 +184,24 @@ describe('system settings path overrides while an administrator file is installe
     const warnings = warn.mock.calls.map((call: unknown[]) => String(call[0]));
     expect(warnings).toHaveLength(2);
     expect(
-      warnings.some((text: string) =>
-        text.startsWith('QWEN_CODE_SYSTEM_DEFAULTS_PATH is set'),
+      warnings.some(
+        (text: string) =>
+          text.startsWith('QWEN_CODE_SYSTEM_DEFAULTS_PATH is set') &&
+          text.includes('"/etc/qwen-code/system-defaults.json"'),
       ),
     ).toBe(true);
+    expect(resolver.ignoredSystemPathOverrides(env)).toEqual([
+      {
+        name: 'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+        configured: settingsOverride,
+        reason: 'administrator-file-installed',
+      },
+      {
+        name: 'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+        configured: defaultsOverride,
+        reason: 'administrator-file-installed',
+      },
+    ]);
   });
 
   it('does not derive the defaults beside an ignored settings override', () => {
@@ -197,17 +214,46 @@ describe('system settings path overrides while an administrator file is installe
     ).toBe('/etc/qwen-code/system-defaults.json');
   });
 
-  it('treats an installed system defaults file as an administrator file', () => {
+  it('treats an installed system defaults file as the administrator file of the defaults layer', () => {
     install('/etc/qwen-code/system-defaults.json');
+    trust(defaultsOverride);
 
     expect(
-      resolver.getSystemSettingsPath({
-        QWEN_CODE_SYSTEM_SETTINGS_PATH: settingsOverride,
+      resolver.getSystemDefaultsPath({
+        QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaultsOverride,
       }),
-    ).toBe('/etc/qwen-code/settings.json');
+    ).toBe('/etc/qwen-code/system-defaults.json');
     expect(String(warn.mock.calls[0]?.[0])).toContain(
       '"/etc/qwen-code/system-defaults.json"',
     );
+  });
+
+  it('honors a trusted settings override while only the system defaults file is installed', () => {
+    install('/etc/qwen-code/system-defaults.json');
+    trust(settingsOverride);
+    const env = { QWEN_CODE_SYSTEM_SETTINGS_PATH: settingsOverride };
+
+    expect(resolver.getSystemSettingsPath(env)).toBe(settingsOverride);
+    expect(resolver.ignoredSystemPathOverrides(env)).toEqual([]);
+    // The installed defaults file stays the defaults layer: the settings
+    // override does not carry it to a sibling of the override.
+    expect(resolver.getSystemDefaultsPath(env)).toBe(
+      '/etc/qwen-code/system-defaults.json',
+    );
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('honors a trusted defaults override while only the system settings file is installed', () => {
+    install('/etc/qwen-code/settings.json');
+    trust(defaultsOverride);
+    const env = { QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaultsOverride };
+
+    expect(resolver.getSystemDefaultsPath(env)).toBe(defaultsOverride);
+    expect(resolver.getSystemSettingsPath(env)).toBe(
+      '/etc/qwen-code/settings.json',
+    );
+    expect(resolver.ignoredSystemPathOverrides(env)).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('keeps honoring a trusted override while the installed entry is user-owned', () => {
