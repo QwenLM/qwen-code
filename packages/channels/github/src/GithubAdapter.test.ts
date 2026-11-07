@@ -6578,6 +6578,11 @@ describe('GithubChannel', () => {
       await initWithoutLoop();
       (
         channel as unknown as {
+          pendingFinalDeliveryRetryStopRequested: boolean;
+        }
+      ).pendingFinalDeliveryRetryStopRequested = false;
+      (
+        channel as unknown as {
           abortableSleep: (ms: number) => Promise<void>;
         }
       ).abortableSleep = vi.fn().mockResolvedValue(undefined);
