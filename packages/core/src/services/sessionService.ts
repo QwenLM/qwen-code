@@ -2975,20 +2975,30 @@ export class SessionService {
     archiveState: SessionArchiveState = 'active',
   ): Promise<string | undefined> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) return undefined;
-    if (
-      !(await this.readProjectSessionHead(
+    try {
+      return await this.transcriptReader.getLastUserPromptAt(
         sessionId,
-        this.getSessionFilePath(sessionId, archiveState),
-      ))
-    )
-      return undefined;
-    return this.transcriptReader.getLastUserPromptAt(sessionId, archiveState, {
-      validateFirstRecord: (record) =>
-        typeof record.sessionId === 'string' &&
-        typeof record.cwd === 'string' &&
-        record.sessionId.toLowerCase() === sessionId.toLowerCase() &&
-        this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
-    });
+        archiveState,
+        {
+          validateFirstRecord: (record) =>
+            typeof record.sessionId === 'string' &&
+            typeof record.cwd === 'string' &&
+            record.sessionId.toLowerCase() === sessionId.toLowerCase() &&
+            this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
+        },
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+  }
+
+  async setLastUserPromptAt(
+    sessionId: string,
+    timestamp: string | undefined,
+  ): Promise<void> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) return;
+    await this.transcriptReader.setLastUserPromptAt(sessionId, timestamp);
   }
 
   async getSessionListItem(

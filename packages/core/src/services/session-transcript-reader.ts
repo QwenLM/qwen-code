@@ -14,9 +14,9 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { z } from 'zod';
 import type { Content, Part } from '@google/genai';
 import { Storage } from '../config/storage.js';
+import { userPromptTimestamp } from './last-user-prompt-time.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { addDaemonRequestAttribute } from '../telemetry/daemon-tracing.js';
@@ -667,7 +667,15 @@ function recordRestoreSelectionAttributes(
 }
 
 const indexCache = new Map<string, CacheEntry>();
-const lastUserPromptCache = new Map<string, Promise<LastUserPromptSnapshot>>();
+interface LastUserPromptCacheEntry {
+  fileIdentity: SessionTranscriptFileIdentity;
+  size: number;
+  lastUpdated: string;
+  snapshot: Promise<LastUserPromptSnapshot>;
+}
+
+const lastUserPromptCache = new Map<string, LastUserPromptCacheEntry>();
+const lastUserPromptUpdates = new Map<string, object>();
 const LAST_USER_PROMPT_CACHE_MAX_ENTRIES = 512;
 // Per-workspace HMAC signing keys are cached for the daemon's lifetime (keyed by
 // key-file path). Rotating a key file externally therefore requires a daemon
@@ -2132,30 +2140,6 @@ async function readGoalStatePayloadBeforePosition(
   return parseGoalStateRecordPayloadV2(record?.systemPayload);
 }
 
-const userPromptTimestampSchema = z.string().datetime({ offset: true });
-
-function userPromptTimestamp(record: ChatRecord): string | undefined {
-  if (
-    record.type !== 'user' ||
-    record.forkedFrom !== undefined ||
-    record.agentId !== undefined ||
-    record.isSidechain === true ||
-    (record.provenance !== undefined && record.provenance !== 'real_user') ||
-    (record.subtype !== undefined &&
-      record.subtype !== 'mid_turn_user_message' &&
-      record.subtype !== 'realtime_message' &&
-      record.subtype !== 'agent_mention')
-  ) {
-    return undefined;
-  }
-  if (!userPromptTimestampSchema.safeParse(record.timestamp).success)
-    return undefined;
-  const timestamp = Date.parse(record.timestamp);
-  return Number.isFinite(timestamp)
-    ? new Date(timestamp).toISOString()
-    : undefined;
-}
-
 function lastUserPromptFromIndex(index: TranscriptIndex): string | undefined {
   for (let position = index.replayUuids.length - 1; position >= 0; position--) {
     const timestamp = index.byUuid.get(
@@ -2989,21 +2973,37 @@ export class SessionTranscriptReader {
   ): Promise<string | undefined> {
     const filePath = this.getSessionFilePath(sessionId, archiveState);
     const stats = await fsp.stat(filePath);
-    if (stats.size > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) return undefined;
     const fileIdentity = fileIdentityFromStats(stats);
     const lastUpdated = new Date(stats.mtimeMs).toISOString();
-    const key = makeCacheKey(filePath, fileIdentity, stats.size, lastUpdated);
+    const key = JSON.stringify([filePath, this.workspaceCwd]);
     const cached = lastUserPromptCache.get(key);
-    if (cached) {
+    if (
+      cached &&
+      fileIdentity.ino === 0 &&
+      cached.fileIdentity.ino === 0 &&
+      (stats.size !== cached.size || lastUpdated !== cached.lastUpdated)
+    )
+      return undefined;
+    if (
+      cached &&
+      sameFileIdentity(cached.fileIdentity, fileIdentity) &&
+      stats.size >= cached.size &&
+      (stats.size !== cached.size || lastUpdated === cached.lastUpdated)
+    ) {
       lastUserPromptCache.delete(key);
       lastUserPromptCache.set(key, cached);
-      const snapshot = await cached;
+      let snapshot = await cached.snapshot;
+      const current = lastUserPromptCache.get(key);
+      if (current && current !== cached) snapshot = await current.snapshot;
+      cached.size = stats.size;
+      cached.lastUpdated = lastUpdated;
       return readOptions.validateFirstRecord &&
         (!snapshot.firstRecordOwner ||
           !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
         ? undefined
         : snapshot.lastUserPromptAt;
     }
+    if (stats.size > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) return undefined;
     const pending = (async (): Promise<LastUserPromptSnapshot> => {
       let index: TranscriptIndex;
       try {
@@ -3058,15 +3058,23 @@ export class SessionTranscriptReader {
         },
       };
     })();
-    lastUserPromptCache.set(key, pending);
+    const entry = {
+      fileIdentity,
+      size: stats.size,
+      lastUpdated,
+      snapshot: pending,
+    };
+    lastUserPromptCache.set(key, entry);
     while (lastUserPromptCache.size > LAST_USER_PROMPT_CACHE_MAX_ENTRIES) {
       lastUserPromptCache.delete(lastUserPromptCache.keys().next().value!);
     }
     let snapshot: LastUserPromptSnapshot;
     try {
       snapshot = await pending;
+      const current = lastUserPromptCache.get(key);
+      if (current && current !== entry) snapshot = await current.snapshot;
     } catch (error) {
-      if (lastUserPromptCache.get(key) === pending)
+      if (lastUserPromptCache.get(key) === entry)
         lastUserPromptCache.delete(key);
       throw error;
     }
@@ -3075,6 +3083,45 @@ export class SessionTranscriptReader {
         !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
       ? undefined
       : snapshot.lastUserPromptAt;
+  }
+
+  async setLastUserPromptAt(
+    sessionId: string,
+    timestamp: string | undefined,
+  ): Promise<void> {
+    const filePath = this.getSessionFilePath(sessionId);
+    const key = JSON.stringify([filePath, this.workspaceCwd]);
+    if (timestamp === undefined) {
+      lastUserPromptUpdates.delete(key);
+      lastUserPromptCache.delete(key);
+      return;
+    }
+    const update = {};
+    lastUserPromptUpdates.set(key, update);
+    try {
+      const stats = await fsp.stat(filePath);
+      if (lastUserPromptUpdates.get(key) !== update) return;
+      lastUserPromptCache.delete(key);
+      lastUserPromptCache.set(key, {
+        fileIdentity: fileIdentityFromStats(stats),
+        size: stats.size,
+        lastUpdated: new Date(stats.mtimeMs).toISOString(),
+        snapshot: Promise.resolve({
+          lastUserPromptAt: timestamp,
+          firstRecordOwner: { sessionId, cwd: this.workspaceCwd },
+        }),
+      });
+      while (lastUserPromptCache.size > LAST_USER_PROMPT_CACHE_MAX_ENTRIES) {
+        lastUserPromptCache.delete(lastUserPromptCache.keys().next().value!);
+      }
+    } catch (error) {
+      if (lastUserPromptUpdates.get(key) === update)
+        lastUserPromptCache.delete(key);
+      throw error;
+    } finally {
+      if (lastUserPromptUpdates.get(key) === update)
+        lastUserPromptUpdates.delete(key);
+    }
   }
 
   private decodeSnapshot(snapshot: string): SessionTranscriptSnapshotState {
@@ -4319,6 +4366,7 @@ export class SessionTranscriptReader {
 
 export function resetSessionTranscriptIndexCacheForTest(): void {
   lastUserPromptCache.clear();
+  lastUserPromptUpdates.clear();
   indexCache.clear();
   cursorHmacKeys.clear();
   indexCacheMaxBytesForTest = undefined;
