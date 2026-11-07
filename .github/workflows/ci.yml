@@ -739,7 +739,7 @@ jobs:
       # The key carries no runner.arch. The x64-labelled pool includes ARM64
       # hosts, and every built path is JavaScript except the bundle's opentui
       # native library, which `build` recopies for the host after restoring
-      # and every consumer recopies after unpacking (`host-assets`). Split
+      # and every consumer recopies after unpacking. Split
       # by arch, each half of the pool restored the other half's misses.
       - name: 'Restore the build cache'
         id: 'build_cache'
@@ -1230,7 +1230,10 @@ jobs:
         run: |-
           tar -xzf "${RUNNER_TEMP}/unit-test-tree/unit-test-tree.tgz"
           rm -rf "${RUNNER_TEMP}/unit-test-tree"
-          node scripts/ci-build-cache.mjs host-assets
+          # PR checkouts may predate the build-cache host-assets command.
+          if [ -f dist/cli.js ]; then
+            node --input-type=module -e 'import { copyOpenTuiAssets } from "./scripts/copy_bundle_assets.js"; copyOpenTuiAssets();'
+          fi
 
       - name: 'Report npm cache usage (self-hosted)'
         if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
@@ -2193,7 +2196,7 @@ jobs:
     # used to rebuild every workspace (~10 minutes, four times per run):
     # this lane's ARM64 cache was saved once and never refreshed, so it
     # restored a stale build every time. The tree is JavaScript apart from
-    # the opentui native library, which `host-assets` recopies for ARM64.
+    # the opentui native library, which is recopied for ARM64 after unpacking.
     # Drafts skip it, as they skip the no-AK integration gate.
     needs:
       - 'classify_pr'
@@ -2458,7 +2461,10 @@ jobs:
         run: |-
           tar -xzf "${RUNNER_TEMP}/unit-test-tree/unit-test-tree.tgz"
           rm -rf "${RUNNER_TEMP}/unit-test-tree"
-          node scripts/ci-build-cache.mjs host-assets
+          # PR checkouts may predate the build-cache host-assets command.
+          if [ -f dist/cli.js ]; then
+            node --input-type=module -e 'import { copyOpenTuiAssets } from "./scripts/copy_bundle_assets.js"; copyOpenTuiAssets();'
+          fi
 
       - name: 'Install Playwright Chromium and WebKit (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
@@ -3222,7 +3228,10 @@ jobs:
         run: |-
           tar -xzf "${RUNNER_TEMP}/unit-test-tree/unit-test-tree.tgz"
           rm -rf "${RUNNER_TEMP}/unit-test-tree"
-          node scripts/ci-build-cache.mjs host-assets
+          # PR checkouts may predate the build-cache host-assets command.
+          if [ -f dist/cli.js ]; then
+            node --input-type=module -e 'import { copyOpenTuiAssets } from "./scripts/copy_bundle_assets.js"; copyOpenTuiAssets();'
+          fi
 
       - name: 'Run required no-AK integration gate'
         if: "${{ needs.test_build.result == 'success' && steps.ci_profile.outputs.ci_profile == 'full' }}"
