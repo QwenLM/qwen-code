@@ -2640,4 +2640,26 @@ export default {
   'Signed out of Qwen. Use /auth to sign in with another account.':
     '已登出 Qwen，請使用 /auth 登入其他帳號。',
   'Tip: Run /usage to see your plan usage.': '提示：執行 /usage 查看方案用量。',
+
+  // ============================================================================
+  // Goal budget stop-reason
+  // ============================================================================
+  'goal.reason.token_budget':
+    '目標已用盡自主 token 預算（{{count}} {{unit}}）。恢復目標以授權另一個預算窗口，或將其清除。',
+  'goal.reason.turn_budget':
+    '目標已用盡輪次預算（{{count}} {{unit}}）。恢復目標以授權另一個輪次窗口，或將其清除。',
+  'goal.reason.time_budget':
+    '目標已用盡活躍時間預算（{{count}} {{unit}}）。恢復目標以授權另一個時間窗口，或將其清除。',
+  'goal.reason.unit.token.one': '詞元',
+  'goal.reason.unit.token.few': '詞元',
+  'goal.reason.unit.token.many': '詞元',
+  'goal.reason.unit.turn.one': '輪',
+  'goal.reason.unit.turn.few': '輪',
+  'goal.reason.unit.turn.many': '輪',
+  'goal.reason.unit.minute.one': '分鐘',
+  'goal.reason.unit.minute.few': '分鐘',
+  'goal.reason.unit.minute.many': '分鐘',
+  'goal.reason.unit.second.one': '秒',
+  'goal.reason.unit.second.few': '秒',
+  'goal.reason.unit.second.many': '秒',
 };
