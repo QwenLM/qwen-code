@@ -149,7 +149,17 @@ export function validateReasoningCapabilities(
   route: Route,
   declaration: unknown,
 ): ResolvedReasoning | undefined {
-  if (declaration === undefined) return getBuiltinDeepSeekReasoning(route);
+  if (declaration === undefined) {
+    if (route.authType === 'qwen-subscription') {
+      return {
+        thinking: true,
+        efforts: ['low', 'medium', 'xhigh'],
+        defaultEffort: 'medium',
+        disableField: 'enable_thinking',
+      };
+    }
+    return getBuiltinDeepSeekReasoning(route);
+  }
   const input = validateReasoningDeclaration(route, declaration);
   if (!input) return undefined;
   if (input.profile === undefined && 'thinking' in input)

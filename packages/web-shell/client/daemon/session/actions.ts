@@ -51,6 +51,7 @@ import {
   extractHttpStatus,
   isInvalidClientIdError,
   isAcpChildCapacityError,
+  isSessionLimitExceededError,
 } from './httpErrors.js';
 import {
   applyConfigOptions,
@@ -1321,6 +1322,8 @@ export function createDaemonSessionActions({
         );
       }
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+      const localPrompt = { sessionId, startedAt: Date.now() };
+      setConnection((current) => ({ ...current, localPrompt }));
       setPromptStatus('waiting');
       const ctrl = new AbortController();
       activePromptsRef.current.set(sessionId, {
@@ -1528,6 +1531,12 @@ export function createDaemonSessionActions({
           'send_prompt',
         );
       } finally {
+        setConnection((current) => {
+          if (current.localPrompt !== localPrompt) return current;
+          const next = { ...current };
+          delete next.localPrompt;
+          return next;
+        });
         const active = activePromptsRef.current.get(sessionId);
         if (active?.controller === ctrl) {
           activePromptsRef.current.delete(sessionId);
@@ -1924,10 +1933,6 @@ export function createDaemonSessionActions({
       ) {
         throw new Error('Model refresh requires a connected workspace.');
       }
-      if (readOnly && session) {
-        // Invalidate older reconnect snapshots without starting a config write.
-        observeSessionConfig(sessionConfigGeneration, session);
-      }
       const isCurrent = (current = getConnection()) =>
         sessionRef.current === session &&
         current.sessionId === before.sessionId &&
@@ -1954,6 +1959,10 @@ export function createDaemonSessionActions({
       };
       await beforeRefresh?.({ workspaceCwd, sessionId: session?.sessionId });
       if (!isCurrent()) return;
+      if (readOnly && session) {
+        // Invalidate older reconnect snapshots without starting a config write.
+        observeSessionConfig(sessionConfigGeneration, session);
+      }
       const workspace = client.workspaceByCwd(workspaceCwd);
       if (!readOnly) {
         const reload = workspace.reloadModelProviders({
@@ -2792,6 +2801,9 @@ export function createDaemonSessionActions({
           }`,
           error,
           'create_session',
+          isSessionLimitExceededError(error)
+            ? { code: 'session_limit_exceeded' }
+            : undefined,
         );
       }
     },
@@ -2873,17 +2885,19 @@ export function createDaemonSessionActions({
 
     async releaseSession(sessionId) {
       try {
-        const session = requireSessionForAction(
-          addNotice,
-          sessionRef.current,
-          'Release session failed',
-          'release_session',
-        );
+        const session = sessionRef.current;
+        // The release dialog is reachable from the empty new-session screen,
+        // where no session client exists yet. Fall back to the workspace
+        // daemon client so the recovery action still frees the slot.
+        const client = session?.client ?? getClient?.();
+        if (!client) {
+          throw new Error('Daemon session is not connected');
+        }
         await withActionTimeout(
-          session.client.closeSession(sessionId),
+          client.closeSession(sessionId),
           'Release session timed out',
         );
-        onGeneratedUiInvalidated?.(session, 'deleted', sessionId);
+        if (session) onGeneratedUiInvalidated?.(session, 'deleted', sessionId);
       } catch (error) {
         throw dispatchActionError(
           addNotice,
@@ -2944,10 +2958,14 @@ export function createDaemonSessionActions({
       }
     },
 
-    async getContext() {
+    async getContext(opts) {
+      const currentSession = sessionRef.current;
+      if (!currentSession && opts?.silent) {
+        throw new Error('Daemon session is not connected');
+      }
       const session = requireSessionForAction(
         addNotice,
-        sessionRef.current,
+        currentSession,
         'Load context failed',
         'load_context',
       );
@@ -2993,6 +3011,9 @@ export function createDaemonSessionActions({
             ? { ...current, workflowModeStatus: 'unknown' }
             : current,
         );
+        if (opts?.silent && isTransientSessionReadError(error)) {
+          throw error;
+        }
         throw dispatchActionError(
           addNotice,
           'Load context failed',

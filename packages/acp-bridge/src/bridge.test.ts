@@ -82,7 +82,12 @@ import type {
   BridgeTelemetry,
 } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
-import { EventBus, type BridgeEvent } from './eventBus.js';
+import {
+  EventBus,
+  DEFAULT_RING_MAX_BYTES,
+  MAX_RING_MAX_BYTES,
+  type BridgeEvent,
+} from './eventBus.js';
 import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
   JOURNAL_GROWTH_HARD_CAP_BYTES,
@@ -3037,6 +3042,110 @@ describe('createAcpSessionBridge', () => {
 
       await bridge.shutdown();
     });
+
+    it('reaps an idle channel session while its channel subscriber is attached', async () => {
+      const closeCalls: string[] = [];
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+            closeCalls.push(String(params['sessionId']));
+          }
+          return { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 10,
+        sessionIdleTimeoutMs: 10,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sourceType: 'channel',
+      });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      const abort = new AbortController();
+      const pending = bridge
+        .subscribeEvents(session.sessionId, { signal: abort.signal })
+        [Symbol.asyncIterator]()
+        .next();
+      await vi.waitFor(() =>
+        expect(
+          bridge.getDaemonStatusSnapshot().sessions[0]?.subscriberCount,
+        ).toBe(1),
+      );
+
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+      expect(closeCalls).toEqual([session.sessionId]);
+
+      abort.abort();
+      await pending.catch(() => undefined);
+      await bridge.shutdown();
+    });
+
+    it('keeps a non-channel session with an attached subscriber past the idle threshold', async () => {
+      const closeCalls: string[] = [];
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+            closeCalls.push(String(params['sessionId']));
+          }
+          return { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 10,
+        sessionIdleTimeoutMs: 10,
+      });
+      const channelSession = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+        sourceType: 'channel',
+      });
+      const userSession = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: channelSession.sessionId, holds: [] },
+        { sessionId: userSession.sessionId, holds: [] },
+      ]);
+      const subscriptions = [channelSession, userSession].map((session) => {
+        const abort = new AbortController();
+        const pending = bridge
+          .subscribeEvents(session.sessionId, { signal: abort.signal })
+          [Symbol.asyncIterator]()
+          .next();
+        return { abort, pending };
+      });
+      await vi.waitFor(() =>
+        expect(
+          bridge
+            .getDaemonStatusSnapshot()
+            .sessions.every((session) => session.subscriberCount === 1),
+        ).toBe(true),
+      );
+
+      // The channel sibling proves the reaper ran; the user session survives
+      // that same tick only because the subscriber guard still applies to it.
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(1));
+      expect(closeCalls).toEqual([channelSession.sessionId]);
+      expect(bridge.getDaemonStatusSnapshot().sessions[0]?.sessionId).toBe(
+        userSession.sessionId,
+      );
+
+      for (const subscription of subscriptions) {
+        subscription.abort.abort();
+        await subscription.pending.catch(() => undefined);
+      }
+      await bridge.shutdown();
+    });
   });
 
   it('streams workspace content without requiring a session', async () => {
@@ -4452,6 +4561,94 @@ describe('createAcpSessionBridge', () => {
       /Invalid eventRingSize/,
     );
   });
+
+  it('resolves default and custom eventRingMaxBytes at bridge construction', () => {
+    expect(
+      makeBridge().getDaemonStatusSnapshot().limits.eventRingMaxBytes,
+    ).toBe(DEFAULT_RING_MAX_BYTES);
+    for (const value of [1, 1024 * 1024, MAX_RING_MAX_BYTES]) {
+      expect(
+        makeBridge({ eventRingMaxBytes: value }).getDaemonStatusSnapshot()
+          .limits.eventRingMaxBytes,
+      ).toBe(value);
+    }
+  });
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER + 1,
+    MAX_RING_MAX_BYTES + 1,
+  ])('rejects invalid eventRingMaxBytes=%s at construction', (value) => {
+    expect(() => makeBridge({ eventRingMaxBytes: value })).toThrow(
+      /eventRingMaxBytes/,
+    );
+  });
+
+  it.each(['fresh', 'load', 'resume'] as const)(
+    'wires eventRingMaxBytes and retention diagnostics for %s sessions',
+    async (kind) => {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        eventRingMaxBytes: 1024,
+      });
+      const retention = vi.spyOn(EventBus.prototype, 'retentionSnapshot');
+      try {
+        const session =
+          kind === 'fresh'
+            ? await bridge.spawnOrAttach({ workspaceCwd: WS_A })
+            : await bridge[kind === 'load' ? 'loadSession' : 'resumeSession']({
+                sessionId: SESS_A,
+                workspaceCwd: WS_A,
+              });
+        await handle.agentConnection.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [{ name: 'help', description: 'Show help' }],
+            _meta: {
+              availableSkillDetails: { help: { body: 'Skill details' } },
+            },
+          },
+        });
+        for (let i = 0; i < 8; i++) {
+          await handle.agentConnection.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'x'.repeat(300) },
+            },
+          });
+        }
+        const diagnostic = bridge.getDaemonStatusSnapshot().sessions[0]!;
+        const snapshot = retention.mock.results.at(-1)!.value as ReturnType<
+          EventBus['retentionSnapshot']
+        >;
+        expect(diagnostic).toMatchObject({
+          eventRingCount: snapshot.ringCount,
+          eventRingBytes: snapshot.ringBytes,
+          eventRingEarliestEventId: snapshot.earliestEventId,
+          eventRingEvictedEvents: snapshot.evictedEvents,
+          eventRingEvictedBytes: snapshot.evictedBytes,
+          availableCommandsSnapshotBytes:
+            snapshot.availableCommandsSnapshotBytes,
+        });
+        expect(diagnostic.eventRingCount).toBeGreaterThan(0);
+        expect(diagnostic.eventRingBytes).toBeLessThanOrEqual(1024);
+        expect(diagnostic.eventRingEvictedEvents).toBeGreaterThan(0);
+        expect(diagnostic.eventRingEvictedBytes).toBeGreaterThan(0);
+        expect(diagnostic.availableCommandsSnapshotBytes).toBeGreaterThan(0);
+      } finally {
+        retention.mockRestore();
+        await bridge.shutdown();
+      }
+    },
+  );
 
   it('accepts and rejects BridgeOptions.compactedReplayMaxBytes at construction time', () => {
     expect(() => makeBridge({ compactedReplayMaxBytes: 1 })).not.toThrow();
