@@ -2891,8 +2891,9 @@ jobs:
         run: |-
           set -euo pipefail
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
-          # The 👀 acknowledgement lives in the hosted authorize job, so the
-          # requester gets a receipt even when this self-hosted job is queued.
+          # The 👀 acknowledgement lives in the authorize gate job, so the
+          # requester gets a receipt ahead of this sandbox lane (for comment
+          # triggers the gate itself queues with the pool).
           # Same mergeability settling loop as the tmux job: refs/pull/N/merge
           # is only current once GitHub has computed mergeability.
           for attempt in 1 2 3 4 5; do

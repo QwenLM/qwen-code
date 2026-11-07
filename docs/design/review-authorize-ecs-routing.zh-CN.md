@@ -8,9 +8,10 @@
 
 每一条 bot 命令——`qwen-code-pr-review.yml` 里的 `/review`、`/resolve`，以及
 `qwen-triage.yml` 里的 `/triage`、`/tmux`、`/verify`——都先经过一个 `authorize`
-job。该 job 是写权限门：从事件元数据读出触发主体，并调用一个只读 API
-（`repos/{owner}/{repo}/collaborators/{principal}/permission`）。它不跑 agent、不
-checkout 任何代码、也不处理任何 pull-request 内容。
+job。该 job 是写权限门：从事件元数据读出触发主体，并调用权限 API
+（`repos/{owner}/{repo}/collaborators/{principal}/permission`）；triage 门还会
+读取 PR 作者/head 并发送回执反应/评论。它不跑 agent、不 checkout 任何代码、也不
+处理任何 pull-request 内容。
 
 尽管这是一个只需四秒的纯 API job，实测 `authorize` 曾在 GitHub 托管队列里等待
 **3 小时 10 分**才得以启动（PR #15286，run 42201221971，2026-11-06：创建于
@@ -106,7 +107,7 @@ PR 载荷的事件（`pull_request_target`、`pull_request_review`、
 1. **因为没有任何 fork 代码进入该 job，所以在持久池上是安全的。** 让 fork 触发的
    工作远离持久 runner 的威胁，是 job *执行*攻击者撰写的分支代码、并留下幸存进程攻
    击同一主机上后续 job。`authorize` 不执行任何来自 PR 的东西：它只读事件元数据（一
-   个用户名）并调用一个只读 API。评论正文只在 GitHub 侧的 `if:` 表达式里被匹配，绝
+   个用户名）并调用只读/回执 API。评论正文只在 GitHub 侧的 `if:` 表达式里被匹配，绝
    不传入 shell。因此把它路由到 ECS 并不扩大 fork 攻击面。
 
 2. **与仓库既有模式一致。** `qwen-autofix.yml` 的 `route` 与 `review-scan` job 早
@@ -129,27 +130,28 @@ PR 载荷的事件（`pull_request_target`、`pull_request_review`、
 ## 风险
 
 - **命令触发对任何 GitHub 用户开放。** `issue_comment` 析取项使该门可以被任何人在
-  fork PR 上评论 `@qwen-code /review` 或 `@qwen-code /resolve` 触发；
-  `workflow_dispatch` 仍要求写权限。该门不运行该 PR 的任何内容，故未新增执行路径
-  ——但它确实把 `CI_BOT_PAT` 与该 job 的 `should_review` 决定，放到了由外部人员排程
-  的一次运行所在的共享池上，而 `should_review` 正是每个下游 job 不经重新推导即消费
-  的授权事实。两者都属于
+  fork PR 上评论 bot 命令（`@qwen-code /review`、`/resolve`、`/triage`、`/tmux`、
+  `/verify`）触发；`workflow_dispatch` 仍要求写权限。该门不运行该 PR 的任何内容，
+  故未新增执行路径——但它确实把 `CI_BOT_PAT` 与该 job 的授权决定（review workflow
+  的 `should_review`、triage 的 `should_run`），放到了由外部人员排程的一次运行所在
+  的共享池上，而该输出正是每个下游 job 不经重新推导即消费的授权事实。两者都属于
   [autofix-gate-runner-isolation.md](autofix-gate-runner-isolation.md) 跟踪的同一
   共享主机类别；本条记录这次触发面扩大，以免被误认为触发集未变。
 - **共享主机上的 PAT 暴露。** `authorize` 加载 `CI_BOT_PAT`。在持久池上，先前 job
   的同驻幸存进程原则上可能以它为目标——尤其是经由池上共享且可写的 `~/.config/gh`：
-  在那里植入的 `http_unix_socket` 会收到该 PAT，并能伪造下游 job 当作 `should_review`
+  在那里植入的 `http_unix_socket` 会收到该 PAT，并能伪造下游 job 当作门的授权输出
   消费的权限响应。因此该步骤以与 `qwen-autofix.yml` 的 `route`/`review-scan` 相同的
   gh pin 开场——`export GH_HOST=github.com` 加一个私有、带守卫的 `GH_CONFIG_DIR`
   （`mktemp` 失败即 exit 1；该门 fail closed）——并由一条 meta-test pin 住它们。
   **带着这些 pin**，其暴露才与 `review-scan` 已被接受的相同（它在同一池上加载
   `CI_DEV_BOT_PAT`；`route` 只加载只读的 `github.token`），且 `authorize` 严格更轻
-  （一个只读 API、无 checkout）。没有这些 pin，该对等就不成立。共享池上携带 PAT 步骤
-  的结构性收口在 [autofix-gate-runner-isolation.md](autofix-gate-runner-isolation.md)
+  （少量只读/回执 API、无 checkout）。没有这些 pin，该对等就不成立。共享池上携带 PAT
+  步骤的结构性收口在 [autofix-gate-runner-isolation.md](autofix-gate-runner-isolation.md)
   中单独跟踪；本改动不使其倒退。
 - **下游仍有托管队列。** `resolve-pr` 与 `publish-resolution` 仍在托管上运行，因此
-  饱和的托管池仍可能延迟 agent 与推送。本改动只消除门口等待，并不宣称 `/resolve` 变
-  得无队列。
+  饱和的托管池仍可能延迟 agent 与推送；`/verify` 的 `publish-verify` job 也出于设计
+  留在托管（它携带 OSS 凭据）。本改动只消除门口等待，并不宣称 `/resolve`——或任何
+  命令——端到端变得无队列。
 
 ## 扩展到 triage 命令门
 
@@ -158,7 +160,7 @@ PR 载荷的事件（`pull_request_target`、`pull_request_review`、
 与 review 门的单步骤不同，该 job 有**三个**步骤用 `CI_BOT_PAT` 调 `gh`——权限检查、
 verify 确认、以及停用通告——每一步现在都以相同的自包含 `GH_HOST` + 带守卫
 `GH_CONFIG_DIR` 前导开场，遵循仓库的每步约定。把该门搬上池却不加固其中任何一步，都会
-复现 R2-1 改道，因此这里的加固不是可选项。`.github/scripts/qwen-triage-workflow.test.mjs`
+复现 gh 配置改道（植入的共享配置收到 PAT 并伪造权限响应），因此这里的加固不是可选项。`.github/scripts/qwen-triage-workflow.test.mjs`
 中的一条 meta-test pin 住析取项、无 checkout/无拼接不变量、每个步骤（不限于携带 PAT
 的步骤——不携带凭据的步骤若执行植入文件，同样会在持久主机上留下幸存进程）不得执行
 仓库代码的不变量、以及每个调 gh 步骤的 gh 配置加固。该 workflow 的记录体积基线
