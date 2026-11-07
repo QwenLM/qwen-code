@@ -14,7 +14,7 @@
 
 在既有字段 hook 增加明确的 `clear()` 事务。非空且有效的字段只提交一次空值，保留文本/光标 Undo 及既有 100 条历史合同；空字段或 settled 字段不操作。保留[对话框编辑设计](2026-10-30-opentui-dialog-editing.zh-CN.md)中的 owner 接受/检查点限制。真实数字上下文 owner 接受空字符串；测试其接受后的 `auto` 显示，以及 Undo 后提交原数字。自定义 model 文本先原样接受，再单独归一化 model IDs；model search 原样接受文本。
 
-只在具有焦点的 Auth URL/API-key/自定义 model/search/数字字段和 Permissions 规则/目录字段接入原 CLEAR_INPUT matcher。保留视图、可见性和 settled 守卫。不把 Ctrl+C 加进同时服务密码/手写输入的纯 reducer。Sources、AskUserQuestion 和非敏感 acquisition 设置继续明确待办；不自动替换 Discover 手写搜索及敏感密码 Ctrl+U 行为。外部编辑器另行处理。
+只在具有焦点的 Auth URL/API-key/自定义 model/search/数字字段、Permissions 规则/目录字段，以及扩展 Sources 的两个普通输入字段（Add Marketplace、Install Extension）接入原 CLEAR_INPUT matcher。保留视图、可见性、busy 和 settled 守卫；在一次 stdin 读取可能先移动焦点再送达清空的路径上，读取实时焦点索引。不把 Ctrl+C 加进同时服务密码/手写输入的纯 reducer。AskUserQuestion 和非敏感 acquisition 设置继续明确待办；不自动替换 Discover 手写搜索及敏感密码 Ctrl+U 行为。外部编辑器另行处理。Sources 分支的规格见 [Source 字段控制](2026-10-30-opentui-source-field-controls.zh-CN.md)。
 
 局部清空不能通过 `preventDefault`、`stopPropagation` 吞掉进程全局事件。Ink 将 Ctrl+C 广播给字段与 app owner：首击可以清空同时预置退出，既有窗口内第二击可以退出。全局入口复用原 QUIT/EXIT matcher，不改变 release 过滤、取消、guard 窗口或 composer 非空时的 Ctrl+D 门槛。Ctrl+D 不编辑对话框字段；全局能否处理它不取决于该字段长度。
 
@@ -23,6 +23,8 @@
 ## 公开验证
 
 复用既有 `tui-editor-parity.test.ts` scenario 与公开 `InteractiveSession`，不新增 driver。新增 `permissions-clear-undo-replace-without-model` 用例沿用 90 秒限制、零重试：进入 `/permissions`，paste `WebFetch`，清空到 placeholder 并观测退出提示，Undo 恢复精确原字段行，在独立的再次清空前观测 guard 到期，替换为 `Read`，实际经过 scope 选择并要求设置只含 `Read`。返回 composer，以 `/quit` 自然 exit 0/signal 0，并要求模型 HTTP 请求为零。
+
+该用例刻意等到护栏窗口到期后才做下一次清空，因此无法固定「必须仍然退出」的那一半契约。`permissions-second-control-c-exits-without-model` 在同一时限内承担这一半：填满规则字段，两次 Ctrl+C 之间不插入任何轮询帧，断言间隔仍在 `CTRL_EXIT_PROMPT_DURATION_MS` 之内，并要求 exit 0/signal 0、模型请求为零。给字段清空路径加上 `stopPropagation()` 或 `exitGuard.disarm()` 必须使该用例失败。
 
 在已记录的全局安装 Ink 基线之后，对单独构建的候选执行 Node+Ink、Bun+Ink、strict Bun+OpenTUI。固定的公开 `options.command` 必须携带原完整 CLI 参数。除非另有独立观测，基线只记录有限的启动器字节/realpath；产品 commit/version/runtime 保持未知，并与 harness HEAD、diff、Node 身份分开。不能用 harness bundle 或版本探测代替安装产品身份。
 

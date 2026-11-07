@@ -989,6 +989,11 @@ it(
         expect(settings().context?.includeDirectories).not.toContain(
           realpathSync(parent),
         );
+        // Both writes land in one settings file. Re-read the rule after the
+        // directory commit: a commit that rewrote the file from a stale
+        // snapshot, or wrote only `context`, would drop it while every
+        // context-only assertion below still passed.
+        expect(settings().permissions?.allow).toEqual(['Bash(ls)']);
         const beforeCancel = readFileSync(settingsFile, 'utf8');
         await press('\r');
         await until(
@@ -1033,10 +1038,16 @@ it(
             permissions?: { allow?: string[] };
           };
         const exitHint = 'Press Ctrl+C again to exit.';
+        // The value arm is column-exact at the scenario's pinned cols: 100.
+        // Ink spends two columns on its `> ` prefix, so its padding run is 79
+        // where OpenTUI's is 81 (caret cell included). A `[ \t]*` here absorbs
+        // the phantom column an empty `after` text node mounts — the layout
+        // regression this case exists to catch. Only the whitespace outside
+        // the frame stays tolerant: ink trims the row tail, OpenTUI pads it.
         const originalRuleRow =
           renderer === 'ink'
-            ? /^[ \t]*│[ \t]*│ > WebFetch[ \t]*│[ \t]*│[ \t]*$/m
-            : /^[ \t]*│[ \t]*│ WebFetch[ \t]*│[ \t]*│[ \t]*$/m;
+            ? /^[ \t]*│[ \t]*│ > WebFetch {79}│[ \t]*│[ \t]*$/m
+            : /^[ \t]*│[ \t]*│ WebFetch {81}│[ \t]*│[ \t]*$/m;
         await until(
           async () =>
             (await frame('clear-ready')).includes('Type your message'),
@@ -1114,6 +1125,56 @@ it(
         await type('/quit');
         await press('\r');
         await until(() => session.exitResult() !== undefined, 'natural quit');
+        expect(session.exitResult()?.exitCode).toBe(0);
+        expect(session.exitResult()?.signal ?? 0).toBe(0);
+        expect(server.requests).toHaveLength(0);
+      },
+    ),
+  90_000,
+);
+
+it(
+  'permissions-second-control-c-exits-without-model',
+  () =>
+    scenario(
+      'permissions-second-control-c-exits-without-model',
+      async ({ session, server, type, press, paste, frame }) => {
+        await until(
+          async () => (await frame('exit-ready')).includes('Type your message'),
+          'composer ready',
+        );
+        await type('/permissions');
+        await press('\r');
+        await until(
+          async () => (await frame('exit-list')).includes('Add a new rule'),
+          'permission list',
+        );
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('exit-input')).includes('Enter permission rule…'),
+          'rule field',
+        );
+        await paste('WebFetch');
+        await until(
+          async () => (await frame('exit-filled')).includes('WebFetch'),
+          'rule field holds the pasted value',
+        );
+        // The confirming half of the Ctrl+C contract: the field clear must not
+        // swallow the process-global key, so a second press inside the 1000 ms
+        // guard window still quits. The sibling clear/Undo case pins the first
+        // press's placeholder and exit hint; no frame is polled between these
+        // two presses because that round-trip can outlast the window.
+        const firstKeyAt = Date.now();
+        await press('\x03', false);
+        await sleep(300);
+        const secondKeyAt = Date.now();
+        expect(secondKeyAt - firstKeyAt).toBeLessThan(1000);
+        await press('\x03', false);
+        await until(
+          () => session.exitResult() !== undefined,
+          'second Ctrl+C reaches the global exit owner',
+        );
         expect(session.exitResult()?.exitCode).toBe(0);
         expect(session.exitResult()?.signal ?? 0).toBe(0);
         expect(server.requests).toHaveLength(0);

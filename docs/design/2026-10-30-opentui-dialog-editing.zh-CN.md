@@ -22,9 +22,9 @@
 
 ## Permissions 表单与补全
 
-规则/路径编辑与 bracketed paste 使用 `useLineEdit`。保留原规则解析、工作区验证和变更回调。通过 `windowLineAtCaret` 绘制光标所在逻辑行，清理终端文本并限制到输入框实际宽度。空输入或无效提交保持可编辑。成功提交先 settle 再切视图。目录提交只有在同步保存回调成功返回后才 settle；回调抛错时必须保留编辑和 Escape。
+规则/路径编辑与 bracketed paste 使用 `useLineEdit`。这些字段只绘制一行，因此其 paste 分支在插入前把 CR/LF 连续串压平为一个空格：保留换行会让光标停在空的第二行，整行读起来是空白，而 Enter 仍提交用户从未看到的缓冲区。共享的 `normalizePastedText` 为 composer 保留换行，不作改动。保留原规则解析、工作区验证和变更回调。通过 `windowLineAtCaret` 绘制光标所在逻辑行，清理终端文本并限制到输入框实际宽度。空输入或无效提交保持可编辑。成功提交先 settle 再切视图。目录提交只有在同步保存回调成功返回后才 settle；回调抛错时必须保留编辑和 Escape。
 
-复用已有 batch-safe 视图状态。旧绘制视图的 handler 不能编辑或提交后继视图。Esc settle 离开的字段。Tab 补全在当前 stdin read 剩余期间 settle 旧字段，下一次渲染按补全路径重新挂载；同一 read 的 Tab+Enter 不能提交补全前的路径。
+复用已有 batch-safe 视图状态。旧绘制视图的 handler 不能编辑或提交后继视图。Esc settle 离开的字段。Tab 补全在当前 stdin read 剩余期间 settle 旧字段，下一次渲染按补全路径重新挂载；同一 read 的 Tab+Enter 不能提交补全前的路径。Tab/Up/Down 按字段实时值重算候选，而不是读取已绘制列表，并仍受行数预算上限约束：丢弃按键会失去与前缀字符同处一次读取的 Tab，而选用已绘制列表则会套用该字符已经排除的候选。
 
 对齐 Ink 补全：展开 `~`，保留相对路径，检查目录项，排除文件和隐藏名称，按前缀匹配，保留文件系统枚举顺序中的前 6 项，显示候选，Up/Down 选择，Tab 应用并补 `/`。文本编辑后重置选择。候选行按实际可用高度计费，不能选择隐藏行。保留现有 realpath、存在性与覆盖关系验证。
 
@@ -34,7 +34,7 @@
 
 已核查每个生产 owner。Sources 传原样 `setInput`；Discover 传原样 `setQuery`。Base URL/API-key onChange 原样存值；API key trim 仅在成功提交、字段 settle 时发生。自定义 model 字段先原样保存 custom text，再单独归一化 model IDs。Model search 原样存值。Ask-user 自定义答案原样存文本、另更新选中标记。Permissions 字段原样存值、提交时才验证。
 
-唯一实际过滤 onChange 是 context-window size：`useProviderSetupFlow.ts` 中的 `changeContextWindowSize` 删除非数字，初始化及 start/reset 只写空值。在两个真实 `ctxField.insert` 调用前按同一 `/[^0-9]/g` 规则归一化键入/paste 文本，保留 flow 过滤作为幂等后盾。非法输入变为 no-op，不改变历史；混合 paste 把接受的数字记为一次编辑。非空 paste 即使过滤结果为空仍应消费。专用 Space 分支也必须消费 Space，但 context-window 行不调用 insert；其他行保留切换行为。Space 不能创建被拒绝的历史记录。不修改 auth-flow 模块或通用回调 API。
+唯一实际过滤 onChange 是 context-window size：`useProviderSetupFlow.ts` 中的 `changeContextWindowSize` 删除非数字，初始化及 start/reset 只写空值。在两个真实 `ctxField.insert` 调用前按同一 `/[^0-9]/g` 规则归一化键入/paste 文本，保留 flow 过滤作为幂等后盾。非法输入变为 no-op，不改变历史；混合 paste 把接受的数字记为一次编辑。非空 paste 即使过滤结果为空仍应消费。专用 Space 分支也必须消费 Space，但 context-window 行不调用 insert；其他行保留切换行为。Space 不能创建被拒绝的历史记录。清空与数字分支读取由 flow 镜像而来的实时焦点索引，因为一次 stdin 读取可能在按键到达前先移动焦点；flow 暴露其已有的 `advancedOptionCount`，使镜像复现同一环绕规则而不是复制一份公式。不修改通用回调 API。
 
 已有 auth 测试明确记录受控字段与 Ink 的差异：Ink 内部 buffer 可能保留被拒绝字母，而父值已过滤；OpenTUI 保持接受后的数字与光标。保留这个已测试的 OpenTUI 数字合同。对比归一化后已接受编辑序列与最终持久化 contextWindowSize，不能声称非法原始输入的内部状态完全一致。
 
@@ -75,14 +75,14 @@ for leg in node:ink bun:ink bun:opentui; do
     TMPDIR="$dialog_leg_root/tmp" TMP="$dialog_leg_root/tmp" TEMP="$dialog_leg_root/tmp" \
     QWEN_E2E_RUNTIME="${leg%%:*}" QWEN_E2E_RENDERER="${leg#*:}" QWEN_SANDBOX=false \
     npx vitest run interactive/tui-editor-parity.test.ts interactive/tui-extension-acquisition.test.ts \
-      --testNamePattern='^(permissions-edits-and-completes-without-model|acquires a real source through Discover and cold reload on .*)$' \
+      --testNamePattern='^(permissions-edits-and-completes-without-model|permissions-clear-undo-replace-without-model|permissions-second-control-c-exits-without-model|acquires a real source through Discover and cold reload on .*)$' \
       --retry=0 --fileParallelism=false --maxWorkers=1 --minWorkers=1 \
       --dangerouslyIgnoreUnhandledErrors=false || failed=1
 done
 exit "$failed"
 ```
 
-这两个场景通过现有测试文件接入 `.github/workflows/tui-parity.yml`：Permissions 编辑/paste、规则持久化、可见目录补全与取消；Source 编辑/撤销/重做后实际获取及冷启动重载。renderer matrix 要求 strict Bun+OpenTUI，并与 Node+Ink、Bun+Ink 区分。逐项记录各运行组合；某一组合仍待完成或原生微型测试成功，都不表示三个组合全部通过。受控 fixture 不需要外部模型账号或设备权限。
+这四个场景通过现有测试文件接入 `.github/workflows/tui-parity.yml`：Permissions 编辑/paste、规则持久化、可见目录补全与取消；Ctrl+C 清空/撤销/替换并观测全局退出提示；护栏窗口内第二次 Ctrl+C 仍以 0 退出；Source 编辑/撤销/重做后实际获取及冷启动重载。renderer matrix 要求 strict Bun+OpenTUI，并与 Node+Ink、Bun+Ink 区分。逐项记录各运行组合；某一组合仍待完成或原生微型测试成功，都不表示三个组合全部通过。受控 fixture 不需要外部模型账号或设备权限。
 
 单元测试覆盖同一 read 的按键/paste、被拒提交、保存回调失败、低高度/窄宽度所有权、数字过滤及历史。原生检查还必须覆盖空 → 非空 → 空光标分段与精确行几何；mock 的文本展平无法证明终端列布局。
 
@@ -90,4 +90,4 @@ exit "$failed"
 
 词编辑结果必须与真实 Ink reducer 一致，包括 Ctrl+Meta 优先级和跨换行的码点偏移。Permissions 两个表单应支持编辑/paste 且不改变提交意图；目录 footer 必须对应实际可用、可见的补全。不能选择隐藏候选。无效输入保持可编辑，视图切换阻止旧 handler 修改状态。
 
-当前批次已实现，验证结论仍须限定到实际候选、命令和记录的运行时结果。对话框后续工作包括 Ctrl+C 字段清空与全局退出所有权、Ctrl+X 外部编辑器生命周期。IME/a11y、完整平台/安装资格（包括 Windows PowerShell 及受支持的原生/runtime 组合）仍是迁移要求。本批次不授权切默认或移除 Ink，也不把历史失败提升为通过。
+当前批次已实现，验证结论仍须限定到实际候选、命令和记录的运行时结果。Ctrl+C 字段清空与全局退出所有权已随本批次交付，规格见 [Ctrl+C 所有权](2026-10-30-opentui-control-c-ownership.zh-CN.md)；对话框后续工作包括 Ctrl+X 外部编辑器生命周期。IME/a11y、完整平台/安装资格（包括 Windows PowerShell 及受支持的原生/runtime 组合）仍是迁移要求。本批次不授权切默认或移除 Ink，也不把历史失败提升为通过。
