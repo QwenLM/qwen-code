@@ -340,6 +340,7 @@ import {
   CHANNEL_TASK_OUTPUT_META_KEY,
   CHANNEL_TASK_RESULT_META_KEY,
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
+  CHANNEL_TURN_NOTICE_META_KEY,
 } from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
@@ -413,6 +414,7 @@ import {
 } from '../extension-skills.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
+import { subscriptionQuotaFromError } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import type {
   AvailableCommand,
   ContentBlock,
@@ -1042,6 +1044,10 @@ export const LOOP_DETECTED_TURN_ERROR_MESSAGE =
 const TOOL_EXECUTION_CANCELLED_MESSAGE = 'Tool execution was cancelled.';
 const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
   'The tool had already completed; its output was discarded.';
+// Mirrors the scheduler's wording for a producer that reports interruption by
+// returning (the shell tool on user cancel) instead of throwing.
+const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE =
+  'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.';
 const USER_PROMPT_BLOCKED_TOOL_RESULT =
   'A UserPromptSubmit hook blocked this tool result from reaching the model. Do not rerun the tool to get it.';
 
@@ -2822,6 +2828,8 @@ export class Session implements SessionContext {
   private unsubscribeApprovalModeChange?: () => void;
   private unsubscribeWorkflowModeChange?: () => void;
   private workflowModeUpdateQueue: Promise<void> = Promise.resolve();
+  private availableCommandsUpdateTail: Promise<void> = Promise.resolve();
+  private lastSuccessfulAvailableCommandsHash?: string;
   private unsubscribeRequestLifecycle?: () => void;
   private requestLifecycleSessionId: string;
   private readonly requestLifecycleExecutions = new Set<string>();
@@ -4738,7 +4746,35 @@ export class Session implements SessionContext {
     }
   }
 
-  async reloadModelProvidersFromDisk(): Promise<void> {
+  async reloadModelProvidersFromDisk(options?: {
+    subscriptionSignedOut?: boolean;
+  }): Promise<void> {
+    if (
+      options?.subscriptionSignedOut &&
+      this.config.getAuthType() === AuthType.QWEN_SUBSCRIPTION
+    ) {
+      this.config
+        .getBackgroundTaskRegistry()
+        .abortAll({ notify: false, persistedStatus: 'cancelled' });
+      this.config.setSubscriptionPlan(undefined);
+      const authType = this.config.getAuthType();
+      const currentModelId = authType
+        ? getCurrentAcpModelId(
+            buildAcpModelOptions(this.config.getAllConfiguredModels()),
+            this.config.getModel(),
+            authType,
+            this.config.getCurrentModelRegistryBaseUrl(),
+          )
+        : '';
+      await this.client.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: this.sessionId,
+        currentModelId,
+        subscriptionSignedOut: true,
+      });
+      await this.sendAvailableCommandsUpdate();
+      return;
+    }
     if (
       !this.settings.reloadScopesFromDiskAtomically([
         SettingScope.User,
@@ -9365,6 +9401,7 @@ export class Session implements SessionContext {
 
     const errorStatus = getErrorStatus(error);
     const errorMessage = error instanceof Error ? error.message : String(error);
+    const quota = subscriptionQuotaFromError(error);
     const hookSystem = this.config.getHookSystem?.();
     if (
       !this.config.getDisableAllHooks?.() &&
@@ -9382,9 +9419,20 @@ export class Session implements SessionContext {
     }
 
     if (errorStatus === 429) {
-      throw new RequestError(429, 'Rate limit exceeded. Try again later.');
+      throw new RequestError(
+        429,
+        this.config.getAuthType() === AuthType.QWEN_SUBSCRIPTION
+          ? errorMessage
+          : 'Rate limit exceeded. Try again later.',
+      );
     }
 
+    if (quota) {
+      throw new RequestError(-32603, errorMessage, {
+        details: errorMessage,
+        subscriptionQuota: quota,
+      });
+    }
     throw error;
   }
 
@@ -14855,7 +14903,18 @@ export class Session implements SessionContext {
     if (updateFailed) throw updateError;
   }
 
-  reloadSkillSettings(): void {
+  reloadSkillSettings(includeUserSettings = false): void {
+    if (includeUserSettings) {
+      if (
+        !this.settings.reloadScopesFromDiskAtomically([
+          SettingScope.Workspace,
+          SettingScope.User,
+        ])
+      ) {
+        throw new Error('Failed to reload user skill settings');
+      }
+      return;
+    }
     this.settings.reloadScopeFromDisk(SettingScope.Workspace);
   }
 
@@ -14868,24 +14927,41 @@ export class Session implements SessionContext {
     );
   }
 
-  private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
-    if (this.#isAutomaticWorkHeld()) return;
-    const { availableCommands, availableSkills, availableSkillDetails } =
-      await this.buildAvailableCommandsSnapshot();
-    this.config.refreshWorkflowMode?.();
-    const update: SessionUpdate = {
-      sessionUpdate: 'available_commands_update',
-      availableCommands,
-      ...(availableSkills !== undefined
-        ? {
-            _meta: {
-              availableSkills,
-              ...(availableSkillDetails ? { availableSkillDetails } : {}),
-            },
-          }
-        : {}),
-    };
-    await this.sendUpdate(update);
+  private sendAvailableCommandsUpdateOrThrow(): Promise<void> {
+    const pending = this.availableCommandsUpdateTail.then(async () => {
+      if (this.disposed || this.#isAutomaticWorkHeld()) return;
+      const { availableCommands, availableSkills, availableSkillDetails } =
+        await this.buildAvailableCommandsSnapshot();
+      if (this.disposed || this.#isAutomaticWorkHeld()) return;
+      this.config.refreshWorkflowMode?.();
+      const update: SessionUpdate = {
+        sessionUpdate: 'available_commands_update',
+        availableCommands,
+        ...(availableSkills !== undefined
+          ? {
+              _meta: {
+                availableSkills,
+                ...(availableSkillDetails ? { availableSkillDetails } : {}),
+              },
+            }
+          : {}),
+      };
+      const hash = createHash('sha256')
+        .update(JSON.stringify(update))
+        .digest('hex');
+      if (
+        hash === this.lastSuccessfulAvailableCommandsHash ||
+        this.disposed ||
+        this.#isAutomaticWorkHeld()
+      ) {
+        return;
+      }
+      await this.sendUpdate(update);
+      if (this.disposed || this.#isAutomaticWorkHeld()) return;
+      this.lastSuccessfulAvailableCommandsHash = hash;
+    });
+    this.availableCommandsUpdateTail = pending.catch(() => undefined);
+    return pending;
   }
 
   #withBackgroundPermission(
@@ -15038,6 +15114,25 @@ export class Session implements SessionContext {
         undefined,
         `authType cannot be determined for modelId "${parsed.modelId}"`,
       );
+    }
+
+    const enforcedAuthType = this.settings.merged.security?.auth?.enforcedType;
+    const modelAuthType = parsed.modelId.startsWith(RUNTIME_SNAPSHOT_PREFIX)
+      ? parsed.modelId.split('|', 3)[1]
+      : selectedAuthType;
+    if (enforcedAuthType && enforcedAuthType !== modelAuthType) {
+      throw RequestError.invalidParams(
+        { errorKind: 'auth_type_enforced' },
+        'Authentication is restricted by policy.',
+      );
+    }
+
+    if (
+      this.requiresManagedConversationBinding &&
+      selectedAuthType === AuthType.QWEN_SUBSCRIPTION &&
+      !resolvedRoute
+    ) {
+      await this.config.refreshSubscriptionModels();
     }
 
     const requireCachedCredentials =
@@ -19557,16 +19652,29 @@ export class Session implements SessionContext {
             }
           }
 
+          const interruptedBeforeCompletion =
+            toolResult.interruptedBeforeCompletion === true;
+          const cancelReason = interruptedBeforeCompletion
+            ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
+            : TOOL_POST_EXECUTION_CANCELLED_MESSAGE;
           if (
             activeToolAbortSignal.aborted &&
             !(isExecutionTimeout && parentAbortedAtExecutionSettle)
           ) {
             status = 'cancelled';
+            // Keep the producer's own partial output as the detail, the way
+            // the scheduler does, instead of discarding it with the notice.
+            const cancelDetail =
+              interruptedBeforeCompletion &&
+              typeof toolResult.llmContent === 'string' &&
+              toolResult.llmContent.trim()
+                ? `\n\n${toolResult.llmContent}`
+                : '';
             responseParts = convertToFunctionErrorResponse(
               modelFacingToolName,
               callId,
-              TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
-              TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
+              `${cancelReason}${cancelDetail}`,
+              cancelReason,
             );
           }
           terminalStatus = status;
@@ -19576,7 +19684,7 @@ export class Session implements SessionContext {
             status === 'error' && toolResult.error
               ? new Error(toolResult.error.message)
               : status === 'cancelled'
-                ? new Error(TOOL_POST_EXECUTION_CANCELLED_MESSAGE)
+                ? new Error(cancelReason)
                 : undefined;
           if (isTrustedTodoWriteTool && status === 'cancelled') {
             this.todoStopGuard.suspend();
@@ -19880,6 +19988,18 @@ export class Session implements SessionContext {
 
     switch (result.type) {
       case 'submit_prompt': {
+        // Stacked-skill overflow is a warning, not a failure: the prompt still
+        // runs, so the client gets a notice and the turn continues. Channel
+        // bridges deliver only the turn's text, so tag the notice and let them
+        // carry it with the reply instead of the shadowed slash-command slot.
+        if (result.stackedSkillOverflow) {
+          await this.messageEmitter.emitSlashCommandOutput(
+            result.stackedSkillOverflow,
+            undefined,
+            undefined,
+            { [CHANNEL_TURN_NOTICE_META_KEY]: true },
+          );
+        }
         const expandedPrompt = normalizePartList(result.content);
         const attachmentBlocks =
           result.resolvedCommand?.kind === CommandKind.BUILT_IN

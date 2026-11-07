@@ -2519,6 +2519,26 @@ describe('loadCliConfig', () => {
     ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
   });
 
+  it('does not expose aux-selector credentials in the startup error', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const failure = await loadCliConfig(
+      {
+        advisorModel:
+          'openai:missing-advisor\0https://user:sk-secret@gw.example/v1',
+      },
+      argv,
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(FatalConfigError);
+    expect((failure as Error).message).toContain(
+      "Advisor model 'openai:missing-advisor (https://gw.example/v1)' is not configured.",
+    );
+    expect((failure as Error).message).not.toContain('sk-secret');
+    expect((failure as Error).message).not.toContain('\0');
+  });
+
   it('should use settings fallback models when the CLI flag is absent', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -5959,6 +5979,58 @@ describe('loadCliConfig with includeDirectories', () => {
       expect(vi.mocked(getProjectHooksApprovalState).mock.calls).toEqual([
         [approval],
       ]);
+    });
+
+    it.each([
+      ['pending', false],
+      ['rejected', true],
+      ['approved', false],
+    ] as const)(
+      'an explicitly trusted folder runs a %s block without demanding approval (pending=%s)',
+      async (state, expectedPending) => {
+        vi.mocked(getProjectHooksApprovalState).mockReturnValue(state);
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await loadCliConfig(
+          { security: { folderTrust: { enabled: true } } } as Settings,
+          argv,
+          cwd,
+          undefined,
+          { projectHooks, projectHooksApproval: approval },
+        );
+
+        // Trust is the co-equal authority: pending clears, an explicit
+        // rejection still withholds, approved stays cleared.
+        expect(gateParam()).toBe(expectedPending);
+      },
+    );
+
+    it('IDE-reported workspace trust clears the gate even with the feature off', async () => {
+      const { ideContextStore } = await import('@qwen-code/qwen-code-core');
+      const getSpy = vi.spyOn(ideContextStore, 'get').mockReturnValue({
+        workspaceState: { isTrusted: true, openFiles: [] },
+      } as never);
+      vi.mocked(getProjectHooksApprovalState).mockReturnValue('pending');
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: true,
+        source: 'ide',
+      });
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      try {
+        await loadCliConfig({} as Settings, argv, cwd, undefined, {
+          projectHooks,
+          projectHooksApproval: approval,
+        });
+        expect(gateParam()).toBe(false);
+      } finally {
+        getSpy.mockRestore();
+      }
     });
 
     it.each([

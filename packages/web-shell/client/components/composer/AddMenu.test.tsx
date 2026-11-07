@@ -144,6 +144,59 @@ async function settle(): Promise<void> {
 }
 
 describe('AddMenu', () => {
+  it.each([
+    ['en', false],
+    ['zh-CN', false],
+    ['en', true],
+    ['zh-CN', true],
+  ] as const)(
+    'renders visible labels and linked descriptions in %s (mobile: %s)',
+    async (language, mobile) => {
+      renderWith(
+        baseProps({
+          getWorkspaceActions: () => ({
+            listDirectory: vi.fn().mockResolvedValue([]),
+            loadExtensionsStatus: vi.fn(),
+            loadMcpStatus: vi.fn(),
+          }),
+          onSkillsOpenChange: vi.fn(),
+          ...(mobile
+            ? {
+                mobileActions: {
+                  commands: [],
+                  onHistory: vi.fn(),
+                  onToggleShell: vi.fn(),
+                  shellMode: false,
+                },
+              }
+            : {}),
+        }),
+        language,
+      );
+      await openMenu();
+      const t = getTranslator(language);
+      for (const [testId, key] of [
+        ['file', 'file'],
+        ['reference-file', 'referenceFile'],
+        ['extensions', 'extensions'],
+        ['mcp', 'mcp'],
+        ['skills', 'skills'],
+      ] as const) {
+        if (mobile && key === 'file') continue;
+        const row = menuItem(`composer-add-menu-${testId}`)!;
+        const label = t(`composerAdd.${key}.label`);
+        const description = t(`composerAdd.${key}.description`);
+        expect(row.textContent).toBe(`${label}${description}`);
+        expect(row.getAttribute('aria-label')).toBe(label);
+        const descriptionId = row.getAttribute('aria-describedby');
+        expect(descriptionId).toBeTruthy();
+        expect(document.getElementById(descriptionId!)?.textContent).toBe(
+          description,
+        );
+      }
+    },
+  );
+
   it('renders a "+" trigger with an add-to-message label', () => {
     render();
     const trigger = container!.querySelector(
@@ -351,14 +404,14 @@ describe('AddMenu', () => {
     expect(plan.getAttribute('role')).toBe('menuitemcheckbox');
     expect(plan.getAttribute('aria-checked')).toBe('true');
     expect(plan.textContent).toBe('Plan modePlan first, run after you approve');
-    // The description hides below the small-screen breakpoint, like the
-    // siblings' secondary text.
     const description = Array.from(plan.querySelectorAll('span')).find(
       (element) => element.textContent === 'Plan first, run after you approve',
     )!;
     expect(description).toBeDefined();
-    expect(description.className).toContain('hidden');
-    expect(description.className).toContain('sm:block');
+    expect(
+      plan.querySelector('[data-checked]')?.getAttribute('data-checked'),
+    ).toBe('true');
+    expect(plan.querySelector('button, [role="switch"]')).toBeNull();
   });
 
   it('puts the Plan entry last and states why it is disabled', async () => {
@@ -373,12 +426,14 @@ describe('AddMenu', () => {
     const rows = portalRoot!.querySelectorAll('[role^="menuitem"]');
     const plan = menuItem('composer-add-menu-plan')!;
     expect(rows[rows.length - 1]).toBe(plan);
-    // A separator sets the mode row apart from the add actions, and only this
-    // row carries a leading icon.
+    // A separator keeps the mode row apart from the add actions.
     expect(plan.previousElementSibling?.getAttribute('role')).toBe('separator');
     expect(plan.querySelector('span[style*="mode-icon-url"]')).not.toBeNull();
     expect(plan.hasAttribute('data-disabled')).toBe(true);
     expect(plan.textContent).toContain('Switching mode');
+    expect(
+      plan.querySelector('[data-checked]')?.getAttribute('data-checked'),
+    ).toBe('false');
     await act(async () => {
       plan.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
     });
@@ -1267,6 +1322,26 @@ describe('mobile AddMenu', () => {
       portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
     ).toBeNull();
   });
+  it('opens live voice from a tiled row after closing the drawer', async () => {
+    const props = mobileProps();
+    const onLiveVoice = vi.fn(() => {
+      expect(
+        portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+      ).toBeNull();
+    });
+    props.mobileActions!.onLiveVoice = onLiveVoice;
+    renderWith(props);
+    await openMenu();
+    const row = Array.from(portalRoot!.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Open Live Voice',
+    )!;
+    expect(
+      row.querySelector(':scope > span[aria-hidden="true"] svg'),
+    ).not.toBeNull();
+    await tap('Open Live Voice');
+    expect(onLiveVoice).toHaveBeenCalledOnce();
+  });
+
   it.each(['en', 'zh-CN'] as const)(
     'localizes the busy mobile Plan row in %s',
     async (language) => {
@@ -1279,9 +1354,13 @@ describe('mobile AddMenu', () => {
       const row = menuItem('composer-add-menu-plan') as HTMLButtonElement;
       const t = getTranslator(language);
       expect(row.textContent).toBe(
-        `${t('composerAdd.plan.label')}${t('composerAdd.plan.busy')}`,
+        `${t('composerAdd.plan.label')}${t('composerAdd.plan.description')}${t('composerAdd.plan.busy')}`,
       );
       expect(row.disabled).toBe(true);
+      expect(
+        document.getElementById(row.getAttribute('aria-describedby')!)
+          ?.textContent,
+      ).toBe(t('composerAdd.plan.busy'));
       await act(async () => row.click());
       expect(onToggle).not.toHaveBeenCalled();
     },
