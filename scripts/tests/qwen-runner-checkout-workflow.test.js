@@ -13,8 +13,45 @@ import { join } from 'node:path';
 import { parse } from 'yaml';
 import { expect, it } from 'vitest';
 
+// The qwen-triage entries are DERIVED, not hand-typed: every pool-routed job
+// that checks out must reset the workspace git metadata first. A hand-typed
+// list missed publish-triage once (the write-PAT job ran on the pool with
+// agent-planted hooks executable while this suite stayed green); deriving
+// the set means the next pool-routed checkout job reddens here with no edit
+// to this file. The checkout intersection is load-bearing: authorize and
+// publish-tmux are pool-routed but never check out, so they have no reset
+// step to pin. Same derivation shape as e2e-workflow.test.js's pool gate.
+const triagePoolCheckoutJobs = Object.entries(
+  parse(readFileSync('.github/workflows/qwen-triage.yml', 'utf8')).jobs,
+)
+  .filter(([, job]) => String(job['runs-on'] ?? '').includes('ecs-qwen'))
+  .filter(([, job]) =>
+    (job.steps ?? []).some((step) =>
+      /^actions\/checkout@/.test(String(step.uses ?? '')),
+    ),
+  )
+  .map(([name]) => ['qwen-triage', name]);
+
+// A floor, not an exact list: the derivation reads the UN-EVALUATED runs-on
+// expression, so rewriting one job's routing into a `vars.` lookup (or moving
+// its checkout behind a composite action) silently drops that row and the
+// guard stops covering it. Assert the jobs known to be pool-routed with a
+// checkout are present, so a filter that stops matching names the job it
+// lost; a NEW pool job still joins the matrix with no edit here.
+it('derives every known pool-routed checkout job in qwen-triage', () => {
+  expect(triagePoolCheckoutJobs.map(([, name]) => name)).toEqual(
+    expect.arrayContaining([
+      'triage',
+      'publish-triage',
+      'tmux-testing',
+      'verify',
+    ]),
+  );
+});
+
 const jobs = [
-  ...['triage', 'tmux-testing', 'verify'].map((name) => ['qwen-triage', name]),
+  ['desktop-release', 'prepare'],
+  ...triagePoolCheckoutJobs,
   ...[
     'test',
     'lint_and_static',

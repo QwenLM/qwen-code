@@ -131,7 +131,13 @@ export type SessionTitleOutcome =
 export async function tryGenerateSessionTitle(
   config: Config,
   abortSignal: AbortSignal,
-  userDisplayTexts: ReadonlyArray<string | undefined> = [],
+  // One entry per user turn: its display text, `undefined` when the turn
+  // recorded none, or `null` for a turn the person did not type, which offers
+  // the title nothing either way.
+  userDisplayTexts: ReadonlyArray<string | null | undefined> = [],
+  // The keys ({@link modPromptTitleKey}) of the messages the Mods submitted,
+  // which a title drawn from the conversation leaves out too.
+  modPromptKeys: ReadonlySet<string> = new Set(),
   projectionMode = false,
 ): Promise<SessionTitleOutcome> {
   try {
@@ -153,7 +159,7 @@ export async function tryGenerateSessionTitle(
       if (fullHistory.length < 2) {
         return { ok: false, reason: 'empty_history' };
       }
-      dialog = filterToDialog(fullHistory);
+      dialog = filterToDialog(fullHistory, modPromptKeys);
     }
     const recentHistory = takeRecentDialog(dialog, RECENT_MESSAGE_WINDOW);
     if (recentHistory.length === 0) {
@@ -283,10 +289,36 @@ export function normalizeForEchoCompare(s: string): string {
  * only user prompts and the model's user-visible text. A single tool response
  * can be a 10K-token file dump that swamps the title-LLM with irrelevant detail.
  */
-function filterToDialog(history: Content[]): Content[] {
+/**
+ * What a Mod's message is found by in the conversation: the text the model
+ * read for it, its first text part as recorded.
+ */
+export function modPromptTitleKey(parts: readonly Part[]): string | undefined {
+  return parts.find((part) => typeof part?.text === 'string')?.text;
+}
+
+// The request that reaches history can carry reminders as parts of their own
+// and IDE context prepended to the first text part, so a part that ends with
+// the key after that separator is the Mod's text too.
+function isModPrompt(msg: Content, keys: ReadonlySet<string>): boolean {
+  if (msg.role !== 'user' || keys.size === 0) return false;
+  return (msg.parts ?? []).some((part) => {
+    const text = part?.text;
+    if (typeof text !== 'string') return false;
+    for (const key of keys)
+      if (text === key || text.endsWith(`\n\n${key}`)) return true;
+    return false;
+  });
+}
+
+function filterToDialog(
+  history: Content[],
+  modPromptKeys: ReadonlySet<string>,
+): Content[] {
   const out: Content[] = [];
   for (const msg of history.slice(getStartupContextLength(history))) {
     if (msg.role !== 'user' && msg.role !== 'model') continue;
+    if (isModPrompt(msg, modPromptKeys)) continue;
     const textParts: Part[] = [];
     const parts = stripTrailingUserPromptSubmitContextPart(msg.parts ?? []);
     for (const part of parts) {

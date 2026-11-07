@@ -127,10 +127,12 @@ describe('renameCommand', () => {
       reason: 'empty_history',
     });
     const displayTexts = ['你好', '/rename   --auto'];
+    const modPromptKeys = new Set(['framed']);
     const mockConfig = {
       getChatRecordingService: vi.fn().mockReturnValue({
         getUserDisplayTextsForTitle: vi.fn().mockReturnValue(displayTexts),
         hasDisplayProjectionForTitle: vi.fn().mockReturnValue(true),
+        getModPromptKeysForTitle: vi.fn().mockReturnValue(modPromptKeys),
       }),
     };
     mockContext = createMockCommandContext({
@@ -143,6 +145,7 @@ describe('renameCommand', () => {
       mockConfig,
       expect.any(AbortSignal),
       ['你好'],
+      modPromptKeys,
       true,
     );
   });

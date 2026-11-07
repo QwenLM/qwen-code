@@ -49,6 +49,7 @@ import {
   SessionSourceError,
   validateSessionSourceInput,
   canonicalSessionPrUrl,
+  isSessionPrRole,
   toSessionPrInfo,
   normalizeTurnResultError,
   normalizeSnapshotPayload,
@@ -62,6 +63,7 @@ import type { HarnessChannel } from './channel-lifecycle.js';
 import {
   EventBus,
   DEFAULT_RING_SIZE,
+  normalizeMaxRingBytes,
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
   type LiveReplayMode,
@@ -201,7 +203,11 @@ import type {
   ChannelWorkExclusions,
   createChannelHarness,
 } from './channel-harness.js';
-import { channelUnavailableReject } from './channel-transport.js';
+import {
+  channelUnavailableReject,
+  raceChannelUnavailable,
+} from './channel-transport.js';
+import { raceLongLived } from './race-long-lived.js';
 import { withTimeout } from './with-timeout.js';
 import { parseBackgroundNotificationTurn } from './bridgeTypes.js';
 import type {
@@ -1755,6 +1761,7 @@ function broadcastTurnError(
 ): void {
   const message = extractErrorMessage(err);
   const structuredErrorKind = extractJsonRpcErrorField(err, 'errorKind');
+  const subscriptionQuota = getJsonRpcErrorDataField(err, 'subscriptionQuota');
   const errorKind = structuredErrorKind ?? classifyTurnErrorKind(message);
   const code =
     structuredErrorKind !== undefined
@@ -1794,6 +1801,7 @@ function broadcastTurnError(
       data: {
         sessionId,
         message,
+        ...(subscriptionQuota !== undefined ? { subscriptionQuota } : {}),
         ...(code ? { code } : {}),
         ...(errorKind ? { errorKind } : {}),
         ...(loopType ? { loopType } : {}),
@@ -2700,6 +2708,7 @@ export function createSessionControlPlane(
         `Must be a positive integer in [1, ${MAX_EVENT_RING_SIZE}].`,
     );
   }
+  const eventRingMaxBytes = normalizeMaxRingBytes(opts.eventRingMaxBytes);
   const compactedReplayMaxBytes = normalizeCompactedReplayMaxBytes(
     opts.compactedReplayMaxBytes,
   );
@@ -4124,16 +4133,24 @@ export function createSessionControlPlane(
       case SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload:
         return {
           kind: 'modelProviders',
-          tightening: false,
+          tightening: params?.['subscriptionSignedOut'] === true,
           persistedByControl: false,
-          payload: {},
+          payload:
+            params?.['subscriptionSignedOut'] === true
+              ? { subscriptionSignedOut: true }
+              : {},
         };
       case SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh:
         return {
           kind: 'skills',
           tightening: false,
           persistedByControl: false,
-          payload: { reason: params?.['reason'] ?? 'all' },
+          payload: {
+            reason: params?.['reason'] ?? 'all',
+            ...(params?.['includeUserSettings'] !== undefined
+              ? { includeUserSettings: params['includeUserSettings'] }
+              : {}),
+          },
         };
       default:
         return undefined;
@@ -4146,14 +4163,22 @@ export function createSessionControlPlane(
   async function propagateWorkspaceChange(
     change: WorkspaceChange,
     timeoutMs: number,
-  ): Promise<{ revision: number; unacknowledged: string[] }> {
+  ): Promise<{
+    revision: number;
+    unacknowledged: string[];
+    skillsRefreshFailed: boolean;
+  }> {
     // Legacy is workspace control. A Legacy channel that replaced a timed-out
     // one while the command ran has read the current settings itself.
     const targets = liveChannelInfos().filter(
       (ci) => ci.harness.executionEngine !== 'legacy',
     );
     if (targets.length === 0) {
-      return { revision: workspaceChangeRevision, unacknowledged: [] };
+      return {
+        revision: workspaceChangeRevision,
+        unacknowledged: [],
+        skillsRefreshFailed: false,
+      };
     }
     const revision = ++workspaceChangeRevision;
     const params = {
@@ -4170,6 +4195,7 @@ export function createSessionControlPlane(
       response['revision'] === revision &&
       response['acknowledged'] === true;
     const unacknowledged: string[] = [];
+    let skillsRefreshFailed = false;
     await Promise.all(
       targets.map(async (ci) => {
         // Sent outside workspace control, like a Managed resource read: a slow
@@ -4181,11 +4207,22 @@ export function createSessionControlPlane(
         );
         try {
           const response = await withTimeout(
-            Promise.race([request, getChannelClosedReject(ci)]),
+            raceLongLived(request, getChannelClosedReject(ci)),
             timeoutMs,
             SERVE_CONTROL_EXT_METHODS.workspaceChange,
           );
-          if (acknowledges(response)) return;
+          if (acknowledges(response)) {
+            if (
+              change.kind === 'skills' &&
+              change.payload['includeUserSettings'] === true &&
+              isRecord(response) &&
+              (Number(response['sessionsFailed'] ?? 0) > 0 ||
+                Number(response['configsFailed'] ?? 0) > 0)
+            ) {
+              skillsRefreshFailed = true;
+            }
+            return;
+          }
         } catch (error) {
           // An exited channel's sessions are gone, and a fresh session starts
           // a new channel that reads current settings.
@@ -4205,7 +4242,7 @@ export function createSessionControlPlane(
         refuseUnacknowledgedChannel(ci, revision, change.tightening);
       }),
     );
-    return { revision, unacknowledged };
+    return { revision, unacknowledged, skillsRefreshFailed };
   }
 
   /**
@@ -4372,17 +4409,19 @@ export function createSessionControlPlane(
         const extension = entry.connection
           .extMethod(PROMPT_CANCEL_METHOD, notification)
           .then((result) => ({ kind: 'result' as const, result }));
-        const outcome = await Promise.race([
-          extension,
+        const outcome = await raceLongLived(
+          [
+            extension,
+            ...(pending.cancelForwardDeadline
+              ? [
+                  pending.cancelForwardDeadline.then(() => ({
+                    kind: 'deadline' as const,
+                  })),
+                ]
+              : []),
+          ],
           getTransportClosedReject(entry),
-          ...(pending.cancelForwardDeadline
-            ? [
-                pending.cancelForwardDeadline.then(() => ({
-                  kind: 'deadline' as const,
-                })),
-              ]
-            : []),
-        ]);
+        );
         if (outcome.kind === 'deadline') return;
         const { result } = outcome;
         if (typeof result['cancelled'] !== 'boolean') {
@@ -4398,13 +4437,15 @@ export function createSessionControlPlane(
             error.code === -32601) ||
           isNotCurrentlyGeneratingCancelError(error)
         ) {
-          await Promise.race([
-            entry.connection.cancel(notification),
+          await raceLongLived(
+            [
+              entry.connection.cancel(notification),
+              ...(pending.cancelForwardDeadline
+                ? [pending.cancelForwardDeadline]
+                : []),
+            ],
             getTransportClosedReject(entry),
-            ...(pending.cancelForwardDeadline
-              ? [pending.cancelForwardDeadline]
-              : []),
-          ]);
+          );
           return;
         }
         throw error;
@@ -4832,8 +4873,13 @@ export function createSessionControlPlane(
       opts.fileSystem,
       // §2.3: centralised model_switched publish — keeps cache + generation
       // update atomic. BridgeClient calls this instead of inlining publish.
-      (entry, modelId, originator) =>
-        publishModelSwitched(entry as SessionEntry, modelId, originator),
+      (entry, modelId, originator, subscriptionSignedOut) =>
+        publishModelSwitched(
+          entry as SessionEntry,
+          modelId,
+          originator,
+          subscriptionSignedOut,
+        ),
       // A2: centralised approval_mode_changed publish on in-session mode
       // promotion. `previous` is read from the bridge state cache.
       (entry, modeId, originator, planExecutionMode) => {
@@ -5325,7 +5371,7 @@ export function createSessionControlPlane(
         return;
       }
       try {
-        const closeResult = await Promise.race([
+        const closeResult = await raceLongLived(
           withTimeout(
             ci.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
               sessionId: lateSessionId,
@@ -5335,7 +5381,7 @@ export function createSessionControlPlane(
             'abandonedNewSessionClose',
           ),
           getChannelClosedReject(ci),
-        ]);
+        );
         if (!isRecord(closeResult) || closeResult['closed'] !== true) {
           throw new Error('ACP child refused abandoned newSession cleanup');
         }
@@ -5445,7 +5491,7 @@ export function createSessionControlPlane(
           abandonedSessionIdReservations.add(cleanupReservation);
         }
         try {
-          const result = await Promise.race([
+          const result = await raceLongLived(
             withTimeout(
               ci.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
                 sessionId,
@@ -5455,7 +5501,7 @@ export function createSessionControlPlane(
               'rejected session close',
             ),
             getChannelClosedReject(ci),
-          ]);
+          );
           if (!isRecord(result) || result['closed'] !== true) {
             throw new Error('ACP child refused rejected session cleanup');
           }
@@ -5613,10 +5659,11 @@ export function createSessionControlPlane(
               !!worktree,
             );
             onNewSessionDispatch?.();
-            const rawNewSession = Promise.race([
+            const rawNewSession = raceChannelUnavailable(
+              ci.channel,
               ci.connection.newSession(newSessionRequest),
-              channelUnavailableReject(ci.channel, 'during newSession'),
-            ]);
+              'during newSession',
+            );
             const lifecycle: {
               phase: 'active' | 'abandoned';
               resolveSettlement?: () => void;
@@ -5834,7 +5881,7 @@ export function createSessionControlPlane(
             break;
           }
           try {
-            const parentResult = await Promise.race([
+            const parentResult = await raceLongLived(
               withTimeout(
                 entry.connection.extMethod(
                   SERVE_CONTROL_EXT_METHODS.sessionParent,
@@ -5847,7 +5894,7 @@ export function createSessionControlPlane(
                 'sessionParent',
               ),
               getTransportClosedReject(entry),
-            ]);
+            );
             // A reachable child gives a definitive answer — do not retry a
             // `persisted: false` (recording service off; a retry can't fix it).
             parentSessionPersisted =
@@ -6077,7 +6124,7 @@ export function createSessionControlPlane(
           sourceType: entry.sourceType,
           sourceId: entry.sourceId,
         });
-        const result = await Promise.race([
+        const result = await raceLongLived(
           withTimeout(
             conn.unstable_setSessionModel({
               sessionId: entry.sessionId,
@@ -6094,7 +6141,7 @@ export function createSessionControlPlane(
             'setSessionModel',
           ),
           transportClosed,
-        ]);
+        );
         publishModelSwitched(entry, modelId, originatorClientId);
         if (
           persistDefault &&
@@ -6171,7 +6218,7 @@ export function createSessionControlPlane(
       entry.approvalModeRoundtripInFlight = true;
       let succeeded = false;
       try {
-        const response = (await Promise.race([
+        const response = (await raceLongLived(
           withTimeout(
             entry.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
@@ -6185,7 +6232,7 @@ export function createSessionControlPlane(
             SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
           ),
           getTransportClosedReject(entry),
-        ])) as {
+        )) as {
           previous: ApprovalMode;
           current: ApprovalMode;
           planExecutionMode?: ApprovalMode;
@@ -6496,13 +6543,13 @@ export function createSessionControlPlane(
     ): Promise<void> => {
       try {
         const result = await withTimeout(
-          Promise.race([
+          raceLongLived(
             info.connection.extMethod(method, {
               serverName,
               cwd: boundWorkspace,
             }),
             getChannelClosedReject(info),
-          ]),
+          ),
           initTimeoutMs,
           method,
         );
@@ -6599,13 +6646,13 @@ export function createSessionControlPlane(
     const requestRuntimeEpoch = info.harness.runtimeEpoch;
     return await withWorkspaceStatusRead(info, async () => {
       let response = await withTimeout(
-        Promise.race([
+        raceLongLived(
           info.connection.extMethod(method, {
             ...params,
             cwd: boundWorkspace,
           }),
           getChannelClosedReject(info),
-        ]),
+        ),
         initTimeoutMs,
         method,
       );
@@ -6820,13 +6867,13 @@ export function createSessionControlPlane(
     try {
       const request = () =>
         withTimeout(
-          Promise.race([
+          raceLongLived(
             info.connection.extMethod(
               SERVE_STATUS_EXT_METHODS.workspaceResource,
               { cwd: boundWorkspace },
             ),
             getChannelClosedReject(info),
-          ]),
+          ),
           initTimeoutMs,
           SERVE_STATUS_EXT_METHODS.workspaceResource,
         );
@@ -6932,20 +6979,25 @@ export function createSessionControlPlane(
   // re-reads the persisted settings when it starts; a Managed channel that
   // starts later is sent this before its first session request instead.
   let rememberedUserLanguage:
-    | { language: string; syncOutputLanguage: boolean }
+    | { language: string; syncOutputLanguage: boolean; scope?: 'workspace' }
     | undefined;
   const sendUserLanguage = (
     info: ChannelInfo,
-    params: { language: string; syncOutputLanguage: boolean },
+    params: {
+      language: string;
+      syncOutputLanguage: boolean;
+      scope?: 'workspace';
+    },
   ): Promise<{ language: string; sessions: number; failed: number }> => {
     const response = withTimeout(
-      Promise.race([
+      raceLongLived(
         info.connection.extMethod(SERVE_CONTROL_EXT_METHODS.userLanguage, {
           language: params.language,
           syncOutputLanguage: params.syncOutputLanguage,
+          ...(params.scope ? { scope: params.scope } : {}),
         }),
         getChannelClosedReject(info),
-      ]),
+      ),
       initTimeoutMs,
       SERVE_CONTROL_EXT_METHODS.userLanguage,
     ) as Promise<{ language: string; sessions: number; failed: number }>;
@@ -6984,14 +7036,14 @@ export function createSessionControlPlane(
     const info = channelInfoForEntry(entry);
     if (!info || info.harness.isDying)
       throw new SessionNotFoundError(sessionId);
-    const response = await Promise.race([
+    const response = await raceLongLived(
       withTimeout(
         entry.connection.extMethod(method, { ...params, sessionId }),
         timeoutMs,
         method,
       ),
       getTransportClosedReject(entry),
-    ]);
+    );
     return response as unknown as T;
   };
 
@@ -7056,7 +7108,7 @@ export function createSessionControlPlane(
       const observedCloseRequest = opts?.timeoutMs
         ? withTimeout(closeRequest, opts.timeoutMs, label)
         : closeRequest;
-      const response = await Promise.race([
+      const response = await raceLongLived(
         opts?.throwOnFailure === true
           ? observedCloseRequest
           : withTimeout(
@@ -7065,7 +7117,7 @@ export function createSessionControlPlane(
               SERVE_CONTROL_EXT_METHODS.sessionClose,
             ),
         getTransportClosedReject(entry),
-      ]);
+      );
       return response['closed'] === true;
     } catch (err) {
       // The child's close refusal crosses the ACP wire as a JSON-RPC
@@ -7213,6 +7265,7 @@ export function createSessionControlPlane(
           : {}),
       }),
       {
+        maxRingBytes: eventRingMaxBytes,
         // Fired once, on the FIRST ingest/seed failure (the bus keeps the
         // degraded flag set silently afterwards). The bus doesn't know its
         // session, so the sessionId context is injected here.
@@ -7233,6 +7286,7 @@ export function createSessionControlPlane(
     entry: SessionEntry,
     modelId: string,
     originatorClientId: string | undefined,
+    subscriptionSignedOut?: boolean,
   ): void => {
     entry.currentModelId = modelId;
     entry.modelPublishGeneration++;
@@ -7243,7 +7297,11 @@ export function createSessionControlPlane(
     entry.events.publish({
       type: 'model_switched',
       ...(entry.activePromptId ? { promptId: entry.activePromptId } : {}),
-      data: { sessionId: entry.sessionId, modelId },
+      data: {
+        sessionId: entry.sessionId,
+        modelId,
+        ...(subscriptionSignedOut ? { subscriptionSignedOut: true } : {}),
+      },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
   };
@@ -7558,7 +7616,7 @@ export function createSessionControlPlane(
   ): Promise<boolean> {
     let reason = 'unknown';
     try {
-      const sourceResult = await Promise.race([
+      const sourceResult = await raceLongLived(
         withTimeout(
           entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSource, {
             sessionId: entry.sessionId,
@@ -7574,7 +7632,7 @@ export function createSessionControlPlane(
           'sessionSource',
         ),
         getTransportClosedReject(entry),
-      ]);
+      );
       const acknowledgement = sourceResult as
         | { persisted?: unknown; reason?: unknown }
         | undefined;
@@ -7791,6 +7849,7 @@ export function createSessionControlPlane(
     const reason = 'reason' in value ? value.reason : undefined;
     if (
       reason === 'setting-disabled' ||
+      reason === 'unsupported-client' ||
       reason === 'unsupported-runtime' ||
       reason === 'workspace-untrusted' ||
       reason === 'provider-conflict' ||
@@ -8077,13 +8136,13 @@ export function createSessionControlPlane(
     try {
       const response = await withSessionReadControl(req.sessionId, (info) =>
         withTimeout(
-          Promise.race([
+          raceLongLived(
             info.connection.extMethod(
               SERVE_STATUS_EXT_METHODS.sessionTranscript,
               { ...req, cwd: boundWorkspace },
             ),
             getChannelClosedReject(info),
-          ]),
+          ),
           Math.max(initTimeoutMs, SESSION_TRANSCRIPT_TIMEOUT_MS),
           SERVE_STATUS_EXT_METHODS.sessionTranscript,
         ),
@@ -8103,13 +8162,13 @@ export function createSessionControlPlane(
     try {
       const response = await withSessionReadControl(req.sessionId, (info) =>
         withTimeout(
-          Promise.race([
+          raceLongLived(
             info.connection.extMethod(
               SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
               { ...req, cwd: boundWorkspace },
             ),
             getChannelClosedReject(info),
-          ]),
+          ),
           Math.max(initTimeoutMs, SESSION_TRANSCRIPT_TIMEOUT_MS),
           SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
         ),
@@ -8945,7 +9004,7 @@ export function createSessionControlPlane(
           return;
         }
         try {
-          const closeResult = await Promise.race([
+          const closeResult = await raceLongLived(
             withTimeout(
               channel.connection.extMethod(
                 SERVE_CONTROL_EXT_METHODS.sessionClose,
@@ -8958,7 +9017,7 @@ export function createSessionControlPlane(
               'abandonedRestoreClose',
             ),
             getChannelClosedReject(channel),
-          ]);
+          );
           if (!isRecord(closeResult) || closeResult['closed'] !== true) {
             throw new Error('ACP child refused abandoned restore cleanup');
           }
@@ -9066,27 +9125,6 @@ export function createSessionControlPlane(
       // so without this allow-list the tombstone would silently drop
       // them. Cleared in the matching `finally` below.
       restoreChannel.client.markRestoreInFlight(req.sessionId);
-      // Restore is a low-frequency one-shot path, so we register a
-      // fresh channel-unavailable race per call instead of going
-      // through `getTransportClosedReject` (which exists to keep
-      // sendPrompt's per-session listener count at 1 over the
-      // session's lifetime). The listener is bound to this restore's
-      // race only — once the race settles, no new awaits attach to
-      // it, so there's no listener leak across restores.
-      const transportClosed = channelUnavailableReject(
-        restoreChannel.channel,
-        `during session/${action}`,
-      );
-      // Suppress the dangling rejection if `withTimeout` wins the
-      // race below: `transportClosed` then stays pending, and a
-      // later channel-unavailable settle fires the inner `throw` with
-      // no observer attached. Node 22 logs `unhandledRejection`;
-      // under `--unhandled-rejections=throw` (common in container
-      // deployments) the daemon process crashes. The `Promise.race`
-      // path's own consumer below catches the rejection in the
-      // try/catch, so the suppressed rejection here is the
-      // race-loser case only.
-      transportClosed.catch(() => {});
       let state: BridgeSessionState;
       let replayUpdates: SessionUpdate[] = [];
       let replayPartial: true | undefined;
@@ -9189,7 +9227,11 @@ export function createSessionControlPlane(
             );
           },
         );
-        const observedRestore = Promise.race([rawRestore, transportClosed]);
+        const observedRestore = raceChannelUnavailable(
+          restoreChannel.channel,
+          rawRestore,
+          `during session/${action}`,
+        );
         state = await new Promise<BridgeSessionState>((resolve, reject) => {
           const timer = setTimeout(() => {
             if (restoreLifecycle.phase !== 'active') return;
@@ -10474,7 +10516,7 @@ export function createSessionControlPlane(
       return queue;
     }
 
-    void Promise.race([
+    void raceLongLived(
       withTimeout(
         entry.connection.extMethod(
           SERVE_CONTROL_EXT_METHODS.sessionGenerationStart,
@@ -10486,7 +10528,7 @@ export function createSessionControlPlane(
         SERVE_CONTROL_EXT_METHODS.sessionGenerationStart,
       ),
       getTransportClosedReject(entry),
-    ])
+    )
       .then((raw) => {
         if (request.settled) return;
         const response = raw as Record<string, unknown>;
@@ -10552,6 +10594,7 @@ export function createSessionControlPlane(
               ? null
               : maxPendingPromptsPerSession,
           eventRingSize,
+          eventRingMaxBytes,
           compactedReplayMaxBytes,
           maxJournalEvents,
           maxJournalBytes,
@@ -10572,6 +10615,7 @@ export function createSessionControlPlane(
         permissionPolicy: permissionMediator.policy,
         sessions: [...byId.values()].map((entry) => {
           const journalLimits = entry.events.journalLimits();
+          const retention = entry.events.retentionSnapshot();
           return {
             sessionId: entry.sessionId,
             workspaceCwd: entry.workspaceCwd,
@@ -10588,6 +10632,15 @@ export function createSessionControlPlane(
               ? { backgroundTurn: entry.backgroundTurn }
               : {}),
             lastEventId: entry.events.lastEventId,
+            eventRingCount: retention.ringCount,
+            eventRingBytes: retention.ringBytes,
+            ...(retention.earliestEventId !== undefined
+              ? { eventRingEarliestEventId: retention.earliestEventId }
+              : {}),
+            eventRingEvictedEvents: retention.evictedEvents,
+            eventRingEvictedBytes: retention.evictedBytes,
+            availableCommandsSnapshotBytes:
+              retention.availableCommandsSnapshotBytes,
             ...(entry.sessionLastSeenAt !== undefined
               ? { lastSeenAt: entry.sessionLastSeenAt }
               : {}),
@@ -11350,14 +11403,18 @@ export function createSessionControlPlane(
       const capturedContext = telemetry.captureContext();
       const queuedAt = Date.now();
       const entry = byId.get(sessionId);
-      if (!entry) return Promise.reject(new SessionNotFoundError(sessionId));
+      // Admission-phase failures throw SYNCHRONOUSLY (same contract as the
+      // worktree-reset barrier below and the continue path's closing check):
+      // a rejected promise would let the HTTP route return a phantom 202 for
+      // a prompt that was never enqueued, and a channel relay would mark the
+      // event delivered and lose it instead of waking the session and
+      // retrying.
+      if (!entry) throw new SessionNotFoundError(sessionId);
       if (isClosingOrAuthorizingClose(entry)) {
-        return Promise.reject(
-          new SessionNotFoundError(
-            sessionId,
-            'The session is closing; retry after close completes',
-            'session_closing',
-          ),
+        throw new SessionNotFoundError(
+          sessionId,
+          'The session is closing; retry after close completes',
+          'session_closing',
         );
       }
       // Worktree-reset barrier: the transfer owns this session's worktree
@@ -11373,7 +11430,11 @@ export function createSessionControlPlane(
         isReservedStandaloneSessionSourceType(entry.sourceType) &&
         entry.managedConversationBinding?.released !== true
       ) {
-        return Promise.reject(standaloneWorkingDirectoryMissingError());
+        // Synchronous like every reachable sibling admission check: a
+        // deferred rejection would let the prompt route return a phantom
+        // 202 that the channel relay consumes as durable acceptance, losing
+        // the event (the route's key-forget cannot un-send the 202).
+        throw standaloneWorkingDirectoryMissingError();
       }
       if (!Array.isArray(req.prompt)) {
         return Promise.reject(
@@ -11960,15 +12021,14 @@ export function createSessionControlPlane(
                 // promise so the FIFO moves on even though the agent-side
                 // `promptPromise` never resolves.
                 const racedPromise = deadlinePromise
-                  ? Promise.race([
+                  ? raceLongLived(
+                      [promptPromise, deadlinePromise],
+                      getTransportClosedReject(entry),
+                    )
+                  : raceLongLived(
                       promptPromise,
                       getTransportClosedReject(entry),
-                      deadlinePromise,
-                    ])
-                  : Promise.race([
-                      promptPromise,
-                      getTransportClosedReject(entry),
-                    ]);
+                    );
 
                 // The user echo (`echoPromptToSessionBus`) was already published
                 // BEFORE the forward. If the forward itself fails (transport died,
@@ -12627,10 +12687,10 @@ export function createSessionControlPlane(
                 displayName?: string;
               };
               try {
-                settled = (await Promise.race([
+                settled = (await raceLongLived(
                   mutation,
                   getTransportClosedReject(entry),
-                ])) as typeof settled;
+                )) as typeof settled;
               } catch (err) {
                 const data = (err as { data?: unknown })?.data;
                 if (
@@ -12675,7 +12735,7 @@ export function createSessionControlPlane(
                 : [];
               // Let the child release the target writer before restore, even
               // if copying sources exceeds the normal request timeout.
-              const copied = (await Promise.race([
+              const copied = (await raceLongLived(
                 entry.connection.extMethod('qwen/session/sources/copy', {
                   sessionId,
                   targetSessionId: result.newSessionId,
@@ -12683,7 +12743,7 @@ export function createSessionControlPlane(
                   attachmentIds,
                 }),
                 getTransportClosedReject(entry),
-              ])) as { warnings?: string[]; sourceError?: unknown };
+              )) as { warnings?: string[]; sourceError?: unknown };
               if (copied.sourceError) {
                 sourceWarnings.push('Session sources could not be copied.');
               } else {
@@ -12766,7 +12826,8 @@ export function createSessionControlPlane(
               if (!ci.harness.isDying) {
                 await harness.withWorkspaceControl(ci.harness, () =>
                   withTimeout(
-                    Promise.race([
+                    raceChannelUnavailable(
+                      ci.channel,
                       ci.connection.extMethod(
                         SERVE_CONTROL_EXT_METHODS.sessionClose,
                         {
@@ -12776,11 +12837,8 @@ export function createSessionControlPlane(
                             sessionCloseDrainBudgetMs(initTimeoutMs),
                         },
                       ),
-                      channelUnavailableReject(
-                        ci.channel,
-                        'during branchSession cleanup',
-                      ),
-                    ]),
+                      'during branchSession cleanup',
+                    ),
                     initTimeoutMs,
                     'branchSession cleanup',
                   ),
@@ -12926,10 +12984,10 @@ export function createSessionControlPlane(
           }
 
           const raw = await harness.withWorkspaceControl(ci.harness, () =>
-            Promise.race([
+            raceLongLived(
               harness.changeSessionCwd(ci.harness, sessionId, req),
               getTransportClosedReject(entry),
-            ]),
+            ),
           );
           const extResult = raw as {
             previousCwd: string;
@@ -13037,7 +13095,7 @@ export function createSessionControlPlane(
         throw standaloneWorkingDirectoryMissingError();
       }
       const response = (await withTimeout(
-        Promise.race([
+        raceLongLived(
           entry.connection.extMethod(
             SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingCommit,
             {
@@ -13046,7 +13104,7 @@ export function createSessionControlPlane(
             },
           ),
           getTransportClosedReject(entry),
-        ]),
+        ),
         initTimeoutMs,
         'commitManagedConversationBinding',
       )) as { committed?: unknown };
@@ -13112,7 +13170,7 @@ export function createSessionControlPlane(
         throw standaloneWorkingDirectoryMissingError();
       }
       const response = (await withTimeout(
-        Promise.race([
+        raceLongLived(
           entry.connection.extMethod(
             SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingRelease,
             {
@@ -13121,7 +13179,7 @@ export function createSessionControlPlane(
             },
           ),
           getTransportClosedReject(entry),
-        ]),
+        ),
         initTimeoutMs,
         'releaseManagedConversationBinding',
       )) as { released?: unknown };
@@ -13241,13 +13299,13 @@ export function createSessionControlPlane(
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const result = (await withTimeout(
-        Promise.race([
+        raceLongLived(
           entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionSource, {
             sessionId,
             sourceType: 'default',
           }),
           getTransportClosedReject(entry),
-        ]),
+        ),
         initTimeoutMs,
         'ensureDefaultSessionPersisted',
       )) as { persisted?: unknown };
@@ -13290,11 +13348,13 @@ export function createSessionControlPlane(
           ((pr as SessionPrInfo).state !== undefined &&
             (pr as SessionPrInfo).state !== 'open' &&
             (pr as SessionPrInfo).state !== 'merged' &&
-            (pr as SessionPrInfo).state !== 'closed')
+            (pr as SessionPrInfo).state !== 'closed') ||
+          ((pr as SessionPrInfo).role !== undefined &&
+            !isSessionPrRole((pr as SessionPrInfo).role))
         ) {
           throw new InvalidSessionMetadataError(
             'pr',
-            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\``,
+            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\`, and an optional \`role\` that is one of \`review\`, \`verify\`, or \`fix\``,
           );
         }
       }
@@ -13403,7 +13463,8 @@ export function createSessionControlPlane(
           latest.url === bound.url &&
           // A re-bind carrying a new state is a change: the live entry,
           // the metadata event, and the catalog revision must all see it.
-          (bound.state === undefined || bound.state === latest.state)
+          (bound.state === undefined || bound.state === latest.state) &&
+          (bound.role === undefined || bound.role === latest.role)
         ) {
           // Same binding repeated — no change, no event.
         } else {
@@ -13425,6 +13486,11 @@ export function createSessionControlPlane(
                 ? {
                     state: (bound.state ??
                       known?.state) as SessionPrInfo['state'],
+                  }
+                : {}),
+              ...((bound.role ?? known?.role)
+                ? {
+                    role: (bound.role ?? known?.role) as SessionPrInfo['role'],
                   }
                 : {}),
               // The issue snapshot is daemon-derived, never client-bound.
@@ -13891,10 +13957,10 @@ export function createSessionControlPlane(
           targets.map(async ([info, sessionIds]) =>
             harness.withWorkspaceControl(info.harness, async () =>
               withTimeout(
-                Promise.race([
+                raceLongLived(
                   info.connection.extMethod(method, { ...params, sessionIds }),
                   getChannelClosedReject(info),
-                ]),
+                ),
                 invokeOpts?.timeoutMs ?? initTimeoutMs,
                 method,
               ),
@@ -13937,10 +14003,10 @@ export function createSessionControlPlane(
       const invoke = async (info: ChannelInfo) => {
         const timeout = invokeOpts?.timeoutMs ?? initTimeoutMs;
         const response = await withTimeout(
-          Promise.race([
+          raceLongLived(
             info.connection.extMethod(method, params ?? {}),
             getChannelClosedReject(info),
-          ]),
+          ),
           timeout,
           method,
         );
@@ -13995,10 +14061,11 @@ export function createSessionControlPlane(
       } else {
         controlError = new SessionNotFoundError(`workspace-command:${method}`);
       }
-      const { revision, unacknowledged } = await propagateWorkspaceChange(
-        change,
-        invokeOpts?.timeoutMs ?? initTimeoutMs,
-      );
+      const { revision, unacknowledged, skillsRefreshFailed } =
+        await propagateWorkspaceChange(
+          change,
+          invokeOpts?.timeoutMs ?? initTimeoutMs,
+        );
       if (unacknowledged.length > 0) {
         throw new WorkspaceChangePartiallyAppliedError(
           revision,
@@ -14009,19 +14076,22 @@ export function createSessionControlPlane(
         );
       }
       if (controlError !== undefined) throw controlError;
+      if (skillsRefreshFailed) {
+        throw new Error('User Skill settings did not reach every session');
+      }
       return result as T;
     },
 
     async isWorkspaceMemoryRememberAvailable(): Promise<boolean> {
       return await withEnsuredWorkspaceControl(async (info) => {
         const response = await withTimeout(
-          Promise.race([
+          raceLongLived(
             info.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability,
               { cwd: boundWorkspace },
             ),
             getChannelClosedReject(info),
-          ]),
+          ),
           initTimeoutMs,
           SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability,
         );
@@ -14038,13 +14108,13 @@ export function createSessionControlPlane(
     ): Promise<BridgeWorkspaceMemoryRememberResult> {
       return await withEnsuredWorkspaceControl(async (info) => {
         const response = await withTimeout(
-          Promise.race([
+          raceLongLived(
             info.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember,
               { ...request, cwd: boundWorkspace },
             ),
             getChannelClosedReject(info),
-          ]),
+          ),
           WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS,
           SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember,
         );
@@ -14057,13 +14127,13 @@ export function createSessionControlPlane(
     ): Promise<BridgeWorkspaceMemoryForgetResult> {
       return await withEnsuredWorkspaceControl(async (info) => {
         const response = await withTimeout(
-          Promise.race([
+          raceLongLived(
             info.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget,
               { ...request, cwd: boundWorkspace },
             ),
             getChannelClosedReject(info),
-          ]),
+          ),
           WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS,
           SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget,
         );
@@ -14074,13 +14144,13 @@ export function createSessionControlPlane(
     async runWorkspaceMemoryDream(): Promise<BridgeWorkspaceMemoryDreamResult> {
       return await withEnsuredWorkspaceControl(async (info) => {
         const response = await withTimeout(
-          Promise.race([
+          raceLongLived(
             info.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream,
               { cwd: boundWorkspace },
             ),
             getChannelClosedReject(info),
-          ]),
+          ),
           WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS,
           SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream,
         );
@@ -14728,14 +14798,14 @@ export function createSessionControlPlane(
         // `model_switch_failed` the catch block already publishes.
         let succeeded = false;
         try {
-          const result = await Promise.race([
+          const result = await raceLongLived(
             withTimeout(
               conn.unstable_setSessionModel(normalized),
               initTimeoutMs,
               'setSessionModel',
             ),
             transportClosed,
-          ]);
+          );
           // Cache the advertised selector as received from the caller. Any
           // drift is corrected by `reconcileAfterRoundtrip`, which reads the
           // agent's authoritative selector and re-publishes if it differs.
@@ -14805,14 +14875,14 @@ export function createSessionControlPlane(
       const transportClosed = getTransportClosedReject(entry);
       const work = entry.modelChangeQueue.then(async () => {
         assertCurrentOwner();
-        const response = await Promise.race([
+        const response = await raceLongLived(
           withTimeout(
             entry.connection.setSessionConfigOption(normalized),
             initTimeoutMs,
             'setSessionConfigOption',
           ),
           transportClosed,
-        ]);
+        );
         assertCurrentOwner();
         if (entry.restoreState) {
           entry.restoreState.configOptions = response.configOptions;
@@ -14837,7 +14907,7 @@ export function createSessionControlPlane(
         context?.clientId,
       );
 
-      const result = (await Promise.race([
+      const result = (await raceLongLived(
         withTimeout(
           entry.connection.extMethod(
             SERVE_CONTROL_EXT_METHODS.sessionLanguage,
@@ -14851,7 +14921,7 @@ export function createSessionControlPlane(
           SERVE_CONTROL_EXT_METHODS.sessionLanguage,
         ),
         getTransportClosedReject(entry),
-      ])) as {
+      )) as {
         language: string;
         outputLanguage: string | null;
         refreshed: boolean;
@@ -14883,9 +14953,16 @@ export function createSessionControlPlane(
 
     async setUserLanguage(params) {
       if (executionEngines) {
+        // A user write cannot clear a persisted workspace language override.
+        const workspaceOverride =
+          params.scope !== 'workspace' &&
+          rememberedUserLanguage?.scope === 'workspace'
+            ? rememberedUserLanguage
+            : undefined;
         rememberedUserLanguage = {
-          language: params.language,
+          language: workspaceOverride?.language ?? params.language,
           syncOutputLanguage: params.syncOutputLanguage,
+          ...(params.scope || workspaceOverride ? { scope: 'workspace' } : {}),
         };
       }
       // Sessionless: runs on every channel that is already live — one per
@@ -15005,7 +15082,7 @@ export function createSessionControlPlane(
       const endSideRequest = beginSideRequest(entry);
       let response: { sessionId: string; recap: string | null };
       try {
-        response = (await Promise.race([
+        response = (await raceLongLived(
           withTimeout(
             entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionRecap, {
               sessionId,
@@ -15014,7 +15091,7 @@ export function createSessionControlPlane(
             SERVE_CONTROL_EXT_METHODS.sessionRecap,
           ),
           getTransportClosedReject(entry),
-        ])) as { sessionId: string; recap: string | null };
+        )) as { sessionId: string; recap: string | null };
       } finally {
         endSideRequest();
       }
@@ -15592,7 +15669,7 @@ export function createSessionControlPlane(
         throw new SessionNotFoundError(sessionId);
       entry.pendingAgentNotificationCount++;
       try {
-        const response = await Promise.race([
+        const response = await raceLongLived(
           withTimeout(
             entry.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification,
@@ -15602,7 +15679,7 @@ export function createSessionControlPlane(
             SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification,
           ),
           getTransportClosedReject(entry),
-        ]);
+        );
         return { sessionId, accepted: response['accepted'] === true };
       } finally {
         entry.pendingAgentNotificationCount = Math.max(
@@ -15626,7 +15703,7 @@ export function createSessionControlPlane(
         throw new SessionNotFoundError(sessionId);
       entry.pendingAgentNotificationCount++;
       try {
-        const response = await Promise.race([
+        const response = await raceLongLived(
           withTimeout(
             entry.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.sessionExternalRecord,
@@ -15636,7 +15713,7 @@ export function createSessionControlPlane(
             SERVE_CONTROL_EXT_METHODS.sessionExternalRecord,
           ),
           getTransportClosedReject(entry),
-        ]);
+        );
         const recordId = response['recordId'];
         if (response['deferred'] === true) {
           // The child holds the record until its running turn settles.
@@ -15707,7 +15784,6 @@ export function createSessionControlPlane(
           SESSION_BTW_TIMEOUT_MS,
           SERVE_CONTROL_EXT_METHODS.sessionBtw,
         ),
-        getTransportClosedReject(entry),
       ];
       let cleanupAbort: (() => void) | undefined;
       if (signal) {
@@ -15722,7 +15798,10 @@ export function createSessionControlPlane(
       }
       let response: { sessionId: string; answer: string | null };
       try {
-        response = (await Promise.race(races)) as {
+        response = (await raceLongLived(
+          races,
+          getTransportClosedReject(entry),
+        )) as {
           sessionId: string;
           answer: string | null;
         };
@@ -15783,7 +15862,7 @@ export function createSessionControlPlane(
           launched?: boolean;
         };
         try {
-          response = (await Promise.race([
+          response = (await raceLongLived(
             withTimeout(
               entry.connection.extMethod(
                 SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
@@ -15796,7 +15875,7 @@ export function createSessionControlPlane(
               SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
             ),
             getTransportClosedReject(entry),
-          ])) as {
+          )) as {
             description?: string;
             launched?: boolean;
           };
@@ -15967,13 +16046,13 @@ export function createSessionControlPlane(
 
         try {
           await withTimeout(
-            Promise.race([
+            raceLongLived(
               entry.connection.extMethod(
                 SERVE_CONTROL_EXT_METHODS.sessionShellHistory,
                 { sessionId, command, output: historyOutput, exitCode },
               ),
               getTransportClosedReject(entry),
-            ]),
+            ),
             initTimeoutMs,
             'sessionShellHistory',
           );
@@ -16040,13 +16119,13 @@ export function createSessionControlPlane(
         let response: { deletedGroupIds: string[]; deletedPromptIds: string[] };
         let contextError: unknown;
         try {
-          response = (await Promise.race([
+          response = (await raceLongLived(
             entry.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.sessionMessagesDelete,
               { sessionId, ...req },
             ),
             getTransportClosedReject(entry),
-          ])) as typeof response;
+          )) as typeof response;
         } catch (error) {
           const data = (
             error as {
@@ -16074,12 +16153,12 @@ export function createSessionControlPlane(
         entry.events.resetReplay();
         const replayStartEventId = entry.events.lastEventId;
         try {
-          const replay = (await Promise.race([
+          const replay = (await raceLongLived(
             entry.connection.extMethod('qwen/session/loadUpdates', {
               sessionId,
             }),
             getTransportClosedReject(entry),
-          ])) as {
+          )) as {
             updates?: SessionUpdate[];
             partial?: boolean;
             replayError?: string;
@@ -16329,7 +16408,7 @@ export function createSessionControlPlane(
           // its real outcome is known so a caller never sees a timeout
           // followed by an unobserved history truncation + file restores —
           // same hazard the branch path documents.
-          response = (await Promise.race([
+          response = (await raceLongLived(
             entry.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.sessionRewind,
               {
@@ -16339,7 +16418,7 @@ export function createSessionControlPlane(
               },
             ),
             getTransportClosedReject(entry),
-          ])) as Record<string, unknown>;
+          )) as Record<string, unknown>;
         } catch (err) {
           const data = (err as { data?: unknown })?.data;
           if (data && typeof data === 'object' && 'errorKind' in data) {
@@ -16503,7 +16582,7 @@ export function createSessionControlPlane(
             pending?: boolean;
           };
           try {
-            response = (await Promise.race([
+            response = (await raceLongLived(
               withTimeout(
                 info.connection.extMethod(
                   SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
@@ -16513,7 +16592,7 @@ export function createSessionControlPlane(
                 SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
               ),
               getChannelClosedReject(info),
-            ])) as typeof response;
+            )) as typeof response;
           } catch (error) {
             if (
               action === 'authenticate' &&
@@ -16569,7 +16648,7 @@ export function createSessionControlPlane(
     async initializeWorkspaceMcp() {
       return await withEnsuredWorkspaceControl(async (info) => {
         info.workspaceMcpDiscoveryRequested = true;
-        const result = (await Promise.race([
+        const result = (await raceLongLived(
           withTimeout(
             info.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize,
@@ -16579,7 +16658,7 @@ export function createSessionControlPlane(
             SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize,
           ),
           getChannelClosedReject(info),
-        ])) as { accepted: boolean };
+        )) as { accepted: boolean };
         if (result.accepted) {
           beginWorkspaceMcpDiscovery(info);
         }
@@ -16590,7 +16669,7 @@ export function createSessionControlPlane(
     async reloadWorkspaceMcp(options) {
       return await withEnsuredWorkspaceControl(async (info) => {
         info.workspaceMcpDiscoveryRequested = true;
-        const result = (await Promise.race([
+        const result = (await raceLongLived(
           withTimeout(
             info.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.workspaceMcpReload,
@@ -16600,7 +16679,7 @@ export function createSessionControlPlane(
             SERVE_CONTROL_EXT_METHODS.workspaceMcpReload,
           ),
           getChannelClosedReject(info),
-        ])) as { accepted: boolean };
+        )) as { accepted: boolean };
         if (result.accepted) {
           beginWorkspaceMcpDiscovery(info);
         }
@@ -16616,7 +16695,7 @@ export function createSessionControlPlane(
       return await harness.withWorkspaceControl(
         info.harness,
         async () =>
-          (await Promise.race([
+          (await raceLongLived(
             withTimeout(
               info.connection.extMethod(
                 SERVE_CONTROL_EXT_METHODS.workspaceAgentGenerate,
@@ -16626,7 +16705,7 @@ export function createSessionControlPlane(
               SERVE_CONTROL_EXT_METHODS.workspaceAgentGenerate,
             ),
             getChannelClosedReject(info),
-          ])) as {
+          )) as {
             name: string;
             description: string;
             systemPrompt: string;
@@ -16672,7 +16751,7 @@ export function createSessionControlPlane(
           await harness.withWorkspaceControl(channelInfo.harness, async () => {
             if (request.settled) return;
             workspaceGenerationRequests.set(requestId, request);
-            const raw = await Promise.race([
+            const raw = await raceLongLived(
               withTimeout(
                 channelInfo.connection.extMethod(
                   SERVE_CONTROL_EXT_METHODS.workspaceGenerationStart,
@@ -16686,7 +16765,7 @@ export function createSessionControlPlane(
                 SERVE_CONTROL_EXT_METHODS.workspaceGenerationStart,
               ),
               getChannelClosedReject(channelInfo),
-            ]);
+            );
             if (request.settled) return;
             const response = raw as Record<string, unknown>;
             const model = response['model'];
@@ -16768,7 +16847,7 @@ export function createSessionControlPlane(
         reason: 'budget_warning_only' | 'runtime_name_conflict';
       };
       return await harness.withWorkspaceControl(info.harness, async () => {
-        const response = (await Promise.race([
+        const response = (await raceLongLived(
           withTimeout(
             info.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
@@ -16778,7 +16857,7 @@ export function createSessionControlPlane(
             SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
           ),
           getChannelClosedReject(info),
-        ])) as AddOk | AddSkip;
+        )) as AddOk | AddSkip;
         const addSkipped = (response as { skipped?: boolean }).skipped === true;
         if (!addSkipped) {
           const ok = response as AddOk;
@@ -16825,7 +16904,7 @@ export function createSessionControlPlane(
       };
       type RemoveSkip = { name: string; skipped: true; reason: 'not_present' };
       return await harness.withWorkspaceControl(info.harness, async () => {
-        const response = (await Promise.race([
+        const response = (await raceLongLived(
           withTimeout(
             info.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove,
@@ -16835,7 +16914,7 @@ export function createSessionControlPlane(
             SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove,
           ),
           getChannelClosedReject(info),
-        ])) as RemoveOk | RemoveSkip;
+        )) as RemoveOk | RemoveSkip;
         const removeSkipped =
           (response as { skipped?: boolean }).skipped === true;
         if (!removeSkipped) {

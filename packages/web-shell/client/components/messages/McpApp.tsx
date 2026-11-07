@@ -2,14 +2,18 @@ import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppBridge,
   PostMessageTransport,
+  type McpUiStyles,
 } from '@modelcontextprotocol/ext-apps/app-bridge';
 import {
   McpAppHostContext,
   useMcpAppAdmission,
   isBuiltInGeneratedUi,
+  isBundledGeneratedUi,
   McpAppMessagesContext,
   McpAppSessionContext,
   McpAppToolsContext,
+  McpAppModelContextContext,
+  generatedUiContextTagId,
   McpAppGeneratedUiOwnerContext,
   McpAppVisibilityContext,
 } from '../../mcpAppHostContext';
@@ -129,13 +133,66 @@ export function applySandboxCspQuery(
     : sandboxUrl;
 }
 
-function mcpAppHostContext(theme: ReturnType<typeof useTheme>) {
+// Cards grow with their content up to this height, then scroll inside.
+const MAX_APP_HEIGHT = 960;
+// The built-in card sizes its view to the content, so it gets one page-level
+// scroll instead of a nested scroll area inside the transcript.
+const MAX_GENERATED_UI_HEIGHT = 4000;
+
+// Standard MCP App style variables resolved from the Web Shell tokens the
+// card itself sees, so Apps can match the current theme instead of the
+// operating system's color scheme. Secondary text uses the token that keeps
+// readable contrast in each theme.
+function hostStyleVariables(
+  element: Element | null,
+  theme: ReturnType<typeof useTheme>,
+): Record<string, string> | undefined {
+  if (!element || typeof getComputedStyle !== 'function') return undefined;
+  const computed = getComputedStyle(element);
+  const tokens: Record<string, string> = {
+    '--color-background-primary': '--background',
+    '--color-background-secondary': '--muted',
+    '--color-background-inverse': '--primary',
+    '--color-text-primary': '--foreground',
+    '--color-text-secondary':
+      theme === 'light' ? '--secondary-foreground' : '--muted-foreground',
+    '--color-text-inverse': '--primary-foreground',
+    '--color-text-danger': '--destructive',
+    '--color-border-primary': '--border',
+    '--color-border-secondary': '--input',
+    '--color-ring-primary': '--ring',
+    '--font-sans': '--font-sans',
+    '--border-radius-md': '--radius',
+  };
+  const variables: Record<string, string> = {};
+  for (const [name, token] of Object.entries(tokens)) {
+    const value = computed.getPropertyValue(token).trim();
+    if (value) variables[name] = value;
+  }
+  return Object.keys(variables).length ? variables : undefined;
+}
+
+function mcpAppHostContext(
+  maxHeight: number,
+  theme: ReturnType<typeof useTheme>,
+  locale: string,
+  variables?: Record<string, string>,
+) {
   return {
     theme,
+    locale,
+    // Hosts may send any subset of the standard variables.
+    ...(variables
+      ? {
+          styles: {
+            variables: variables as Partial<McpUiStyles> as McpUiStyles,
+          },
+        }
+      : {}),
     platform: 'web' as const,
     displayMode: 'inline' as const,
     availableDisplayModes: ['inline' as const],
-    containerDimensions: { maxHeight: 640 },
+    containerDimensions: { maxHeight },
   };
 }
 
@@ -171,12 +228,40 @@ function acquireAppToolSlot(signal: AbortSignal): Promise<() => void> {
   });
 }
 
+// The readable title and summary a Generated UI result carries; the raw
+// fallback text also contains its structured JSON for the model.
+function generatedUiSummary(
+  display: McpAppDisplay,
+): { title: string; summary: string } | undefined {
+  const structured = display.toolResult['structuredContent'];
+  if (!structured || typeof structured !== 'object') return undefined;
+  const { title, summary } = structured as Record<string, unknown>;
+  return typeof title === 'string' && typeof summary === 'string'
+    ? { title, summary }
+    : undefined;
+}
+
+/** The saved title and summary of a Generated UI card, as readable text. */
+export function GeneratedUiSummary({ display }: { display: McpAppDisplay }) {
+  const readable = generatedUiSummary(display);
+  return readable ? (
+    <>
+      <div className={styles.fallbackTitle}>{readable.title}</div>
+      <div className={styles.fallbackSummary}>{readable.summary}</div>
+    </>
+  ) : (
+    <div>{display.fallbackText}</div>
+  );
+}
+
 export function GeneratedUiFallback({ display }: { display: McpAppDisplay }) {
   const { t } = useI18n();
   return (
     <div className={styles.fallback}>
-      <div>{display.fallbackText}</div>
-      <div>{t('mcpApp.generatedUi.unavailable')}</div>
+      <GeneratedUiSummary display={display} />
+      <div className={styles.fallbackNote}>
+        {t('mcpApp.generatedUi.unavailable')}
+      </div>
     </div>
   );
 }
@@ -223,11 +308,18 @@ export function McpAppRuntime({
   display: McpAppDisplay;
   retained?: GeneratedUiInstance['runtime'];
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
+  const builtInGeneratedUi = isBundledGeneratedUi(display);
+  const maxHeight = builtInGeneratedUi
+    ? MAX_GENERATED_UI_HEIGHT
+    : MAX_APP_HEIGHT;
   const daemonBaseUrl = useContext(McpAppHostContext);
   const sessionId = useContext(McpAppSessionContext);
   const tools = useContext(McpAppToolsContext);
   const messages = useContext(McpAppMessagesContext);
+  const modelContext = useContext(McpAppModelContextContext);
+  const modelContextRef = useRef(modelContext);
+  modelContextRef.current = modelContext;
   const messageHost =
     sessionId && messages?.sessionId === sessionId ? messages : undefined;
   const requestMessage =
@@ -237,7 +329,10 @@ export function McpAppRuntime({
   const callTool =
     sessionId && tools?.sessionId === sessionId ? tools.callTool : undefined;
   const theme = useTheme();
+  const languageRef = useRef(language);
+  languageRef.current = language;
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
   const bridgeRef = useRef<AppBridge | null>(null);
   const mountGenerationRef = useRef(0);
   const displayRef = useRef(display);
@@ -245,6 +340,9 @@ export function McpAppRuntime({
   displayRef.current = display;
   themeRef.current = theme;
   const [height, setHeight] = useState(260);
+  // Hidden until the App initializes, so a sandbox origin that is still
+  // unreachable (for example a forwarded port) never shows a browser error page.
+  const [appReady, setAppReady] = useState(false);
   const [error, setError] = useState<string>();
   const [dataSandbox, setDataSandbox] = useState(false);
   const cspKey = display.csp ? JSON.stringify(display.csp) : '';
@@ -263,6 +361,7 @@ export function McpAppRuntime({
 
   useEffect(() => {
     setError(undefined);
+    setAppReady(false);
     const iframe = iframeRef.current;
     if (!iframe || !sandboxUrl) return;
     const generation = ++mountGenerationRef.current;
@@ -276,11 +375,22 @@ export function McpAppRuntime({
       {
         ...(callTool ? { serverTools: {} } : {}),
         ...(requestMessage ? { message: { text: {} } } : {}),
+        // Only the built-in card attaches its values to the next message.
+        ...(builtInGeneratedUi && requestMessage
+          ? { updateModelContext: { text: {} } }
+          : {}),
         sandbox: {
           ...(current.csp ? { csp: current.csp } : {}),
         },
       },
-      { hostContext: mcpAppHostContext(themeRef.current) },
+      {
+        hostContext: mcpAppHostContext(
+          maxHeight,
+          themeRef.current,
+          languageRef.current,
+          hostStyleVariables(cardRef.current, themeRef.current),
+        ),
+      },
     );
     bridgeRef.current = bridge;
     const appAbort = new AbortController();
@@ -310,6 +420,9 @@ export function McpAppRuntime({
           return await requestMessage({
             serverName: current.serverName,
             resourceUri: current.resourceUri,
+            ...(isBundledGeneratedUi(current)
+              ? { requiredFeature: 'generated-ui' as const }
+              : {}),
             text: content[0].text,
             signal,
           });
@@ -318,6 +431,36 @@ export function McpAppRuntime({
         } finally {
           messagePending = false;
         }
+      };
+    }
+    if (builtInGeneratedUi && requestMessage) {
+      bridge.onupdatemodelcontext = async (params) => {
+        const host = modelContextRef.current;
+        const shown = displayRef.current;
+        const structured = shown.toolResult['structuredContent'];
+        const id =
+          structured && typeof structured === 'object'
+            ? (structured as Record<string, unknown>)['documentId']
+            : undefined;
+        const text = (params.content ?? [])
+          .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+          .join('\n\n');
+        if (
+          active &&
+          host &&
+          host.sessionId === sessionId &&
+          (!retained || retained.isVisible()) &&
+          typeof id === 'string' &&
+          text.trim() &&
+          text.length <= 16 * 1024
+        ) {
+          host.attach({
+            id: generatedUiContextTagId(id),
+            title: generatedUiSummary(shown)?.title ?? '',
+            text,
+          });
+        }
+        return {};
       };
     }
     if (callTool) {
@@ -406,6 +549,7 @@ export function McpAppRuntime({
     bridge.oninitialized = () => {
       if (!active) return;
       initialized = true;
+      setAppReady(true);
       clearTimeout(readyTimeout);
       const resource = displayRef.current;
       void bridge
@@ -415,13 +559,18 @@ export function McpAppRuntime({
         })
         .catch(failInitialization);
     };
-    bridge.onsizechange = ({ height: requestedHeight }) => {
+    bridge.onsizechange = ({ height: requestedHeight, width }) => {
       if (
         typeof requestedHeight === 'number' &&
         Number.isFinite(requestedHeight) &&
+        // While the page reflows the App can briefly lay out at zero width
+        // and report a height thousands of pixels tall; ignore that report.
+        width !== 0 &&
         (!retained || (retained.isVisible() && requestedHeight > 0))
       ) {
-        setHeight(Math.min(640, Math.max(120, Math.ceil(requestedHeight))));
+        setHeight(
+          Math.min(maxHeight, Math.max(120, Math.ceil(requestedHeight))),
+        );
       }
     };
 
@@ -471,51 +620,101 @@ export function McpAppRuntime({
     display.serverName,
     display.resourceUri,
     display.html,
+    builtInGeneratedUi,
     cspKey,
     toolArgumentsKey,
     toolResultKey,
     retained,
+    maxHeight,
   ]);
 
   useEffect(() => {
-    bridgeRef.current?.setHostContext(mcpAppHostContext(theme));
-  }, [theme]);
+    bridgeRef.current?.setHostContext(
+      mcpAppHostContext(
+        maxHeight,
+        theme,
+        language,
+        hostStyleVariables(cardRef.current, theme),
+      ),
+    );
+  }, [theme, language, maxHeight]);
 
   if (!display.html || !sandboxUrl) {
     return <div className={styles.fallback}>{display.fallbackText}</div>;
   }
 
   return (
-    <div className={styles.card} data-testid="mcp-app">
-      <div className={styles.header}>
-        <span>MCP App</span>
-        <span className={styles.server}>{display.serverName}</span>
-        {retained && (
-          <Button
-            variant="ghost"
-            size="sm"
-            title={t('mcpApp.generatedUi.reopenNotice')}
-            onClick={retained.reset}
-          >
-            {t('mcpApp.generatedUi.reset')}
-          </Button>
-        )}
-      </div>
-      {retained?.reopened && (
-        <div className={styles.fallback}>
-          {t('mcpApp.generatedUi.reopenNotice')}
-        </div>
+    <div ref={cardRef} className={styles.card} data-testid="mcp-app">
+      {builtInGeneratedUi ? (
+        // No MCP framing: one quiet row, only for the host's reset action.
+        retained && (
+          <div className={styles.builtInBar}>
+            <span>
+              {retained.reopened ? t('mcpApp.generatedUi.reopenNotice') : ''}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              title={t('mcpApp.generatedUi.reopenNotice')}
+              onClick={retained.reset}
+            >
+              {t('mcpApp.generatedUi.reset')}
+            </Button>
+          </div>
+        )
+      ) : (
+        <>
+          <div className={styles.header}>
+            <span>MCP App</span>
+            <span className={styles.server}>{display.serverName}</span>
+            {retained && (
+              <Button
+                variant="ghost"
+                size="sm"
+                title={t('mcpApp.generatedUi.reopenNotice')}
+                onClick={retained.reset}
+              >
+                {t('mcpApp.generatedUi.reset')}
+              </Button>
+            )}
+          </div>
+          {retained?.reopened && (
+            <div className={styles.fallback}>
+              {t('mcpApp.generatedUi.reopenNotice')}
+            </div>
+          )}
+        </>
       )}
       {error ? (
         <div className={styles.fallback}>
           {display.fallbackText || 'MCP App could not initialize.'}
         </div>
       ) : null}
+      {!error && !appReady ? (
+        <div className={styles.loading} role="status">
+          {t(
+            builtInGeneratedUi
+              ? 'mcpApp.generatedUi.loading'
+              : 'mcpApp.loading',
+          )}
+        </div>
+      ) : null}
       <iframe
         ref={iframeRef}
-        title={`${display.serverName} MCP App`}
+        title={
+          builtInGeneratedUi
+            ? t('mcpApp.generatedUi.title')
+            : `${display.serverName} MCP App`
+        }
         className={styles.frame}
-        style={{ height, display: error ? 'none' : undefined }}
+        style={{
+          height,
+          display: error ? 'none' : undefined,
+          // Keep loading off-screen in layout terms but out of sight.
+          ...(appReady
+            ? {}
+            : { position: 'absolute', visibility: 'hidden' as const }),
+        }}
         sandbox="allow-scripts allow-forms allow-same-origin"
         referrerPolicy="origin"
         onError={() => setError('sandbox-load-failed')}

@@ -36,11 +36,6 @@ const hasGnuRealpath =
     0;
 
 const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
-const audioPrebuildsWorkflow = readFileSync(
-  '.github/workflows/audio-capture-prebuilds.yml',
-  'utf8',
-);
-const audioPrebuildsYaml = parse(audioPrebuildsWorkflow);
 const releaseYaml = parse(workflow);
 const releaseStepScriptPath = '.github/scripts/run-release-step.sh';
 const releaseStepScriptAbsolutePath = join(
@@ -293,15 +288,19 @@ describe('CUA release workflow', () => {
 });
 
 // The canonical workspace restoration script shared by all nine
-// 'Restore workspace ownership' copies in release.yml. The full wipe (vs
+// 'Restore workspace ownership' action calls in release.yml. The full wipe (vs
 // serve-ab.yml's keep-and-scrub) is deliberate on this lane: release
-// checkouts carry CI_BOT_PAT and the npm OIDC id-token, so no pre-existing
-// repo state may survive into them. Pin the WHOLE body by equality, the way
+// checkouts persist credentials by default (only the publish, build-release,
+// and trusted-scripts checkouts opt out), and the publish job holds CI_BOT_PAT
+// and can mint the npm OIDC id-token, so no pre-existing repo state may
+// survive into them. Pin the WHOLE body by equality, the way
 // review-worktree-cleanup-workflow.test.js pins its sweep copies: a
 // commented-out find, an inserted early exit, or a uniformly dropped
 // ownership ladder all ship green under substring pins, and each of those
 // mutants reopens the incident class this step exists for.
-const canonicalWipe = `set -uo pipefail
+const canonicalWipe = `#!/usr/bin/env bash
+set -euo pipefail
+umask 077
 # Reject symlinked or non-canonical paths before recursive changes.
 RWS="\${RUNNER_WORKSPACE:?}"
 while [ "\${RWS%/}" != "$RWS" ]; do RWS="\${RWS%/}"; done
@@ -382,7 +381,15 @@ mkdir "\${release_state}/gh" || exit 1
   echo "NPM_CONFIG_USERCONFIG=\${release_state}/npmrc"
   echo "DOCKER_CONFIG=\${release_state}/docker"
   echo "GH_CONFIG_DIR=\${release_state}/gh"
-} >> "\${GITHUB_ENV:?}"`;
+} >> "\${GITHUB_ENV:?}"
+mkdir "\${release_state}/bin"
+echo "NPM_CONFIG_PREFIX=\${release_state}" >> "\${GITHUB_ENV}"
+echo "\${release_state}/bin" >> "\${GITHUB_PATH:?}"
+`;
+const releaseRunnerScript = readFileSync(
+  '.github/scripts/prepare-release-runner.sh',
+  'utf8',
+);
 
 describe('release workflow', () => {
   // The shard-completeness pin and the zero-test ratchet must gate on the
@@ -427,7 +434,7 @@ describe('release workflow', () => {
       'quality_scripts',
       'integration_none',
       'integration_docker',
-      'publish',
+      'build_release',
     ]);
     for (const [id, job] of checkoutJobs) {
       const restoreIndex = job.steps.findIndex(
@@ -444,12 +451,13 @@ describe('release workflow', () => {
         String(step.uses ?? '').includes('actions/checkout'),
       );
       expect(checkoutIndex, id).toBeGreaterThan(0);
-      // Full-string equality against the shared constant: commenting out
-      // the find, inserting an early exit, or dropping the chown/chmod
-      // ladder uniformly from all nine copies keeps every substring and
-      // equality-across-copies pin green while reopening the incident.
-      expect(job.steps[restoreIndex]?.run, id).toBe(canonicalWipe);
+      // Every caller must reach the same pinned cleanup implementation.
+      expect(job.steps[restoreIndex]?.uses, id).toBe(
+        '$/.github/actions/prepare-release-runner',
+      );
     }
+    // Full-body equality also catches early exits or a commented-out wipe.
+    expect(releaseRunnerScript).toBe(canonicalWipe);
     // Pool-routed jobs inherit root-owned leftovers whether or not they
     // check out, so the exemption above must never extend to them.
     for (const [id, job] of Object.entries(releaseYaml.jobs)) {
@@ -457,6 +465,7 @@ describe('release workflow', () => {
         continue;
       }
       expect(wipesWorkspace(job), id).toBe(true);
+      expect(['read', 'write'], id).toContain(job.permissions?.contents);
     }
   });
 
@@ -509,10 +518,10 @@ describe('release workflow', () => {
       expect(gateIndex, id).toBeLessThan(installIndex);
     }
     expect(gated.sort()).toEqual([
+      'build_release',
       'integration_docker',
       'integration_none',
       'prepare',
-      'publish',
       'quality_build',
       'quality_scripts',
       'quality_static',
@@ -529,6 +538,7 @@ describe('release workflow', () => {
 
     expect(checkoutDepth('prepare')).toBe(0);
     expect(checkoutDepth('publish')).toBe(0);
+    expect(checkoutDepth('build_release')).toBe(0);
     for (const id of [
       'quality_static',
       'quality_build',
@@ -548,6 +558,7 @@ describe('release workflow', () => {
       'quality_build',
       'workspace_tests',
       'integration_docker',
+      'build_release',
       'publish',
       'notify_failure',
       'reconcile_failure',
@@ -568,7 +579,7 @@ describe('release workflow', () => {
         // The tarball gate rides this checkout too: run from the selected
         // ref's own `scripts/`, it is missing on any ref that predates it.
         'sparse-checkout':
-          '/.github/scripts\n/scripts/assert-release-version.mjs\n/scripts/check-release-tarball-exec-bits.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
+          '/.github/scripts\n/.github/workflows/audio-capture-prebuilds.yml\n/scripts/assert-release-version.mjs\n/scripts/check-release-tarball-exec-bits.mjs\n/scripts/release-packages.mjs\n/scripts/workspaces.js\n/package.json\n/packages/*/package.json\n/packages/channels/*/package.json\n/integrations/*/package.json',
         'sparse-checkout-cone-mode': false,
         path: '.release-workflow',
       });
@@ -598,7 +609,12 @@ describe('release workflow', () => {
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
       const steps = job.steps ?? [];
       for (const [index, step] of steps.entries()) {
-        if (!String(step.run ?? '').includes('.release-workflow/')) continue;
+        if (
+          !String(step.run ?? step.with?.script ?? '').includes(
+            '.release-workflow/',
+          )
+        )
+          continue;
         swept += 1;
         const label = `${jobId}:${step.name}`;
         const checkoutIndex = steps.findLastIndex(
@@ -611,9 +627,17 @@ describe('release workflow', () => {
         // run selected-ref npm code, which could overwrite the runner in
         // place — including npm lifecycle scripts fired by `npm publish`.
         expect(
-          steps
-            .slice(checkoutIndex + 1, index)
-            .some((candidate) => /\bnpm\b/.test(String(candidate.run ?? ''))),
+          steps.slice(checkoutIndex + 1, index).some((candidate) => {
+            const command = String(candidate.run ?? '');
+            const helper = command.match(/run-release-step\.sh ([\w-]+)/)?.[1];
+            const body = helper
+              ? (releaseStepScript
+                  .split(`  ${helper})`)[1]
+                  ?.split('\n    ;;')[0] ?? '')
+              : '';
+            // Committing can run selected-ref hooks, including npm scripts.
+            return /\bnpm\b|\bcommit_release_version\b/.test(command + body);
+          }),
           label,
         ).toBe(false);
       }
@@ -686,7 +710,9 @@ describe('release workflow', () => {
     // is the job that reports their failure, so its last-resort issue filing
     // is deliberately inline. Every other step stays under the per-step cap
     // below, which is the rule that actually keeps logic out of the YAML.
-    expect(workflow.split('\n').length).toBeLessThan(930);
+    // The optional ECS build handoff adds artifact routing;
+    // fingerprinting, source validation, and packing remain in scripts.
+    expect(workflow.split('\n').length).toBeLessThan(1160);
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
       for (const step of job.steps ?? []) {
         if (step.name === 'Restore workspace ownership' || !step.run) continue;
@@ -1896,7 +1922,7 @@ describe('release workflow', () => {
   it.skipIf(
     !hasGnuRealpath || process.getuid?.() === 0 || process.platform === 'win32',
   )('executes the workspace wipe against guard branches', () => {
-    const wipeScript = canonicalWipe;
+    const wipeScript = releaseRunnerScript;
 
     const runWipe = (envOverrides, { preCreateWorkspace } = {}) => {
       const base = mkdtempSync(join(tmpdir(), 'release-wipe-behavioral-'));
@@ -1910,6 +1936,7 @@ describe('release workflow', () => {
         RUNNER_TEMP: join(base, 'temp'),
         RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
         GITHUB_ENV: join(base, 'github-env'),
+        GITHUB_PATH: join(base, 'github-path'),
         HOME: join(base, 'home'),
         XDG_CONFIG_HOME: join(base, 'home', '.config'),
         ...envOverrides,
@@ -2055,6 +2082,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(runnerRoot, 'temp'),
           RUNNER_TOOL_CACHE: join(runnerRoot, '_work', '_tool'),
           GITHUB_ENV: join(runnerRoot, 'github-env'),
+          GITHUB_PATH: join(runnerRoot, 'github-path'),
           HOME: join(runnerRoot, 'home'),
           XDG_CONFIG_HOME: join(runnerRoot, 'home', '.config'),
         };
@@ -2099,6 +2127,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(base, 'temp'),
           RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
           GITHUB_ENV: join(base, 'github-env'),
+          GITHUB_PATH: join(base, 'github-path'),
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };
@@ -2137,6 +2166,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(base, 'temp'),
           RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
           GITHUB_ENV: join(base, 'github-env'),
+          GITHUB_PATH: join(base, 'github-path'),
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };
@@ -2176,6 +2206,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(base, 'temp'),
           RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
           GITHUB_ENV: join(base, 'github-env'),
+          GITHUB_PATH: join(base, 'github-path'),
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };
@@ -2214,6 +2245,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(base, 'temp'),
           RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
           GITHUB_ENV: join(base, 'github-env'),
+          GITHUB_PATH: join(base, 'github-path'),
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };
@@ -2259,6 +2291,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(base, 'temp'),
           RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
           GITHUB_ENV: join(base, 'github-env'),
+          GITHUB_PATH: join(base, 'github-path'),
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };
@@ -2303,6 +2336,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(runnerRoot, 'temp'),
           RUNNER_TOOL_CACHE: join(runnerRoot, 'tool-cache'),
           GITHUB_ENV: join(runnerRoot, 'github-env'),
+          GITHUB_PATH: join(runnerRoot, 'github-path'),
           HOME: join(runnerRoot, 'home'),
           XDG_CONFIG_HOME: join(runnerRoot, 'home', '.config'),
         };
@@ -2347,6 +2381,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(runnerRoot, 'temp'),
           RUNNER_TOOL_CACHE: join(runnerRoot, 'tool-cache'),
           GITHUB_ENV: join(runnerRoot, 'github-env'),
+          GITHUB_PATH: join(runnerRoot, 'github-path'),
           HOME: join(runnerRoot, 'home'),
           XDG_CONFIG_HOME: join(runnerRoot, 'home', '.config'),
         };
@@ -2389,6 +2424,7 @@ describe('release workflow', () => {
           RUNNER_TEMP: join(base, 'temp'),
           RUNNER_TOOL_CACHE: join(base, 'tool-cache'),
           GITHUB_ENV: join(base, 'github-env'),
+          GITHUB_PATH: join(base, 'github-path'),
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
         };
@@ -2480,6 +2516,23 @@ describe('release workflow', () => {
     );
   });
 
+  it('selects the apt mirror before the always-cold sandbox build', () => {
+    // #16271: this lane prunes the builder cache, so its apt layers are always
+    // cold — the same defect #16214 fixed for the E2E leg. It must source the
+    // shared probe and apply it before `build:sandbox`, so a mainland host
+    // builds against the VPC intranet mirror rather than the throttled default.
+    // Match the source statement, not a substring — the shellcheck directive
+    // above it also names the file.
+    expect(dockerIntegrationScript).toMatch(
+      /^source .*apt-mirror-probe\.sh"$/m,
+    );
+    const applyIndex = dockerIntegrationScript.indexOf('apply_apt_mirror');
+    expect(applyIndex).toBeGreaterThan(-1);
+    expect(
+      dockerIntegrationScript.indexOf('npm run build:sandbox'),
+    ).toBeGreaterThan(applyIndex);
+  });
+
   it('prunes BuildKit cache and gates the docker data root before the build and the vitest phase', () => {
     // #13479: run 37374675168 passed the job-start disk floor gate and the
     // runner still died on ENOSPC 24 minutes into the docker test step. The
@@ -2555,6 +2608,9 @@ describe('release workflow', () => {
     dockerPostFloorKb,
     postGateExit,
     inspectTimesOut = false,
+    aptDefaultRate,
+    aptAliyunRate,
+    aptTunaRate,
   } = {}) => {
     const directory = mkdtempSync(
       join(tmpdir(), 'release-docker-integration-'),
@@ -2611,8 +2667,25 @@ if [ "$1" = 'info' ]; then
 fi
 exit 0`,
     );
-    stub('npm', `printf 'npm %s\\n' "$*" >> "$CALLS_LOG"`);
+    stub(
+      'npm',
+      `printf 'npm %s flags=%s\\n' "$*" "\${BUILD_SANDBOX_FLAGS:-}" >> "$CALLS_LOG"`,
+    );
     stub('npx', `printf 'npx %s\\n' "$*" >> "$CALLS_LOG"`);
+    // Deterministic stand-in for the probe's range reads so the suite stays
+    // hermetic (#16278 R1-1): answer the -w '%{http_code} %{speed_download}'
+    // projection per URL, default slow + one fast mirror.
+    stub(
+      'curl',
+      `for url; do :; done
+case "$url" in
+  *deb.debian.org*) printf '206 %s' "\${CURL_DEFAULT_RATE:-10000}" ;;
+  *mirrors.aliyun.com*) printf '206 %s' "\${CURL_ALIYUN_RATE:-5000000}" ;;
+  *mirrors.tuna.tsinghua.edu.cn*) printf '206 %s' "\${CURL_TUNA_RATE:-0}" ;;
+  *mirrors.cloud.aliyuncs.com*) printf '000 0' ;;
+  *) printf '000 0' ;;
+esac`,
+    );
     if (!helperAbsent) {
       // Both checkpoints share this stub: count invocations so a case can
       // fail the pre-vitest gate while the pre-build gate passes.
@@ -2647,6 +2720,10 @@ exit 0`,
         PRUNE_FAILS: pruneFails ? '1' : '0',
         IMAGE_PRUNE_FAILS: imagePruneFails ? '1' : '0',
         DOCKER_INFO_FAILS: dockerInfoFails ? '1' : '0',
+        BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true',
+        CURL_DEFAULT_RATE: String(aptDefaultRate ?? 10000),
+        CURL_ALIYUN_RATE: String(aptAliyunRate ?? 5000000),
+        CURL_TUNA_RATE: String(aptTunaRate ?? 0),
       };
       // The floor knobs come from the test, never the ambient environment:
       // the suite's verdict must not depend on the env of whoever runs it.
@@ -2684,6 +2761,30 @@ exit 0`,
       rmSync(directory, { recursive: true, force: true });
     }
   };
+
+  it.skipIf(process.platform === 'win32')(
+    'selects the fast apt mirror and preserves the CI label in the build flags',
+    () => {
+      const { result, calls } = runDockerIntegrationScript();
+      expect(result.status).toBe(0);
+      expect(calls).toContain('--build-arg APT_MIRROR=mirrors.aliyun.com');
+      expect(calls).toContain('--label org.qwen-code.ci.sandbox=true');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'adds no apt mirror build arg when every endpoint is slow',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        aptDefaultRate: 10000,
+        aptAliyunRate: 20000,
+        aptTunaRate: 15000,
+      });
+      expect(result.status).toBe(0);
+      expect(calls).not.toContain('--build-arg APT_MIRROR=');
+      expect(calls).toContain('--label org.qwen-code.ci.sandbox=true');
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'reclaims without the disk gate or the lock protocol on hosted runners',
@@ -3476,6 +3577,24 @@ exit 0`,
     );
   });
 
+  it('reads the release tree with the run-scoped token, not the bot PAT', () => {
+    // The publish checkout is read-only and the repository is public, so
+    // authenticating it with the long-lived bot PAT adds an auth dependency
+    // without adding access: a transient PAT rejection failed the release at
+    // Checkout (#15726). The PAT stays exported to the steps that write.
+    const steps = releaseYaml.jobs.publish.steps;
+    const checkout = steps.find((step) => step.name === 'Checkout');
+    expect(checkout.with.token).toBe('${{ github.token }}');
+    expect(checkout.with['persist-credentials']).toBe(false);
+    expect(
+      steps.find((step) => step.id === 'push_release_branch').env.CI_BOT_PAT,
+    ).toBe('${{ secrets.CI_BOT_PAT }}');
+    expect(
+      steps.find((step) => step.name === 'Create GitHub Release and Tag').env
+        .GITHUB_TOKEN,
+    ).toBe('${{ secrets.CI_BOT_PAT }}');
+  });
+
   it('serializes publish jobs per release tag', () => {
     // The pre-push re-validation below is only sound while at most one
     // publish job pushes and publishes a given version at a time; --force
@@ -3546,7 +3665,7 @@ exit 0`,
     expect(releaseBranchStep.env.GITHUB_TOKEN).toBeUndefined();
     expect(pushReleaseBranchStep.env.GITHUB_TOKEN).toBe('${{ github.token }}');
     expect(pushReleaseBranchStep.env.BRANCH_NAME).toBe(
-      '${{ steps.release_branch.outputs.BRANCH_NAME }}',
+      "${{ format('release/{0}', needs.prepare.outputs.release_tag) }}",
     );
     expect(pushReleaseBranchStep.env.CI_BOT_PAT).toBe(
       '${{ secrets.CI_BOT_PAT }}',
@@ -3789,53 +3908,197 @@ describe('release lane runner routing', () => {
     // hosted pool while every machine it depended on sat idle.
     expect(releaseYaml.jobs.quality['runs-on']).toContain('ecs-qwen-hk4-host');
     expect(releaseYaml.jobs.quality['runs-on']).toContain('ubuntu-latest');
-    // publish carries CI_BOT_PAT and npm OIDC publishing. ecs-qwen-hk4-host
-    // machines are dual-labelled onto the ecs-qwen PR CI pool, so publish may
-    // only reach a release-only machine set — and only when explicitly
-    // opted in, which keeps the lane hosted until ops provisions it.
-    expect(releaseYaml.jobs.publish['runs-on']).toContain(
+    // npm trusted publishing stays hosted; only credential-free builds use ECS.
+    expect(releaseYaml.jobs.publish['runs-on']).toBe('ubuntu-latest');
+    expect(releaseYaml.jobs.build_release['runs-on']).toEqual([
+      'self-hosted',
+      'linux',
       'ecs-qwen-release-host',
-    );
-    expect(releaseYaml.jobs.publish['runs-on']).not.toContain(
-      'ecs-qwen-hk4-host',
-    );
-    expect(releaseYaml.jobs.publish['runs-on']).toContain(
+    ]);
+    expect(releaseYaml.jobs.build_release.if).toContain(
       "vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true'",
     );
-    expect(releaseYaml.jobs.publish['runs-on']).toContain('ubuntu-latest');
+    expect(releaseYaml.jobs.build_release.permissions).toEqual({
+      contents: 'read',
+      actions: 'read',
+    });
+    expect(JSON.stringify(releaseYaml.jobs.build_release)).not.toContain(
+      'secrets.',
+    );
+    expect(releaseYaml.jobs.build_release.environment).toBeUndefined();
     // Failure reporting must survive whatever broke the pool it reports on.
     expect(releaseYaml.jobs.notify_failure['runs-on']).toBe('ubuntu-latest');
     expect(releaseYaml.jobs.notify_failure['runs-on']).not.toContain(
       'ecs-qwen',
     );
   });
+});
 
-  it('keeps prebuild collection fail-closed on the release-only pool', () => {
-    // collect rides the same opt-in ecs-qwen-release-host lane as publish,
-    // so the runs-on expression must keep the repository condition and the
-    // hosted fallback that keep forks and the unset default on ubuntu-latest.
-    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
-      "github.repository == 'QwenLM/qwen-code'",
+describe('release artifact handoff', () => {
+  const step = (job, name) =>
+    releaseYaml.jobs[job].steps.find((entry) => entry.name === name);
+
+  it.each([
+    {
+      name: 'unset switch, fresh audio',
+      enabled: '',
+      build: 'skipped',
+      expectedBuild: false,
+      expectedPublish: true,
+    },
+    {
+      name: 'enabled, fresh audio',
+      expectedBuild: true,
+      expectedPublish: true,
+    },
+    {
+      name: 'enabled, reused audio',
+      audio: 'skipped',
+      artifact: '123',
+      expectedBuild: true,
+      expectedPublish: true,
+    },
+    {
+      name: 'unset switch, reused audio',
+      enabled: '',
+      audio: 'skipped',
+      artifact: '123',
+      build: 'skipped',
+      expectedBuild: false,
+      expectedPublish: true,
+    },
+    {
+      name: 'missing audio',
+      audio: 'skipped',
+      expectedBuild: false,
+      expectedPublish: false,
+    },
+    {
+      name: 'failed audio',
+      audio: 'failure',
+      expectedBuild: false,
+      expectedPublish: false,
+    },
+    {
+      name: 'failed prepare',
+      prepare: 'failure',
+      expectedBuild: false,
+      expectedPublish: false,
+    },
+    {
+      name: 'failed tests',
+      quality: 'failure',
+      expectedBuild: false,
+      expectedPublish: false,
+    },
+    {
+      name: 'explicitly skipped tests',
+      quality: 'skipped',
+      skip: 'true',
+      expectedBuild: true,
+      expectedPublish: true,
+    },
+    {
+      name: 'skip tests cannot bypass audio failure',
+      audio: 'failure',
+      skip: 'true',
+      expectedBuild: false,
+      expectedPublish: false,
+    },
+    {
+      name: 'failed handoff',
+      build: 'failure',
+      expectedBuild: true,
+      expectedPublish: false,
+    },
+    {
+      name: 'cancelled handoff',
+      build: 'cancelled',
+      expectedBuild: true,
+      expectedPublish: false,
+    },
+    {
+      name: 'unexpectedly skipped handoff',
+      build: 'skipped',
+      expectedBuild: true,
+      expectedPublish: false,
+    },
+  ])('$name gates the build and publisher', (scenario) => {
+    const needs = {
+      prepare: {
+        result: scenario.prepare ?? 'success',
+        outputs: { audio_artifact_id: scenario.artifact ?? '' },
+      },
+      quality: { result: scenario.quality ?? 'success' },
+      integration_none: { result: 'success' },
+      integration_docker: { result: 'success' },
+      audio_capture_prebuilds: { result: scenario.audio ?? 'success' },
+      build_release: { result: scenario.build ?? 'success' },
+    };
+    const github = {
+      repository: 'QwenLM/qwen-code',
+      event: { inputs: { force_skip_tests: scenario.skip ?? 'false' } },
+    };
+    const vars = {
+      ECS_RELEASE_HOST_RUNNER_ENABLED: scenario.enabled ?? 'true',
+    };
+    // These conditions use only boolean operators and string comparisons,
+    // whose semantics match JavaScript for the explicit context above.
+    const enabled = (job) =>
+      new Function(
+        'needs',
+        'github',
+        'vars',
+        'always',
+        `return (${releaseYaml.jobs[job].if.slice(3, -2)});`,
+      )(needs, github, vars, () => true);
+    expect(enabled('build_release')).toBe(scenario.expectedBuild);
+    expect(enabled('publish')).toBe(scenario.expectedPublish);
+  });
+
+  it('skips hosted builds only after importing a successful same-run handoff', () => {
+    const publish = releaseYaml.jobs.publish;
+    expect(publish.needs).toContain('build_release');
+    expect(
+      step('publish', 'Download release handoff').with['artifact-ids'],
+    ).toBe('${{ needs.build_release.outputs.artifact_id }}');
+    const restore = step('publish', 'Restore release commit and outputs');
+    expect(restore.env.RELEASE_COMMIT).toBe(
+      '${{ needs.build_release.outputs.release_commit }}',
     );
-    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
-      "vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true'",
+    expect(restore.if).toBe("${{ needs.build_release.result == 'success' }}");
+    for (const name of [
+      'Prepare release branch',
+      'Build Bundle and Prepare Package',
+      'Build Standalone Archives',
+    ]) {
+      expect(step('publish', name).if).toBe(
+        "${{ needs.build_release.result != 'success' }}",
+      );
+    }
+    expect(publish.steps.indexOf(restore)).toBeLessThan(
+      publish.steps.indexOf(
+        step('publish', 'Conditionally push release branch'),
+      ),
     );
-    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
-      'ecs-qwen-release-host',
+  });
+
+  it('reports audio and handoff failures, including when publishing is skipped', () => {
+    for (const dependency of ['audio_capture_prebuilds', 'build_release']) {
+      expect(releaseYaml.jobs.notify_failure.needs).toContain(dependency);
+      expect(releaseYaml.jobs.notify_failure.if).toContain(
+        `needs.${dependency}.result == 'failure'`,
+      );
+      expect(releaseYaml.jobs.reconcile_failure.if).toContain(
+        `needs.${dependency}.result != 'failure'`,
+      );
+    }
+    expect(releaseStepScript).toContain(
+      'audio_capture_prebuilds:${AUDIO_PREBUILDS_RESULT}',
     );
-    expect(audioPrebuildsYaml.jobs.collect['runs-on']).toContain(
-      'ubuntu-latest',
+    expect(releaseStepScript).toContain(
+      'build_release:${BUILD_RELEASE_RESULT}',
     );
-    // On the persistent release-host workspace, download-artifact's
-    // merge-multiple merges into existing paths, so a stale prebuilds/ tree
-    // from a previous release would leak into the merged artifact. The wipe
-    // must stay first and self-hosted-only; dropping it (or reordering it
-    // after the merge) re-opens that leak.
-    const [wipe, ...rest] = audioPrebuildsYaml.jobs.collect.steps;
-    expect(wipe.name).toBe('Clear stale prebuilds (self-hosted)');
-    expect(wipe.if).toBe("${{ runner.environment == 'self-hosted' }}");
-    expect(wipe.run).toBe('rm -rf prebuilds');
-    expect(rest[0].name).toBe('Merge per-platform prebuilds');
   });
 });
 

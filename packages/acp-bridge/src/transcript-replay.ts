@@ -32,6 +32,10 @@ import {
   EVENT_API_RESPONSE,
   EVENT_TOOL_CALL,
 } from '@qwen-code/qwen-code-core/telemetryConstants';
+// Node-free like the subpaths above: the compaction utils' only runtime
+// import is the pure shell-result helper, so the browser replay bundle
+// stays Node-free.
+import { compactToolResultDisplayForRecording } from '@qwen-code/qwen-code-core/utils/toolResultDisplayCompaction.js';
 import {
   GOAL_PAUSE_REASON_COMMAND,
   isGoalCheckpointBookkeepingRecord,
@@ -48,6 +52,7 @@ import type {
   SessionAgentAuthor,
   SessionAgentStep,
   SessionAgentTerminalStatus,
+  ToolResultDisplay,
 } from '@qwen-code/qwen-code-core';
 
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
@@ -177,6 +182,16 @@ export interface TranscriptToolCallResultOptions extends UpdateMetaOptions {
   readonly errorMessage?: string;
   readonly artifacts?: readonly unknown[];
   readonly contentPrefix?: readonly ToolCallContent[];
+  /**
+   * Producer identity for the AgentTool call this result closes. Rebuilt by
+   * replay from the `task_execution` display so a reloaded session carries
+   * the same `_meta.agent` the live wire had.
+   */
+  readonly agent?: {
+    agentName: string;
+    depth: number;
+    kind: 'subagent';
+  };
 }
 
 export interface TranscriptTodoItem {
@@ -310,6 +325,9 @@ const AGENT_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
   'cancelled',
   'offline',
 ] satisfies SessionAgentTerminalStatus[]);
+
+/** `SubagentValidator`'s name constraint, re-checked on the replay side. */
+const SUBAGENT_NAME_PATTERN = /^[\p{L}\p{N}_-]+$/u;
 
 function parseAgentAuthor(value: unknown): SessionAgentAuthor | undefined {
   if (
@@ -992,7 +1010,17 @@ export function createTranscriptToolCallResultUpdate(
   options: TranscriptToolCallResultOptions,
 ): SessionUpdate {
   const provenance = resolveToolProvenance(options.toolName);
-  const content = buildToolResultContent(options);
+  // Live results reach the daemon's replay journal uncompacted, and every
+  // session/load embeds that journal. A single edit of a large file carries
+  // the whole old and new file contents twice (diff content + rawOutput),
+  // which ballooned one observed load response to ~40 MB (#16171). Emit the
+  // same bounded display the recorder persists, so warm replay matches what
+  // cold replay from the transcript already shows. Idempotent for the
+  // already-sanitized displays cold replay passes in.
+  const resultDisplay = compactToolResultDisplayForRecording(
+    options.resultDisplay as ToolResultDisplay | undefined,
+  );
+  const content = buildToolResultContent({ ...options, resultDisplay });
   const update: Record<string, unknown> = {
     sessionUpdate: 'tool_call_update',
     toolCallId: options.callId,
@@ -1008,11 +1036,12 @@ export function createTranscriptToolCallResultUpdate(
         ...(options.artifacts && options.artifacts.length > 0
           ? { artifacts: options.artifacts }
           : {}),
+        ...(options.agent ? { agent: options.agent } : {}),
         ...(options.extra ?? {}),
       },
     }),
   };
-  const rawOutput = getReplayRawOutput(options.resultDisplay);
+  const rawOutput = getReplayRawOutput(resultDisplay);
   if (rawOutput !== undefined) update['rawOutput'] = rawOutput;
   return update as unknown as SessionUpdate;
 }
@@ -1713,6 +1742,13 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           resultDisplay,
           record.uuid,
         ),
+        // The live wire stamps `_meta.agent` on the AgentTool call from
+        // `SubAgentTracker`; persistence keeps only the `subagentName` in the
+        // `task_execution` display, so rebuild the root-parented identity
+        // here to keep a reloaded session attributable.
+        ...(isTaskExecutionDisplay(resultDisplay)
+          ? { agent: agentIdentityFromTaskExecution(resultDisplay) }
+          : {}),
         ...meta,
       }),
     );
@@ -2700,6 +2736,44 @@ function normalizeTodos(values: readonly unknown[]): TranscriptTodoItem[] {
   });
 }
 
+function agentIdentityFromTaskExecution(
+  display: Record<string, unknown>,
+): { agentName: string; depth: number; kind: 'subagent' } | undefined {
+  const subagentName = display['subagentName'];
+  if (typeof subagentName !== 'string' || subagentName.length === 0) {
+    return undefined;
+  }
+  // `executionMode` separates a validated name from the raw model-supplied
+  // `subagent_type` (`buildSpawnBlockedResult` sets neither), but it is written
+  // by rejection paths too — worktree-provisioning failure and the foreground
+  // model-slot cancel both persist it for a subagent whose session never
+  // registered. `subagentSessionReady` is the positive evidence that a session
+  // existed, so a mode-shaped display without it stays unattributed rather
+  // than minting an identity the live wire never stamped.
+  const executionMode = display['executionMode'];
+  if (executionMode === 'foreground' || executionMode === 'background') {
+    if (display['subagentSessionReady'] !== true) return undefined;
+  } else {
+    // Positive allowlist. A persisted record may come from a truncated or
+    // older writer, so an absent or non-string status is not evidence that
+    // anything ran; a negative allowlist would mint on exactly that input.
+    const status = display['status'];
+    if (
+      typeof status !== 'string' ||
+      (status !== 'completed' &&
+        status !== 'running' &&
+        status !== 'background' &&
+        status !== 'cancelled')
+    ) {
+      return undefined;
+    }
+  }
+  if (!SUBAGENT_NAME_PATTERN.test(subagentName)) return undefined;
+  // A persisted `task_execution` carries no lineage beyond its own type name,
+  // so replay can only ever rebuild the root-parented form; nested identity
+  // still requires the live wire.
+  return { agentName: `/root/${subagentName}`, depth: 1, kind: 'subagent' };
+}
 function isTaskExecutionDisplay(
   value: unknown,
 ): value is Record<string, unknown> {

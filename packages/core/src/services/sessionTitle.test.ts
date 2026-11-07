@@ -20,6 +20,7 @@ import {
 import {
   normalizeForEchoCompare,
   sanitizeTitle,
+  modPromptTitleKey,
   tryGenerateSessionTitle,
 } from './sessionTitle.js';
 import { content, modelText, userText } from '../test-utils/model-fixtures.js';
@@ -182,6 +183,7 @@ describe('tryGenerateSessionTitle', () => {
           config,
           new AbortController().signal,
           ['Visible parser request'],
+          new Set(),
           true,
         )
       ).ok,
@@ -459,6 +461,7 @@ describe('tryGenerateSessionTitle', () => {
       config,
       new AbortController().signal,
       ['你好'],
+      new Set(),
       true,
     );
 
@@ -486,6 +489,7 @@ describe('tryGenerateSessionTitle', () => {
       config,
       new AbortController().signal,
       ['你好', '再见'],
+      new Set(),
       true,
     );
 
@@ -514,6 +518,7 @@ describe('tryGenerateSessionTitle', () => {
       config,
       new AbortController().signal,
       ['', '/advisor check my work'],
+      new Set(),
       true,
     );
 
@@ -544,6 +549,7 @@ describe('tryGenerateSessionTitle', () => {
       config,
       new AbortController().signal,
       ['', ''],
+      new Set(),
       true,
     );
 
@@ -574,12 +580,83 @@ describe('tryGenerateSessionTitle', () => {
       config,
       new AbortController().signal,
       [undefined, undefined],
+      new Set(),
       true,
     );
 
     expect(outcome).toEqual({ ok: false, reason: 'empty_history' });
     expect(getHistoryShallow).not.toHaveBeenCalled();
     expect(generateJson).not.toHaveBeenCalled();
+  });
+
+  it("draws on the conversation when only a Mod's turn is in the projection", async () => {
+    const framed =
+      '<qwen:mod-prompt mod="lint">\nRun the linter\n</qwen:mod-prompt>';
+    // As recorded, and as history holds it: a reminder part ahead, IDE context
+    // prepended to the text, the hooks' context after.
+    const modParts = [
+      { text: framed },
+      { text: wrapUserPromptSubmitContext('MOD_CONTEXT') },
+    ];
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'Fix the flaky login test' }] },
+        { role: 'model', parts: [{ text: 'Fixed it.' }] },
+        {
+          role: 'user',
+          parts: [
+            { text: 'REMINDER' },
+            { text: `IDE_CONTEXT\n\n${framed}` },
+            modParts[1]!,
+          ],
+        },
+        { role: 'model', parts: [{ text: 'Lint is clean.' }] },
+      ],
+      generateJsonResult: { title: 'Fix flaky login test' },
+    });
+
+    // The person's prompt recorded no display text; the Mod's turn offers
+    // nothing and must not switch the title to an empty projection, nor reach
+    // it through the conversation.
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      [undefined, null],
+      new Set([modPromptTitleKey(modParts)!]),
+    );
+
+    expect(outcome).toMatchObject({ ok: true });
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('Fix the flaky login test');
+    expect(prompt).not.toContain('Run the linter');
+    expect(prompt).not.toContain('REMINDER');
+    expect(prompt).toContain('Lint is clean.');
+  });
+
+  it("leaves a Mod's turn out of a display projection", async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden instructions' }] },
+        { role: 'model', parts: [{ text: 'Hello!' }] },
+      ],
+      generateJsonResult: { title: 'Answer greeting' },
+    });
+
+    await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      ['你好', null],
+      new Set(),
+      true,
+    );
+
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('你好');
+    expect(prompt).not.toContain('hidden instructions');
   });
 
   it('does not align a display projection onto an intervening system turn', async () => {
@@ -598,6 +675,7 @@ describe('tryGenerateSessionTitle', () => {
       config,
       new AbortController().signal,
       ['visible channel message'],
+      new Set(),
       true,
     );
 
@@ -628,6 +706,7 @@ describe('tryGenerateSessionTitle', () => {
       config,
       new AbortController().signal,
       [undefined, undefined, '当前消息'],
+      new Set(),
       true,
     );
 

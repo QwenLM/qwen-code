@@ -126,6 +126,7 @@ const MAX_EMBEDDED_RESOURCE_EXTRA_ESTIMATE = 8 * MAX_EMBEDDED_RESOURCE_BYTES;
  */
 const MAX_EMBEDDED_RESOURCE_AGGREGATE_ESTIMATE = 8 * 256 * 1024;
 const jsonByteEncoder = new TextEncoder();
+const MAX_PENDING_TOOL_NAMES = 256;
 const MAX_CLONE_DEPTH = 16;
 const truncationCallbacks = new WeakMap<
   DaemonTranscriptState,
@@ -146,6 +147,7 @@ export function createDaemonTranscriptState(
     blocks: [],
     blockIndexById: createIndex(),
     toolBlockByCallId: createIndex(),
+    pendingToolNameByCallId: createIndex(),
     trimmedToolNotificationByCallId: createIndex(),
     permissionBlockByRequestId: createIndex(),
     activeAssistantBlockByParent: createIndex(),
@@ -275,6 +277,7 @@ export function reduceDaemonTranscriptEvents(
     Object.freeze(result.blocks);
     Object.freeze(result.blockIndexById);
     Object.freeze(result.toolBlockByCallId);
+    Object.freeze(result.pendingToolNameByCallId);
     Object.freeze(result.activeAssistantBlockByParent);
     Object.freeze(result.activeThoughtBlockByParent);
     Object.freeze(result.trimmedToolNotificationByCallId);
@@ -1110,6 +1113,11 @@ function appendTextDelta(
   if (parentId != null) {
     (block as DaemonTextTranscriptBlock).parentToolCallId = parentId;
   }
+  const eventAgent =
+    'agent' in event ? (event as DaemonUiTextEvent).agent : undefined;
+  if (eventAgent) {
+    (block as DaemonTextTranscriptBlock).agent = eventAgent;
+  }
   appendBlock(state, block);
 
   if (parentMap && parentId != null) {
@@ -1206,6 +1214,36 @@ function upsertToolBlock(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'tool.update' }>,
 ): void {
+  if (event.nameOnly) {
+    const namedId = state.toolBlockByCallId[event.toolCallId];
+    const index =
+      namedId !== undefined ? state.blockIndexById[namedId] : undefined;
+    const named = index !== undefined ? state.blocks[index] : undefined;
+    // A lifecycle frame can arrive before the block it names (mid-run attach:
+    // the client never saw the create frame). Hold the name until the create
+    // path can seed it, otherwise the card keeps the "unknown Tool" label.
+    // #16301
+    if (named?.kind !== 'tool') {
+      if (event.toolName) {
+        rememberPendingToolName(state, event.toolCallId, event.toolName);
+      }
+      return;
+    }
+    // Every named block's `ended` frame is a no-op; returning before the
+    // copy-on-write path keeps it from swapping identities and bumping the
+    // store revision for nothing.
+    if (named.toolName !== undefined || !event.toolName) {
+      return;
+    }
+    const writable = getWritableBlockById(state, namedId);
+    if (writable?.kind === 'tool') {
+      const bytesBefore = estimateBlockBytes(writable);
+      writable.toolName = event.toolName;
+      writable.updatedAt = state.now;
+      state.retainedBytes += estimateBlockBytes(writable) - bytesBefore;
+    }
+    return;
+  }
   const compactTaskOutput =
     !state.retainSubagentBlocks &&
     isRecord(event.rawOutput) &&
@@ -1363,6 +1401,12 @@ function upsertToolBlock(
     if (event.subagentType && !existing.subagentType) {
       existing.subagentType = event.subagentType;
     }
+    // Same first-wins adoption as subagentType: a replayed result frame
+    // carries the identity its start frame never had — persistence keeps
+    // it only on the closing task_execution display.
+    if (event.agent && !existing.agent) {
+      existing.agent = event.agent;
+    }
     state.retainedBytes += estimateBlockBytes(existing) - bytesBefore;
     updateCurrentToolPointer(state, event.toolCallId, event.status);
     return;
@@ -1383,13 +1427,21 @@ function upsertToolBlock(
       toolName: event.toolName,
       toolKind: event.toolKind,
     });
+  // A lifecycle frame that arrived before this create (mid-run attach) left
+  // its name here; consume it exactly once so the card is named from the
+  // start instead of showing "unknown Tool" until a later frame. #16301
+  const pendingToolName = state.pendingToolNameByCallId[event.toolCallId];
+  if (pendingToolName !== undefined) {
+    delete state.pendingToolNameByCallId[event.toolCallId];
+  }
+  const toolName = event.toolName ?? pendingToolName;
   const block: DaemonToolTranscriptBlock = {
     id: allocateBlockId(state, 'tool'),
     kind: 'tool',
     toolCallId: event.toolCallId,
     ...(event.startedAt !== undefined ? { startedAt: event.startedAt } : {}),
     ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
-    title: event.title ?? event.toolName ?? event.toolKind ?? 'Tool',
+    title: event.title ?? toolName ?? event.toolKind ?? 'Tool',
     status: event.status ?? 'pending',
     preview: createDaemonToolPreview(event.rawInput, {
       title: event.title,
@@ -1426,12 +1478,13 @@ function upsertToolBlock(
     ...(event.locations !== undefined ? { locations: event.locations } : {}),
     ...(event.rawInput !== undefined ? { rawInput: event.rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
-    ...(event.toolName ? { toolName: event.toolName } : {}),
+    ...(toolName ? { toolName } : {}),
     ...(event.toolKind ? { toolKind: event.toolKind } : {}),
     ...(event.parentToolCallId
       ? { parentToolCallId: event.parentToolCallId }
       : {}),
     ...(event.subagentType ? { subagentType: event.subagentType } : {}),
+    ...(event.agent ? { agent: event.agent } : {}),
     ...(parentBlockId ? { parentBlockId } : {}),
   };
   appendBlock(state, block);
@@ -1465,6 +1518,27 @@ function upsertToolBlock(
 
 function isBackgroundToolOutput(value: unknown): boolean {
   return isRecord(value) && value['status'] === 'background';
+}
+
+/**
+ * Park a late lifecycle name until its block is created. Bounded so a stream
+ * of lifecycle frames for call ids that never materialise cannot grow the
+ * snapshot without limit; the oldest entry is evicted first.
+ */
+function rememberPendingToolName(
+  state: DaemonTranscriptState,
+  toolCallId: string,
+  toolName: string,
+): void {
+  const pending = state.pendingToolNameByCallId;
+  if (pending[toolCallId] === undefined) {
+    const parked = Object.keys(pending);
+    if (parked.length >= MAX_PENDING_TOOL_NAMES) {
+      const oldest = parked[0];
+      if (oldest !== undefined) delete pending[oldest];
+    }
+  }
+  pending[toolCallId] = toolName;
 }
 
 function discardToolBlock(
@@ -1928,7 +2002,9 @@ function appendStatusBlock(
     ...((event?.type === 'status' || event?.type === 'debug') && event.source
       ? { source: event.source }
       : {}),
-    ...((event?.type === 'status' || event?.type === 'debug') &&
+    ...((event?.type === 'status' ||
+      event?.type === 'debug' ||
+      event?.type === 'error') &&
     event.data !== undefined
       ? { data: event.data }
       : {}),
@@ -2072,6 +2148,9 @@ function cloneTranscriptState(
     toolBlockByCallId: shareSideIndexes
       ? state.toolBlockByCallId
       : createIndex(state.toolBlockByCallId),
+    pendingToolNameByCallId: shareSideIndexes
+      ? state.pendingToolNameByCallId
+      : createIndex(state.pendingToolNameByCallId),
     activeAssistantBlockByParent: shareSideIndexes
       ? state.activeAssistantBlockByParent
       : createIndex(state.activeAssistantBlockByParent),
@@ -2445,6 +2524,7 @@ function truncateTranscriptBeforeBlock(
 function rebuildTranscriptIndexes(state: DaemonTranscriptState): void {
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(state.blocks);
   state.toolBlockByCallId = createIndex();
+  state.pendingToolNameByCallId = createIndex();
   state.permissionBlockByRequestId = createIndex();
   state.trimmedToolNotificationByCallId = createIndex();
   state.activeUserBlockId = undefined;

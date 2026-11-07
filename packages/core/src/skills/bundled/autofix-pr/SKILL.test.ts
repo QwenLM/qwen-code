@@ -193,7 +193,39 @@ describe('bundled autofix-pr skill', () => {
       '**Only a start or a resume asks the user anything.**',
     );
     expect(body).toContain('merge, never rebase');
+    // A failed check on a branch behind its base: the round snapshot says
+    // so, and the brief merges the base before fixing anything else.
+    expect(body).toContain(
+      '`baseBehind: true` means a check fails while the branch is behind its base',
+    );
+    expect(body).toContain('When the snapshot says `baseBehind: true`');
+    expect(body).toContain('already fixed needs no code change');
+    // A failure that survives the merge is not presumed the PR's defect:
+    // it goes through the same classification as any failed check.
+    expect(body).toContain('handle the rest as failed checks');
+    expect(body).toContain(
+      'the base merged when the snapshot said `baseBehind: true`',
+    );
     expect(body).toContain('Never list an `untrusted_comment` id');
+    // A bot's PR conversation comment is dropped, not listed as untrusted.
+    expect(body).toContain(
+      "a bot's `issue_comment` (a report, not a request) is dropped",
+    );
+    // A round of a watch whose fix is still running says so and ends.
+    expect(body).toContain(
+      "For `fix_in_flight` (a fix agent is working in the PR's worktree) nothing was read or written",
+    );
+    // Work in the user's own copy of the head branch keeps a start from
+    // racing the user's push to that branch.
+    expect(body).toContain(
+      "the user's own copy of the head branch could not be squared with the PR",
+    );
+    expect(body).toContain('do not start, `--once` included');
+    expect(body).toContain('`localWorkUnknown` is true');
+    expect(body).toContain('have them fetch the branch or fix the checkout');
+    // A --once round of a watch this session already runs spends its budget.
+    expect(body).toContain("its push counts against that watch's budget");
+    expect(body).toContain('`--no-work` skips its git scan');
     // One task drives a watch: each schedule mints its id, every other task
     // of the PR — from before a take-over, a /clear or a later start — is
     // deleted before the new one is made, and a round woken by one deletes it.
@@ -281,6 +313,81 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain("whose gate names the watch's session");
   });
 
+  it('answers every step the helpers can name, each with what that step does', () => {
+    const { body } = loadSkill();
+    const section = body.slice(
+      body.indexOf('## Refusals'),
+      body.indexOf('## Arguments'),
+    );
+    // The steps and codes as the helpers define them: read from their source,
+    // as core does not import the CLI.
+    const source = fs.readFileSync(
+      path.join(
+        path.dirname(fileURLToPath(import.meta.url)),
+        '../../../../../cli/src/commands/autofix-pr/refusal.ts',
+      ),
+      'utf8',
+    );
+    const steps = [
+      ...(/export type RefusalNext =([^;]+);/.exec(source)?.[1] ?? '').matchAll(
+        /'([a-z_]+)'/g,
+      ),
+    ].map(([, step]) => step);
+    const codes = [
+      ...(
+        /export const REFUSAL_CODES = \[([\s\S]*?)\] as const/.exec(
+          source,
+        )?.[1] ?? ''
+      ).matchAll(/^\s*'([a-z_]+)',/gm),
+    ].map(([, code]) => code);
+    expect(steps).toContain('retry');
+    expect(codes).toContain('busy');
+    const bullet = (step: string) =>
+      section.split('\n').find((line) => line.startsWith(`- \`${step}\` → `));
+    for (const step of steps) {
+      expect(bullet(step), `no bullet for ${step}`).toBeDefined();
+    }
+    // What each step does, so two bodies cannot trade places unnoticed.
+    const does: Record<string, string> = {
+      retry: 'run the same call again',
+      stop: 'Section "Stop"',
+      end_task: 'delete (`cron_delete`) this task',
+      take_over: 'Start step 3',
+      discard: 'run `sync <n> --discard` in its place',
+      foreground: 'call in the foreground',
+      rerun: 'Round step 3',
+      needs_human: 'are `needs_human`',
+      fix_plan: 'run `reply` again',
+      report: 'report the message',
+    };
+    expect(Object.keys(does).sort()).toEqual([...steps].sort());
+    for (const [step, phrase] of Object.entries(does)) {
+      expect(bullet(step)).toContain(phrase);
+    }
+    // The codes whose line the section gives apart.
+    for (const code of [
+      'busy',
+      'partial',
+      'not_prepared',
+      'task_replaced',
+      'watch_stopped',
+      'watched_elsewhere',
+      'fix_in_flight',
+    ]) {
+      expect(codes).toContain(code);
+      expect(section).toContain(`\`${code}\``);
+    }
+    // `prepare` gives `pr_closed` the step `report` (a start has no watch to
+    // stop): a resume, which has one, keys on the code instead.
+    expect(body).toContain(
+      'A refusal with `refused: "pr_closed"` (the PR is merged or closed) → Section "Stop" for this PR',
+    );
+    // Nothing matches a refusal by its wording any more.
+    expect(body).not.toContain('another autofix-pr helper is working');
+    expect(body).not.toContain('fails saying');
+    expect(body).not.toContain('refusal saying');
+  });
+
   it("forbids the fix agent's brief every write to GitHub, which only the main session makes", () => {
     const { body } = loadSkill();
     const never = /## Never([\s\S]*?)## Verify/.exec(body)?.[1] ?? '';
@@ -300,6 +407,43 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain('whose `## Never` it is told to follow too');
   });
 
+  it('draws the line at ready to merge: no approval, no review state, no merge, no auto-merge', () => {
+    const { body } = loadSkill();
+    expect(body).toContain(
+      'The watch gets the PR ready to merge and keeps it there',
+    );
+    expect(body).toContain(
+      'It never approves a PR, changes its review state, merges or closes it, or turns on auto-merge',
+    );
+    expect(body).toContain(
+      "It combines with the repository's auto-merge, which merges once those requirements are met.",
+    );
+    // The start confirmation says it too, not the opening paragraph alone.
+    const confirm =
+      /\n5\. \*\*Confirm\*\*([\s\S]*?)\n6\. /.exec(body)?.[1] ?? '';
+    expect(confirm).toContain('it gets the PR ready to merge, and no further');
+    expect(confirm).toContain("merging stays the user's");
+  });
+
+  it('reports a round that pushed nothing but left something for a person', () => {
+    const { body } = loadSkill();
+    expect(body).toContain(
+      'With nothing pushed, post one anyway when `needsHuman` is not empty',
+    );
+    // What keeps the report from repeating is the helper's, not the round's.
+    expect(body).toContain(
+      'a summary that answers no comments goes out once per head, and a later round posts one again only when it leaves something new for a person',
+    );
+    // A report that never reached the PR is not spent: the round runs again.
+    expect(body).toContain(
+      'One that never reached the PR is still owed, so a failed `reply` is run again with the same plan.',
+    );
+    expect(body).toContain(
+      'Omit it (`null`) only when nothing was pushed, no review or issue comment was answered, and `needsHuman` is empty.',
+    );
+    expect(body).toContain('and the summary reports them on the PR');
+  });
+
   it("lists every item step 3 sets aside under the brief's own items, which the after-fix turn answers from", () => {
     const { body } = loadSkill();
     const ciLogs = /3\. \*\*CI logs\.\*\*([^\n]*)/.exec(body)?.[1] ?? '';
@@ -309,8 +453,16 @@ describe('bundled autofix-pr skill', () => {
         /out of the brief's events, list (?:it|them) under `## The round's own items`/g,
       ),
     ).toHaveLength(2);
-    expect(ciLogs).toContain(
-      "never goes into the brief's events — only under `## The round's own items`",
+    // A workflow that could not start, and a check its fix pushes left red.
+    expect(
+      ciLogs.match(
+        /never goes into the brief's events — only under `## The round's own items`/g,
+      ),
+    ).toHaveLength(2);
+    // A spent check gets no log and no fix: a person's, recorded as handled.
+    expect(ciLogs).toContain('with a `runId` and no `exhausted`, run');
+    expect(ciLogs).toMatch(
+      /`exhausted: true`[^]*?it is not fixed again\. It is `needs_human`[^]*?its `key` goes into `handledChecks`/,
     );
     expect(ciLogs).not.toMatch(/out of the brief[ ,.]|into the brief[;.]/);
     expect(body).toContain(
@@ -363,5 +515,23 @@ describe('bundled autofix-pr skill', () => {
     const { body } = loadSkill();
     expect(body).toContain('`subagent_type` = `general-purpose`');
     expect(BuiltinAgentRegistry.isBuiltinAgent('general-purpose')).toBe(true);
+  });
+
+  it("keeps the brief's Events scoping consistent with the fields its instructions name", () => {
+    const { body } = loadSkill();
+    // The brief is the skill's only ```markdown block.
+    const template = body.split('```markdown')[1]?.split('```')[0] ?? '';
+    const named = [
+      ...template.matchAll(/the snapshot says `(\w+): true`/g),
+    ].map((match) => match[1]);
+    // The stale-base hint is a top-level snapshot field, not an event: the
+    // scoping sentence must exempt the fields the instructions name, or the
+    // brief forbids the very merge it commands.
+    expect(named).toContain('baseBehind');
+    const scoping = /Nothing else in that file is yours to act on([^\n]*)/.exec(
+      template,
+    );
+    expect(scoping).not.toBeNull();
+    expect(scoping![1]).toContain('beyond the fields these instructions name');
   });
 });

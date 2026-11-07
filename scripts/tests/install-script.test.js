@@ -495,7 +495,10 @@ describe('installation scripts', () => {
     expect(prepared.command).toBe(
       'set "PROCESSOR_ARCHITECTURE=AMD64" && set "PROCESSOR_ARCHITEW6432=" && set "PSModulePath=C:\\PowerShell\\7\\Modules" && call "C:\\tools\\install-qwen-standalone.bat"',
     );
-    expect(prepared.env).toEqual({ Path: 'C:\\fake-bin' });
+    expect(prepared.env).toEqual({
+      Path: 'C:\\fake-bin',
+      QWEN_NO_MODIFY_PATH: '1',
+    });
   });
 
   it('creates PowerShell validation scripts with a ps1 extension', () => {
@@ -1418,6 +1421,28 @@ describe('standalone release packaging', () => {
     expect(installBatchSource).toContain('QWEN_INSTALLER_PARENT_POWERSHELL');
     expect(installBatchSource).toContain(
       'Final PATH refresh is handled by the PowerShell entrypoint.',
+    );
+  });
+
+  it('persists the Windows install bin unless PATH updates are disabled', () => {
+    const script = readScript(
+      'scripts/installation/install-qwen-standalone.bat',
+    );
+    const maybeUpdatePath = readBatchRoutine(script, 'MaybeUpdatePath');
+
+    expect(script).toContain(
+      'if not "!EXTRA_BIN!"=="" if /i not "!NO_MODIFY_PATH!"=="1" (',
+    );
+    expect(script).toContain(
+      'call :PrintFinalInstructions "!INSTALL_BIN_DIR!" "!INSTALL_DIR!" "standalone"',
+    );
+    expect(script).toContain('call :MaybeUpdatePath "!EXTRA_BIN!"');
+    expect(maybeUpdatePath).toContain('set "QWEN_PATH_SCOPE=!PATH_SCOPE!"');
+    expect(maybeUpdatePath).toContain(
+      "$target = if ($scope -ieq 'machine') { 'Machine' } else { 'User' }",
+    );
+    expect(maybeUpdatePath).toContain(
+      "[Environment]::SetEnvironmentVariable('Path', $newPath, $target)",
     );
   });
 
@@ -4948,6 +4973,13 @@ describe('Windows installer end-to-end', () => {
         const home = path.join(tmpDir, 'home');
         runWindowsInstaller(archive, installRoot, home);
 
+        const persistentPaths = runWindowsCommand(
+          `powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path', 'User'); [Environment]::GetEnvironmentVariable('Path', 'Machine')"`,
+        ).toString();
+        expect(persistentPaths.toLowerCase()).not.toContain(
+          installRoot.toLowerCase(),
+        );
+
         expect(existsSync(path.join(installRoot, 'bin', 'qwen.cmd'))).toBe(
           true,
         );
@@ -6061,7 +6093,8 @@ const WINDOWS_COMMAND_ENV_OVERRIDES = [
 ];
 
 function prepareWindowsCommand(command, env = {}, baseEnv = process.env) {
-  const commandEnv = { ...baseEnv, ...env };
+  // USERPROFILE does not isolate the account's persistent registry PATH.
+  const commandEnv = { ...baseEnv, QWEN_NO_MODIFY_PATH: '1', ...env };
   const commandPrefix = [];
 
   for (const key of WINDOWS_COMMAND_ENV_OVERRIDES) {

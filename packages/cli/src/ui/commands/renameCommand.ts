@@ -203,6 +203,7 @@ export const renameCommand: SlashCommand = {
           config,
           context.abortSignal ?? new AbortController().signal,
           titleDisplayTexts,
+          recorder?.getModPromptKeysForTitle?.(),
           projectionMode,
         );
       } finally {

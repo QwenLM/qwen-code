@@ -1832,6 +1832,29 @@ describe('SessionTranscriptReader', () => {
     ]);
   });
 
+  it("keeps a Mod's prompt out of the cold-restored title projection", async () => {
+    // The payload is marker-less, which the legacy heuristic reads as a
+    // projection. The person did not type it, so the restored session must
+    // still title from the conversation, as the live recorder does.
+    const modPrompt: ChatRecord = {
+      ...record('u1', null, 'Run the linter'),
+      provenance: 'mod_prompt',
+      systemPayload: {
+        displayText: 'Run the linter',
+        hookContext: '',
+        mod: 'lint',
+      },
+    };
+    await writeRecords([modPrompt, record('a1', 'u1', 'answer')]);
+
+    const recording = (await coldProjection())?.runtime.recording;
+
+    expect(recording?.turnParentUuids).toEqual([null]);
+    expect(recording?.turnTitleStates).toEqual([
+      { projection: false, displayText: undefined },
+    ]);
+  });
+
   it('prunes a cold-restored compressed title projection on rewind', async () => {
     const first: ChatRecord = {
       ...record('u1', null, 'first prompt'),
@@ -2305,6 +2328,24 @@ describe('SessionTranscriptReader', () => {
     const page = await readPage({ limit: 2 });
     expect(uuids(page.records)).toEqual(['u1', 'a1']);
     expect(page.branchPointsByAssistantUuid).toEqual({ a1: 'checkpoint-1' });
+  });
+
+  it('advertises branch points on the restore replay pages', async () => {
+    await writeRecords([
+      ...chain('prompt', 'answer'),
+      branchCheckpoint('checkpoint-1'),
+    ]);
+    const reader = newReader();
+    const restored = await reader.readRestoreProjection(sessionId, all(false));
+    expect(uuids(restored?.replay?.records)).toContain('a1');
+    expect(restored?.replay?.branchPointsByAssistantUuid).toEqual({
+      a1: 'checkpoint-1',
+    });
+
+    const live = await reader.readLiveRestoreProjection(sessionId, all(false));
+    expect(live?.replay?.branchPointsByAssistantUuid).toEqual({
+      a1: 'checkpoint-1',
+    });
   });
 
   it('keeps a long user turn complete when it exceeds the record limit', async () => {

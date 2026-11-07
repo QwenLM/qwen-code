@@ -20,7 +20,10 @@ import type { SessionWriterLease } from './session-writer-lease.js';
 
 const tryGenerateSessionTitleMock = vi.fn();
 
-vi.mock('./sessionTitle.js', () => ({
+vi.mock('./sessionTitle.js', async (importOriginal) => ({
+  modPromptTitleKey: (
+    await importOriginal<typeof import('./sessionTitle.js')>()
+  ).modPromptTitleKey,
   tryGenerateSessionTitle: (...args: unknown[]) =>
     tryGenerateSessionTitleMock(...args),
 }));
@@ -398,6 +401,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       ['你好'],
+      new Set(),
       true,
     );
   });
@@ -444,6 +448,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       [undefined, 'visible question'],
+      new Set(),
       true,
     );
   });
@@ -486,6 +491,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       [],
+      new Set(),
       false,
     );
   });
@@ -513,6 +519,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       [],
+      new Set(),
       false,
     );
   });
@@ -604,6 +611,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       ['', '/advisor check my work'],
+      new Set(),
       true,
     );
     expect(findCustomTitleRecord()?.systemPayload).toEqual({
@@ -794,7 +802,73 @@ describe('ChatRecordingService - auto-title trigger', () => {
       resumedConfig,
       expect.any(AbortSignal),
       ['你好', '再见'],
+      new Set(),
       true,
+    );
+  });
+
+  it("restores a Mod's prompt in its turn's place without offering it to the title", () => {
+    const record = (
+      uuid: string,
+      parentUuid: string | null,
+      extra: Partial<ChatRecord>,
+    ): ChatRecord => ({
+      uuid,
+      parentUuid,
+      sessionId: 'test-session-id',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      provenance: 'real_user',
+      cwd: '/test/project/root',
+      version: '1.0.0',
+      message: { role: 'user', parts: [{ text: 'hidden' }] },
+      ...extra,
+    });
+    const { service } = resume({
+      conversation: {
+        messages: [
+          record('user-1', null, {
+            systemPayload: { displayText: '你好', hookContext: '' },
+          }),
+          record('user-2', 'user-1', {
+            provenance: 'mod_prompt',
+            systemPayload: {
+              displayText: 'Run the linter',
+              hookContext: '',
+              mod: 'lint',
+            },
+          }),
+        ],
+      },
+      lastCompletedUuid: 'user-2',
+    });
+    expect(service.getUserDisplayTextsForTitle()).toEqual(['你好', null]);
+    expect([...service.getModPromptKeysForTitle()]).toEqual(['hidden']);
+  });
+
+  it("does not let a Mod's prompt establish the title projection on its own", async () => {
+    // The Mod's turn carries a marker-less payload, which the legacy
+    // heuristic reads as a projection. It must not: the person typed
+    // nothing, so the title still comes from the conversation, with the
+    // Mod's message left out of it.
+    mockOk('Fix flaky login test');
+    chatRecordingService.recordUserMessage(
+      [{ text: 'Run the linter' }],
+      undefined,
+      { displayText: 'Run the linter', hookContext: '', mod: 'lint' },
+    );
+
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([null]);
+    expect(chatRecordingService.hasDisplayProjectionForTitle()).toBe(false);
+
+    await assistantTurn();
+
+    expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
+      mockConfig,
+      expect.any(AbortSignal),
+      [],
+      new Set(['Run the linter']),
+      false,
     );
   });
 
@@ -844,6 +918,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       [],
+      new Set(),
       false,
     );
     expect(findCustomTitleRecord()?.systemPayload).toEqual({
@@ -878,6 +953,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       [],
+      new Set(),
       false,
     );
     expect(findCustomTitleRecord()?.systemPayload).toEqual({
@@ -915,6 +991,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       mockConfig,
       expect.any(AbortSignal),
       ['visible prompt'],
+      new Set(),
       true,
     );
   });

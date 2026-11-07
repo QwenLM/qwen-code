@@ -10,7 +10,8 @@
   watch probes and from local runs of the same probes. The §2 Policy bullet
   and the §10 scanner-capacity item were corrected the same day. §4.4's
   measurement notes and the §10 scanner-capacity item were updated on
-  2026-10-26 for the scanner row pool (#15442).
+  2026-10-26 for the scanner row pool (#15442), and the §10 item was updated
+  on 2026-10-28 for the decision on the shared-Session queue (#15667).
 - **Related**: [managed automation (H6)](2026-10-04-managed-automation.md),
   [managed automation runtime (H6b)](2026-10-07-managed-automation-runtime.md),
   [managed runtime tool contract](2026-09-24-managed-runtime-tool-contract.md),
@@ -194,10 +195,10 @@ Idempotency-Key: watch-pr-123
 
 Authentication and tenant headers are left out of the example.
 
-The deployment has to enable automations
-(`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`) and Workspace files
-(`QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED`, which has prerequisites of its
-own), both off by default, and the Session has to have the Shell profile. A
+Automations are enabled by default; the deployment can disable them with
+`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED=false`. The deployment has to enable
+Workspace files (`QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED`, off by default
+with prerequisites of its own), and the Session has to have the Shell profile. A
 built-in `qwen-code` Workspace Session gets it when created while Workspace
 Shell is enabled (`QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED`, off by
 default, which needs `QWEN_MANAGED_AGENT_APPROVAL_MODE` set to `default` or
@@ -755,10 +756,16 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
     occurrence row stays `firing`, and a later tick re-drives it with backoff,
     as for any lost answer. Each holds a scanner thread while it waits. In a
     Harness pool, a lost answer also takes that Harness out of selection until
-    the pool's next refresh, which affects the other calls for Sessions placed
-    on it, not only fires. §5.2 sets the probe's 20 s so that one acquire and
-    one probe fit in the relay's 30 s; that sizing leaves no room for this
-    wait.
+    the pool's next successful refresh, which affects the other calls for
+    Sessions placed on it, not only fires: the public automation routes can
+    then answer `409 harness_owner_still_live` (#15666). §5.2 sets the probe's
+    20 s so that one acquire and one probe fit in the relay's 30 s; that
+    sizing leaves no room for this wait. The row pool design records this
+    queueing, and the lost answers it causes, as intended (#15667, decided in
+    #15724): the funnel is shared with public relays and other nodes, so
+    serializing one node's rows by Session would not remove the queue. That
+    design's guidance is to give a gated definition whose probe is slow its
+    own Session.
   - A row's work (its re-drives, slots and reconciles) runs one call after
     another under one lease that is not renewed, so it can outlast the lease;
     a single fire can do so during a long takeover load (below). If another

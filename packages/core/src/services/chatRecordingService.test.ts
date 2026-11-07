@@ -436,6 +436,44 @@ describe('ChatRecordingService', () => {
       return { record: await flushed(), attachmentReferences };
     }
 
+    it("records a Mod's prompt as the Mod's, not the person's", async () => {
+      svc.recordUserMessage(
+        [{ text: 'framed' }],
+        undefined,
+        { displayText: 'Run the linter', hookContext: '', mod: 'lint' },
+        'prompt-1',
+      );
+      const record = await flushed();
+      expect(record.provenance).toBe('mod_prompt');
+      expect(record.systemPayload).toEqual({
+        displayText: 'Run the linter',
+        hookContext: '',
+        mod: 'lint',
+      });
+      // A title drawn from the conversation knows the message to leave out.
+      expect([...svc.getModPromptKeysForTitle()]).toEqual(['framed']);
+    });
+
+    it('keeps the newest Mod prompts as title keys, and none sent as the person', async () => {
+      const mod = (text: string, asUser?: true) =>
+        svc.recordUserMessage([{ text }], undefined, {
+          displayText: text,
+          hookContext: '',
+          mod: 'lint',
+          ...(asUser && { asUser }),
+        });
+      for (let index = 0; index < 20; index++) mod(`k${index}`);
+      // Submitted again, k0 is the newest and outlives the next one in.
+      mod('k0');
+      mod('k20');
+      expect(svc.getModPromptKeysForTitle().has('k0')).toBe(true);
+      expect(svc.getModPromptKeysForTitle().has('k1')).toBe(false);
+      // Unframed, its text is what the person might type themselves.
+      mod('Continue', true);
+      expect(svc.getModPromptKeysForTitle().has('Continue')).toBe(false);
+      await svc.flush();
+    });
+
     it('should record a user message immediately', async () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
       svc.recordUserMessage(userParts, undefined, undefined, 'prompt-1');
@@ -1552,6 +1590,21 @@ describe('ChatRecordingService', () => {
 
     const displayed = (text: string) =>
       user(`hidden ${text}`, undefined, { displayText: text, hookContext: '' });
+
+    it("keeps a Mod's prompt out of the title, in its turn's place", async () => {
+      displayed('A');
+      user('framed', undefined, {
+        displayText: 'Run the linter',
+        hookContext: '',
+        mod: 'lint',
+      });
+      displayed('B');
+      expect(svc.getUserDisplayTextsForTitle()).toEqual(['A', null, 'B']);
+      svc.rewindRecording(2, { truncatedCount: 1 });
+      expect(svc.getUserDisplayTextsForTitle()).toEqual(['A', null]);
+      await svc.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+    });
 
     it('drops display projections from rewound user turns', async () => {
       displayed('A');
