@@ -920,6 +920,7 @@ export class BridgeClient implements Client {
       entry: BridgeClientSessionEntry,
       modelId: string,
       originatorClientId: string | undefined,
+      subscriptionSignedOut?: boolean,
     ) => void,
     /**
      * §2.3 / A2 callback: centralised `approval_mode_changed` publish.
@@ -3211,6 +3212,7 @@ export class BridgeClient implements Client {
         entry,
         currentModelId,
         entry.activePromptOriginatorClientId,
+        params['subscriptionSignedOut'] === true,
       );
     } else {
       // `EventBus.publish` never throws (closed bus → undefined no-op); per
@@ -3218,7 +3220,13 @@ export class BridgeClient implements Client {
       entry.events.publish({
         type: 'model_switched',
         ...currentTurnMetadata(entry),
-        data: { sessionId, modelId: currentModelId },
+        data: {
+          sessionId,
+          modelId: currentModelId,
+          ...(params['subscriptionSignedOut'] === true
+            ? { subscriptionSignedOut: true }
+            : {}),
+        },
       });
     }
     writeStderrLine(

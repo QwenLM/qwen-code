@@ -12,6 +12,7 @@ import {
   WorkspaceFileError,
   workspaceFileDirectories,
   workspaceFilePath,
+  type SessionWorkspaceFileScope,
 } from './managed-workspace-files.js';
 
 export interface WorkspaceUploadMetadata {
@@ -133,12 +134,18 @@ export async function writeWorkspaceUpload(
   bytes: Buffer,
   expected: { device: string; inode: string },
   verifyStorage: () => Promise<void>,
+  sessionScope?: SessionWorkspaceFileScope,
 ): Promise<WorkspaceUploadResult> {
   let directories: Awaited<ReturnType<typeof workspaceFileDirectories>>;
   let parent: string;
   try {
     await verifyStorage();
-    directories = await workspaceFileDirectories(root, cwd, expected);
+    directories = await workspaceFileDirectories(
+      root,
+      cwd,
+      expected,
+      sessionScope,
+    );
     parent = await directories.directory(path.posix.dirname(metadata.path));
   } catch (error) {
     return failed(metadata, error);
@@ -180,9 +187,15 @@ export async function inspectWorkspaceUpload(
   metadata: WorkspaceUploadMetadata,
   expected: { device: string; inode: string },
   verifyStorage: () => Promise<void>,
+  sessionScope?: SessionWorkspaceFileScope,
 ): Promise<WorkspaceUploadResult> {
   await verifyStorage();
-  const directories = await workspaceFileDirectories(root, cwd, expected);
+  const directories = await workspaceFileDirectories(
+    root,
+    cwd,
+    expected,
+    sessionScope,
+  );
   const parent = await directories.directory(path.posix.dirname(metadata.path));
   const destination = path.join(directories.base, metadata.path);
   let completed = false;

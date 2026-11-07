@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest';
-import { getTranslator } from './i18n';
+import { describe, expect, it, vi } from 'vitest';
+import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
+import {
+  WEB_SHELL_LANGUAGES,
+  getTranslator,
+  languageLabel,
+  languageSettingToWebShellLanguage,
+  normalizeLanguage,
+} from './i18n';
 
 // getTranslator returns the raw key when EN has no entry. SettingsMessage
 // translateSettingText then substitutes the settingsSchema.ts description,
@@ -11,7 +18,85 @@ const FOLLOWUP_SETTING_KEYS = [
   'settings.description.ui.enableFollowupSuggestions',
 ] as const;
 
+const BROWSER_NOTIFICATION_KEYS = [
+  'label',
+  'description',
+  'prompt',
+  'reply',
+  'completed',
+  'failed',
+  'ended',
+  'approval',
+  'question',
+  'allow',
+  'enable',
+  'helpEnabled',
+  'helpWaiting',
+  'helpWhen',
+  'helpSystem',
+  'helpMac',
+  'helpWindows',
+  'enabled',
+  'disabled',
+  'waiting',
+  'denied',
+  'unavailable',
+  'requesting',
+  'error',
+  'temporary',
+].map((suffix) => `browserNotifications.${suffix}`);
+
 describe('web-shell i18n catalog', () => {
+  it('keeps every browser notification translation in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    for (const key of BROWSER_NOTIFICATION_KEYS) {
+      const english = en(key, { text: 'Task' });
+      const chinese = zh(key, { text: 'Task' });
+      expect(english).not.toBe(key);
+      expect(chinese).not.toBe(key);
+      expect(chinese).not.toBe(english);
+    }
+    expect(en('browserNotifications.prompt', { text: 'Task' })).toBe(
+      'Prompt: Task',
+    );
+    expect(zh('browserNotifications.reply', { text: 'Task' })).toBe(
+      '回复：Task',
+    );
+  });
+
+  it.each([
+    [
+      'en',
+      "You've used up your weekly credits. Your credits are expected to reset in 2 days and 1 hour. Please try again after the reset.",
+    ],
+    ['zh-CN', '周额度已用完，预计将于2天 1小时后恢复，请在额度恢复后重试。'],
+    [
+      'ru',
+      "You've used up your weekly credits. Your credits are expected to reset in 2 days and 1 hour. Please try again after the reset.",
+    ],
+  ] as const)(
+    'formats quota data through the %s catalog',
+    (language, expected) => {
+      const now = Date.parse('2026-11-04T00:00:00Z');
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+      try {
+        expect(
+          formatSubscriptionQuotaDisplay(
+            {
+              type: 'subscription_quota',
+              memberType: 'pro',
+              resetAt: now / 1000 + 49 * 3600,
+            },
+            getTranslator(language),
+          ),
+        ).toBe(expected);
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
+
   it('explains missing rewind identities in both locales', () => {
     expect(getTranslator('en')('rewind.identityUnavailable')).toContain(
       'no prompt identity',
@@ -43,6 +128,7 @@ describe('web-shell i18n catalog', () => {
       '已选 2 组',
     );
   });
+
   it('keeps task cancellation and elapsed-time copy available in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
@@ -111,5 +197,160 @@ describe('web-shell i18n catalog', () => {
         t('settings.liveSetup.modelCustom'),
       );
     }
+  });
+});
+
+// #13391: ru ships a PARTIAL catalog covering the Goal card and the Goals
+// dialog only; every other key must fall back to EN in getTranslator. These
+// pins guard the normalizer branches, the pluralisation and that fallback.
+describe('web-shell ru locale', () => {
+  it('normalizes ru spellings to ru and leaves the en/zh mappings untouched', () => {
+    for (const value of [
+      'ru',
+      'ru-ru',
+      'ru_ru',
+      'russian',
+      'русский',
+      'RU',
+      ' RU-RU ',
+      // Region-qualified Russian must not fall through to en.
+      'ru-UA',
+      'ru-KZ',
+      'ru-BY',
+      'ru-MD',
+    ]) {
+      expect(normalizeLanguage(value)).toBe('ru');
+    }
+    expect(normalizeLanguage('en')).toBe('en');
+    expect(normalizeLanguage('EN-US')).toBe('en');
+    expect(normalizeLanguage('zh')).toBe('zh-CN');
+    expect(normalizeLanguage('zh-cn')).toBe('zh-CN');
+    expect(normalizeLanguage('zh_cn')).toBe('zh-CN');
+    // Unrelated locales still collapse to en (fr, ja, … are not shipped).
+    expect(normalizeLanguage('fr-FR')).toBe('en');
+    expect(normalizeLanguage('ja-JP')).toBe('en');
+    expect(normalizeLanguage(undefined)).toBe('en');
+  });
+
+  it('maps daemon language settings to ru, underscore and region forms included', () => {
+    for (const value of [
+      'ru',
+      'ru-ru',
+      'ru_ru',
+      'russian',
+      'русский',
+      'RU',
+      'ru-UA',
+    ]) {
+      expect(languageSettingToWebShellLanguage(value)).toBe('ru');
+    }
+    expect(languageSettingToWebShellLanguage('zh')).toBe('zh-CN');
+    expect(languageSettingToWebShellLanguage('en')).toBe('en');
+    expect(languageSettingToWebShellLanguage('fr')).toBeUndefined();
+  });
+
+  it('lists ru in the picker with the "Русский [ru]" label', () => {
+    expect(WEB_SHELL_LANGUAGES).toEqual(['en', 'zh-CN', 'ru']);
+    expect(languageLabel('ru')).toBe('Русский [ru]');
+  });
+
+  it('lists every shipped language in the /language error and usage copy', () => {
+    // The /language gate, help and completions derive from WEB_SHELL_LANGUAGES;
+    // the error/usage copy must carry the same set, in both locales.
+    for (const language of ['en', 'zh-CN'] as const) {
+      const t = getTranslator(language);
+      expect(t('language.invalid')).toContain('en, zh-CN, ru');
+      expect(t('language.usage')).toContain('en|zh-CN|ru');
+      expect(t('language.usage')).toContain('[--project|--global]');
+    }
+  });
+
+  it('pluralises turn counters the Russian way', () => {
+    const t = getTranslator('ru');
+    expect(t('goal.turns', { count: 1 })).toBe('1 ход');
+    expect(t('goal.turns', { count: 2 })).toBe('2 хода');
+    expect(t('goal.turns', { count: 5 })).toBe('5 ходов');
+    expect(t('goal.turns', { count: 11 })).toBe('11 ходов');
+    expect(t('goal.turns', { count: 21 })).toBe('21 ход');
+    // The budget side pluralises on the budget, not the used count.
+    expect(t('goal.turnsOfBudget', { count: 1, budget: 1 })).toBe('1 / 1 ход');
+    expect(t('goal.turnsOfBudget', { count: 1, budget: 2 })).toBe('1 / 2 хода');
+    expect(t('goal.turnsOfBudget', { count: 3, budget: 11 })).toBe(
+      '3 / 11 ходов',
+    );
+  });
+
+  it('pluralises token spend the Russian way', () => {
+    const t = getTranslator('ru');
+    expect(t('goal.tokens', { used: 1 })).toBe('1 токен');
+    expect(t('goal.tokens', { used: 3 })).toBe('3 токена');
+    expect(t('goal.tokens', { used: 5 })).toBe('5 токенов');
+    expect(t('goal.tokens', { used: 11 })).toBe('11 токенов');
+    expect(t('goal.tokens', { used: 21 })).toBe('21 токен');
+  });
+
+  it('pluralises the token budget on the budget, not the used count', () => {
+    const t = getTranslator('ru');
+    // Plain numbers: production's abbreviated shape (>= 1000 → '1.2k')
+    // coerces to NaN on both arms and would test the coercion, not the
+    // operand.
+    expect(t('goal.tokensOfBudget', { used: 1, budget: 2 })).toBe(
+      '1 / 2 токена',
+    );
+    expect(t('goal.tokensOfBudget', { used: 3, budget: 11 })).toBe(
+      '3 / 11 токенов',
+    );
+  });
+
+  it('pluralises the goals counter the Russian way', () => {
+    const t = getTranslator('ru');
+    expect(t('goals.count', { count: 1 })).toBe('1 активная цель');
+    expect(t('goals.count', { count: 2 })).toBe('2 активные цели');
+    expect(t('goals.count', { count: 5 })).toBe('5 активных целей');
+    expect(t('goals.count', { count: 11 })).toBe('11 активных целей');
+    expect(t('goals.count', { count: 21 })).toBe('21 активная цель');
+  });
+
+  it('renders goals.dropped with the session count and the right plural', () => {
+    const t = getTranslator('ru');
+    expect(t('goals.dropped', { count: 3 })).toBe(
+      'не удалось связаться с 3 сессиями — цели, которые они выполняли, отсутствуют в этом списке.',
+    );
+    expect(t('goals.dropped', { count: 5 })).toBe(
+      'не удалось связаться с 5 сессиями — цели, которые они выполняли, отсутствуют в этом списке.',
+    );
+    expect(t('goals.dropped', { count: 1 })).toBe(
+      'не удалось связаться с 1 сессией — цели, которые они выполняли, отсутствуют в этом списке.',
+    );
+    // 21 ends in 1: the one-form (instrumental singular) must apply.
+    expect(t('goals.dropped', { count: 21 })).toBe(
+      'не удалось связаться с 21 сессией — цели, которые они выполняли, отсутствуют в этом списке.',
+    );
+  });
+
+  it('renders the Goal card from the ru catalog, not from EN', () => {
+    const t = getTranslator('ru');
+    const en = getTranslator('en');
+    expect(t('goal.blocked')).toBe('Цель заблокирована');
+    expect(t('goal.lastCheck')).toBe('Последняя проверка');
+    expect(t('goal.status.blocked')).toBe('Заблокирована');
+    expect(t('goals.title')).toBe('Цели');
+    expect(t('goals.empty')).toBe(
+      'Нет активных целей. Задайте: /goal <условие>.',
+    );
+    expect(t('goal.blocked')).not.toBe(en('goal.blocked'));
+  });
+
+  it('falls back to EN for keys the partial ru catalog lacks', () => {
+    const t = getTranslator('ru');
+    const en = getTranslator('en');
+    // Plain and parameterised EN values both resolve, not the raw key.
+    expect(t('welcome.prompt')).toBe(en('welcome.prompt'));
+    expect(t('welcome.prompt')).not.toBe('welcome.prompt');
+    expect(t('capacityChoice.capacity', { used: 1, limit: 2 })).toBe(
+      en('capacityChoice.capacity', { used: 1, limit: 2 }),
+    );
+    // Unknown in every catalog: the key itself, as in all locales.
+    expect(t('no.such.key')).toBe('no.such.key');
   });
 });

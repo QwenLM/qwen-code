@@ -127,6 +127,7 @@ describe('NativeLspService disk document synchronization', () => {
       {
         getProjectRoot: () => directory,
         isTrustedFolder: () => true,
+        isExplicitlyTrustedFolder: () => true,
       } as unknown as Config,
       { getDirectories: () => [directory] } as unknown as WorkspaceContext,
       new EventEmitter(),
@@ -2274,6 +2275,48 @@ describe('NativeLspService disk document synchronization', () => {
         });
         expect(result.error?.message).toContain('in progress');
         expect(result.llmContent).not.toContain('No diagnostics found');
+        expect(connection.request).not.toHaveBeenCalled();
+      },
+    );
+
+    it('names a starting server for goToDefinition instead of reporting no definitions', async () => {
+      handle.status = 'IN_PROGRESS';
+      const result = await execute(lspTool(), {
+        operation: 'goToDefinition',
+        filePath: file,
+        line: 1,
+        character: 1,
+      });
+      expect(result.llmContent).toContain(
+        'No LSP server is ready to provide definitions (test is in progress)',
+      );
+      expect(result.llmContent).not.toContain('No definitions found');
+      expect(connection.request).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['definitions', () => service.definitions({ uri, range })],
+      ['references', () => service.references({ uri, range })],
+      ['hover', () => service.hover({ uri, range })],
+      ['document symbols', () => service.documentSymbols(uri)],
+      ['implementations', () => service.implementations({ uri, range })],
+      ['call hierarchy', () => service.prepareCallHierarchy({ uri, range })],
+      [
+        'code actions',
+        () =>
+          service.codeActions(uri, range, {
+            diagnostics: [],
+            triggerKind: 'invoked',
+          }),
+      ],
+      ['workspace symbols', () => service.workspaceSymbols('fn')],
+    ] as Array<[string, () => Promise<unknown>]>)(
+      'rejects %s when no server is ready',
+      async (operation, query) => {
+        handle.status = 'IN_PROGRESS';
+        await expect(run(query())).rejects.toThrow(
+          `No LSP server is ready to provide ${operation} (test is in progress)`,
+        );
         expect(connection.request).not.toHaveBeenCalled();
       },
     );

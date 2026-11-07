@@ -374,10 +374,74 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     ]);
     expect(
       models.find((model) => model.name === 'Custom')?.configOptions,
-    ).toBeUndefined();
+    ).toMatchObject([
+      {
+        currentValue: 'high',
+        options: [{ value: 'none' }, { value: 'high' }, { value: 'max' }],
+      },
+    ]);
     expect(
       models.find((model) => model.name === 'Anthropic')?.configOptions,
     ).toBeUndefined();
+  });
+
+  it('projects tiered Qwen controls for duplicate model routes', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    const maasA =
+      'https://llm-a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+    const maasB =
+      'https://llm-b.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: {
+        name: 'qwen4-plus',
+        baseUrl: maasA,
+        reasoningEffort: 'low',
+      },
+      modelProviders: {
+        openai: [
+          { id: 'qwen4-plus', name: 'Qwen4 A', baseUrl: maasA },
+          { id: 'qwen4-plus', name: 'Qwen4 B', baseUrl: maasB },
+          {
+            id: 'qwen-latest-series-invite-202610-m6',
+            name: 'Invite A',
+            baseUrl: maasA,
+          },
+          {
+            id: 'qwen-latest-series-invite-202610-m6',
+            name: 'Invite B',
+            baseUrl: maasB,
+          },
+          { id: 'qwen3.8-max', name: 'Stable A', baseUrl: maasA },
+          { id: 'qwen3.8-max', name: 'Stable B', baseUrl: maasB },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const models = result.providers.flatMap((entry) => entry.models);
+    for (const name of [
+      'Qwen4 A',
+      'Qwen4 B',
+      'Invite A',
+      'Invite B',
+      'Stable A',
+      'Stable B',
+    ]) {
+      const entry = models.find((model) => model.name === name);
+      expect(entry?.modelId).toMatch(/^qwen-route:v1:/);
+      expect(entry?.configOptions).toMatchObject([
+        {
+          currentValue: 'low',
+          options: [
+            { value: 'none' },
+            { value: 'low' },
+            { value: 'medium' },
+            { value: 'xhigh' },
+          ],
+        },
+      ]);
+    }
   });
 
   it.each([
@@ -437,6 +501,61 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       expect(model?.configOptions).toMatchObject([{ currentValue }]);
     },
   );
+
+  it('previews the auth fallback for a missing saved model without rewriting settings', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      $version: 4,
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'qwen3.8-max' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3.8-max-preview',
+            name: '[Token Plan] preview',
+            baseUrl: 'https://token-plan.example/v1',
+            envKey: 'REPRO_PLAN_KEY',
+          },
+        ],
+      },
+    });
+    const before = await fs.readFile(
+      path.join(qwenHome, 'settings.json'),
+      'utf8',
+    );
+    const result = await provider(workspace, false);
+    expect(result.current).toMatchObject({
+      authType: 'openai',
+      modelId: 'qwen3.8-max-preview(openai)',
+      baseUrl: 'https://token-plan.example/v1',
+    });
+    expect(
+      result.providers
+        .flatMap((entry) => entry.models)
+        .find((model) => model.isCurrent)?.baseModelId,
+    ).toBe('qwen3.8-max-preview');
+    expect(
+      await fs.readFile(path.join(qwenHome, 'settings.json'), 'utf8'),
+    ).toBe(before);
+  });
+
+  it('preserves a missing model backed by explicit connection settings', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: {
+        auth: {
+          selectedType: 'openai',
+          apiKey: 'manual-key',
+          baseUrl: 'https://manual.example/v1',
+        },
+      },
+      model: { name: 'manual-model' },
+      modelProviders: { openai: [{ id: 'other-model' }] },
+    });
+    expect((await provider(workspace, false)).current?.modelId).toBe(
+      'manual-model',
+    );
+  });
 
   it('reads fresh default model settings on every request', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
@@ -870,24 +989,24 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     ).toBe(settingsBefore);
   });
 
-  it('does not project reasoning preview onto opaque route models', async () => {
+  it('does not project reasoning preview onto opaque routes without a tiered manifest', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
       security: { auth: { selectedType: 'openai' } },
       model: {
-        name: 'qwen3.8-max',
+        name: 'qwen3.7-plus',
         baseUrl: 'https://one.example/v1',
       },
       modelProviders: {
         openai: [
           {
-            id: 'qwen3.8-max',
-            name: 'Qwen 3.8 Max One',
+            id: 'qwen3.7-plus',
+            name: 'Qwen 3.7 Plus One',
             baseUrl: 'https://one.example/v1',
           },
           {
-            id: 'qwen3.8-max',
-            name: 'Qwen 3.8 Max Two',
+            id: 'qwen3.7-plus',
+            name: 'Qwen 3.7 Plus Two',
             baseUrl: 'https://two.example/v1',
           },
         ],

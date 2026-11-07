@@ -17,12 +17,15 @@
  * or a directory named without the `-verify-` infix all produce a round whose
  * report is about another PR or is discarded outright.
  *
- * This script resolves those coordinates and nothing else. It does not checkout
- * a worktree, build, or execute PR code. It also cannot gate on isolation:
- * resolving the coordinates needs `gh`, and `gh` and the boundary are mutually
- * exclusive, so this path always runs on the host. The gate is the separate
- * `--require-isolation` mode, meant to run inside the boundary before the round
- * executes anything.
+ * This script resolves those coordinates and checks the tree the round will
+ * reuse; it does not checkout a worktree, build, or execute PR code. The tree
+ * check exists because the round runs the head side of its A/B in the current
+ * tree: prepare refuses a HEAD other than the PR head or any uncommitted
+ * change, and never stashes for the maintainer. It also cannot gate on
+ * isolation: resolving the coordinates needs `gh`, and `gh` and the boundary
+ * are mutually exclusive, so this path always runs on the host. The gate is
+ * the separate `--require-isolation` mode, meant to run inside the boundary
+ * before the round executes anything.
  *
  * Usage:
  *   node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
@@ -38,12 +41,18 @@
  * Exit codes:
  *   0  coordinates resolved, or the boundary check passed
  *   2  usage error
- *   3  metadata, OID, or filesystem failure
+ *   3  metadata, OID, tree-state, or filesystem failure
  *   4  --require-isolation found no boundary — do not run PR code here
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
@@ -69,7 +78,14 @@ metadata snapshot the round reads as $QWEN_VERIFY_CONTEXT:
 
   - fetches the PR snapshot with gh, from the repository you name
   - verifies the base and head OIDs exist in this clone
+  - refuses a tree that is not a clean checkout of the PR head, so the round
+    can reuse the current tree as the head side of the A/B; the gitignored
+    install/build still needs a freshness check before it is reused
   - creates tmp/pr<n>-verify-<YYYYMMDD-HHMMSS>/ with an evidence/ subdirectory
+    and a context.json holding repo, pr, baseRefOid and headRefOid
+  - snapshots the PR's review threads and standing change requests beside
+    the metadata, as the CI lane does; best-effort, so a failed fetch leaves
+    no file and the round lists that review state as not covered
   - reports the isolation signals this process can observe
 
 The coordinate path runs on the host by construction: it needs gh, and gh and
@@ -216,6 +232,73 @@ export function validateContext(json) {
   };
 }
 
+// The CI lane's verify job runs this query and reshapes it with jq into the
+// same review-threads.json; a test runs both over the same pages.
+export const REVIEW_STATE_QUERY =
+  'query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { latestOpinionatedReviews(first: 100) { nodes { state submittedAt url body author { login } authorAssociation commit { oid } } } reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line originalLine comments(first: 50) { totalCount nodes { createdAt url body author { login } authorAssociation originalCommit { oid } pullRequestReview { url } } } } } } } }';
+
+/**
+ * Reshapes `gh api graphql --paginate --slurp` pages of REVIEW_STATE_QUERY into
+ * the review state a round reads: every review thread, resolved ones included
+ * (resolving is the author's claim, not a measurement), and each reviewer's
+ * standing CHANGES_REQUESTED review. Null when the pages are not that query's
+ * answer.
+ */
+export function reviewState(pages) {
+  if (!Array.isArray(pages) || pages.length === 0) return null;
+  const isObject = (value) => value !== null && typeof value === 'object';
+  const pulls = pages.map((page) => page?.data?.repository?.pullRequest);
+  if (
+    pulls.some(
+      (pull) =>
+        !Array.isArray(pull?.reviewThreads?.nodes) ||
+        !Array.isArray(pull?.latestOpinionatedReviews?.nodes) ||
+        !pull.latestOpinionatedReviews.nodes.every(isObject) ||
+        !pull.reviewThreads.nodes.every(
+          (thread) =>
+            isObject(thread) &&
+            Array.isArray(thread.comments?.nodes) &&
+            thread.comments.nodes.every(isObject),
+        ),
+    )
+  ) {
+    return null;
+  }
+  const who = (node) => ({
+    author: node.author?.login ?? null,
+    association: node.authorAssociation ?? null,
+  });
+  return {
+    threads: pulls
+      .flatMap((pull) => pull.reviewThreads.nodes)
+      .map((thread) => ({
+        resolved: thread.isResolved ?? null,
+        outdated: thread.isOutdated ?? null,
+        path: thread.path ?? null,
+        line: thread.line ?? null,
+        originalLine: thread.originalLine ?? null,
+        commentCount: thread.comments.totalCount ?? null,
+        comments: thread.comments.nodes.map((comment) => ({
+          ...who(comment),
+          createdAt: comment.createdAt ?? null,
+          url: comment.url ?? null,
+          review: comment.pullRequestReview?.url ?? null,
+          commit: comment.originalCommit?.oid ?? null,
+          body: comment.body ?? null,
+        })),
+      })),
+    changeRequests: pulls[0].latestOpinionatedReviews.nodes
+      .filter((review) => review.state === 'CHANGES_REQUESTED')
+      .map((review) => ({
+        ...who(review),
+        submittedAt: review.submittedAt ?? null,
+        commit: review.commit?.oid ?? null,
+        url: review.url ?? null,
+        body: review.body ?? null,
+      })),
+  };
+}
+
 /** Drops C0/C1 control characters, which a terminal would interpret. */
 export function printable(text) {
   return [...String(text ?? '')]
@@ -261,8 +344,170 @@ export function parseArgs(argv) {
   return options;
 }
 
-function run(command, args) {
-  return spawnSync(command, args, { encoding: 'utf8' });
+function run(command, args, options = {}) {
+  return spawnSync(command, args, { encoding: 'utf8', ...options });
+}
+
+/** `{state}` on success, `{error}` naming why the review state is unknown. */
+function fetchReviewState(owner, name, pr) {
+  const view = run(
+    'gh',
+    [
+      'api',
+      'graphql',
+      '--paginate',
+      '--slurp',
+      '-f',
+      `owner=${owner}`,
+      '-f',
+      `name=${name}`,
+      '-F',
+      `number=${pr}`,
+      '-f',
+      `query=${REVIEW_STATE_QUERY}`,
+    ],
+    // Every thread's comment bodies, resolved ones included, arrive before
+    // the filter: one busy PR's pages measured 790 KB, near spawnSync's 1 MB
+    // default.
+    { maxBuffer: 256 * 1024 * 1024 },
+  );
+  if (view.status !== 0) {
+    const detail =
+      (view.stderr || '').trim().split('\n')[0] ||
+      view.error?.message ||
+      `exit ${view.status}`;
+    return { error: `gh api graphql failed: ${detail}` };
+  }
+  let pages;
+  try {
+    pages = JSON.parse(view.stdout);
+  } catch {
+    return { error: 'gh api graphql returned output that is not JSON' };
+  }
+  const state = reviewState(pages);
+  return state
+    ? { state }
+    : { error: 'gh api graphql returned pages without review threads' };
+}
+
+// The tree under inspection is PR-controlled and can persist hostile git
+// config in .git/config: fsmonitor, hooks and clean/smudge/process filters all
+// execute on an ordinary `git status`. On the host these run as the maintainer,
+// outside the boundary, so every git command disables the fixed vectors and
+// empties every locally defined filter before reading the tree. The fixed
+// vectors come LAST in every argument list: git applies the last `-c` for a
+// key, so an enumerated entry must never be able to outrank them.
+export const GIT_HARDENING = [
+  '-c',
+  'core.fsmonitor=false',
+  '-c',
+  'core.hooksPath=/dev/null',
+  '-c',
+  'credential.helper=',
+  '-c',
+  'core.excludesFile=/dev/null',
+];
+
+const FILTER_NAME = /^filter\..+\.(clean|smudge|process)$/;
+
+/**
+ * A filter name git allows (e.g. `filter.a=b.clean`) but `-c key=value`
+ * cannot represent: git splits the argument at the FIRST `=`, so emitting an
+ * override would set a different key and leave the real filter armed. The
+ * gate refuses such names instead, with their own remedy.
+ */
+export class UnsafeFilterNameError extends Error {
+  constructor(name) {
+    super(
+      `filter name ${name} contains '=' and cannot be safely disabled with -c — remove the filter from the tree's git config, or re-clone, then re-run prepare`,
+    );
+    this.name = 'UnsafeFilterNameError';
+  }
+}
+
+/**
+ * Empty `-c` overrides for every locally defined filter command. The filter
+ * name is attacker-chosen, so the override set has to be enumerated from the
+ * tree's own config instead of hardcoded. Three properties are load-bearing:
+ * `--includes` follows `include.path` the way the config parsing `git status`
+ * uses does; `--null --name-only` frames KEY NAMES only, because a filter
+ * VALUE may contain newlines that would forge extra entries if the rendered
+ * `key value` output were parsed; and each name is re-validated before it
+ * becomes a `-c` argument. When `extensions.worktreeConfig` is set,
+ * `git status` also reads `.git/config.worktree`, so that scope is enumerated
+ * too. Names containing `=` throw UnsafeFilterNameError — no override can
+ * represent them.
+ */
+export function localFilterOverrides(root) {
+  const prefix = root ? ['-C', root] : [];
+  const scopes = ['--local'];
+  const worktreeConfig = run('git', [
+    ...prefix,
+    'config',
+    '--local',
+    '--includes',
+    '--bool',
+    'extensions.worktreeConfig',
+  ]);
+  if (worktreeConfig.status === 0 && worktreeConfig.stdout.trim() === 'true') {
+    scopes.push('--worktree');
+  }
+  const overrides = [];
+  for (const scope of scopes) {
+    const result = run('git', [
+      ...prefix,
+      'config',
+      scope,
+      '--includes',
+      '--null',
+      '--name-only',
+      '--get-regexp',
+      '^filter\\..*\\.(clean|smudge|process)$',
+    ]);
+    if (result.status === 1) continue;
+    if (result.status !== 0) {
+      throw new Error('could not enumerate local git filters');
+    }
+    for (const name of result.stdout.split('\0')) {
+      if (!name || !FILTER_NAME.test(name)) continue;
+      if (name.includes('=')) throw new UnsafeFilterNameError(name);
+      overrides.push('-c', `${name}=`);
+    }
+  }
+  return overrides;
+}
+
+export function gitStatusArgs(root) {
+  return [
+    ...localFilterOverrides(root),
+    ...GIT_HARDENING,
+    '-C',
+    root,
+    'status',
+    '--porcelain',
+    '--untracked-files=normal',
+  ];
+}
+
+function runGit(args) {
+  return run('git', [...localFilterOverrides(), ...GIT_HARDENING, ...args]);
+}
+
+/**
+ * True when `.git/info/exclude` carries active patterns. A fresh clone has
+ * only git's commented default there; patterns hide untracked files from the
+ * clean-tree check, and unlike core.excludesFile no `-c` can neutralize this
+ * file, so the gate refuses it instead of reading a steered status.
+ */
+export function hasHostileInfoExclude(root) {
+  const path = join(root, '.git', 'info', 'exclude');
+  if (!existsSync(path)) return false;
+  return readFileSync(path, 'utf8')
+    .split('\n')
+    .some((line) => {
+      const trimmed = line.trim();
+      return trimmed !== '' && !trimmed.startsWith('#');
+    });
 }
 
 function report(lines) {
@@ -289,7 +534,17 @@ function main(argv) {
   const { owner, name } = parseRepo(options.repo);
   const slug = `${owner}/${name}`;
 
-  const toplevel = run('git', ['rev-parse', '--show-toplevel']);
+  let toplevel;
+  try {
+    toplevel = runGit(['rev-parse', '--show-toplevel']);
+  } catch (error) {
+    // A hostile filter name is a refusal with its own remedy, not a missing
+    // worktree; it must surface before any guarded status could run it.
+    if (error instanceof UnsafeFilterNameError) {
+      return fail(3, error.message);
+    }
+    return fail(3, 'not inside a git worktree — run this from the clone');
+  }
   if (toplevel.status !== 0) {
     return fail(3, 'not inside a git worktree — run this from the clone');
   }
@@ -331,13 +586,73 @@ function main(argv) {
   ];
   for (const [label, oid, ref] of probes) {
     if (
-      run('git', ['-C', root, 'cat-file', '-e', `${oid}^{commit}`]).status !== 0
+      runGit(['-C', root, 'cat-file', '-e', `${oid}^{commit}`]).status !== 0
     ) {
       return fail(
         3,
         `${label} ${oid} is not in this clone — run: git fetch https://github.com/${slug}.git ${ref}`,
       );
     }
+  }
+
+  // The round runs the head side of its A/B in this tree, so a HEAD other
+  // than the PR head or an uncommitted change would measure code the report
+  // does not name. Checked before the artifact directory exists, so a refusal
+  // leaves nothing behind.
+  const treeHead = runGit(['-C', root, 'rev-parse', 'HEAD']);
+  if (treeHead.status !== 0) {
+    return fail(3, 'could not read HEAD in this clone');
+  }
+  if (treeHead.stdout.trim() !== context.head) {
+    return fail(
+      3,
+      `current tree is at ${treeHead.stdout.trim()}, not PR head ${context.head} — run: git checkout ${context.head}, then re-run prepare`,
+    );
+  }
+  // The ignore channel is steerable from the same PR-controlled .git:
+  // core.excludesFile is neutralized by GIT_HARDENING, but .git/info/exclude
+  // has no `-c` override, so active patterns there are refused outright
+  // rather than read through.
+  if (hasHostileInfoExclude(root)) {
+    return fail(
+      3,
+      '.git/info/exclude carries local exclude patterns, which can hide untracked files from the clean-tree check — re-clone (a fresh clone has only the commented default), or clear the file, then re-run prepare',
+    );
+  }
+  // Explicit mode: a maintainer's status.showUntrackedFiles=no would otherwise
+  // hide the untracked files this check exists to refuse.
+  const dirty = run('git', gitStatusArgs(root));
+  if (dirty.status !== 0) {
+    const detail = (dirty.stderr || '').trim() || `exit ${dirty.status}`;
+    return fail(3, `could not read the working tree status: ${detail}`);
+  }
+  if (dirty.stdout.trim() !== '') {
+    // Name the entries and a remedy that actually clears them: a plain
+    // `git stash` leaves untracked files behind, so the advice would loop.
+    const entries = dirty.stdout.trim().split('\n');
+    const shown = entries.slice(0, 5).map(printable).join(', ');
+    return fail(
+      3,
+      `working tree has uncommitted changes (${shown}${entries.length > 5 ? ', …' : ''}) — commit them, or run \`git stash push --include-untracked\` (a plain \`git stash\` leaves untracked files behind), or remove them, then re-run prepare; this script never stashes for you`,
+    );
+  }
+  // git status trusts the index: skip-worktree / assume-unchanged entries
+  // (a sparse checkout sets them en masse) hide tracked divergence from it,
+  // so refuse anything that is not a plain cached 'H' entry.
+  const flagged = runGit(['-C', root, 'ls-files', '-v']);
+  if (flagged.status !== 0) {
+    const detail = (flagged.stderr || '').trim() || `exit ${flagged.status}`;
+    return fail(3, `could not read the index flags: ${detail}`);
+  }
+  const opaque = flagged.stdout
+    .split('\n')
+    .filter((line) => line && !line.startsWith('H '));
+  if (opaque.length > 0) {
+    const shown = opaque.slice(0, 5).map(printable).join(', ');
+    return fail(
+      3,
+      `tracked entries hide their worktree state (${shown}${opaque.length > 5 ? ', …' : ''}) — re-clone without a sparse checkout, or clear the index flags, then re-run prepare`,
+    );
   }
 
   const contextDir = join(root, 'tmp', 'verify-context');
@@ -353,6 +668,24 @@ function main(argv) {
     return fail(3, `could not create the artifact directory: ${error.message}`);
   }
   writeFileSync(contextPath, `${JSON.stringify(snapshot, null, 2)}\n`);
+  // Best-effort, like the lane: the round reads a missing file as "review
+  // state unknown", so an earlier prepare's copy must not outlive a failed
+  // fetch.
+  const reviewPath = join(contextDir, `pr${context.pr}-review-threads.json`);
+  rmSync(reviewPath, { force: true });
+  const review = fetchReviewState(owner, name, context.pr);
+  if (review.state) {
+    writeFileSync(reviewPath, `${JSON.stringify(review.state, null, 2)}\n`);
+  }
+  writeFileSync(
+    join(artifacts, 'context.json'),
+    `${JSON.stringify({
+      repo: slug,
+      pr: context.pr,
+      baseRefOid: context.base,
+      headRefOid: context.head,
+    })}\n`,
+  );
 
   const isolation = detectIsolation();
   // The title comes from an untrusted fork, and a control character would reach
@@ -364,7 +697,11 @@ function main(argv) {
     `  pr         #${context.pr}${title ? ` ${title}` : ''}`,
     `  base       ${context.base}`,
     `  head       ${context.head}`,
+    '  tree       at PR head, clean — reuse this tree; verify or refresh its install/build first',
     `  context    ${contextPath}`,
+    review.state
+      ? `  review     ${reviewPath} (${review.state.threads.filter((thread) => !thread.resolved).length} of ${review.state.threads.length} threads unresolved, ${review.state.changeRequests.length} change requests)`
+      : `  review     not written — ${printable(review.error)}; the round lists review findings as not covered`,
     `  artifacts  ${artifacts}`,
     `  isolation  ${isolation.isolated ? isolation.signals.join(', ') : 'none detected'}`,
   ]);

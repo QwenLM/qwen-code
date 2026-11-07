@@ -23,6 +23,7 @@ import {
   toSessionPrInfo,
   type SessionArchiveState,
   type SessionPr,
+  type SessionPrRole,
   type SessionPrSource,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -162,6 +163,15 @@ interface CommandMention {
   number: number;
   bare: boolean;
   /**
+   * The command that named the number — the binding's role source:
+   * `/review` mints `review`, `/verify-pr` mints `verify`. The FIRST mention
+   * keeps its command (the same first-wins rule as position), so a session
+   * that reviewed and later verified one PR keeps the role it earned first;
+   * an explicit metadata-route role outranks both and is never overwritten
+   * by a backfill re-offer.
+   */
+  command: 'review' | 'verify-pr';
+  /**
    * Every `[HOST/]OWNER/REPO` spelling a `/verify-pr` claim on this number
    * carried: the number names THAT repo's PR, not this workspace's. Absent
    * means this workspace's, the only reading `/review` has. Kept as a list —
@@ -181,14 +191,51 @@ interface CommandMention {
 // `/verify-pr-watch …` are other commands and must not forge a binding. The
 // bare-number alternative closes its token against filename characters
 // (`(?!\w)`-class): `/review <file-path>` is another documented invocation
-// form, so `/review 001_init.sql` must not forge PR 1. The URL alternative
-// keeps `(?!\d)`: it rejects 10+-digit numbers instead of truncating them to
-// a 9-digit prefix. The bare-number alternative comes first: `/review 42 and
-// fix #7` names 42. Bare session git branches are NOT a source: they bind the
-// workspace's current branch PR onto every session — measured pure noise,
-// removed with cleanup.
-const PR_COMMAND_PATTERN =
-  /^\s*\/(review|verify-pr)(?:[ \t]+#?(\d{1,9})(?![\w./-])|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
+// form, so `/review 001_init.sql` must not forge PR 1. A glued `--flag` is
+// the one exception: users type `/verify-pr 15979--publish` without the
+// space and the skill still runs, so the badge must bind too. The exception
+// admits only a FLAG-SHAPED tail — `--`, a letter-led name of word/dash
+// characters, an optional `=value`, then whitespace or end — so a single
+// `-` (date-style `2026-08-25-notes.md`) and double-dash file names
+// (`42--diff.patch`, `2026--08-25-notes.md`), digit tails (`42--45`) and a
+// lone `--` all stay rejected. parsePrCommand grants the tolerance to
+// /verify-pr only: /review also accepts extension-less file paths
+// (`42--notes`), which no tail grammar can tell from a flag — but the
+// policy rejection still falls through to the URL arm, because a prompt
+// like `/review 42--notes https://…/pull/7` names PR 7 by URL and bound it
+// before the policy existed. The URL alternative keeps `(?!\d)`: it rejects
+// 10+-digit numbers instead of truncating them to a 9-digit prefix.
+// The bare-number alternative comes first: `/review 42 and fix #7` names 42.
+// Bare session git branches are NOT a source: they bind the workspace's
+// current branch PR onto every session — measured pure noise, removed with
+// cleanup.
+// The URL arm is shared with the policy fallback so the two cannot drift,
+// and the fallback is anchored at command position: its gap cannot cross a
+// newline or a quote, so a URL on a later line or inside quotes is not
+// evidence — the alternation never read those either.
+const PR_URL_FORM_PATTERN =
+  /[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d))/;
+const PR_COMMAND_URL_PATTERN = new RegExp(
+  String.raw`^\s*\/(?:review|verify-pr)` + PR_URL_FORM_PATTERN.source,
+);
+// One glued flag link — the single source of truth for the number tail and
+// the qualifier chain, so the two can never disagree on what a link is.
+// The name is word runs joined by SINGLE dashes; the optional =value may
+// contain single dashes but never `--`. Neither part can swallow the `--`
+// that opens the next link, so every quantifier partition stays unique and
+// the scan stays linear — a `[\w-]*` name or a `[^\s]*` value inside a
+// starred link backtracks catastrophically on long chains (measured).
+const PR_FLAG_LINK_BODY = String.raw`[A-Za-z]\w*(?:-\w+)*(?:=(?:[^\s-]|-(?!-))*)?`;
+const PR_FLAG_LINK = String.raw`--` + PR_FLAG_LINK_BODY;
+const PR_COMMAND_PATTERN = new RegExp(
+  String.raw`^\s*\/(review|verify-pr)(?:[ \t]+#?(\d{1,9})(?![\w./]|-(?!-` +
+    PR_FLAG_LINK_BODY +
+    String.raw`(?:` +
+    PR_FLAG_LINK +
+    String.raw`)*(?=[ \t\r\n]|$)))|` +
+    PR_URL_FORM_PATTERN.source +
+    ')',
+);
 
 // `/verify-pr --repo <owner>/<repo>` scopes the number to another repository;
 // a bare number beside it must never bind this workspace's same-numbered PR.
@@ -199,9 +246,23 @@ const PR_COMMAND_PATTERN =
 // through to this workspace's PR. `--assets-repo` is a different flag of the
 // same command and must not count as one. `/review` takes no `--repo`, so a
 // stray occurrence in its prompt reads as a qualifier too — the safer
-// reading, and never a binding this workspace's number.
-const REPO_FLAG_PATTERN =
-  /(?:^|[^-\w])--repo(?![\w-])|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*["']?(?:[a-z][a-z0-9+.-]*:\/\/[^\s"']+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-]))["']?/g;
+// reading, and never a binding this workspace's number. The glued spelling
+// must count as well — otherwise its missing or next-line value would read
+// as no qualifier and bind this workspace's PR — but ONLY within the
+// command's own glued flag CHAIN: the arm is anchored to the command
+// position and walks `--flag` links (`77--repo`, `77--publish--repo`,
+// `77--repo--publish`), because a prose digit (`docs/a1--repo`, a quoted
+// `"77--repo"`, even line-final) is not a qualifier and must not decline a
+// legitimate bare binding. The token boundary includes `-` so a `--repo`
+// link followed by another link is still an unreadable qualifier. The walk
+// uses the same PR_FLAG_LINK as the number tail, valued links included, so
+// `77--publish=x--repo` declines exactly like `77--publish--repo`.
+const REPO_FLAG_PATTERN = new RegExp(
+  String.raw`(?:^|[^-\w])--repo(?![\w-])|^\s*\/(?:review|verify-pr)[ \t]+#?\d{1,9}(?:` +
+    PR_FLAG_LINK +
+    String.raw`)*--repo(?=[ \t\r\n=-]|$)|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*["']?(?:[a-z][a-z0-9+.-]*:\/\/[^\s"']+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-]))["']?`,
+  'g',
+);
 const REPO_VALUE_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?[^\s"']+/g;
 const REPO_FORM_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?([^\s"']+)/;
 
@@ -223,11 +284,36 @@ function parsePrCommand(prompt: string): {
   if (prompt.length > PR_COMMAND_MAX_LENGTH) return {};
   const match = PR_COMMAND_PATTERN.exec(prompt);
   if (!match) return {};
+  // The pattern's first capture is the closed command alternation.
+  const command = match[1] as 'review' | 'verify-pr';
   const bareNumber = match[2];
   if (bareNumber !== undefined) {
     // `\d{1,9}` admits 0; PR 0 does not exist and the sidecar write
     // declines it, so it must never count as a binding.
     if (Number(bareNumber) <= 0) return {};
+    // `/review <file-path>` is a documented invocation form, and an
+    // extension-less path (`42--notes`) is indistinguishable from a glued
+    // flag — so the glued-tail tolerance is /verify-pr's alone, the
+    // incident command, which takes no file path. The regex encodes the
+    // tail SHAPE; this is the per-command POLICY. The rejection still
+    // falls through to URL evidence: before the policy existed the bare
+    // alternative failed on these prompts and the alternation bound the
+    // URL's PR, and that binding must survive. The fallback is the
+    // command-anchored URL arm, not a prompt-wide scan: a URL on a later
+    // line or behind a quote was never evidence the alternation could read.
+    if (match[1] === 'review' && prompt.charAt(match[0].length) === '-') {
+      const urlMatch = PR_COMMAND_URL_PATTERN.exec(prompt);
+      if (urlMatch) {
+        const urlNumber = Number(urlMatch[2]);
+        if (urlNumber > 0) {
+          return {
+            mention: { number: urlNumber, bare: false, command },
+            urlForm: { number: urlNumber, url: urlMatch[1] },
+          };
+        }
+      }
+      return {};
+    }
     const repoForm = REPO_FORM_PATTERN.exec(prompt)?.[1];
     // The TOKEN decides, not the VALUE: a qualifier this grammar cannot read
     // is still a qualifier, so the number must decline. Comparing the counts
@@ -239,13 +325,19 @@ function parsePrCommand(prompt: string): {
     const valueCount = (prompt.match(REPO_VALUE_PATTERN) ?? []).length;
     if (valueCount < flagCount) {
       return {
-        mention: { number: Number(bareNumber), bare: true, repoForms: [] },
+        mention: {
+          number: Number(bareNumber),
+          bare: true,
+          command,
+          repoForms: [],
+        },
       };
     }
     return {
       mention: {
         number: Number(bareNumber),
         bare: true,
+        command,
         ...(repoForm !== undefined ? { repoForms: [repoForm] } : {}),
       },
     };
@@ -255,7 +347,7 @@ function parsePrCommand(prompt: string): {
   if (url === undefined || urlNumber === undefined) return {};
   const number = Number(urlNumber);
   return number > 0
-    ? { mention: { number, bare: false }, urlForm: { number, url } }
+    ? { mention: { number, bare: false, command }, urlForm: { number, url } }
     : {};
 }
 
@@ -1249,6 +1341,19 @@ export async function backfillWorkspaceSessionPrs(
               ? { ...entry, source: stamp }
               : entry;
           });
+        // Command-position roles: the first mention's command names the
+        // job. The Map constructor is last-wins on a duplicate key, but no
+        // duplicate reaches it: collectCommandPrNumbers.noteMention dedupes
+        // by number upstream and never pushes a second mention, so each
+        // number appears exactly once — with the FIRST command. The
+        // convention number alone mints NO role — `fix` is an explicit
+        // metadata-route binding, never inferred from a worktree.
+        const roleByNumber = new Map<number, SessionPrRole>(
+          candidate.mentions.map((mention) => [
+            mention.number,
+            mention.command === 'review' ? 'review' : 'verify',
+          ]),
+        );
         const additions: SessionPr[] = [];
         for (const number of plan) {
           if (freshNumbers.has(number)) continue;
@@ -1259,6 +1364,7 @@ export async function backfillWorkspaceSessionPrs(
           // it and let the next run re-bind it.
           if (url === undefined) continue;
           const state = states.get(number);
+          const role = roleByNumber.get(number);
           const source: SessionPrSource =
             number === candidate.conventionNumber ? 'worktree' : 'review';
           additions.push({
@@ -1267,6 +1373,7 @@ export async function backfillWorkspaceSessionPrs(
             createdAt,
             ...(state !== undefined ? { state } : {}),
             source,
+            ...(role !== undefined ? { role } : {}),
           });
         }
         added = additions.length;

@@ -73,9 +73,16 @@ curl --fail http://127.0.0.1:8080/actuator/health
 
 同一项 `KillMode=process` 也意味着 `systemctl stop qwen-managed-agent-server` 只向主进程发送信号：unit 报告 inactive 时 Runtime worker 仍在运行并持有状态目录与 Workspace，随后启动会与它们竞争。重启前先回收：`systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server`。
 
+JVM 收到 `SIGTERM` 并正常关闭后以状态码 143 退出，因此 unit 设置了 `SuccessExitStatus=143`；否则每次停止都会让 unit 处于 failed 状态。
+
+## 升级
+
+使用新分发产物中的 `bin/qwen-managed-agent-upgrade` 升级，步骤见部署指南的“升级”一节。它会停止这两个 unit、回收 Runtime worker、备份数据库、Runtime 状态与配置，并在新版本的预检通过后启动它。第一次 `install` 会把 `/opt/qwen-managed-agent` 移到 `/opt/qwen-managed-agent-releases/<version>`，并在原位置放一个链接，因此 unit 中的路径不变。它从不修改这两个 unit：`check` 提示模板有变化时，请在 `start` 之前把变化同步过来并执行 `systemctl daemon-reload`。
+
 ## 路径
 
-- `/opt/qwen-managed-agent` — 解压后的分发产物（只读）。
+- `/opt/qwen-managed-agent` — 解压后的分发产物（只读）；第一次升级之后，是指向已安装版本的链接。
+- `/opt/qwen-managed-agent-releases` — 升级安装的各个版本，包括上一个版本。
 - `/etc/qwen-managed-agent` — 凭据与 `application.yml`。
 - `/var/lib/qwen-managed-agent` — Runtime 状态。
 - `/srv/qwen-workspace` — Workspace；迁移位置时同步调整 `ReadWritePaths`。

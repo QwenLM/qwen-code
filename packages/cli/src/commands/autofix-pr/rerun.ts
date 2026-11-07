@@ -28,7 +28,7 @@ import {
   assertPositiveInteger,
   autofixPrPaths,
   checkAttemptKey,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
   rerunFloors,
   withWatchLock,
@@ -36,6 +36,7 @@ import {
   type AutofixPrPaths,
 } from './state.js';
 import { assertNoFixInFlight } from './fix.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 export interface RerunOutcome {
   rerun: boolean;
@@ -54,7 +55,7 @@ export function runRerun(
   task?: string,
 ): RerunOutcome {
   assertPositiveInteger(runId, 'run id');
-  const paths = autofixPrPaths(repoRoot(), prNumber);
+  const paths = autofixPrPaths(resolveWatchRoot(prNumber), prNumber);
   return withWatchLock(paths, prNumber, () =>
     rerunLocked(paths, prNumber, runId, task),
   );
@@ -73,7 +74,8 @@ function rerunLocked(
   ensureAuthenticated();
   const { pr } = fetchPrData(state);
   if (pr.state !== 'OPEN') {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'pr_closed',
       `PR #${prNumber} is ${pr.state.toLowerCase()}; nothing is re-run on it.`,
     );
   }
@@ -199,7 +201,8 @@ function rerunLocked(
           : {}),
       });
     }
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'rerun_failed',
       `GitHub did not re-run run ${runId}${refused ? '' : ' (or its answer was lost; the re-run is counted)'}: ${message.trim().split('\n').slice(-3).join(' ')} — answer its failures as needing a human.`,
     );
   }

@@ -302,6 +302,59 @@ test('keeps docs mixed with helper files or Markdown off application tests', () 
   );
 });
 
+test('uses java_only for changes confined to the Java packages', () => {
+  assert.equal(
+    classifyChangedFiles([
+      'packages/managed-agent-server/server/src/main/java/A.java',
+      'packages/managed-agent-server/pom.xml',
+      'packages/sdk-java/qwencode/src/main/java/B.java',
+    ]),
+    'java_only',
+  );
+  // Java Markdown no suite reads needs no tests beside the Java change.
+  assert.equal(
+    classifyChangedFiles([
+      'packages/managed-agent-server/docs/notes.md',
+      'packages/managed-agent-server/pom.xml',
+    ]),
+    'java_only',
+  );
+  assert.equal(
+    classifyChangedFiles([
+      'docs/usage.md',
+      '.github/CODEOWNERS',
+      'packages/sdk-java/client/pom.xml',
+    ]),
+    'java_only',
+  );
+});
+
+test('keeps Java files that TypeScript suites read on the full profile', () => {
+  for (const file of [
+    'packages/managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public.yaml',
+    'packages/managed-agent-server/verification/src/test/resources/capability-parity/managed-surface.txt',
+  ]) {
+    assert.equal(classifyChangedFiles([file]), 'full', file);
+  }
+  assert.equal(
+    classifyChangedFiles([
+      'packages/managed-agent-server/pom.xml',
+      'packages/cli/src/index.ts',
+    ]),
+    'full',
+  );
+  assert.equal(
+    classifyChangedFiles([
+      {
+        filename: 'packages/sdk-java/client/src/A.java',
+        status: 'renamed',
+        previous_filename: 'packages/cli/src/A.java',
+      },
+    ]),
+    'full',
+  );
+});
+
 test('falls back to full for main CI workflow changes', () => {
   assert.equal(classifyChangedFiles(['.github/workflows/ci.yml']), 'full');
   assert.equal(classifyChangedFiles(['.github/workflows/codeql.yml']), 'full');
