@@ -494,7 +494,7 @@ async fn install_update(webview: WebviewWindow, app: AppHandle) -> Result<(), St
         move || {
             app.dialog()
                 .message(format!(
-                    "Install Qwen Code Desktop {version} and restart now?"
+                    "Install Qwen Code Desktop {version} and restart now?\n\nOpen sessions will be closed."
                 ))
                 .title("Qwen Code update")
                 .kind(MessageDialogKind::Info)
@@ -853,7 +853,7 @@ fn check_updates_silently(app: AppHandle) {
             move || {
                 app.dialog()
                     .message(format!(
-                        "Qwen Code Desktop {version} is available. Install and restart now?"
+                        "Qwen Code Desktop {version} is available. Install and restart now?\n\nOpen sessions will be closed."
                     ))
                     .title("Qwen Code update")
                     .kind(MessageDialogKind::Info)
@@ -890,8 +890,18 @@ fn check_updates_silently(app: AppHandle) {
 }
 
 async fn check_for_update(app: &AppHandle) -> Result<Option<Update>, String> {
+    let exit_handle = app.clone();
     app.updater_builder()
         .timeout(UPDATE_CHECK_TIMEOUT)
+        // Windows cannot overwrite a mapped executable, and the bundled
+        // runtime keeps runtime\qwen-code\node\node.exe mapped. The plugin runs
+        // this hook once the download succeeded, right before it launches the
+        // installer and exits. on_before_exit replaces the plugin's default
+        // cleanup_before_exit hook rather than appending, so chain it here.
+        .on_before_exit(move || {
+            stop_runtime(&exit_handle);
+            exit_handle.cleanup_before_exit();
+        })
         .build()
         .map_err(|error| format!("Failed to initialize updater: {error}"))?
         .check()
