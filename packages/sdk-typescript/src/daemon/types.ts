@@ -170,6 +170,11 @@ export interface DaemonCapabilitiesLimits {
   sessionRestoreTimeoutMs?: number;
   /** Present when `workspace_file_upload` is advertised. */
   maxWorkspaceFileUploadBytes?: number;
+  /** Only raw Skill archives and zip-file sources; legacy limits are unchanged. */
+  maxSkillArchiveBytes?: number;
+  maxSkillArchiveExpandedBytes?: number;
+  maxSkillArchiveEntries?: number;
+  maxSkillArchiveManifestBytes?: number;
 }
 
 export interface DaemonWorkspaceCapability {
@@ -909,6 +914,12 @@ export interface DaemonStatusReportSession {
   pendingPermissionCount: number;
   hasActivePrompt: boolean;
   lastEventId: number;
+  eventRingCount?: number;
+  eventRingBytes?: number;
+  eventRingEarliestEventId?: number;
+  eventRingEvictedEvents?: number;
+  eventRingEvictedBytes?: number;
+  availableCommandsSnapshotBytes?: number;
   lastSeenAt?: number;
   currentModelId?: string;
   currentApprovalMode?: string;
@@ -1052,6 +1063,7 @@ export interface DaemonStatusReport {
     maxPendingPromptsPerSession: number | null;
     listenerMaxConnections: number | null;
     eventRingSize: number;
+    eventRingMaxBytes?: number;
     promptDeadlineMs: number | null;
     writerIdleTimeoutMs: number | null;
     channelIdleTimeoutMs: number;
@@ -4157,6 +4169,19 @@ export type DaemonSkillToggleActivation =
   | 'reconciling'
   | 'partial';
 
+export type DaemonUserSkillActivation =
+  | { state: 'enabled' }
+  | { state: 'disabled'; mode?: 'hard' | 'default' };
+
+export interface DaemonUserSkillsActivationResult {
+  scope: 'user';
+  state: 'enabled' | 'disabled';
+  mode?: 'hard' | 'default';
+  /** Queue disposition for this write, not effective Skill availability. */
+  propagation: 'queued' | 'deferred' | 'not_required';
+  results: Array<{ skillName: string; changed: boolean }>;
+}
+
 export interface DaemonSkillToggleMutationSkill {
   name: string;
   enabled: boolean;
@@ -4230,12 +4255,61 @@ export interface DaemonSkillInstallRequest {
   source: DaemonSkillInstallSource;
 }
 
+export type DaemonSkillConfigInstallRequest =
+  | DaemonSkillInstallRequest
+  | {
+      name: string;
+      scope: DaemonSkillScope;
+      attemptId?: string;
+      source: { type: 'zip-file'; path: string; sha256?: string };
+    };
+
+export interface DaemonSkillInstallOptions {
+  signal?: AbortSignal;
+  /** Native sources default to 130 seconds; 0 disables only the client timeout. */
+  timeoutMs?: number;
+}
+
+export interface DaemonSkillArchiveInstallRequest
+  extends Omit<DaemonWorkspaceFileUploadRequest, 'path'> {
+  name: string;
+  attemptId?: string;
+}
+
+export interface DaemonSkillArchiveInstallResult
+  extends DaemonSkillMutationResult {
+  attemptId: string;
+  archiveSha256: string;
+}
+
+export interface DaemonSkillInstallAttempt {
+  attemptId: string;
+  scope: DaemonSkillScope;
+  skillName: string;
+  workspaceId: string;
+  generationId?: number;
+  state: 'running' | 'committed' | 'not_committed' | 'recovery_required';
+  phase:
+    | 'receiving'
+    | 'copying'
+    | 'waiting'
+    | 'extracting'
+    | 'publishing'
+    | 'cleanup';
+  archiveSha256?: string;
+  result?: DaemonSkillMutationResult;
+  error?: { code: string; message: string; retainedPaths?: string[] };
+}
+
 export interface DaemonSkillMutationResult {
   skillName: string;
   scope: DaemonSkillScope;
   installedPath?: string;
   deleted?: boolean;
   activation?: DaemonSkillToggleActivation;
+  attemptId?: string;
+  archiveSha256?: string;
+  activationWarning?: string;
 }
 
 export interface DaemonSettingDescriptor {
@@ -5697,6 +5771,7 @@ export type DaemonHookEventName =
   | 'TodoCreated'
   | 'TodoCompleted'
   | 'InstructionsLoaded'
+  | 'FileChanged'
   | (string & {});
 
 export type DaemonHookMatcherKind =

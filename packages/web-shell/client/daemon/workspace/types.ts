@@ -529,9 +529,11 @@ export interface DaemonWorkspaceActions
     | 'getSubscriptionLogin'
     | 'cancelSubscriptionLogin'
     | 'getSubscriptionUserInfo'
+    | 'getSubscriptionDefaultModel'
     | 'signOutSubscription'
   > {
   activateSubscription(options?: {
+    workspaceCwd?: string;
     signal?: AbortSignal;
   }): Promise<DaemonSubscriptionActivation>;
   setUiLanguage(

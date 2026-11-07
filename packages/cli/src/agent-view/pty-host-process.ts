@@ -669,7 +669,7 @@ export function createAgentViewPtyHostServer(
     });
     // Byte-transparent framing: only the request line is decoded, so
     // coalesced keystrokes after an attach request reach the worker verbatim.
-    let buffer = Buffer.alloc(0);
+    let buffer: Buffer = Buffer.alloc(0);
     socket.on('data', (chunk: Buffer) => {
       buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
       if (buffer.length > MAX_PTY_HOST_REQUEST_LINE_BYTES) {

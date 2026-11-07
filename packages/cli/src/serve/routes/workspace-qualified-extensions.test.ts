@@ -60,6 +60,7 @@ function makeBridge(): AcpSessionBridge {
         maxSessions: 20,
         maxPendingPromptsPerSession: 5,
         eventRingSize: 8000,
+        eventRingMaxBytes: 8 * 1024 * 1024,
         compactedReplayMaxBytes: 4 * 1024 * 1024,
         maxJournalEvents: 10_000,
         maxJournalBytes: 8 * 1024 * 1024,

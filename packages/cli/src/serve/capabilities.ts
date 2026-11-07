@@ -263,6 +263,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_tool_toggle: { since: 'v1' },
   workspace_skill_settings_toggle: { since: 'v1' },
   workspace_skill_settings_batch_toggle: { since: 'v1' },
+  user_skill_activation: { since: 'v1' },
   workspace_session_refresh: { since: 'v1' },
   extension_batch_activation_v2: { since: 'v1' },
   // Extension activation commits do not refresh active sessions. Clients that
@@ -270,6 +271,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // operation after the activation operation commits.
   extension_activation_explicit_refresh: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
+  // Native archive sources also support owner-scoped installation receipts.
+  skill_archive_install: { since: 'v1' },
+  skill_zip_file_source: { since: 'v1' },
   // `GET /brand` — the Web Shell's product name and logo, resolved from the
   // operator settings scopes. Unconditional because the route is registered
   // unconditionally. Advertised so a host can preflight rather than issue the
@@ -662,6 +666,7 @@ export interface AdvertiseFeatureToggles {
   promptDeadlineMs?: number;
   writerIdleTimeoutMs?: number;
   persistSettingAvailable?: boolean;
+  userSkillActivationAvailable?: boolean;
   voiceTranscriptionAvailable?: boolean;
   sessionShellCommandEnabled?: boolean;
   sessionArtifactsPersistenceAvailable?: boolean;
@@ -792,6 +797,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       toggles.writerIdleTimeoutMs > 0,
   ],
   ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
+  [
+    'user_skill_activation',
+    (toggles) => toggles.userSkillActivationAvailable === true,
+  ],
   ['user_language_sync', (toggles) => toggles.persistSettingAvailable === true],
   ['workspace_voice', (toggles) => toggles.persistSettingAvailable === true],
   [
@@ -910,6 +919,14 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'workspace_skills_config_runtime',
+    (toggles) => toggles.workspaceRuntimeAvailable === true,
+  ],
+  [
+    'skill_archive_install',
+    (toggles) => toggles.workspaceRuntimeAvailable === true,
+  ],
+  [
+    'skill_zip_file_source',
     (toggles) => toggles.workspaceRuntimeAvailable === true,
   ],
   [

@@ -323,6 +323,7 @@ function LiveHostWorkspace({
       trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
       noSessionsLabel={t('sidebar.noSessions')}
       loadErrorLabel={t('sidebar.loadFailed')}
+      untitledSessionLabel={t('sidebar.untitledSession')}
       organizationEnabled={false}
       channelGroupingEnabled={false}
       ungroupedLabel={t('sidebar.groupUngrouped')}
@@ -408,13 +409,20 @@ function FanoutSessionRow({
   session: DaemonSessionSummary;
   onOpen: () => void;
 }) {
-  const label = session.displayName?.trim() || session.sessionId.slice(0, 8);
+  const { t } = useI18n();
+  const displayName = session.displayName?.trim();
+  const label = displayName || t('sidebar.untitledSession');
+  // No visible id and no details tooltip on this row: two nameless sessions
+  // must still be distinguishable by the one surface that can carry the id.
+  const title = displayName
+    ? label
+    : `${label} · ${session.sessionId.slice(0, 8)}`;
   return (
     <div
       className={sidebarStyles.sessionRow}
       role="button"
       tabIndex={0}
-      title={label}
+      title={title}
       onClick={onOpen}
       onKeyDown={(event) => {
         if (event.key === 'Enter') onOpen();

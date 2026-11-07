@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFileAttributes;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.nio.file.attribute.UserPrincipal;
 
@@ -33,7 +34,7 @@ public final class RuntimeStateFiles {
     }
 
     public static void validate(Path path, boolean isDirectory, UserPrincipal owner) throws IOException {
-        var attributes = Files.readAttributes(path, java.nio.file.attribute.PosixFileAttributes.class,
+        var attributes = Files.readAttributes(path, PosixFileAttributes.class,
                 LinkOption.NOFOLLOW_LINKS);
         if (isDirectory ? !attributes.isDirectory() : !attributes.isRegularFile()) {
             throw new IOException("Recovery entry has an invalid type");
