@@ -212,6 +212,7 @@ import type { AttachmentPreviewRequest } from './adapters/messageTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { GoalStatusStrip } from './components/GoalStatusStrip';
 import { SessionRecoveryBanner } from './components/SessionRecoveryBanner';
+import { SessionLimitBanner } from './components/SessionLimitBanner';
 import composerStatusStyles from './components/ComposerStatusStack.module.css';
 import { GoalEditDialog } from './components/dialogs/GoalEditDialog';
 import { StreamingStatus } from './components/StreamingStatus';
@@ -10003,6 +10004,10 @@ export function App({
   const [showResumeDialog, setShowResumeDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showReleaseDialog, setShowReleaseDialog] = useState(false);
+  const [sessionLimitReached, setSessionLimitReached] = useState(false);
+  const sessionLimitScopeRef = useRef<
+    { sessionId?: string; workspaceCwd?: string } | undefined
+  >(undefined);
   const [showRewindDialog, setShowRewindDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
@@ -13808,6 +13813,12 @@ export function App({
         dismissNotice(notice.id);
         continue;
       }
+      if (
+        notice.code === 'session_limit_exceeded' &&
+        notice.operation === 'create_session'
+      ) {
+        setSessionLimitReached(true);
+      }
       if (shouldToastNotice(notice)) {
         pushToast(
           toastToneFromNotice(notice),
@@ -13833,6 +13844,22 @@ export function App({
     setBtwMessage(null);
     setTasksDialogMessage(null);
     lastRecapBlockCountRef.current = 0;
+  }, [connection.sessionId, connection.workspaceCwd]);
+
+  useEffect(() => {
+    const scope = {
+      sessionId: connection.sessionId,
+      workspaceCwd: connection.workspaceCwd,
+    };
+    const previous = sessionLimitScopeRef.current;
+    sessionLimitScopeRef.current = scope;
+    if (
+      previous !== undefined &&
+      (previous.sessionId !== scope.sessionId ||
+        previous.workspaceCwd !== scope.workspaceCwd)
+    ) {
+      setSessionLimitReached(false);
+    }
   }, [connection.sessionId, connection.workspaceCwd]);
 
   // A recap is one local annotation shared by both triggers: the latest request
@@ -22949,6 +22976,7 @@ export function App({
               <ReleaseSessionDialog
                 workspaceCwd={lockedWorkspaceCwd}
                 onReleased={(sessionId) => {
+                  setSessionLimitReached(false);
                   store.dispatch([
                     {
                       type: 'status',
@@ -25389,6 +25417,12 @@ export function App({
                             unknownPromptAdmission?.payloadAvailable === true
                           }
                         />
+                        {sessionLimitReached && workspaceContextActive && (
+                          <SessionLimitBanner
+                            onRelease={() => setShowReleaseDialog(true)}
+                            onDismiss={() => setSessionLimitReached(false)}
+                          />
+                        )}
                         <ChatEditor
                           ref={setEditorHandle}
                           liveVoicePortalContainer={
