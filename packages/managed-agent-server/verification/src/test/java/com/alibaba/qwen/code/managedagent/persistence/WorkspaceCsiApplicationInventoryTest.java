@@ -846,11 +846,11 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(owner.cell("personal_execution_actor_key").isNull()).isTrue();
         assertThat(owner.number("personal_auth_config_revision")).isZero();
         assertThat(before.blockers()).noneMatch(blocker -> blocker.table().equals("ma_session"));
-        jdbc.update("UPDATE ma_session SET personal_auth_config_revision = 1 WHERE tenant_id = 'tenant' AND session_id = ?", session);
+        jdbc.update("UPDATE ma_session SET personal_auth_config_revision = 1 WHERE tenant_id = ? AND session_id = ?", "tenant", session);
         assertThat(inspect().blockers()).anyMatch(blocker -> blocker.table().equals("ma_session")
                 && blocker.code().equals("invalid_original_association"));
         jdbc.update("UPDATE ma_session SET personal_execution_actor_key = ?, personal_auth_config_revision = 1"
-                + " WHERE tenant_id = 'tenant' AND session_id = ?", "a".repeat(64), session);
+                + " WHERE tenant_id = ? AND session_id = ?", "a".repeat(64), "tenant", session);
         var snapshot = inspect();
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift"));
         assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session")
@@ -858,7 +858,7 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(snapshot.table("ma_session").rows().getFirst().text("personal_execution_actor_key")).isEqualTo("a".repeat(64));
         assertThat(snapshot.table("ma_session").rows().getFirst().number("personal_auth_config_revision")).isEqualTo(1);
         jdbc.update("UPDATE ma_session SET personal_execution_actor_key = NULL, personal_auth_config_revision = 0"
-                + " WHERE tenant_id = 'tenant' AND session_id = ?", session);
+                + " WHERE tenant_id = ? AND session_id = ?", "tenant", session);
         var restored = inspect();
         assertThat(restored.blockers()).noneMatch(blocker -> blocker.table().equals("ma_session"));
         assertThat(restored.table("ma_session").rows().getFirst().bytes()).isEqualTo(owner.bytes());
