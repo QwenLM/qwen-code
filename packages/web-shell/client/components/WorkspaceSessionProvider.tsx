@@ -32,6 +32,7 @@ import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Spinner } from './ui/spinner';
 import { WorkspaceUnavailableState } from './WorkspaceUnavailableState';
 import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
+import { managedSelectionFromRoute } from './managed/managed-session-storage';
 
 function surfaceTheme(theme: WebShellTheme | undefined): WebShellTheme {
   return theme ?? WebShellThemeId.Dark;
@@ -319,17 +320,13 @@ function WorkspaceSessionProviderWorkspace({
     lockWorkspaceCwd,
   ]);
 
-  // Managed 的工作区/会话由 managedAgentProvider 经宿主 HTTP provider 提供，不存在 daemon workspace/capabilities。
-  // 这些门禁对 Managed 不成立；但 provider 链必须保留——App 普通分支与 managed 分支是兄弟节点都会挂载。
-  // 仅注入 provider 还不够：URL 显式 managed=0 表示用户要看本地 daemon 会话，
-  // 此时必须保留 daemon 门禁（含「工作区不存在」拒绝），否则会掩盖真实的本地错误。
-  // 与 App 的 managedMode 同一口径：provider 存在且 managed 选择未被关闭。
+  // Managed 的工作区/会话由 managedAgentProvider 经宿主 HTTP provider 提供，不存在 daemon workspace/capabilities；
+  // 但这些门禁不能被「宿主注入了 provider」整体关掉——本组件在 App 之上，普通本地会话分支同样经过这里。
+  // 因此按 App 的同一份选择规则判定当前渲染的是不是 managed 视图（managed=1，或在默认为 managed home 的
+  // 页面且 URL 未写 managed=0）；本地会话目标（chat 页 + 会话 id）永远保留 daemon 门禁。
   const managedProvided =
     appProps.managedAgentProvider !== undefined &&
-    !(
-      typeof window !== 'undefined' &&
-      new URLSearchParams(window.location.search).get('managed') === '0'
-    );
+    managedSelectionFromRoute(navigation?.route).open;
   // Keep an unscoped session mounted when a later refresh fails.
   if (
     !managedProvided &&
@@ -609,13 +606,10 @@ function StandaloneSessionGate({
   }
 
   const capabilities = workspace.capabilities;
-  // 与上方 workspace 分支同口径：provider 存在且 URL 未显式 managed=0 时才豁免 daemon 门禁。
+  // 与 workspace 分支同口径：只有 managed 视图才豁免 daemon 门禁，本地会话目标始终保留。
   const managedProvided =
     appProps.managedAgentProvider !== undefined &&
-    !(
-      typeof window !== 'undefined' &&
-      new URLSearchParams(window.location.search).get('managed') === '0'
-    );
+    managedSelectionFromRoute(navigation?.route).open;
   if (!managedProvided && workspace.status === 'error') {
     return (
       <WorkspaceUnavailableState

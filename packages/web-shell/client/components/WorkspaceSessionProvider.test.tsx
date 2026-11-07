@@ -507,7 +507,7 @@ describe('WorkspaceSessionProvider targets', () => {
     expect(mocks.providerProps.at(-1)).toMatchObject({ sessionId: undefined });
   });
 
-  async function renderManagedShell() {
+  async function renderManagedShell(extra: { lockWorkspaceCwd?: string } = {}) {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
@@ -527,6 +527,7 @@ describe('WorkspaceSessionProvider targets', () => {
               urlNavigation={{
                 basePath: inferStandaloneBasePath(window.location.pathname),
               }}
+              lockWorkspaceCwd={extra.lockWorkspaceCwd}
               webShellProps={{ managedAgentProvider }}
             />
           )}
@@ -627,6 +628,63 @@ describe('WorkspaceSessionProvider targets', () => {
     expect(new URLSearchParams(window.location.search).get('managed')).toBe(
       '0',
     );
+  });
+
+  it('keeps the workspace refusal for a local session without managed=0', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/session/session-missing?workspace=missing',
+    );
+    await renderManagedShell();
+    // The managed view is not what this URL selects: no `managed=1`, and the
+    // chat route carries an explicit local session target. The daemon gate
+    // must still refuse instead of mounting the shell.
+    expect(mocks.providerMounts).toBe(0);
+    expect(container.textContent).toContain('Workspace not found');
+  });
+
+  it('keeps the lockWorkspaceCwd constraint for a local session without managed=0', async () => {
+    window.history.replaceState(null, '', '/session/session-a?workspace=a');
+    mocks.addWorkspace.mockRejectedValueOnce(
+      new Error('daemon unreachable') as never,
+    );
+    await renderManagedShell({ lockWorkspaceCwd: '/work/locked' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The host constraint must still hold for the local session even though a
+    // managed provider is injected: no daemon session provider may mount while
+    // the locked workspace is unresolved or refused.
+    expect(mocks.providerMounts).toBe(0);
+  });
+
+  it('keeps the managed view exempt while it is the selected view', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    mocks.addWorkspace.mockRejectedValueOnce(
+      new Error('daemon unreachable') as never,
+    );
+    await renderManagedShell({ lockWorkspaceCwd: '/work/locked' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The managed view is explicitly selected, so the daemon workspace lock
+    // must not take the page over.
+    expect(mocks.providerMounts).toBe(1);
+  });
+
+  it('keeps the default managed home exempt without a managed param', async () => {
+    window.history.replaceState(null, '', '/');
+    mocks.addWorkspace.mockRejectedValueOnce(
+      new Error('daemon unreachable') as never,
+    );
+    await renderManagedShell({ lockWorkspaceCwd: '/work/locked' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // No `managed` param, but a root page defaults to the managed home, so the
+    // exemption must hold; a `managed=1`-only rule would regress this.
+    expect(mocks.providerMounts).toBe(1);
   });
 
   it('drops an unavailable explicit context for a primary new session', async () => {
