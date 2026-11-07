@@ -1636,6 +1636,22 @@ function ManagedSessionsContent({
       />
     );
   }
+  // The host composer footer must not disagree with the composer it sits under,
+  // so both read this single predicate (ChatPane passes one expression too).
+  const composerDisabled =
+    !interactive ||
+    busy ||
+    Boolean(pending) ||
+    lifecycle.blocked(sessionId) ||
+    modelChange.blocked ||
+    compression.blocked ||
+    approvalChange.blocked ||
+    Boolean(
+      sessionId &&
+        (!summary?.capabilities.canSend ||
+          recovery.value?.nextTurnAllowed === false) &&
+        !userMessages.supported,
+    );
   return (
     <div
       ref={pageRef}
@@ -1776,30 +1792,35 @@ function ManagedSessionsContent({
           }
           aria-label={t('managed.conversation')}
         >
-          {summary && home && showManagedSessionHeader && (
+          {summary && home && (
             <div className="shrink-0">
               <ChatContextHeader
                 content={
                   <span className="flex min-w-0 items-center gap-2">
-                    <span
-                      className="truncate"
-                      onDoubleClick={() => rename.open()}
-                    >
-                      {summary.title === summary.sessionId
-                        ? summary.sessionId.slice(0, 8)
-                        : summary.title}
-                    </span>
+                    {showManagedSessionHeader && (
+                      <span
+                        className="truncate"
+                        onDoubleClick={() => rename.open()}
+                      >
+                        {summary.title === summary.sessionId
+                          ? summary.sessionId.slice(0, 8)
+                          : summary.title}
+                      </span>
+                    )}
                     {sessionActions(summary)}
                   </span>
                 }
+                hideWorkspaceIcon={!showManagedSessionHeader}
                 workspaceName={summary.workspace?.workspaceId}
                 location={
-                  <Badge variant="secondary">
-                    {t(`managed.phase.${summary.phase}`)}
-                    {summary.lifecycleStatus &&
-                      summary.lifecycleStatus !== 'active' &&
-                      ` · ${t(`managed.sessionState.${summary.lifecycleStatus}`)}`}
-                  </Badge>
+                  showManagedSessionHeader ? (
+                    <Badge variant="secondary">
+                      {t(`managed.phase.${summary.phase}`)}
+                      {summary.lifecycleStatus &&
+                        summary.lifecycleStatus !== 'active' &&
+                        ` · ${t(`managed.sessionState.${summary.lifecycleStatus}`)}`}
+                    </Badge>
+                  ) : undefined
                 }
                 environmentOpen={taskPanelOpen}
                 environmentAvailable={Boolean(
@@ -2598,21 +2619,7 @@ function ManagedSessionsContent({
                     ? () => void cancel()
                     : undefined
                 }
-                disabled={
-                  !interactive ||
-                  busy ||
-                  Boolean(pending) ||
-                  lifecycle.blocked(sessionId) ||
-                  modelChange.blocked ||
-                  compression.blocked ||
-                  approvalChange.blocked ||
-                  Boolean(
-                    sessionId &&
-                      (!summary?.capabilities.canSend ||
-                        recovery.value?.nextTurnAllowed === false) &&
-                      !userMessages.supported,
-                  )
-                }
+                disabled={composerDisabled}
                 placeholderText={t(
                   active && userMessages.supported
                     ? 'managed.queue.placeholder'

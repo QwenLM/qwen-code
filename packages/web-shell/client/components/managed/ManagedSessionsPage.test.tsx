@@ -4451,6 +4451,11 @@ describe('ManagedSessionsPage', () => {
       },
     );
     expect(container.textContent).not.toContain('Task s1');
+    // Hiding the identity must not unmount the header itself: its action
+    // cluster and panel toggles are the only surfaces that carry them.
+    expect(
+      container.querySelector('[data-testid="chat-context-header"]'),
+    ).not.toBeNull();
   });
 
   it('keeps managed copy by default so the standalone page is unchanged', async () => {
