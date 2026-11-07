@@ -16,7 +16,7 @@ function installDesktop(invoke: Invoke): void {
 /** The mirror plus stamp `writeShellState` leaves behind for a launch. */
 function seedMirror(key: string, value: string, launch = 'launch-nonce'): void {
   window.localStorage.setItem(key, value);
-  window.localStorage.setItem('qwen-shell-mirror-launch', launch);
+  window.localStorage.setItem(`qwen-shell-mirror-launch:${key}`, launch);
 }
 
 describe('desktop shell state', () => {
@@ -234,8 +234,60 @@ describe('desktop shell state', () => {
     );
     // Without this stamp the next hydration would treat the mirror as an
     // earlier launch's copy and drop it instead of re-pushing it.
-    expect(window.localStorage.getItem('qwen-shell-mirror-launch')).toBe(
-      'launch-nonce',
+    expect(
+      window.localStorage.getItem(
+        'qwen-shell-mirror-launch:qwen-remote-connections',
+      ),
+    ).toBe('launch-nonce');
+  });
+
+  it('does not let a sibling catalog make an older mirror look current', async () => {
+    // Launch 1: the saved-connection read fails, so its older mirror stays
+    // while the workspace-host catalog hydrates and is then written.
+    const firstInvoke = vi.fn(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command !== 'shell_state_read') return undefined;
+        if (args?.['key'] === 'qwen-remote-connections') {
+          throw new Error('ipc unavailable');
+        }
+        return null;
+      },
+    );
+    installDesktop(firstInvoke);
+    seedMirror(
+      'qwen-remote-connections',
+      '["https://stale.example"]',
+      'earlier-launch',
+    );
+
+    const first = await import('./shell-state');
+    await first.hydrateShellState();
+    first.writeShellState('qwen-workspace-hosts', '[]');
+    await Promise.resolve();
+
+    // Same-origin reload: the failed key now reads, and it differs from the
+    // mirror the earlier launch left behind.
+    vi.resetModules();
+    const secondInvoke = vi.fn(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command !== 'shell_state_read') return undefined;
+        return args?.['key'] === 'qwen-remote-connections'
+          ? '["https://native.example"]'
+          : null;
+      },
+    );
+    installDesktop(secondInvoke);
+
+    const second = await import('./shell-state');
+    await second.hydrateShellState();
+
+    expect(second.readShellState('qwen-remote-connections')).toBe(
+      '["https://native.example"]',
+    );
+    expect(window.localStorage.getItem('qwen-remote-connections')).toBeNull();
+    expect(secondInvoke).not.toHaveBeenCalledWith(
+      'shell_state_write',
+      expect.objectContaining({ key: 'qwen-remote-connections' }),
     );
   });
 

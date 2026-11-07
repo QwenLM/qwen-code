@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   forgetRemoteConnection,
   formatOriginHost,
@@ -69,6 +69,26 @@ describe('remote connections', () => {
         window.localStorage.getItem('qwen-remote-connections') ?? '[]',
       ),
     ).toEqual([window.location.origin, 'https://three.example']);
+  });
+
+  it('persists a saved connection through the desktop store without the page origin', () => {
+    const invoke = vi.fn(async (): Promise<unknown> => undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    try {
+      rememberRemoteConnection(window.location.origin);
+      expect(invoke).not.toHaveBeenCalled();
+
+      rememberRemoteConnection('https://remote.example');
+
+      expect(readRemoteConnections()).toEqual(['https://remote.example']);
+      expect(invoke).toHaveBeenCalledWith('shell_state_write', {
+        key: 'qwen-remote-connections',
+        value: JSON.stringify(['https://remote.example']),
+        nonce: expect.any(String),
+      });
+    } finally {
+      delete (window as { __TAURI__?: unknown }).__TAURI__;
+    }
   });
 
   it('keeps an invalid display origin from breaking render paths', () => {

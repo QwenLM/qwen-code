@@ -19,9 +19,15 @@ const SHELL_NONCE_STORAGE_KEY = 'qwen-shell-nonce';
  * Stamps the `localStorage` mirror with the launch that wrote it. WebView2 keeps
  * each origin's storage on disk, so a mirror outlives its launch; when an
  * ephemeral port comes back around, an unstamped mirror would look newer than
- * the native catalog the other launches have been building.
+ * the native catalog the other launches have been building. One stamp per
+ * catalog: a key whose read failed keeps its older mirror, and a sibling's
+ * write this launch must not vouch for it.
  */
-const SHELL_MIRROR_STAMP_KEY = 'qwen-shell-mirror-launch';
+const SHELL_MIRROR_STAMP_PREFIX = 'qwen-shell-mirror-launch';
+
+function mirrorStampKey(key: string): string {
+  return `${SHELL_MIRROR_STAMP_PREFIX}:${key}`;
+}
 
 const cache = new Map<string, string | null>();
 let hydration: Promise<void> | undefined;
@@ -68,18 +74,18 @@ function readLocal(key: string): string | null {
 function writeLocal(key: string, value: string): void {
   try {
     window.localStorage.setItem(key, value);
-    window.localStorage.setItem(SHELL_MIRROR_STAMP_KEY, readShellNonce());
+    window.localStorage.setItem(mirrorStampKey(key), readShellNonce());
   } catch {
     // The desktop copy below still persists it; a browser keeps the session copy.
   }
 }
 
-/** Whether the mirror on this origin was written by this launch. */
-function mirrorFromThisLaunch(): boolean {
+/** Whether this catalog's mirror on this origin was written by this launch. */
+function mirrorFromThisLaunch(key: string): boolean {
   const launch = readShellNonce();
   if (!launch) return false;
   try {
-    return window.localStorage.getItem(SHELL_MIRROR_STAMP_KEY) === launch;
+    return window.localStorage.getItem(mirrorStampKey(key)) === launch;
   } catch {
     return false;
   }
@@ -150,7 +156,7 @@ async function hydrateDesktop(): Promise<void> {
           // re-pushing it would drop whatever the launches in between added.
           // With no native copy at all there is nothing to lose, so migration
           // still adopts the mirror.
-          if (typeof native === 'string' && !mirrorFromThisLaunch()) {
+          if (typeof native === 'string' && !mirrorFromThisLaunch(key)) {
             cache.set(key, native);
             removeLocal(key);
             return;

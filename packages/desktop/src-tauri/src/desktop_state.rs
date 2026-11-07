@@ -302,8 +302,9 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
 mod tests {
     use super::{
         is_shell_state_key_allowed, parse_settings, saved_window_state,
-        settings_persistence_disabled_value, validate_shell_state, write_atomic, zoom_after,
-        DesktopSettings, SettingsStore, WindowState, DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM,
+        settings_persistence_disabled, settings_persistence_disabled_value,
+        validate_shell_state, write_atomic, zoom_after, DesktopSettings, SettingsStore,
+        WindowState, DISABLE_SETTINGS_PERSISTENCE_ENV, DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM,
         SHELL_STATE_MAX_VALUE_BYTES,
     };
     use std::ffi::OsStr;
@@ -367,6 +368,13 @@ mod tests {
 
     #[test]
     fn shell_state_survives_a_settings_reload() {
+        // This test needs a write that lands; the debug switch makes `update`
+        // return Ok without writing, which would fail the reload below for a
+        // reason the assertion does not name.
+        assert!(
+            !settings_persistence_disabled(),
+            "{DISABLE_SETTINGS_PERSISTENCE_ENV} must be unset for this test"
+        );
         let root = std::env::temp_dir().join(format!(
             "qwen-desktop-shell-state-{}",
             std::process::id()
