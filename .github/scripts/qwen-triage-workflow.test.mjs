@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -17,9 +18,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 
 const workflowPath = join(
@@ -60,6 +61,25 @@ const publisherPath = join(
   dirname(fileURLToPath(import.meta.url)),
   'triage-publish.mjs',
 );
+const scriptsDir = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(scriptsDir, '..', '..');
+// The sparse-checkout list is the pool job's entire world: it carries no
+// node_modules, so anything the publisher needs must be listed. Read the
+// list once; the guard below materializes exactly it and loads the module.
+const sparseCheckoutEntries = () => {
+  const checkout = publishTriageJob.steps.find((s) => /^Checkout/.test(s.name));
+  assert.ok(checkout, 'publish-triage must checkout its scripts');
+  assert.equal(
+    checkout.with['sparse-checkout-cone-mode'],
+    false,
+    'the sparse list is a set of exact paths, not cone-mode directories',
+  );
+  return String(checkout.with['sparse-checkout'])
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort();
+};
 // The triage agent is a direct CLI launch now; its settings travel as the
 // heredoc the host writes into the fresh per-run QWEN_HOME. Extract and parse
 // them the same way the runtime will read them.
@@ -928,6 +948,135 @@ describe('qwen-triage: token isolation contract', () => {
     assert.ok(
       !steps.some((s) => s.name === 'Notify silent triage re-run'),
       'notify must not remain in the agent job',
+    );
+  });
+
+  it('restores workspace ownership with the full fallback chain', () => {
+    // The header names TWO workspace controls for this job; the .git reset
+    // is pinned by qwen-runner-checkout-workflow.test.js, and this pins the
+    // other one. Without the sudo fallback a root-owned .git on the pool
+    // survives the restore, the reset step then dies, and the job never
+    // reaches the drafts download — silently.
+    const restore = publishTriageJob.steps.find(
+      (s) => s.name === 'Restore workspace ownership',
+    );
+    assertUnconditional(
+      publishTriageJob.steps,
+      restore,
+      'qwen-triage publish-triage',
+    );
+    // assertUnconditional anchors the sudo CHOWN arm but matches chmod
+    // unanchored, so the non-sudo chmod alone satisfies it. Pin the sudo
+    // chmod arm here rather than in the shared helper (five other call
+    // sites): without it a root-owned workspace fails the plain chmod,
+    // the download step's continue-on-error swallows it, and the publish
+    // step exits 0 on "nothing to publish" — drafts silently never land.
+    assert.match(
+      restore.run,
+      /sudo -n chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
+      'publish-triage must keep the sudo chmod fallback that recovers root-owned files',
+    );
+  });
+});
+
+describe('qwen-triage: the sparse checkout is exactly what the publisher needs', () => {
+  // No model of JS syntax here. The pool job checks out ONLY the sparse list
+  // into a workspace with no node_modules, so the guard recreates that world
+  // and loads the publisher in it: a bare specifier, a wrapped import of any
+  // length, an out-of-tree helper, and a helper missing from the list all
+  // fail the load with ERR_MODULE_NOT_FOUND — the job's actual failure mode.
+  // A regex scanner previously stood in for this and kept finding new holes
+  // (statement layout, length bounds, prose that looks like an import).
+  const entryPath = '/.github/scripts/triage-publish.mjs';
+
+  // A node_modules anywhere above the temp tree would silently satisfy a
+  // bare specifier and make the sufficiency check falsely green.
+  const assertNoResolvableModules = (root) => {
+    for (let dir = root; ; dir = dirname(dir)) {
+      assert.ok(
+        !existsSync(join(dir, 'node_modules')),
+        `${join(dir, 'node_modules')} exists above the isolated tree; the sparse-checkout guard cannot prove bare-specifier freedom here`,
+      );
+      if (dirname(dir) === dir) break;
+    }
+  };
+
+  const withSparseTree = async (entries, body) => {
+    const root = mkdtempSync(join(tmpdir(), 'qwen-sparse-'));
+    try {
+      assertNoResolvableModules(root);
+      for (const entry of entries) {
+        const from = join(repoRoot, entry);
+        assert.ok(
+          existsSync(from),
+          `sparse-checkout entry ${entry} does not exist in the repository`,
+        );
+        const to = join(root, entry);
+        mkdirSync(dirname(to), { recursive: true });
+        copyFileSync(from, to);
+      }
+      // Each tree gets a unique URL, so the ESM cache never serves a
+      // previous case's module.
+      return await body(pathToFileURL(join(root, entryPath)).href);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  it('loads the publisher with exactly the sparse set and nothing else', async () => {
+    const entries = sparseCheckoutEntries();
+    assert.ok(entries.includes(entryPath), 'the publisher must be listed');
+    await withSparseTree(entries, async (url) => {
+      await assert.doesNotReject(
+        import(url),
+        /ERR_MODULE_NOT_FOUND|ERR_UNSUPPORTED/,
+        'the sparse checkout must be sufficient to load the publisher: the pool workspace has no node_modules, so a bare specifier or an unlisted helper dies here',
+      );
+    });
+  });
+
+  it('every sparse entry is load-bearing', async () => {
+    const entries = sparseCheckoutEntries();
+    // The owner policy is read at call time, not import time; its necessity
+    // is pinned by the resolved-path test below instead.
+    const modules = entries.filter((entry) => entry.endsWith('.mjs'));
+    assert.ok(modules.length >= 2, 'expected the publisher and its helper');
+    for (const omitted of modules) {
+      await withSparseTree(
+        entries.filter((entry) => entry !== omitted),
+        async (url) => {
+          await assert.rejects(
+            import(url),
+            /ERR_MODULE_NOT_FOUND/,
+            `${omitted} is listed in the sparse checkout but the publisher loads without it; drop the stale entry`,
+          );
+        },
+      );
+    }
+  });
+
+  it('carries the owner policy at the path the publisher resolves', async () => {
+    // Tie the two together instead of hard-coding the expected entry: read
+    // the URL literal the publisher resolves against its own module URL,
+    // resolve it the same way, and require that exact path in the list.
+    const src = readFileSync(publisherPath, 'utf8');
+    const literals = [
+      ...src.matchAll(/new URL\(\s*'([^']+)'\s*,\s*import\.meta\.url\s*\)/g),
+    ]
+      .map((m) => m[1])
+      .filter((spec) => spec.endsWith('.json'));
+    assert.equal(
+      literals.length,
+      1,
+      'expected exactly one owner-policy URL literal in the publisher',
+    );
+    const resolved = fileURLToPath(
+      new URL(literals[0], pathToFileURL(publisherPath)),
+    );
+    const repoRelative = `/${relative(repoRoot, resolved).split(sep).join('/')}`;
+    assert.ok(
+      sparseCheckoutEntries().includes(repoRelative),
+      `the sparse checkout must carry the owner policy the publisher resolves (${repoRelative})`,
     );
   });
 });
