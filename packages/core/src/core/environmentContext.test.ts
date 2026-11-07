@@ -45,6 +45,10 @@ import { MonitorTool } from '../tools/monitor.js';
 import { LspTool } from '../tools/lsp.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
 import {
+  getShellConfiguration,
+  getShellDisplayName,
+} from '../utils/shell-utils.js';
+import {
   collectAvailableSkillEntries,
   SKILLS_ACTIVATED_OPENER,
 } from '../tools/skill-utils.js';
@@ -464,6 +468,15 @@ describe('getEnvironmentContext', () => {
     });
   });
 
+  it('names the shell that will run the command', async () => {
+    const parts = await getEnvironmentContext(mockConfig as Config);
+    const configured = getShellConfiguration();
+
+    expect(parts[0].text).toContain(
+      `Shell commands run under: ${getShellDisplayName(configured)}`,
+    );
+  });
+
   it('omits the local operating system for an execution environment', async () => {
     mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
 
@@ -471,6 +484,8 @@ describe('getEnvironmentContext', () => {
 
     expectContains(parts[0].text, "Today's date is", 'Use workspace tools');
     expect(parts[0].text).not.toContain('My operating system is:');
+    // The command runs in the remote environment, not under the local shell.
+    expect(parts[0].text).not.toContain('Shell commands run under:');
     expect(parts[0].text).not.toContain('/test/dir');
     expect(getFolderStructure).not.toHaveBeenCalled();
   });

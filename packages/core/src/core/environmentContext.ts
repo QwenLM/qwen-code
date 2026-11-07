@@ -14,6 +14,10 @@ import type {
 } from '../tools/tool-registry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
+import {
+  getShellConfiguration,
+  getShellDisplayName,
+} from '../utils/shell-utils.js';
 import { escapeSystemReminderTags, unescapeXml } from '../utils/xml.js';
 import {
   collectAvailableSkillEntries,
@@ -199,12 +203,22 @@ export async function getEnvironmentContext(
   const platform = config.getExecutionEnvironment?.()
     ? ''
     : `My operating system is: ${process.platform}\n`;
+  // Platform alone does not decide shell syntax: on win32 the resolver can
+  // return cmd, PowerShell, or bash reached through Git Bash / MSYS2, and each
+  // wants different syntax. Say which one will run the command, so the model
+  // does not guess from the platform. (WSL reports `linux`, so it takes the
+  // Unix branch in getShellConfiguration and never reaches that choice.)
+  const shell = config.getExecutionEnvironment?.()
+    ? ''
+    : `Shell commands run under: ${getShellDisplayName(
+        getShellConfiguration(),
+      )}\n`;
   const directoryContext = await getDirectoryContextString(config);
 
   const context = `
 This is the Qwen Code. We are setting up the context for our chat.
 Today's date is ${today}.
-${platform}${directoryContext}
+${platform}${shell}${directoryContext}
         `.trim();
 
   return [{ text: context }];
