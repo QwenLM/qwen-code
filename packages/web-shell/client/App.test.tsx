@@ -12183,7 +12183,9 @@ function sessionRecapSetting(effective: boolean): DaemonSettingDescriptor {
   };
 }
 
-function recapAwayThresholdSetting(effective: unknown): DaemonSettingDescriptor {
+function recapAwayThresholdSetting(
+  effective: unknown,
+): DaemonSettingDescriptor {
   return {
     key: 'general.sessionRecapAwayThresholdMinutes',
     type: 'number',
