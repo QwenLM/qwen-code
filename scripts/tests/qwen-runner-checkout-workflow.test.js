@@ -122,6 +122,10 @@ it.each(jobs)(
             // an output file; a real runner always supplies GITHUB_OUTPUT.
             GITHUB_OUTPUT: join(root, 'gh-output'),
             RM_BIN: resolvedBin('rm'),
+            // The patrol's rebuild also validates every component of the
+            // system_path it hands checkout. Derive it from the same binary so
+            // the two checks stand or fall together on any host.
+            SYSTEM_PATH: resolvedBin('rm').replace(/\/[^/]+$/, ''),
             MKTEMP_BIN: resolvedBin('mktemp'),
           },
         });

@@ -76,6 +76,47 @@ const resolvedBin = (name) =>
     encoding: 'utf8',
   }).trim();
 
+// gitmeta validates every system_path component as a directory the job uid can
+// neither write nor own. Derive the fixture value from the same binary it hands
+// RM_BIN, so the two checks stand or fall together on any host.
+const resolvedBinDir = (name) => resolvedBin(name).replace(/\/[^/]+$/, '');
+
+// The point-of-use recheck, extracted by shape rather than by line number so a
+// comment added above it cannot silently move the extraction off the loop.
+const recheckLoop = (step) => {
+  const lines = step.run.split('\n');
+  const start = lines.findIndex((l) => l.startsWith('for v in '));
+  expect(
+    start,
+    `${step.name} has a point-of-use recheck`,
+  ).toBeGreaterThanOrEqual(0);
+  const end = lines.findIndex((l, i) => i > start && l === 'done');
+  expect(end, `${step.name} closes its recheck`).toBeGreaterThan(start);
+  return lines.slice(start, end + 1).join('\n');
+};
+
+const runBody = (body, env) => {
+  try {
+    const out = execFileSync('bash', ['-c', body], {
+      env: { ...process.env, ...env },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { status: 0, out };
+  } catch (e) {
+    return { status: e.status, out: `${e.stdout ?? ''}${e.stderr ?? ''}` };
+  }
+};
+
+const readOutputs = (file) => {
+  const outputs = {};
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    const eq = line.indexOf('=');
+    if (eq > 0) outputs[line.slice(0, eq)] = line.slice(eq + 1);
+  }
+  return outputs;
+};
+
 const workflow = readFileSync(
   '.github/workflows/qwen-ci-flaky-rerun.yml',
   'utf8',
@@ -715,7 +756,11 @@ describe('ci failure patrol workflow', () => {
         (copy.run.match(/for tool in ([^;]+); do/)?.[1] ?? '').split(/\s+/),
       );
       published.add('docker');
-      published.add('system_path');
+      // Derive the rest from the actual publish lines, so dropping one of them
+      // (system_path, readlink) turns this red instead of being assumed.
+      for (const m of copy.run.matchAll(/echo "([\w-]+)=/g)) {
+        published.add(m[1]);
+      }
       for (const name of consumed) {
         expect(published.has(name), `${job.name} consumes ${name}`).toBe(true);
       }
@@ -1019,7 +1064,23 @@ describe('ci failure patrol workflow', () => {
     expect(ensure.env.npm_config_userconfig).toBe('/dev/null');
     expect(ensure.env.npm_config_globalconfig).toBe('/dev/null');
     expect(ensure.run).toContain('command -v qwen');
-    expect(ensure.run).toContain('version=$(qwen --version)');
+    // Neither tool may EXECUTE as a bare name: the tail of this PATH is
+    // uid-writable, and a planted qwen would decide whether to install at all
+    // while its stdout became the version pin the classifier runs.
+    const ensureCode = ensure.run
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('#'))
+      .join('\n');
+    expect(ensureCode).toContain('NPM_BIN="$(verify_on_path npm)"');
+    expect(ensureCode).toContain('QWEN_BIN="$(verify_on_path qwen)"');
+    expect(ensureCode).toContain('echo "version=$("${QWEN_BIN}" --version)"');
+    // `(` is in the prefix class on purpose: the version pin is captured as
+    // `$(… --version)`, so a regex anchored only on whitespace would let the
+    // bare-name regression back in through the command substitution.
+    expect(ensureCode).not.toMatch(/(^|[\s;&|(`])qwen\s+--version/);
+    expect(ensureCode).not.toMatch(/(^|[\s;&|(`])npm\s+install/);
+    expect(ensure.env.READLINK_BIN).toBe('${{ steps.guard.outputs.readlink }}');
+    expect(ensure.env.RUNNER_ENVIRONMENT).toBe('${{ runner.environment }}');
     const classifier = classify.steps.find((step) =>
       step.uses?.includes('qwen-code-action'),
     );
@@ -1224,6 +1285,7 @@ describe('ci failure patrol workflow', () => {
           GITHUB_ENV: githubEnv,
           GITHUB_OUTPUT: join(dir, 'gh_output'),
           RM_BIN: resolvedBin('rm'),
+          SYSTEM_PATH: resolvedBinDir('rm'),
           MKTEMP_BIN: resolvedBin('mktemp'),
           GIT_CONFIG_GLOBAL: '/dev/null',
           GIT_CONFIG_SYSTEM: '/dev/null',
@@ -1470,6 +1532,9 @@ describe('ci failure patrol workflow', () => {
           ...process.env,
           // The planted directory wins an ambient PATH lookup.
           PATH: `${planted}:${trusted}:${process.env.PATH}`,
+          // The ownership arms are pool policy; without this the step would
+          // take the hosted exemption and actually invoke the fixture stub.
+          RUNNER_ENVIRONMENT: 'self-hosted',
           GH_BIN: join(trusted, 'gh'),
           // Deliberately still supplied even though the step no longer reads
           // it: if the workflow regressed to minting a config dir, that mint
@@ -1523,8 +1588,17 @@ describe('ci failure patrol workflow', () => {
         output = execFileSync('bash', ['-c', scan.run], {
           env: {
             ...process.env,
+            // Every declared name is supplied, and the pool policy is on, so
+            // the OWNERSHIP arm is what refuses. Leaving one blank would make
+            // this pass on the empty-value check instead — a green that says
+            // nothing about the forged path.
+            RUNNER_ENVIRONMENT: 'self-hosted',
             NODE_BIN: evil,
             GH_BIN: evil,
+            PATROL_GH: evil,
+            RM_BIN: evil,
+            MKDIR_BIN: evil,
+            GREP_BIN: evil,
             GITHUB_TOKEN: 'SENTINEL-PAT-VALUE',
             GITHUB_OUTPUT: join(root, 'out'),
             RUNNER_TEMP: root,
@@ -1538,7 +1612,9 @@ describe('ci failure patrol workflow', () => {
         output = `${e.stdout ?? ''}${e.stderr ?? ''}`;
       }
       expect(status).not.toBe(0);
-      expect(output).toContain('point of use');
+      // Name the arm: "is not a verified binary" is the ownership/writability
+      // refusal, "is not an executable" is the empty/missing one.
+      expect(output).toContain('NODE_BIN is not a verified binary');
       // Refused BEFORE the exec: the forged binary never ran.
       expect(existsSync(ran)).toBe(false);
     } finally {
@@ -1722,6 +1798,7 @@ describe('ci failure patrol workflow', () => {
         GITHUB_ENV: envFile,
         GITHUB_OUTPUT: join(root, 'gh_output'),
         RM_BIN: resolvedBin('rm'),
+        SYSTEM_PATH: resolvedBinDir('rm'),
       };
       execFileSync('bash', ['-c', rebuild.run], {
         env: stepEnv,
@@ -1749,6 +1826,315 @@ describe('ci failure patrol workflow', () => {
       );
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('pins the interpreter absolutely, because the guard cannot verify it', () => {
+    // The runner chooses the interpreter BEFORE the guard's first line, so a
+    // `bash` an earlier job left in a writable PATH directory would run with
+    // CI_BOT_PAT already in its environment and enforce the guard's published
+    // absolutes itself. Probed on ecs-qwen-hk3-26: /usr/bin/bash is root 755,
+    // not a symlink, in a root-owned non-writable directory.
+    expect(yml.defaults.run.shell).toBe(
+      '/usr/bin/bash --noprofile --norc -e -o pipefail {0}',
+    );
+    const interpreter = yml.defaults.run.shell.split(' ')[0];
+    expect(interpreter.startsWith('/')).toBe(true);
+    expect(
+      yml.jobs.classify.steps[0].env.PATROL_BIN_ROOTS.split(' '),
+    ).toContain(interpreter.replace(/\/[^/]+$/, ''));
+    // A per-step `shell:` would reopen the same entrance.
+    for (const job of Object.values(yml.jobs)) {
+      for (const step of job.steps ?? []) {
+        if (step.run)
+          expect(step.shell, `${job.name}/${step.name}`).toBeUndefined();
+      }
+    }
+  });
+
+  it('behaviorally keeps the hosted fallback alive while the pool arms stay closed', () => {
+    // R8-1: the guard's hosted branch exists for exactly one shape — a host
+    // whose only node is the uid-owned tool-cache copy — and the point-of-use
+    // recheck used to refuse that copy unconditionally, aborting every hosted
+    // round at Scan and turning MAINTAINER_ECS_RUNNER_DISABLED into an outage.
+    // Feed the REAL guard's published paths into the REAL recheck and require
+    // both verdicts: hosted accepts, self-hosted still refuses.
+    const guard = yml.jobs.classify.steps[0];
+    const scan = yml.jobs.classify.steps.find((step) => step.id === 'scan');
+    const root = mkdtempSync(join(tmpdir(), 'patrol-hosted-'));
+    const toolchain = join(root, 'toolchain');
+    const noSystemTools = join(root, 'no-system-tools');
+    mkdirSync(toolchain);
+    mkdirSync(noSystemTools);
+    try {
+      // Stubs, not copies: the guard only stats these (and execs timeout and
+      // docker), so the fixture needs no root-owned toolset and no gh on the
+      // developer host. readlink must be real — the guard invokes it.
+      for (const tool of ['rm', 'git', 'gh', 'node', 'mkdir', 'grep']) {
+        writeFileSync(join(toolchain, tool), '#!/bin/sh\nexit 0\n');
+        chmodSync(join(toolchain, tool), 0o755);
+      }
+      copyFileSync(resolvedBin('readlink'), join(toolchain, 'readlink'));
+      chmodSync(join(toolchain, 'readlink'), 0o755);
+      writeFileSync(
+        join(toolchain, 'timeout'),
+        '#!/bin/sh\nshift\nexec "$@"\n',
+      );
+      chmodSync(join(toolchain, 'timeout'), 0o755);
+      writeFileSync(join(toolchain, 'docker'), '#!/bin/sh\nexit 0\n');
+      chmodSync(join(toolchain, 'docker'), 0o755);
+      const outFile = join(root, 'out');
+      writeFileSync(outFile, '');
+      const guardEnv = {
+        ...process.env,
+        PATH: `${toolchain}:${process.env.PATH}`,
+        PATROL_BIN_ROOTS: noSystemTools,
+        SANDBOX_COMMAND: join(toolchain, 'docker'),
+        GITHUB_OUTPUT: outFile,
+        RUNNER_ENVIRONMENT: 'github-hosted',
+        RUNNER_NAME: 'hosted-probe',
+        DOCKER_HOST: guard.env.DOCKER_HOST,
+        DOCKER_CONTEXT: guard.env.DOCKER_CONTEXT,
+      };
+      const guarded = runBody(guard.run, guardEnv);
+      expect(guarded.status, guarded.out).toBe(0);
+      const published = readOutputs(outFile);
+      // The hosted branch really did publish the ambient, uid-owned copy.
+      expect(published.node).toBe(join(toolchain, 'node'));
+      expect(published.gh).toBe(join(toolchain, 'gh'));
+      const loop = recheckLoop(scan);
+      const bins = {
+        NODE_BIN: published.node,
+        GH_BIN: published.gh,
+        PATROL_GH: published.gh,
+        RM_BIN: published.rm,
+        MKDIR_BIN: published.mkdir,
+        GREP_BIN: published.grep,
+      };
+      const hosted = runBody(loop, {
+        ...bins,
+        RUNNER_ENVIRONMENT: 'github-hosted',
+      });
+      expect(hosted.status, hosted.out).toBe(0);
+      const pool = runBody(loop, {
+        ...bins,
+        RUNNER_ENVIRONMENT: 'self-hosted',
+      });
+      expect(pool.status).toBe(1);
+      expect(pool.out).toContain('NODE_BIN is not a verified binary');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('behaviorally refuses a blank guard output instead of skipping it', () => {
+    // PATROL_GH='' turns the driver back into `process.env.PATROL_GH || 'gh'`,
+    // a bare-name spawn on the plantable PATH — the exact thing this PR removes.
+    // The old loop opened with `[ -n "${p}" ] || continue`, so a forged blank
+    // walked straight through. Hosted here on purpose: the ownership arms must
+    // not be able to supply the refusal for the wrong reason.
+    const scan = yml.jobs.classify.steps.find((step) => step.id === 'scan');
+    const loop = recheckLoop(scan);
+    const node = resolvedBin('node');
+    const bins = {
+      RUNNER_ENVIRONMENT: 'github-hosted',
+      NODE_BIN: node,
+      GH_BIN: node,
+      RM_BIN: node,
+      MKDIR_BIN: node,
+      GREP_BIN: node,
+    };
+    const blank = runBody(loop, { ...bins, PATROL_GH: '' });
+    expect(blank.status).toBe(1);
+    expect(blank.out).toContain('PATROL_GH is not an executable');
+    // Positive control: the same fixture with the name populated passes, so the
+    // refusal above is about the blank and not about the fixture.
+    const populated = runBody(loop, { ...bins, PATROL_GH: node });
+    expect(populated.status, populated.out).toBe(0);
+  });
+
+  it('rechecks exactly the guard-published binaries each step declares', () => {
+    // The loops used to list five names in every step, including steps that
+    // declare only one — so the `[ -n ] || continue` skip was load-bearing and
+    // a blank in a name the step DOES use went unchecked. Bind the list to the
+    // step's own env so the two cannot drift apart again.
+    let checked = 0;
+    for (const job of Object.values(yml.jobs)) {
+      for (const step of job.steps ?? []) {
+        if (
+          !step.run ||
+          !step.run.split('\n').some((l) => l.startsWith('for v in '))
+        ) {
+          continue;
+        }
+        checked += 1;
+        const listed = recheckLoop(step)
+          .split('\n')[0]
+          .replace(/^for v in /, '')
+          .replace(/; do$/, '')
+          .split(/\s+/)
+          .sort();
+        const declared = Object.keys(step.env ?? {})
+          .filter((k) => k.endsWith('_BIN') || k === 'PATROL_GH')
+          .sort();
+        expect(listed, `${job.name}/${step.name}`).toEqual(declared);
+        expect(declared.length, `${job.name}/${step.name}`).toBeGreaterThan(0);
+        // The exemption must come from expression context, not $GITHUB_ENV.
+        expect(step.env.RUNNER_ENVIRONMENT, `${job.name}/${step.name}`).toBe(
+          '${{ runner.environment }}',
+        );
+      }
+    }
+    expect(checked).toBeGreaterThanOrEqual(6);
+  });
+
+  it('behaviorally refuses a forged system_path component before checkout uses it', () => {
+    // checkout consumes system_path as its entire PATH, and the string arrives
+    // through the same appendable $GITHUB_OUTPUT as the binaries. One forged
+    // component would hand actions/checkout's bare `git` to a plant.
+    const gitmeta = yml.jobs.classify.steps.find(
+      (step) => step.id === 'gitmeta',
+    );
+    const root = mkdtempSync(join(tmpdir(), 'patrol-syspath-'));
+    const plant = join(root, 'plant');
+    const workspace = join(root, 'workspace');
+    mkdirSync(plant);
+    mkdirSync(workspace);
+    const outFile = join(root, 'out');
+    const envFile = join(root, 'env');
+    const base = {
+      GITHUB_WORKSPACE: workspace,
+      GITHUB_OUTPUT: outFile,
+      GITHUB_ENV: envFile,
+      RM_BIN: resolvedBin('rm'),
+    };
+    const seedGitDir = () => {
+      mkdirSync(join(workspace, '.git'), { recursive: true });
+      writeFileSync(join(workspace, '.git', 'config'), 'planted\n');
+    };
+    try {
+      // Positive control: a verified component passes and the reset happens.
+      seedGitDir();
+      writeFileSync(outFile, '');
+      writeFileSync(envFile, '');
+      const ok = runBody(gitmeta.run, {
+        ...base,
+        SYSTEM_PATH: resolvedBinDir('rm'),
+      });
+      expect(ok.status, ok.out).toBe(0);
+      expect(existsSync(join(workspace, '.git'))).toBe(false);
+
+      // Forged: a uid-writable directory ahead of the verified one. The refusal
+      // must land BEFORE the destructive reset, not after it.
+      seedGitDir();
+      const forged = runBody(gitmeta.run, {
+        ...base,
+        SYSTEM_PATH: `${plant}:${resolvedBinDir('rm')}`,
+      });
+      expect(forged.status).toBe(1);
+      expect(forged.out).toContain('is not a verified directory');
+      expect(existsSync(join(workspace, '.git'))).toBe(true);
+
+      const empty = runBody(gitmeta.run, { ...base, SYSTEM_PATH: '' });
+      expect(empty.status).toBe(1);
+      expect(empty.out).toContain('system_path is empty');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('behaviorally refuses a planted qwen instead of publishing its version', () => {
+    // R7-1: `command -v qwen` decided whether to install and `qwen --version`
+    // became the pin the classifier installs and runs with the model's keys.
+    // The predicate must see the resolved absolute, not the bare name.
+    const ensure = yml.jobs.classify.steps.find(
+      (step) => step.id === 'ensure_qwen',
+    );
+    const root = mkdtempSync(join(tmpdir(), 'patrol-qwen-'));
+    const plant = join(root, 'plant');
+    const toolchain = join(root, 'toolchain');
+    mkdirSync(plant);
+    mkdirSync(toolchain);
+    const outFile = join(root, 'out');
+    try {
+      writeFileSync(join(plant, 'qwen'), '#!/bin/sh\necho 6.6.6\n');
+      chmodSync(join(plant, 'qwen'), 0o755);
+      writeFileSync(join(toolchain, 'npm'), '#!/bin/sh\nexit 0\n');
+      chmodSync(join(toolchain, 'npm'), 0o755);
+      const base = {
+        TRUSTED_PATH: `${plant}:${toolchain}`,
+        READLINK_BIN: resolvedBin('readlink'),
+        GITHUB_OUTPUT: outFile,
+      };
+      writeFileSync(outFile, '');
+      const pool = runBody(ensure.run, {
+        ...base,
+        RUNNER_ENVIRONMENT: 'self-hosted',
+      });
+      expect(pool.status).not.toBe(0);
+      expect(pool.out).toContain('which the job uid can write or own');
+      // The planted version never became the classifier's pin.
+      expect(readOutputs(outFile).version).toBeUndefined();
+
+      // Positive control: hosted is exempt by policy, so the same fixture runs
+      // the planted copy and publishes its version. That proves the refusal
+      // above came from the predicate and not from a broken fixture.
+      writeFileSync(outFile, '');
+      const hosted = runBody(ensure.run, {
+        ...base,
+        RUNNER_ENVIRONMENT: 'github-hosted',
+      });
+      expect(hosted.status, hosted.out).toBe(0);
+      expect(readOutputs(outFile).version).toBe('6.6.6');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('pins the pre-body loader and egress channels on every node/gh consumer', () => {
+    // These take effect before the step body's first line, so a check inside
+    // the body cannot see them. scan and Resolve sandbox image used to carry
+    // none of them while exec'ing node.
+    const classify = yml.jobs.classify;
+    const act = yml.jobs.act;
+    const nodeConsumers = [
+      classify.steps.find((s) => s.id === 'identity'),
+      classify.steps.find((s) => s.id === 'scan'),
+      classify.steps.find((s) => s.id === 'sandbox_image'),
+      classify.steps.find((s) => s.id === 'decisions'),
+      act.steps.find((s) => s.name === 'Act on patrol decisions'),
+      act.steps.find((s) => s.name === 'Reset successful failure state'),
+    ];
+    for (const step of nodeConsumers) {
+      for (const key of [
+        'BASH_ENV',
+        'SHELLOPTS',
+        'LD_PRELOAD',
+        'LD_AUDIT',
+        'LD_LIBRARY_PATH',
+        'NODE_OPTIONS',
+      ]) {
+        expect(step.env[key], `${step.name}.${key}`).toBe('');
+      }
+    }
+    // gh's egress and trust store are independent of PATH and GH_CONFIG_DIR: a
+    // residue proxy receives the Authorization header and a residue CA file
+    // makes its certificate trusted. Probed unset on the pool, so pinning them
+    // empty costs no egress.
+    for (const step of nodeConsumers.filter(
+      (s) => s.env.PATROL_GH || s.env.GH_BIN,
+    )) {
+      for (const key of [
+        'HTTPS_PROXY',
+        'https_proxy',
+        'HTTP_PROXY',
+        'http_proxy',
+        'SSL_CERT_FILE',
+        'SSL_CERT_DIR',
+        'NODE_EXTRA_CA_CERTS',
+      ]) {
+        expect(step.env[key], `${step.name}.${key}`).toBe('');
+      }
     }
   });
 });

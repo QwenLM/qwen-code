@@ -12,6 +12,16 @@ concurrency:
   group: 'qwen-ci-flaky-rerun'
   cancel-in-progress: false
 
+# The interpreter is chosen BEFORE the guard's first line, so the guard cannot
+# verify it: left unspecified, the runner resolves `bash` through PATH and a
+# plant there runs with CI_BOT_PAT already in its environment. Probed on
+# ecs-qwen-hk3-26: /usr/bin/bash is root 755, not a symlink, in a root-owned
+# non-writable directory. The flags also restore what the unspecified
+# self-hosted default (`bash -e {0}`) omits.
+defaults:
+  run:
+    shell: '/usr/bin/bash --noprofile --norc -e -o pipefail {0}'
+
 env:
   ACTIVE_DAYS: '7'
   MAX_CANDIDATES_PER_RUN: '5'
@@ -99,6 +109,12 @@ jobs:
           # per-job container, a dedicated uid, or a runner no untrusted job
           # shares — and is out of scope here. The pins below are stopgaps for
           # the residue channels, not a proof of isolation.
+          #
+          # The interpreter is pinned in defaults.run.shell, not verified here:
+          # it is chosen before this step runs. One bare name stays outside this
+          # file's reach — the classifier action resolves `qwen` itself after
+          # its own reinstall. Ensure Qwen Code verifies the copy whose version
+          # it publishes; that lookup is the action's contract.
           #
           # A candidate is trusted only when it is an executable the job uid can
           # write neither directly nor by replacing it through its containing
@@ -211,6 +227,9 @@ jobs:
           # requires SANDBOX_COMMAND to be exactly this path.
           verify docker "${SANDBOX_COMMAND}" || exit 1
           echo "system_path=${system_path}" >> "${GITHUB_OUTPUT}"
+          # Already established by builtins above; Ensure Qwen Code needs it to
+          # resolve a symlink without bootstrapping its own trust anchor.
+          echo "readlink=${readlink}" >> "${GITHUB_OUTPUT}"
 
           # The classifier resolves its sandbox command as the bare name
           # `docker`, so the probe must vouch for the name as resolved on the
@@ -247,10 +266,32 @@ jobs:
         if: "${{ runner.environment == 'self-hosted' }}"
         env:
           RM_BIN: '${{ steps.guard.outputs.rm }}'
+          SYSTEM_PATH: '${{ steps.guard.outputs.system_path }}'
         run: |-
           # Verified absolute binaries: this step runs before any PATH capture,
           # so a bare `rm` here would resolve through the plantable ambient PATH
-          # and could silently leave .git in place.
+          # and could silently leave .git in place. The value arrived through
+          # $GITHUB_OUTPUT, so re-check it before the exec instead of taking the
+          # guard's word for it. Pool-only step, so no hosted exemption.
+          if [ ! -x "${RM_BIN:-}" ] || [ -w "${RM_BIN}" ] || [ -O "${RM_BIN}" ] || [ -w "${RM_BIN%/*}" ]; then
+            echo "::error::RM_BIN is not a verified binary at the point of use; refusing to run."
+            exit 1
+          fi
+          # checkout consumes system_path as its entire PATH, and that string
+          # arrives through the same appendable file. Every component must be a
+          # directory the job uid can neither write nor own, or one forged entry
+          # would hand actions/checkout's bare `git` to a plant.
+          IFS=':' read -r -a path_dirs <<< "${SYSTEM_PATH:-}"
+          if [ "${#path_dirs[@]}" -eq 0 ]; then
+            echo "::error::system_path is empty; refusing to run checkout with it."
+            exit 1
+          fi
+          for d in "${path_dirs[@]}"; do
+            if [ ! -d "${d}" ] || [ -w "${d}" ] || [ -O "${d}" ]; then
+              echo "::error::system_path component '${d}' is not a verified directory; refusing to run checkout with it."
+              exit 1
+            fi
+          done
           "${RM_BIN:?}" -rf -- "$GITHUB_WORKSPACE/.git"
           # /dev/null, not a minted file. An unguessable name does not protect a
           # LISTABLE one: $RUNNER_TEMP is enumerable and same-uid writable, so a
@@ -382,6 +423,18 @@ jobs:
           LD_AUDIT: ''
           LD_LIBRARY_PATH: ''
           NODE_OPTIONS: ''
+          # gh's egress and trust store, independent of PATH and GH_CONFIG_DIR:
+          # a residue proxy receives the Authorization header and a residue CA
+          # file makes its certificate trusted. Probed unset on ecs-qwen-hk3-26,
+          # so emptying them costs no egress.
+          HTTPS_PROXY: ''
+          https_proxy: ''
+          HTTP_PROXY: ''
+          http_proxy: ''
+          SSL_CERT_FILE: ''
+          SSL_CERT_DIR: ''
+          NODE_EXTRA_CA_CERTS: ''
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           GH_BIN: '${{ steps.guard.outputs.gh }}'
         run: |-
           # gh has its own reroute channels, independent of PATH: on this pool
@@ -391,13 +444,17 @@ jobs:
           # provenance anchor for every marker comment. Pin the host, drop
           # planted tokens, and mint a fresh empty config dir. Same preamble as
           # qwen-autofix (af-112 / af-148).
-          # The published path came through $GITHUB_OUTPUT, which a live
-          # same-uid process could append to. Re-check it here, right before the
-          # exec, so a forged value fails fast instead of running with the PAT.
-          for v in NODE_BIN GH_BIN RM_BIN MKDIR_BIN GREP_BIN; do
+          # Point-of-use recheck; see Scan for the full rationale. Only names
+          # this step actually declares are listed: skipping an empty value
+          # used to let a forged blank through.
+          for v in GH_BIN; do
             eval "p=\${$v:-}"
-            [ -n "${p}" ] || continue
-            if [ ! -x "${p}" ] || [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; then
+            if [ -z "${p}" ] || [ ! -x "${p}" ]; then
+              echo "::error::${v} is not an executable at the point of use; refusing to run."
+              exit 1
+            fi
+            if [ "${RUNNER_ENVIRONMENT}" = 'self-hosted' ] &&
+              { [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; }; then
               echo "::error::${v} is not a verified binary at the point of use; refusing to run."
               exit 1
             fi
@@ -427,6 +484,23 @@ jobs:
         id: 'scan'
         env:
           GITHUB_TOKEN: '${{ github.token }}'
+          # Same pre-body pins as identity and the classifier: this step execs
+          # node and gh, so a residue loader or egress entry would already have
+          # taken effect before any check inside the body could see it.
+          BASH_ENV: ''
+          SHELLOPTS: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
+          HTTPS_PROXY: ''
+          https_proxy: ''
+          HTTP_PROXY: ''
+          http_proxy: ''
+          SSL_CERT_FILE: ''
+          SSL_CERT_DIR: ''
+          NODE_EXTRA_CA_CERTS: ''
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           NODE_BIN: '${{ steps.guard.outputs.node }}'
           GH_BIN: '${{ steps.guard.outputs.gh }}'
           PATROL_GH: '${{ steps.guard.outputs.gh }}'
@@ -445,13 +519,28 @@ jobs:
           # QWEN_HOME; a test binds the two so they cannot drift apart.
           QWEN_HOME: '${{ runner.temp }}/qwen-patrol-home'
         run: |-
-          # The published path came through $GITHUB_OUTPUT, which a live
-          # same-uid process could append to. Re-check it here, right before the
-          # exec, so a forged value fails fast instead of running with the PAT.
-          for v in NODE_BIN GH_BIN RM_BIN MKDIR_BIN GREP_BIN; do
+          # The published paths came through $GITHUB_OUTPUT, which a live
+          # same-uid process could append to. Re-check them here, right before
+          # the exec, so a forged value fails fast instead of running with the
+          # PAT. Every name this step declares is listed, and an empty one is a
+          # refusal, not a skip: PATROL_GH='' sends the driver back to a bare
+          # `gh` lookup, which is the whole thing this PR exists to remove.
+          for v in NODE_BIN GH_BIN PATROL_GH RM_BIN MKDIR_BIN GREP_BIN; do
             eval "p=\${$v:-}"
-            [ -n "${p}" ] || continue
-            if [ ! -x "${p}" ] || [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; then
+            if [ -z "${p}" ] || [ ! -x "${p}" ]; then
+              echo "::error::${v} is not an executable at the point of use; refusing to run."
+              exit 1
+            fi
+            # The ownership/writability arms are the guard's POOL policy, and
+            # must be gated the same way the guard gates them. A hosted runner
+            # is ephemeral and single-tenant, and the guard deliberately
+            # publishes its uid-owned tool-cache node there; applying the pool
+            # arms unconditionally refused exactly that copy and aborted every
+            # hosted round at this step, turning MAINTAINER_ECS_RUNNER_DISABLED
+            # into an outage instead of a fallback. RUNNER_ENVIRONMENT is step
+            # env, so a residue $GITHUB_ENV entry cannot claim the exemption.
+            if [ "${RUNNER_ENVIRONMENT}" = 'self-hosted' ] &&
+              { [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; }; then
               echo "::error::${v} is not a verified binary at the point of use; refusing to run."
               exit 1
             fi
@@ -492,6 +581,8 @@ jobs:
         timeout-minutes: 5
         env:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+          READLINK_BIN: '${{ steps.guard.outputs.readlink }}'
           # The pool uid owns $HOME/.npmrc; without this, a residue file points
           # the install at an attacker registry and its stdout becomes the
           # version pin the classifier then installs.
@@ -500,13 +591,47 @@ jobs:
         run: |-
           set -euo pipefail
           export PATH="${TRUSTED_PATH:?}"
-          if command -v qwen >/dev/null 2>&1; then
+          # npm and qwen are not among the guard's eight tools. A planted `qwen`
+          # would decide whether to install at all, and its stdout would become
+          # the pin the classifier runs with the model's keys — so apply the
+          # guard's predicate to the resolved absolute, with the same hosted
+          # exemption. Probed on ecs-qwen-hk3-26: both are root-owned symlinks
+          # into root-owned non-writable dirs, so the real pool toolchain passes.
+          verify_on_path() {
+            local c t
+            c="$(command -v "$1" || true)"
+            if [ -z "${c}" ]; then
+              echo "::error::$1 not found on the trusted PATH." >&2
+              return 1
+            fi
+            if [ "${RUNNER_ENVIRONMENT}" = 'self-hosted' ]; then
+              if [ ! -x "${c}" ] || [ -w "${c}" ] || [ -O "${c}" ] || [ -w "${c%/*}" ]; then
+                echo "::error::$1 resolves to ${c}, which the job uid can write or own; refusing to run it." >&2
+                return 1
+              fi
+              if [ -L "${c}" ]; then
+                t="$("${READLINK_BIN:?}" -f "${c}" 2>/dev/null || true)"
+                if [ -z "${t}" ] || [ ! -f "${t}" ] || [ ! -x "${t}" ] || [ -w "${t}" ] || [ -O "${t}" ] || [ -w "${t%/*}" ]; then
+                  echo "::error::$1 is a symlink to an unverifiable target (${t:-none}); refusing to run it." >&2
+                  return 1
+                fi
+              fi
+            fi
+            printf '%s' "${c}"
+          }
+          NPM_BIN="$(verify_on_path npm)"
+          QWEN_BIN="$(command -v qwen || true)"
+          if [ -n "${QWEN_BIN}" ]; then
+            # Present but unverifiable is a refusal, not an install: reinstalling
+            # would not dislodge a plant that sits earlier on the PATH.
+            QWEN_BIN="$(verify_on_path qwen)"
             echo "qwen already installed:"
           else
-            npm install -g --loglevel=error --no-audit @qwen-code/qwen-code@latest
+            "${NPM_BIN}" install -g --loglevel=error --no-audit @qwen-code/qwen-code@latest
+            QWEN_BIN="$(verify_on_path qwen)"
           fi
-          qwen --version
-          echo "version=$(qwen --version)" >> "${GITHUB_OUTPUT}"
+          "${QWEN_BIN}" --version
+          echo "version=$("${QWEN_BIN}" --version)" >> "${GITHUB_OUTPUT}"
 
       - name: 'Resolve sandbox image'
         id: 'sandbox_image'
@@ -519,13 +644,39 @@ jobs:
         # by the runner instead of by this shell.
         timeout-minutes: 12
         env:
+          BASH_ENV: ''
+          SHELLOPTS: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           NODE_BIN: '${{ steps.guard.outputs.node }}'
           TIMEOUT_BIN: '${{ steps.guard.outputs.timeout }}'
           # Absolute path so a planted '${RUNNER_TEMP}/qwen-bin' or $GITHUB_PATH
           # entry cannot shadow the binary the resolver spawns. The guard
           # verified this exact path is not writable by the job uid.
           SANDBOX_COMMAND: '/usr/bin/docker'
+          # No DOCKER_HOST / DOCKER_CONTEXT here on purpose: every docker this
+          # step runs goes through the resolver's sandboxSpawnEnv(), which names
+          # DOCKER_CONTEXT=default and DELETES DOCKER_HOST for pull and inspect
+          # alike. Probed with a 'rogue' currentContext plus a hostile
+          # DOCKER_HOST: both spawns still got CTX=default, HOST=unset.
+          # DOCKER_CONFIG stays untouched — it carries the pull's credentials.
         run: |-
+          # Point-of-use recheck; see Scan for why the pool arms are gated.
+          for v in NODE_BIN TIMEOUT_BIN; do
+            eval "p=\${$v:-}"
+            if [ -z "${p}" ] || [ ! -x "${p}" ]; then
+              echo "::error::${v} is not an executable at the point of use; refusing to run."
+              exit 1
+            fi
+            if [ "${RUNNER_ENVIRONMENT}" = 'self-hosted' ] &&
+              { [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; }; then
+              echo "::error::${v} is not a verified binary at the point of use; refusing to run."
+              exit 1
+            fi
+          done
           # Pull the sandbox image HERE, outside the classifier's 10-minute
           # budget, and report how long it takes. Measured on the pool: the
           # first dispatch spent 601s in this step and never reached the model,
@@ -557,11 +708,18 @@ jobs:
         env:
           RM_BIN: '${{ steps.guard.outputs.rm }}'
           MKDIR_BIN: '${{ steps.guard.outputs.mkdir }}'
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           QWEN_HOME: '${{ runner.temp }}/qwen-patrol-home'
         run: |-
+          # Point-of-use recheck; see Scan for why the pool arms are gated.
           for v in RM_BIN MKDIR_BIN; do
             eval "p=\${$v:-}"
-            if [ ! -x "${p}" ] || [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; then
+            if [ -z "${p}" ] || [ ! -x "${p}" ]; then
+              echo "::error::${v} is not an executable at the point of use; refusing to run."
+              exit 1
+            fi
+            if [ "${RUNNER_ENVIRONMENT}" = 'self-hosted' ] &&
+              { [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; }; then
               echo "::error::${v} is not a verified binary at the point of use; refusing to run."
               exit 1
             fi
@@ -648,8 +806,30 @@ jobs:
         id: 'decisions'
         if: "${{ steps.scan.outputs.target_found == 'true' }}"
         env:
+          # This step execs node and its verdict gates act, so it gets the same
+          # pre-body pins as the other node consumers.
+          BASH_ENV: ''
+          SHELLOPTS: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          NODE_OPTIONS: ''
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           NODE_BIN: '${{ steps.guard.outputs.node }}'
         run: |-
+          # Point-of-use recheck; see Scan for why the pool arms are gated.
+          for v in NODE_BIN; do
+            eval "p=\${$v:-}"
+            if [ -z "${p}" ] || [ ! -x "${p}" ]; then
+              echo "::error::${v} is not an executable at the point of use; refusing to run."
+              exit 1
+            fi
+            if [ "${RUNNER_ENVIRONMENT}" = 'self-hosted' ] &&
+              { [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; }; then
+              echo "::error::${v} is not a verified binary at the point of use; refusing to run."
+              exit 1
+            fi
+          done
           # A timeout can kill the classifier mid-write, leaving a non-empty
           # but unparseable file. Parseability alone is not enough either:
           # {"decisions":[]} parses, act iterates zero entries and the run still
@@ -749,6 +929,12 @@ jobs:
           # per-job container, a dedicated uid, or a runner no untrusted job
           # shares — and is out of scope here. The pins below are stopgaps for
           # the residue channels, not a proof of isolation.
+          #
+          # The interpreter is pinned in defaults.run.shell, not verified here:
+          # it is chosen before this step runs. One bare name stays outside this
+          # file's reach — the classifier action resolves `qwen` itself after
+          # its own reinstall. Ensure Qwen Code verifies the copy whose version
+          # it publishes; that lookup is the action's contract.
           #
           # A candidate is trusted only when it is an executable the job uid can
           # write neither directly nor by replacing it through its containing
@@ -873,10 +1059,32 @@ jobs:
         if: "${{ runner.environment == 'self-hosted' }}"
         env:
           RM_BIN: '${{ steps.guard.outputs.rm }}'
+          SYSTEM_PATH: '${{ steps.guard.outputs.system_path }}'
         run: |-
           # Verified absolute binaries: this step runs before any PATH capture,
           # so a bare `rm` here would resolve through the plantable ambient PATH
-          # and could silently leave .git in place.
+          # and could silently leave .git in place. The value arrived through
+          # $GITHUB_OUTPUT, so re-check it before the exec instead of taking the
+          # guard's word for it. Pool-only step, so no hosted exemption.
+          if [ ! -x "${RM_BIN:-}" ] || [ -w "${RM_BIN}" ] || [ -O "${RM_BIN}" ] || [ -w "${RM_BIN%/*}" ]; then
+            echo "::error::RM_BIN is not a verified binary at the point of use; refusing to run."
+            exit 1
+          fi
+          # checkout consumes system_path as its entire PATH, and that string
+          # arrives through the same appendable file. Every component must be a
+          # directory the job uid can neither write nor own, or one forged entry
+          # would hand actions/checkout's bare `git` to a plant.
+          IFS=':' read -r -a path_dirs <<< "${SYSTEM_PATH:-}"
+          if [ "${#path_dirs[@]}" -eq 0 ]; then
+            echo "::error::system_path is empty; refusing to run checkout with it."
+            exit 1
+          fi
+          for d in "${path_dirs[@]}"; do
+            if [ ! -d "${d}" ] || [ -w "${d}" ] || [ -O "${d}" ]; then
+              echo "::error::system_path component '${d}' is not a verified directory; refusing to run checkout with it."
+              exit 1
+            fi
+          done
           "${RM_BIN:?}" -rf -- "$GITHUB_WORKSPACE/.git"
           # /dev/null, not a minted file. An unguessable name does not protect a
           # LISTABLE one: $RUNNER_TEMP is enumerable and same-uid writable, so a
@@ -948,19 +1156,33 @@ jobs:
           LD_AUDIT: ''
           LD_LIBRARY_PATH: ''
           NODE_OPTIONS: ''
+          # gh's egress and trust-store channels; see identity. Probed unset on
+          # the pool, so emptying them costs no egress.
+          HTTPS_PROXY: ''
+          https_proxy: ''
+          HTTP_PROXY: ''
+          http_proxy: ''
+          SSL_CERT_FILE: ''
+          SSL_CERT_DIR: ''
+          NODE_EXTRA_CA_CERTS: ''
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           NODE_BIN: '${{ steps.guard.outputs.node }}'
           GH_BIN: '${{ steps.guard.outputs.gh }}'
           PATROL_GH: '${{ steps.guard.outputs.gh }}'
         run: |-
           # Same gh reroute preamble as identity: the driver spawns gh itself,
           # so it inherits this environment and the same planted-config risk.
-          # The published path came through $GITHUB_OUTPUT, which a live
-          # same-uid process could append to. Re-check it here, right before the
-          # exec, so a forged value fails fast instead of running with the PAT.
-          for v in NODE_BIN GH_BIN RM_BIN MKDIR_BIN GREP_BIN; do
+          # Point-of-use recheck; see Scan for why the pool arms are gated and
+          # why an empty value is a refusal. PATROL_GH is listed because the
+          # driver falls back to a bare `gh` when it is blank.
+          for v in NODE_BIN GH_BIN PATROL_GH; do
             eval "p=\${$v:-}"
-            [ -n "${p}" ] || continue
-            if [ ! -x "${p}" ] || [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; then
+            if [ -z "${p}" ] || [ ! -x "${p}" ]; then
+              echo "::error::${v} is not an executable at the point of use; refusing to run."
+              exit 1
+            fi
+            if [ "${RUNNER_ENVIRONMENT}" = 'self-hosted' ] &&
+              { [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; }; then
               echo "::error::${v} is not a verified binary at the point of use; refusing to run."
               exit 1
             fi
@@ -997,19 +1219,33 @@ jobs:
           LD_AUDIT: ''
           LD_LIBRARY_PATH: ''
           NODE_OPTIONS: ''
+          # gh's egress and trust-store channels; see identity. Probed unset on
+          # the pool, so emptying them costs no egress.
+          HTTPS_PROXY: ''
+          https_proxy: ''
+          HTTP_PROXY: ''
+          http_proxy: ''
+          SSL_CERT_FILE: ''
+          SSL_CERT_DIR: ''
+          NODE_EXTRA_CA_CERTS: ''
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           NODE_BIN: '${{ steps.guard.outputs.node }}'
           GH_BIN: '${{ steps.guard.outputs.gh }}'
           PATROL_GH: '${{ steps.guard.outputs.gh }}'
         run: |-
           # Same gh reroute preamble as identity: the driver spawns gh itself,
           # so it inherits this environment and the same planted-config risk.
-          # The published path came through $GITHUB_OUTPUT, which a live
-          # same-uid process could append to. Re-check it here, right before the
-          # exec, so a forged value fails fast instead of running with the PAT.
-          for v in NODE_BIN GH_BIN RM_BIN MKDIR_BIN GREP_BIN; do
+          # Point-of-use recheck; see Scan for why the pool arms are gated and
+          # why an empty value is a refusal. PATROL_GH is listed because the
+          # driver falls back to a bare `gh` when it is blank.
+          for v in NODE_BIN GH_BIN PATROL_GH; do
             eval "p=\${$v:-}"
-            [ -n "${p}" ] || continue
-            if [ ! -x "${p}" ] || [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; then
+            if [ -z "${p}" ] || [ ! -x "${p}" ]; then
+              echo "::error::${v} is not an executable at the point of use; refusing to run."
+              exit 1
+            fi
+            if [ "${RUNNER_ENVIRONMENT}" = 'self-hosted' ] &&
+              { [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; }; then
               echo "::error::${v} is not a verified binary at the point of use; refusing to run."
               exit 1
             fi
