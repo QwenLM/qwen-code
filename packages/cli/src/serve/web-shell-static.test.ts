@@ -288,6 +288,41 @@ describe('public PWA HTTP routes', () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it('adds the Managed marker only to Managed HTML and excludes remote daemon origins', async () => {
+    await writeFile(
+      path.join(directory, 'index.html'),
+      '<html><head><title>Shell</title></head><body>app</body></html>',
+    );
+    const managed = express();
+    mountWebShellAssets(managed, directory, [], false, true);
+    mountWebShellSpaFallback(managed, directory, [], false, true);
+    const response = await request(managed)
+      .get('/?daemon=https://attacker.example&fanout=https://other.example')
+      .expect(200);
+    expect(response.text).toContain(
+      '<meta name="qwen-managed-app" content="true">',
+    );
+    expect(response.headers['cache-control']).toBe('no-cache');
+    expect(response.headers['content-security-policy']).not.toContain(
+      'attacker.example',
+    );
+    expect(response.headers['content-security-policy']).not.toContain(
+      'other.example',
+    );
+    const deepLink = await request(managed)
+      .get('/nested-view?daemon=https://attacker.example')
+      .set('Accept', 'text/html')
+      .expect(200);
+    expect(deepLink.text).toContain(
+      '<meta name="qwen-managed-app" content="true">',
+    );
+    expect(deepLink.headers['content-security-policy']).not.toContain(
+      'attacker.example',
+    );
+    const ordinary = await request(app).get('/').expect(200);
+    expect(ordinary.text).not.toContain('qwen-managed-app');
+  });
+
   it.each([false, true])(
     'limits desktop relay CSP to the opt-in endpoint (enabled=%s)',
     async (enabled) => {

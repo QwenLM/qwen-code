@@ -34,6 +34,7 @@ import {
   type ManagedRuntimeWorkerLaunch,
   type ManagedSessionRuntimeWorkerOptions,
 } from './managed-runtime-session-worker.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 /**
  * Records the witness each ledger sweep runs with, so a test can tell the
@@ -2458,7 +2459,7 @@ describe.skipIf(process.platform === 'win32')(
       expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
     });
 
-    it.skipIf(process.getuid?.() === 0)(
+    it.skipIf(!arePermissionBitsEnforced())(
       'an uncreatable ledger directory fails the call, not the environment',
       async () => {
         // A project temp dir this user cannot write — what a one-off root

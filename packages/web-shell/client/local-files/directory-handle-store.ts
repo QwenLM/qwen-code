@@ -8,75 +8,23 @@
  * a miss as "ask again", never as an error.
  */
 
+import { runIndexedDbRequest, type IndexedDbSchema } from '../utils/indexeddb';
+
 const DB_NAME = 'qwen-local-files';
 const DB_VERSION = 1;
 const STORE_NAME = 'handles';
 const KEY = 'directory';
 
+const SCHEMA: IndexedDbSchema = {
+  name: DB_NAME,
+  version: DB_VERSION,
+  store: STORE_NAME,
+};
+
 export interface DirectoryHandleStore {
   save(handle: FileSystemDirectoryHandle): Promise<boolean>;
   load(): Promise<FileSystemDirectoryHandle | undefined>;
   clear(): Promise<boolean>;
-}
-
-function openDatabase(idb: IDBFactory): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = idb.open(DB_NAME, DB_VERSION);
-    let discarded = false;
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME);
-      }
-    };
-    request.onsuccess = () => {
-      // `blocked` is not terminal for an open request: a success can still
-      // follow it. Resolving then would be a no-op on the already-rejected
-      // promise while the fresh connection leaks — and a leaked connection
-      // blocks every future version upgrade.
-      if (discarded) {
-        request.result.close();
-        return;
-      }
-      resolve(request.result);
-    };
-    request.onerror = () =>
-      reject(request.error ?? new Error('IndexedDB open failed'));
-    request.onblocked = () => {
-      discarded = true;
-      reject(new Error('IndexedDB open blocked by another connection'));
-    };
-  });
-}
-
-async function runRequest<T>(
-  idb: IDBFactory,
-  mode: IDBTransactionMode,
-  issue: (store: IDBObjectStore) => IDBRequest<T>,
-): Promise<T> {
-  const db = await openDatabase(idb);
-  try {
-    return await new Promise<T>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, mode);
-      const request = issue(tx.objectStore(STORE_NAME));
-      let value: T | undefined;
-      request.onsuccess = () => {
-        value = request.result;
-      };
-      request.onerror = () =>
-        reject(request.error ?? new Error('IndexedDB request failed'));
-      // Resolve on commit, not on request success: the whole point of storing
-      // the handle is that it survives a reload, and a write acknowledged
-      // before `oncomplete` can still be lost if the page goes away.
-      tx.oncomplete = () => resolve(value as T);
-      tx.onabort = () =>
-        reject(tx.error ?? new Error('IndexedDB transaction aborted'));
-      tx.onerror = () =>
-        reject(tx.error ?? new Error('IndexedDB transaction failed'));
-    });
-  } finally {
-    db.close();
-  }
 }
 
 export function createDirectoryHandleStore(
@@ -92,7 +40,9 @@ export function createDirectoryHandleStore(
   return {
     async save(handle) {
       try {
-        await runRequest(idb, 'readwrite', (store) => store.put(handle, key));
+        await runIndexedDbRequest(idb, SCHEMA, 'readwrite', (store) =>
+          store.put(handle, key),
+        );
         return true;
       } catch {
         return false;
@@ -100,8 +50,11 @@ export function createDirectoryHandleStore(
     },
     async load() {
       try {
-        const stored = await runRequest(idb, 'readonly', (store) =>
-          store.get(key),
+        const stored = await runIndexedDbRequest(
+          idb,
+          SCHEMA,
+          'readonly',
+          (store) => store.get(key),
         );
         // Only a directory handle is a valid stored grant; anything else (a
         // stale value from another feature, a corrupted record) is a miss.
@@ -114,7 +67,9 @@ export function createDirectoryHandleStore(
     },
     async clear() {
       try {
-        await runRequest(idb, 'readwrite', (store) => store.delete(key));
+        await runIndexedDbRequest(idb, SCHEMA, 'readwrite', (store) =>
+          store.delete(key),
+        );
         return true;
       } catch {
         return false;

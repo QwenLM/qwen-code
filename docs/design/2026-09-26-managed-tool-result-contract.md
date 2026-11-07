@@ -238,7 +238,7 @@ The schema fixes each record's shape and the rules it can state readably, includ
 - `packages/core/src/managed-runtime/contracts/managed-tool-result-v1.schema.json` and `.fixtures.json` (new).
 - `packages/core/src/managed-runtime/managed-tool-result.ts` and its test (new).
 - `packages/cli/src/serve/managed-tool-result-admission.test.ts` (new).
-- `ManagedToolResultConformanceTest` in `packages/sdk-java/runtime-broker` (new), and the module's `README.md` and `QWEN.md`.
+- `ManagedToolResultConformanceTest` in `packages/managed-agent-server` (new), and the module's `README.md` and `QWEN.md`.
 - This design document in both languages (new), and the Tool v2 contract document, whose note on the artifact delivery track now points here.
 
 No worker, route manifest, store, provisioner, transport or CI workflow changes.

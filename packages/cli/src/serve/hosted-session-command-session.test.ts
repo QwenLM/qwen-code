@@ -4,26 +4,53 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const planGate = vi.hoisted(() => ({ enabled: false }));
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
+      >();
+    return {
+      ...actual,
+      assertManagedSessionDomainEnabled: (
+        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
+      ) => {
+        if (domain === 'team_plan' && planGate.enabled) return;
+        actual.assertManagedSessionDomainEnabled(domain);
+      },
+    };
+  },
+);
 import {
   openManagedSession,
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
-import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
+import {
+  outboundCommandBody,
+  sessionCommandId,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
 import { MANAGED_SESSION_COMMAND_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-record.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
+import { ManagedSessionAppendUnsettledError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   isChildSessionRun,
   parseChildRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { parseSessionMessage } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-record.js';
 import { sessionMessageInputId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
-import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import {
+  HostedChildAgentSession,
+  type HostedChildAgentStore,
+} from './hosted-child-agent-session.js';
 import {
   HostedSessionCommandSession,
   SessionCommandBlockedError,
@@ -35,6 +62,7 @@ import {
 } from './hosted-session-message-session.js';
 import { memberMessageId } from './hosted-member-chain.js';
 import { HostedTeamSession } from './hosted-team-session.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 // H4e-b3: `session_command` is enabled for real, so this suite drives the
 // funnel with no enablement mock. The member side only needs its own
@@ -44,11 +72,16 @@ import { HostedTeamSession } from './hosted-team-session.js';
 
 const roots: string[] = [];
 const sessions: ManagedSession[] = [];
+const pendingBudgetTests: Array<Promise<void>> = [];
 const PARENT = randomUUID();
 const CHILD = randomUUID();
 const LEAF_RUN = 'run-1';
 
 afterEach(async () => {
+  // Vitest aborts a timed-out body without awaiting its current write. Each
+  // promise is also returned to Vitest, so draining it does not hide failures.
+  await Promise.allSettled(pendingBudgetTests.splice(0));
+  planGate.enabled = false;
   for (const session of sessions.splice(0)) await session.close();
   for (const root of roots.splice(0))
     await rm(root, { recursive: true, force: true });
@@ -117,6 +150,84 @@ async function memberSide(): Promise<Side> {
     parentSessionId: PARENT,
     parentChildRunId: LEAF_RUN,
   });
+}
+
+/**
+ * A member side whose next extension commit lands durably but reports an
+ * unknown outcome: the record is withheld from the authority's view until
+ * `settlePendingAppend()` applies it, exactly the landed-with-lost-ack shape
+ * a retry must settle before reading replay state.
+ */
+async function lostAckMemberSide(): Promise<{
+  readonly member: Side;
+  armNextCommit(): void;
+  publications(kind: string): number;
+}> {
+  const session = await open(CHILD);
+  let pending:
+    | Parameters<typeof session.authority.commitExtensionRecord>
+    | undefined;
+  let armed = false;
+  const published: string[] = [];
+  const publish = async (kind: string, bytes: Buffer) => {
+    const ref = await session.resources.publish(kind, bytes);
+    published.push(kind);
+    return ref;
+  };
+  const resources = new Proxy(session.resources, {
+    get(target, prop) {
+      if (prop === 'publish') return publish;
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const authority = new Proxy(session.authority, {
+    get(target, prop) {
+      if (prop === 'settlePendingAppend') {
+        return async () => {
+          const next = pending;
+          pending = undefined;
+          if (next !== undefined) await target.commitExtensionRecord(...next);
+        };
+      }
+      if (prop === 'commitExtensionRecord') {
+        return async (
+          ...args: Parameters<typeof target.commitExtensionRecord>
+        ) => {
+          if (armed) {
+            armed = false;
+            pending = args;
+            throw new ManagedSessionAppendUnsettledError(
+              new Error('acknowledgement lost after the append landed'),
+            );
+          }
+          return target.commitExtensionRecord(...args);
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const store = {
+    authority: authority as unknown as HostedChildAgentStore['authority'],
+    resources: resources as unknown as HostedChildAgentStore['resources'],
+  };
+  const key = session.authority.sessionHeader.sessionKey;
+  const children = new HostedChildAgentSession(store, key);
+  return {
+    member: {
+      session,
+      children,
+      commands: new HostedSessionCommandSession(store, key, children, {
+        parentSessionId: PARENT,
+        parentChildRunId: LEAF_RUN,
+      }),
+    },
+    armNextCommit: () => {
+      armed = true;
+    },
+    publications: (kind) => published.filter((entry) => entry === kind).length,
+  };
 }
 
 const DEFINITION = {
@@ -279,6 +390,271 @@ const TASK_UPDATE_ARGS = {
 } as const;
 
 describe('hosted-session-command-session funnel (H4e-b3)', () => {
+  it('executes a plan submission and replays its real durable receipt', async () => {
+    planGate.enabled = true;
+    const lead = await leadSideSetup();
+    const teams = new HostedTeamSession(
+      { authority: lead.session.authority, resources: lead.session.resources },
+      lead.session.authority.sessionHeader.sessionKey,
+      lead.children,
+    );
+    await teams.run('team_create', { team_name: 'Review' }, 'create');
+    await teams.join({
+      ...teams.admitMember('bob'),
+      childRunId: LEAF_RUN,
+      planModeRequired: true,
+    });
+    const params = {
+      commandId: commandIdOf('real-plan'),
+      kind: 'plan_submit' as const,
+      childRunId: LEAF_RUN,
+      senderSessionId: CHILD,
+      args: { plan: 'Read then edit' },
+    };
+    const original = await teams.submitPlan(
+      params.commandId,
+      LEAF_RUN,
+      params.args.plan,
+    );
+    expect(await lead.commands.existingReply(params.commandId)).toBeUndefined();
+    planGate.enabled = false;
+    const reply = await lead.commands.execute(teams, params);
+    expect(reply.outcome).toBe('answered');
+    expect(JSON.stringify(reply)).toContain(original);
+    expect(
+      (
+        await lead.commands.execute(teams, {
+          ...params,
+          commandId: commandIdOf('fresh-plan'),
+        })
+      ).outcome,
+    ).toBe('refused');
+    expect(
+      lead.session.authority.extensionRecordsInDomain('team_plan'),
+    ).toHaveLength(1);
+    expect(await lead.commands.execute(teams, params)).toEqual(reply);
+    expect(
+      lead.session.authority.extensionRecordsInDomain('team_plan'),
+    ).toHaveLength(1);
+    expect(await lead.commands.existingReply(params.commandId)).toEqual(reply);
+  });
+
+  it('keeps a partial plan submission retryable across gate-off rollback', async () => {
+    planGate.enabled = true;
+    const lead = await leadSideSetup();
+    const store = {
+      authority: lead.session.authority,
+      resources: lead.session.resources,
+    };
+    const key = lead.session.authority.sessionHeader.sessionKey;
+    const teams = new HostedTeamSession(store, key, lead.children);
+    await teams.run('team_create', { team_name: 'Review' }, 'create');
+    await teams.join({
+      ...teams.admitMember('bob'),
+      childRunId: LEAF_RUN,
+      planModeRequired: true,
+    });
+    await teams.submitPlan('original', LEAF_RUN, 'first');
+    const params = {
+      commandId: commandIdOf('replacement'),
+      kind: 'plan_submit' as const,
+      childRunId: LEAF_RUN,
+      senderSessionId: CHILD,
+      args: { plan: 'second' },
+    };
+    const interrupted = new HostedTeamSession(
+      {
+        ...store,
+        authority: Object.create(store.authority, {
+          commitExtensionRecord: {
+            value: async (
+              ...args: Parameters<typeof store.authority.commitExtensionRecord>
+            ) => {
+              const result = await store.authority.commitExtensionRecord(
+                ...args,
+              );
+              if (
+                args[0].commandId === `supersede:${params.commandId}:original`
+              )
+                throw new Error('cut after cancel');
+              return result;
+            },
+          },
+        }),
+      },
+      key,
+      lead.children,
+    );
+    await expect(lead.commands.execute(interrupted, params)).rejects.toThrow(
+      'cut after cancel',
+    );
+    await lead.children.settleCompleted(LEAF_RUN, {
+      result: Buffer.from('done'),
+      receipt: Buffer.from('{"outcome":"settled"}'),
+    });
+    planGate.enabled = false;
+    await expect(lead.commands.execute(teams, params)).rejects.toBeInstanceOf(
+      SessionCommandBlockedError,
+    );
+    expect(await lead.commands.existingReply(params.commandId)).toBeUndefined();
+    expect(teams.plan(params.commandId)).toBeUndefined();
+    planGate.enabled = true;
+    expect(await lead.commands.execute(teams, params)).toMatchObject({
+      outcome: 'answered',
+    });
+    expect(teams.plan(params.commandId)).toMatchObject({
+      planRevision: 2,
+      run: { state: 'waiting' },
+    });
+  });
+
+  it.each(['waiting', 'cancelled', 'decided', 'other-run'] as const)(
+    'accepts result notifications with only this run waiting plan: %s',
+    async (state) => {
+      planGate.enabled = true;
+      const lead = await leadSideSetup();
+      const teams = new HostedTeamSession(
+        {
+          authority: lead.session.authority,
+          resources: lead.session.resources,
+        },
+        lead.session.authority.sessionHeader.sessionKey,
+        lead.children,
+      );
+      await teams.run('team_create', { team_name: 'Review' }, 'create');
+      await teams.join({
+        ...teams.admitMember('bob'),
+        childRunId: LEAF_RUN,
+        planModeRequired: true,
+      });
+      const requestId = commandIdOf('notification-plan');
+      expect(
+        (
+          await lead.commands.execute(teams, {
+            commandId: requestId,
+            kind: 'plan_submit',
+            childRunId: LEAF_RUN,
+            senderSessionId: CHILD,
+            args: { plan: 'Review <special>' },
+          })
+        ).outcome,
+      ).toBe('answered');
+      await lead.children.settleCompleted(LEAF_RUN, {
+        result: Buffer.from('done'),
+        receipt: Buffer.from('{"outcome":"settled"}'),
+      });
+      if (state === 'cancelled')
+        await teams.run('request_shutdown', { to: 'bob' }, 'stop');
+      if (state === 'decided')
+        await teams.run(
+          'team_plan_approval',
+          { request_id: requestId, action: 'approve' },
+          'approve',
+        );
+      let notified = LEAF_RUN;
+      if (state === 'other-run') {
+        notified = 'other-run';
+        await lead.children.admit({
+          completion: 'sent',
+          childRunId: notified,
+          ownerScopeId: PARENT,
+          rootSessionId: PARENT,
+          description: 'other',
+          prompt: 'other',
+          definition: DEFINITION,
+          workingDirectory: '.',
+          workspaceMode: 'shared',
+          executionCallId: notified,
+        });
+        await lead.children.dispatchStarted(notified, {
+          dispatchId: 'other-dispatch',
+          runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+        });
+        await lead.children.attach(notified, 'other-session');
+        await lead.children.settleCompleted(notified, {
+          result: Buffer.from('done'),
+          receipt: Buffer.from('{"outcome":"settled"}'),
+        });
+      }
+      await lead.children.accept(notified, {
+        notification: { description: 'audit' },
+      });
+      const input = lead.session.authority
+        .readEvents({ afterSequence: 0, limit: 1024 })
+        .find((event) => event.kind === 'input.accepted')!;
+      const ref = (input.payload as Record<string, unknown>)[
+        'contentRef'
+      ] as Parameters<typeof lead.session.resources.read>[0];
+      const text = (await lead.session.resources.read(ref)).toString('utf8');
+      if (state === 'waiting') {
+        expect(text).toContain(requestId);
+        expect(text).toContain('Review &lt;special&gt;');
+      } else expect(text).not.toContain(requestId);
+    },
+  );
+
+  it.each([
+    'planned',
+    'accepting',
+    'unknown',
+    'accepted',
+    'consumed',
+    'refused',
+    'cancelled',
+    'rejected',
+  ] as const)(
+    'deduplicates plan submissions from persisted %s evidence',
+    async (state) => {
+      const member = await memberSide();
+      const first = {
+        commandId: commandIdOf('plan-first'),
+        kind: 'plan_submit' as const,
+        args: { plan: 'Read then edit' },
+        executionCallId: 'plan-first',
+        closing: false,
+      };
+      await member.commands.runCommand(first);
+      if (
+        [
+          'accepting',
+          'unknown',
+          'accepted',
+          'consumed',
+          'refused',
+          'rejected',
+        ].includes(state)
+      )
+        await member.commands.handover(first.commandId, PARENT);
+      if (state === 'unknown' || state === 'cancelled' || state === 'rejected')
+        await member.commands.settle(first.commandId, state);
+      if (state === 'accepted' || state === 'consumed' || state === 'refused')
+        await member.commands.answered(first.commandId, {
+          outcome: state === 'refused' ? 'refused' : 'answered',
+          text: state,
+        });
+      if (state === 'consumed')
+        await member.commands.commitConsumed(first.commandId);
+      const restarted = new HostedSessionCommandSession(
+        {
+          authority: member.session.authority,
+          resources: member.session.resources,
+        },
+        member.session.authority.sessionHeader.sessionKey,
+        member.children,
+        { parentSessionId: PARENT, parentChildRunId: LEAF_RUN },
+      );
+      await restarted.runCommand(first);
+      const retry = restarted.runCommand({
+        ...first,
+        commandId: commandIdOf('plan-second'),
+        executionCallId: 'plan-second',
+      });
+      if (['refused', 'cancelled', 'rejected'].includes(state))
+        await expect(retry).resolves.toBeUndefined();
+      else await expect(retry).rejects.toThrow(/already submitted a plan/);
+    },
+  );
+
   it('commits the outbound planned entry and replays an identical restatement', async () => {
     const member = await memberSide();
     const commandId = commandIdOf('call-1');
@@ -396,6 +772,58 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     );
   });
 
+  it('settles a landed answered append before replay, so a lost-acknowledgement retry publishes once', async () => {
+    const { member, armNextCommit, publications } = await lostAckMemberSide();
+    const commandId = commandIdOf('call-lost-ack-answered');
+    await member.commands.runCommand({
+      commandId,
+      kind: 'board_write',
+      args: TASK_CREATE_ARGS,
+      executionCallId: 'prompt-1:call-lost-ack-answered',
+      closing: false,
+    });
+    await member.commands.handover(commandId, PARENT);
+    const reply = {
+      outcome: 'answered' as const,
+      text: 'Task #1 created: "ship the fix"',
+    };
+    armNextCommit();
+    await expect(member.commands.answered(commandId, reply)).rejects.toThrow(
+      ManagedSessionAppendUnsettledError,
+    );
+    expect(member.commands.command(commandId)?.run.delivery?.state).toBe(
+      'accepting',
+    );
+    await member.commands.answered(commandId, reply);
+    expect(member.commands.command(commandId)?.run.delivery?.state).toBe(
+      'accepted',
+    );
+    expect(publications('managed-command-reply')).toBe(1);
+    expect(await member.commands.readReply(commandId)).toEqual(reply);
+  });
+
+  it('settles a landed outbound append before replay, so a lost-acknowledgement retry publishes once', async () => {
+    const { member, armNextCommit, publications } = await lostAckMemberSide();
+    const commandId = commandIdOf('call-lost-ack-sent');
+    const params = {
+      commandId,
+      kind: 'board_write' as const,
+      args: TASK_CREATE_ARGS,
+      executionCallId: 'prompt-1:call-lost-ack-sent',
+      closing: false,
+    };
+    armNextCommit();
+    await expect(member.commands.runCommand(params)).rejects.toThrow(
+      ManagedSessionAppendUnsettledError,
+    );
+    expect(member.commands.command(commandId)).toBeUndefined();
+    await member.commands.runCommand(params);
+    expect(member.commands.command(commandId)?.run.delivery?.state).toBe(
+      'planned',
+    );
+    expect(publications('managed-command-args')).toBe(1);
+  });
+
   it('settles only along the map: cancelled from planned, unknown and rejected from accepting', async () => {
     const member = await memberSide();
     const commandId = commandIdOf('call-6');
@@ -432,38 +860,77 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     expect(record.run.delivery?.state).toBe('rejected');
   });
 
-  it('enforces the per-run command budget with budget_exhausted', async () => {
-    const member = await memberSide();
-    const commandId = commandIdOf('call-8');
-    await member.commands.runCommand({
-      commandId,
-      kind: 'board_read',
-      args: TASK_LIST_ARGS,
-      executionCallId: 'prompt-1:call-8',
-      closing: false,
-    });
-    // Mint 256 entries by hand: a direct count of outbound records is the
-    // rule's own evidence, so the suite plants the history instead of
-    // driving 256 funnels calls.
-    for (let index = 0; index < 255; index += 1) {
-      await member.commands.runCommand({
-        commandId: `cmd_extra_${index}`,
-        kind: 'board_read',
-        args: TASK_LIST_ARGS,
-        executionCallId: `prompt-1:call-extra-${index}`,
-        closing: false,
-      });
-    }
-    await expect(
-      member.commands.runCommand({
-        commandId: commandIdOf('call-9'),
-        kind: 'board_read',
-        args: TASK_LIST_ARGS,
-        executionCallId: 'prompt-1:call-9',
-        closing: false,
-      }),
-    ).rejects.toThrow(/budget_exhausted/);
-  }, 30_000);
+  // The 256 real durable commands require over 1,000 filesystem syncs.
+  it(
+    'enforces the per-run command budget with budget_exhausted',
+    ({ signal }) => {
+      const work = (async () => {
+        signal.throwIfAborted();
+        const member = await memberSide();
+        const commandId = commandIdOf('call-8');
+        signal.throwIfAborted();
+        await member.commands.runCommand({
+          commandId,
+          kind: 'board_read',
+          args: TASK_LIST_ARGS,
+          executionCallId: 'prompt-1:call-8',
+          closing: false,
+        });
+        // Persist history through the real authority, reusing the first command's
+        // immutable arguments instead of publishing the same bytes 254 more times.
+        const argsRef = member.commands.command(commandId)!.argsRef;
+        for (let index = 0; index < 254; index += 1) {
+          signal.throwIfAborted();
+          const seededId = `cmd_extra_${index}`;
+          const record = outboundCommandBody({
+            commandId: seededId,
+            kind: 'board_read',
+            childRunId: LEAF_RUN,
+            senderSessionId: CHILD,
+            argsRef,
+            executionCallId: `prompt-1:call-extra-${index}`,
+          });
+          await member.session.authority.commitExtensionRecord(
+            {
+              operation: 'sendSessionCommand',
+              commandId: `${seededId}:1`,
+              sessionKey: member.session.authority.sessionHeader.sessionKey,
+              contentDigest: createHash('sha256')
+                .update(JSON.stringify(record))
+                .digest('hex'),
+            },
+            { domain: 'session_command', record },
+            { class: 'trusted_entry' },
+          );
+        }
+        signal.throwIfAborted();
+        expect(member.commands.commands()).toHaveLength(255);
+        await member.commands.runCommand({
+          commandId: 'cmd_extra_254',
+          kind: 'board_read',
+          args: TASK_LIST_ARGS,
+          executionCallId: 'prompt-1:call-extra-254',
+          closing: false,
+        });
+        signal.throwIfAborted();
+        expect(member.commands.commands()).toHaveLength(256);
+        await expect(
+          member.commands.runCommand({
+            commandId: commandIdOf('call-9'),
+            kind: 'board_read',
+            args: TASK_LIST_ARGS,
+            executionCallId: 'prompt-1:call-9',
+            closing: false,
+          }),
+        ).rejects.toThrow(/budget_exhausted/);
+        expect(member.commands.commands()).toHaveLength(256);
+        expect(member.commands.command(commandIdOf('call-9'))).toBeUndefined();
+      })();
+      pendingBudgetTests.push(work);
+      return work;
+    },
+    isSlowTestHost() ? 120_000 : 30_000,
+  );
 
   it("commits the leader's receipt against an attached run and refetches its reply", async () => {
     const lead = await leadSideSetup();

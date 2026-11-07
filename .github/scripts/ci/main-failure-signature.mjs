@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 /**
- * Turn the logs of a failed main-branch CI run into a stable failure signature.
+ * Analyze failed CI logs and render failure details.
  *
- * `main-ci-failure-issue.yml` used to dedupe on the commit SHA, so a standing
- * red opened one fresh issue per merged commit (six duplicates for a single
- * broken E2E test on 2026-07-26). Deduping on *what broke* collapses those into
- * one issue that records each recurrence instead.
+ * main-ci-failure-issue.yml consumes only `analyze` and `comment`: extracted
+ * tests populate the failure summary, and the workflow routes on them — a run
+ * that names failing tests files or reuses a per-signature issue (matched by
+ * the `title` and `searchMarkers` emitted here), while a run without any test
+ * identity shares the workflow's aggregate issue.
  *
- * Every failing test gets its own `qwen-main-ci-failure-test:<key>` marker in
- * the issue body, so an issue is matched when the current failure set overlaps
- * the recorded one at all — `[A]` then `[A, B]` updates the issue that already
- * tracks A rather than opening a second one.
+ * The legacy `plan`/title/body-renderer pipeline has no shipped caller and is
+ * retained for revertability. It places a `qwen-main-ci-failure-test:<key>`
+ * marker for each test in the body, allowing overlapping failure sets such as
+ * `[A]` then `[A, B]` to share an issue; unknown tests fall back to a commit key.
  */
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -259,6 +260,18 @@ export function analyzeLogs(workflowName, logTexts, failedJobs = []) {
     }
   }
 
+  // Packaging and Cargo failures may report no test ID. Keep a standing
+  // Desktop failure on one issue while preserving its platform and step.
+  if (workflowName === 'Desktop Checks' && tests.length === 0) {
+    const ids = new Set();
+    for (const job of failedJobs) {
+      for (const step of job.steps.length ? job.steps : ['']) {
+        ids.add(`Desktop Checks > ${job.name}${step ? ` > ${step}` : ''}`);
+      }
+    }
+    for (const id of ids) tests.push({ id, key: testKey(id) });
+  }
+
   // Guard-derived ids are the only run-level diagnoses in the set: the
   // collision they name is stable across every merge stacked on a standing
   // red, so they title the issue and are searched first. First-seen order
@@ -357,8 +370,8 @@ function renderPerCommitBody({ analysis, occurrence }) {
   return [
     `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
     '',
-    'A main-branch CI run failed on `main` before any test result was',
-    'reported, so this issue is tracked per commit.',
+    'A CI run failed before any test result was reported, so this issue is',
+    'tracked per commit.',
     '',
     `- Workflow: ${analysis.workflow}`,
     ...(analysis.failedJobs.length
@@ -387,6 +400,41 @@ function cappedTestLines(tests) {
   if (tests.length > MAX_BODY_TESTS)
     lines.push(`- …and ${tests.length - MAX_BODY_TESTS} more`);
   return lines;
+}
+
+export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
+  const code = (text) => `\`${String(text).replace(/[`\r\n]/g, ' ')}\``;
+  return [
+    `<!-- qwen-managed-agent-ci-failure:${occurrence.runId} -->`,
+    `### ${code(analysis.workflow)} failed`,
+    '',
+    `[Run ${occurrence.runId}](${occurrence.runUrl}) · commit ${code(occurrence.sha.slice(0, 12))}`,
+    '',
+    ...jobs
+      .filter((job) => job.conclusion === 'failure')
+      .map((job) => {
+        const steps = (job.steps ?? [])
+          .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))
+          .map((step) => code(step.name));
+        return `- [${code(job.name)}](${job.html_url})${steps.length ? `: ${steps.join(', ')}` : ''}`;
+      }),
+    '',
+    ...(analysis.tests.length
+      ? [
+          '**Failing tests**',
+          '',
+          ...analysis.tests
+            .slice(0, MAX_BODY_TESTS)
+            .map((test) => `- ${code(test.id)}`),
+          ...(analysis.tests.length > MAX_BODY_TESTS
+            ? [`- …and ${analysis.tests.length - MAX_BODY_TESTS} more`]
+            : []),
+        ]
+      : [
+          'No test identifier was available; follow the run link for job logs and annotations.',
+        ]),
+    '',
+  ].join('\n');
 }
 
 /**
@@ -419,7 +467,7 @@ export function renderIssueBody({
       `<!-- ${SIGNATURE_MARKER_PREFIX}${analysis.signature} -->`,
       ...bodyMarkers.map((marker) => `<!-- ${marker} -->`),
       '',
-      `A main-branch \`${analysis.workflow}\` run failed on \`main\`.`,
+      `A \`${analysis.workflow}\` run failed.`,
       // The failing tests name what broke; the failed jobs name which lane
       // broke — a guard's diagnosis (the colliding files) lives only in its
       // job log.
@@ -529,10 +577,38 @@ function readFailedJobs(path) {
     return [];
   }
 }
+/**
+ * The workflow's jobs listing can be missing or truncated (the redirect
+ * empties it when `gh api` dies before writing), and the comment must degrade
+ * the same way the issue path does — name no job — instead of failing the
+ * analyze job and losing both reports.
+ */
+function readJobs(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')).jobs ?? [];
+  } catch {
+    return [];
+  }
+}
 
 export function runCli(argv) {
   const [command, ...rest] = argv;
   const { options, positional } = parseArgs(rest);
+
+  if (command === 'comment') {
+    process.stdout.write(
+      renderFailureComment({
+        analysis: JSON.parse(readFileSync(options.analysis, 'utf8')),
+        occurrence: {
+          sha: options.sha,
+          runId: options['run-id'],
+          runUrl: options['run-url'],
+        },
+        jobs: readJobs(options['jobs-json']),
+      }),
+    );
+    return;
+  }
 
   if (command === 'analyze') {
     const logTexts = positional.map((file) => readFileSync(file, 'utf8'));

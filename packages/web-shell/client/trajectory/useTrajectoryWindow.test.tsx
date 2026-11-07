@@ -6,6 +6,12 @@
  */
 
 import { act } from 'react';
+import { TrajectoryLiveContext } from './trajectory-live-context';
+import {
+  createTrajectoryLiveStore,
+  type TrajectoryLiveStore,
+} from './trajectory-live-store';
+import { createTrajectoryPageLoader } from './transcriptPageLoader';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DaemonHttpError, type DaemonEvent } from '@qwen-code/sdk/daemon';
@@ -84,6 +90,7 @@ function render(
     maxPages?: number;
     bookmarkLimit?: number;
     cursorBudget?: number;
+    liveStore?: TrajectoryLiveStore;
   },
 ): {
   latest: () => TrajectoryWindow;
@@ -98,7 +105,15 @@ function render(
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
-    root!.render(<Probe loader={loadPage} />);
+    root!.render(
+      options?.liveStore ? (
+        <TrajectoryLiveContext.Provider value={options.liveStore}>
+          <Probe loader={loadPage} />
+        </TrajectoryLiveContext.Provider>
+      ) : (
+        <Probe loader={loadPage} />
+      ),
+    );
   });
   return {
     latest: () => latest!,
@@ -125,6 +140,80 @@ afterEach(() => {
 });
 
 describe('useTrajectoryWindow', () => {
+  it('does not project previous-loader pages during the render before its reset effect', async () => {
+    const first = vi.fn(async () => page([userText('first', 'first')]));
+    const pending = deferred<TrajectoryPageResult>();
+    const second = vi.fn(() => pending.promise);
+    const frames: Array<{
+      loader: TrajectoryPageLoader;
+      trajectory: TrajectoryWindow['trajectory'];
+      status: TrajectoryWindow['status'];
+      loadedPages: number;
+    }> = [];
+    function Probe({ loader }: { loader: TrajectoryPageLoader }) {
+      const state = useTrajectoryWindow(loader);
+      frames.push({
+        loader,
+        trajectory: state.trajectory,
+        status: state.status,
+        loadedPages: state.loadedPages,
+      });
+      return null;
+    }
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => root!.render(<Probe loader={first} />));
+    expect(frames.some((frame) => frame.trajectory !== undefined)).toBe(true);
+    act(() => root!.render(<Probe loader={second} />));
+    expect(
+      frames
+        .filter((frame) => frame.loader === second)
+        .every(
+          (frame) =>
+            frame.trajectory === undefined &&
+            frame.status !== 'ready' &&
+            frame.loadedPages === 0,
+        ),
+    ).toBe(true);
+  });
+
+  it('keeps the history window and navigation stable across live events and recovery', async () => {
+    const store = createTrajectoryLiveStore();
+    const owner = {};
+    store.begin(owner, {
+      sessionId: 's',
+      scope: 'scope',
+      epoch: 'epoch',
+      events: [],
+      incomplete: false,
+    });
+    const read = vi.fn(async (_id: string, opts: { cursor?: string }) =>
+      opts.cursor
+        ? page([userText('old', 'old')])
+        : page([userText('new', 'new')], { hasMore: true, nextCursor: 'old' }),
+    );
+    const loader = createTrajectoryPageLoader(
+      { getSessionTranscriptPage: read },
+      's',
+      'scope',
+    );
+    const view = render(loader, { maxPages: 1, liveStore: store });
+    await act(async () => {});
+    act(() => view.latest().older());
+    await act(async () => {});
+    const previous = view.latest();
+    act(() =>
+      store.ingest(owner, { v: 1, type: 'replay_complete', data: {} }, 'epoch'),
+    );
+    act(() => store.invalidate(owner, 'gap'));
+    expect(view.latest().trajectory).toBe(previous.trajectory);
+    expect(view.latest().navigationVersion).toBe(previous.navigationVersion);
+    expect(view.latest().mode).toBe('history');
+    expect(view.latest().lifecycle.status).toBe('stale');
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
   it('asks for nothing without a loader', async () => {
     const view = render(undefined);
     await act(async () => {});

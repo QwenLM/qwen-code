@@ -159,7 +159,7 @@ describe('WorkspaceMenu', () => {
       'Copy path',
       'Open folder',
       'Open terminal',
-      'New task',
+      'New session',
     ]);
     await act(async () => {
       click(items[1]!);
@@ -173,6 +173,18 @@ describe('WorkspaceMenu', () => {
       await Promise.resolve();
     });
     expect(openTerminal).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens group creation and closes the menu', async () => {
+    const createGroup = vi.fn();
+    await render(
+      <WorkspaceMenu workspace={workspace} actions={{ createGroup }} />,
+    );
+    const items = await open();
+    expect(labels(items)).toEqual(['Create group']);
+    await act(async () => click(items[0]!));
+    expect(createGroup).toHaveBeenCalledTimes(1);
+    expect(document.body.querySelector('[role="menu"]')).toBeNull();
   });
 
   it('shows the management group with live counts and dispatches its target', async () => {
@@ -227,7 +239,7 @@ describe('WorkspaceMenu', () => {
     );
     const items = await open();
     expect(onOpenChange).toHaveBeenLastCalledWith(true);
-    expect(labels(items)).toEqual(['Rename…', 'New worktree task']);
+    expect(labels(items)).toEqual(['Rename…', 'New worktree session']);
     await act(async () => {
       click(items[0]!);
     });
@@ -277,6 +289,7 @@ describe('WorkspaceMenu', () => {
           openTerminal: vi.fn(),
           newSession: vi.fn(),
           newWorktreeSession: vi.fn(),
+          createGroup: vi.fn(),
           openManagement: vi.fn(),
           reload: vi.fn(),
           remove: vi.fn(),
@@ -289,8 +302,9 @@ describe('WorkspaceMenu', () => {
       'Copy path',
       'Open folder',
       'Open terminal',
-      'New task',
-      'New worktree task',
+      'New session',
+      'New worktree session',
+      'Create group',
       'MCP',
       'Skills',
       'Extensions',

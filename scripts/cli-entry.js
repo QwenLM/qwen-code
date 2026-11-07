@@ -42,7 +42,13 @@ function hasFlag(flag, alias) {
 
 function isInProcessFastPath() {
   const first = cliArgs[0];
-  if (first === 'serve' || first === 'mcp') {
+  if (
+    first === 'serve' ||
+    first === 'mcp' ||
+    first === 'memory' ||
+    first === 'managed-runtime-bootstrap' ||
+    first === 'managed-runtime-bootstrap-worker'
+  ) {
     return true;
   }
   if (first === undefined || first.startsWith('-')) {
@@ -236,7 +242,12 @@ function getManagedNpmInstallation() {
 const standaloneShim = process.env['QWEN_CODE_LAUNCHER_PATH'];
 delete process.env['QWEN_CODE_LAUNCHER_PATH'];
 
-const managedNpmInstallation = getManagedNpmInstallation();
+const managedRuntimeBootstrap =
+  cliArgs[0] === 'managed-runtime-bootstrap' ||
+  cliArgs[0] === 'managed-runtime-bootstrap-worker';
+const managedNpmInstallation = managedRuntimeBootstrap
+  ? undefined
+  : getManagedNpmInstallation();
 const validStandaloneShim =
   standaloneShim && existsSync(standaloneShim) ? standaloneShim : undefined;
 process.env['QWEN_CODE_CLI'] =

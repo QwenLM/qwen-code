@@ -23,7 +23,7 @@ describe('Managed CSI checkpoint evidence entry', () => {
     try {
       if (kind !== 'missing') {
         writeFileSync(file, kind === 'malformed' ? '{' : '{}');
-        if (kind === 'oversized') truncateSync(file, 48 * 1024 * 1024 + 1);
+        if (kind === 'oversized') truncateSync(file, 192 * 1024 * 1024 + 1);
       }
       const result = spawnSync(
         process.execPath,
