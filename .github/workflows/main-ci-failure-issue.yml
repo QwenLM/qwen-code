@@ -1166,11 +1166,13 @@ jobs:
     name: 'Report Java CI failure on the PR'
     needs: ['analyze', 'file_issue', 'rerun_infra']
     # A prepared summary survives issue-write errors. Only a successfully
-    # dispatched infrastructure rerun suppresses the comment, and a timeout
-    # still inside its rerun budget suppresses it too: that run is rerun whole
-    # and its own completion reports the outcome, so posting "failed" now would
-    # leave a red comment that a green rerun never retracts.
-    if: "${{ always() && needs.analyze.outputs.rerun_pending != 'true' && needs.analyze.outputs.comment_body != '' && needs.analyze.outputs.pr_number != '' && (needs.analyze.outputs.infra_only != 'true' || needs.rerun_infra.result != 'success') }}"
+    # dispatched rerun suppresses the comment, and a timeout still inside its
+    # rerun budget suppresses it too: that run is rerun whole and its own
+    # completion reports the outcome, so posting "failed" now would leave a red
+    # comment that a green rerun never retracts. A rerun that could not be
+    # dispatched is the exception — `file_issue` is also false on that path, so
+    # the comment is the only record left and must post.
+    if: "${{ always() && (needs.analyze.outputs.rerun_pending != 'true' || needs.rerun_infra.result != 'success') && needs.analyze.outputs.comment_body != '' && needs.analyze.outputs.pr_number != '' && (needs.analyze.outputs.infra_only != 'true' || needs.rerun_infra.result != 'success') }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:

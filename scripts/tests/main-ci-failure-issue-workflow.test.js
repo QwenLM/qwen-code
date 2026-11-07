@@ -459,7 +459,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
             provisional: 'false',
           },
         },
-        rerun_infra: { result: 'skipped' },
+        // The dispatch the `if:` above admits has succeeded, which is the
+        // only state in which the rerun owns the outcome.
+        rerun_infra: { result: 'success' },
       };
       expect(evaluate(String(jobs.rerun_infra.if), needs)).toBe(true);
       expect(evaluate(String(jobs.file_issue.if), needs)).toBe(false);
@@ -467,6 +469,18 @@ cat "\${RUNNER_TEMP}/pulls.json"
       // a green rerun is rejected by the analyze gate and there is no DELETE
       // path, so the red comment would stay for a run whose last attempt passed.
       expect(evaluate(String(jobs.report_pr.if), needs)).toBe(false);
+      // A rerun that never dispatched leaves `file_issue` false too, so the
+      // comment is the only record of the timeout and must still post.
+      expect(
+        evaluate(String(jobs.report_pr.if), {
+          ...needs,
+          analyze: {
+            ...needs.analyze,
+            outputs: { ...needs.analyze.outputs, comment_body: '### x failed' },
+          },
+          rerun_infra: { result: 'failure' },
+        }),
+      ).toBe(true);
     });
 
     it('files a provisional timeout instead of deferring to a rerun that never runs', () => {
