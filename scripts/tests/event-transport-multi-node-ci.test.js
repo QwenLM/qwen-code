@@ -21,17 +21,20 @@ const step = (name) => {
   return found;
 };
 const verify = () => step('Verify the EventTransport multi-node gates');
-const pom = readFileSync('packages/managed-agent-server/pom.xml', 'utf8');
+const pom = readFileSync(
+  'packages/managed-agent-server/verification/pom.xml',
+  'utf8',
+);
 const profile = pom
   .split('<id>event-transport-multi-node-gates</id>')[1]
   .split('</profile>')[0];
-const server = 'packages/managed-agent-server/src';
+const server = 'packages/managed-agent-server';
 const properties = readFileSync(
-  `${server}/main/java/com/alibaba/qwen/code/managedagent/config/ManagedAgentProperties.java`,
+  `${server}/server/src/main/java/com/alibaba/qwen/code/managedagent/config/ManagedAgentProperties.java`,
   'utf8',
 );
 const gate = readFileSync(
-  `${server}/test/java/com/alibaba/qwen/code/managedagent/EventTransportMultiNodeGate.java`,
+  `${server}/verification/src/test/java/com/alibaba/qwen/code/managedagent/EventTransportMultiNodeGate.java`,
   'utf8',
 );
 const script = readFileSync('scripts/rocketmq-lite-broker.sh', 'utf8');
@@ -73,7 +76,7 @@ describe('EventTransport multi-node gates CI', () => {
     expect(profile.match(/<include>/g)).toHaveLength(1);
     expect(profile).toContain('<failIfNoTests>true</failIfNoTests>');
     expect(profile).toMatch(
-      /<artifactId>maven-surefire-plugin<\/artifactId>\s*<configuration><skipTests>true<\/skipTests>/,
+      /<artifactId>maven-surefire-plugin<\/artifactId>\s*<configuration>\s*<skipTests>true<\/skipTests>/,
     );
   });
 
@@ -123,7 +126,7 @@ describe('EventTransport multi-node gates CI', () => {
       '-Dqwen.gate.rocketmq.work-dir="${RUNNER_TEMP}/rocketmq"',
     );
     expect(step('Upload multi-node gate reports').with.path).toContain(
-      'packages/managed-agent-server/target/mq3-multi-node/',
+      'packages/managed-agent-server/verification/target/mq3-multi-node/',
     );
   });
 

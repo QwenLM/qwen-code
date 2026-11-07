@@ -258,7 +258,7 @@ const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   EditTool.Name,
   ShellTool.Name,
   GlobTool.Name,
-  // #15076: `todo_write`, declared only by `files/3`. It writes no
+  // `todo_write` is declared by `files/3` and `shell/1`. It writes no
   // Workspace file: the task list is the Worker's own bookkeeping.
   TodoWriteTool.Name,
   WebFetchTool.Name,
@@ -2803,12 +2803,16 @@ export function createManagedToolSet(
     fileCheckpointingEnabled: false,
     // The worker has no conversation history to justify cached read elision.
     fileReadCacheDisabled: true,
-    // #15076: the `/3` profiles declare `todo_write`, so the Worker opts in
-    // explicitly. Core defaults this off and the operator-facing path gates
+    // The Worker opts in to its registered `todo_write` tool explicitly.
+    // Core defaults this off and the operator-facing path gates
     // registration on it; leaving it at the default while registering the
     // tool would give a managed Session a tool the same setting hides
     // elsewhere.
     todoWriteEnabled: true,
+    // These tools have no record_artifact and their results carry no artifact
+    // metadata to the host. Off, a Shell call also no longer parses its
+    // command only to decide on the record_artifact reminder.
+    artifactRecordingSupported: false,
   });
   registerSessionProjectDir(sessionId, config.storage.getProjectDir());
   return {

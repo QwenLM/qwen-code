@@ -380,6 +380,175 @@ describe('OpenAIContentConverter', () => {
       ),
     );
 
+  describe('thought signatures', () => {
+    it.each([
+      ['direct', { thoughtSignature: 'sig-a' }],
+      ['nested', { extra_content: { google: { thought_signature: 'sig-a' } } }],
+      [
+        'identical dual',
+        {
+          thoughtSignature: 'sig-a',
+          extra_content: { google: { thought_signature: 'sig-a' } },
+        },
+      ],
+    ])(
+      'captures %s signatures from non-streaming tool calls',
+      (_name, extension) => {
+        const response = toLlm([
+          choice(
+            {
+              tool_calls: [
+                {
+                  id: 'call_read',
+                  type: 'function',
+                  function: { name: 'read_file', arguments: '{"path":"a.ts"}' },
+                  ...extension,
+                },
+              ],
+            },
+            'tool_calls',
+          ),
+        ]);
+
+        expect(partsOf(response)).toEqual([
+          {
+            functionCall: {
+              id: 'call_read',
+              name: 'read_file',
+              args: { path: 'a.ts' },
+            },
+            thoughtSignature: 'sig-a',
+          },
+        ]);
+      },
+    );
+
+    it('does not guess when direct and nested signatures conflict', () => {
+      const response = toLlm([
+        choice(
+          {
+            tool_calls: [
+              {
+                id: 'call_read',
+                type: 'function',
+                function: { name: 'read_file', arguments: '{}' },
+                thoughtSignature: 'sig-direct',
+                extra_content: {
+                  google: { thought_signature: 'sig-nested' },
+                },
+              },
+            ],
+          },
+          'tool_calls',
+        ),
+      ]);
+
+      expect(partsOf(response)).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+        },
+      ]);
+    });
+
+    it('replays a signed function call with both OpenAI wire extensions', () => {
+      const messages = toMessages(
+        content('model', {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+          thoughtSignature: 'sig-a',
+        }),
+        content(
+          'user',
+          fnResponse('read_file', { output: 'done' }, 'call_read'),
+        ),
+      );
+
+      expect(messages.find(hasOpenAIToolCalls)?.tool_calls).toEqual([
+        {
+          id: 'call_read',
+          type: 'function',
+          function: { name: 'read_file', arguments: '{}' },
+          thoughtSignature: 'sig-a',
+          extra_content: { google: { thought_signature: 'sig-a' } },
+        },
+      ]);
+    });
+
+    it('keeps streaming signatures attached to their own parallel calls', () => {
+      const stream = withStreamParser();
+      streamParts(stream, {
+        tool_calls: [
+          {
+            index: 0,
+            id: 'call_read',
+            type: 'function',
+            function: { name: 'read_file', arguments: '{"path":' },
+            thoughtSignature: 'sig-read',
+          },
+        ],
+      });
+      streamParts(stream, {
+        tool_calls: [
+          {
+            index: 1,
+            id: 'call_glob',
+            type: 'function',
+            function: { name: 'glob', arguments: '{}' },
+            extra_content: {
+              google: { thought_signature: 'sig-glob' },
+            },
+          },
+        ],
+      });
+      streamParts(stream, {
+        tool_calls: [{ index: 0, function: { arguments: '"a.ts"}' } }],
+      });
+
+      expect(streamParts(stream, {}, 'tool_calls')).toEqual([
+        {
+          functionCall: {
+            id: 'call_read',
+            name: 'read_file',
+            args: { path: 'a.ts' },
+          },
+          thoughtSignature: 'sig-read',
+        },
+        {
+          functionCall: { id: 'call_glob', name: 'glob', args: {} },
+          thoughtSignature: 'sig-glob',
+        },
+      ]);
+    });
+
+    it('captures a signature delivered on the finish delta', () => {
+      const stream = withStreamParser();
+      streamParts(stream, {
+        tool_calls: [
+          {
+            index: 0,
+            id: 'call_read',
+            type: 'function',
+            function: { name: 'read_file', arguments: '{}' },
+          },
+        ],
+      });
+
+      expect(
+        streamParts(
+          stream,
+          {
+            tool_calls: [{ index: 0, thoughtSignature: 'sig-late' }],
+          },
+          'tool_calls',
+        ),
+      ).toEqual([
+        {
+          functionCall: { id: 'call_read', name: 'read_file', args: {} },
+          thoughtSignature: 'sig-late',
+        },
+      ]);
+    });
+  });
+
   describe('stream-local parser state', () => {
     /** Sends one chunk (provider model 'test') and returns the converted response. */
     const send = (
@@ -2247,6 +2416,61 @@ describe('OpenAIContentConverter', () => {
         getGenAiUsageProvenance(zero.usageMetadata)?.cachedInputTokensReported,
       ).toBe(true);
     });
+
+    it.each([
+      [
+        'non-streaming',
+        (extra: Record<string, unknown>) =>
+          toLlm([], { usage: usage(373, 112, 485, extra) }).usageMetadata,
+      ],
+      [
+        'streaming',
+        (extra: Record<string, unknown>) =>
+          usageChunk(withStreamParser(), usage(373, 112, 485, extra))
+            .usageMetadata,
+      ],
+    ])(
+      'reports prompt_tokens_details.cache_write_tokens as cache creation (%s)',
+      (_title, convert) => {
+        const usageMetadata = convert({
+          prompt_tokens_details: { cache_write_tokens: 256 },
+        });
+
+        // The provider's prompt_tokens already includes cache reads and
+        // writes, so the aggregate must not be reduced again.
+        expect(usageMetadata?.promptTokenCount).toBe(373);
+        expect(
+          getGenAiUsageProvenance(usageMetadata)?.cacheCreationInputTokens,
+        ).toBe(256);
+      },
+    );
+
+    it.each([
+      [
+        'non-streaming',
+        (extra: Record<string, unknown>) =>
+          toLlm([], { usage: usage(373, 112, 485, extra) }).usageMetadata,
+      ],
+      [
+        'streaming',
+        (extra: Record<string, unknown>) =>
+          usageChunk(withStreamParser(), usage(373, 112, 485, extra))
+            .usageMetadata,
+      ],
+    ])(
+      'distinguishes an absent cache write field from an explicitly reported zero (%s)',
+      (_title, convert) => {
+        const absent = convert({});
+        const zero = convert({
+          prompt_tokens_details: { cache_write_tokens: 0 },
+        });
+
+        expect(
+          getGenAiUsageProvenance(absent)?.cacheCreationInputTokens,
+        ).toBeUndefined();
+        expect(getGenAiUsageProvenance(zero)?.cacheCreationInputTokens).toBe(0);
+      },
+    );
 
     it.each([
       [
