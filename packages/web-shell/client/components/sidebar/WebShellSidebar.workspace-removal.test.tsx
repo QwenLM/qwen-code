@@ -16,6 +16,7 @@ import {
   DAEMON_APPROVAL_MODES,
   installSidebarDomShims,
   resolveWebShellSessions,
+  type SidebarConnection,
 } from '../../test/sidebarHarness';
 import { setLivePresence } from '../../live/live-presence';
 import sidebarStyles from './WebShellSidebar.module.css';
@@ -36,12 +37,18 @@ const mocks = createSidebarMocks({
   },
 });
 const {
-  connection,
   active,
   archived,
   actions: sessionActions,
   refreshSessionCatalogQueries,
 } = mocks;
+
+// The sidebar gates delete on the attachment's client id; the shared harness
+// connection shape predates that field, so this suite widens its own copy.
+const connection: SidebarConnection & { clientId?: string } = {
+  ...mocks.connection,
+  clientId: undefined,
+};
 
 const listWorkspaceSessions = vi.fn().mockResolvedValue([]);
 const archiveSessionsData = vi.fn().mockResolvedValue({
@@ -376,6 +383,8 @@ function renderSidebar(
     footer?: Parameters<typeof WebShellSidebar>[0]['footer'];
     onNewSession?: (workspaceCwd?: string) => boolean;
     onNewStandaloneSession?: () => Promise<boolean> | boolean;
+    onLeaveCurrentStandaloneForDelete?: (sessionId: string) => Promise<boolean>;
+    currentSessionRunning?: boolean;
     onLoadSession?: (sessionId: string, workspaceCwd?: string) => void;
     onAddSessionToSplitView?: (sessionId: string) => void;
     canOpenSplitView?: boolean;
@@ -430,6 +439,11 @@ function renderSidebar(
           splitSessionIds={overrides.splitSessionIds}
           onNewSession={overrides.onNewSession ?? (() => false)}
           onNewStandaloneSession={overrides.onNewStandaloneSession}
+          onLeaveCurrentStandaloneForDelete={
+            overrides.onLeaveCurrentStandaloneForDelete ??
+            vi.fn().mockResolvedValue(false)
+          }
+          currentSessionRunning={overrides.currentSessionRunning}
           onLoadSession={overrides.onLoadSession ?? (() => {})}
           onLoadStandaloneSession={overrides.onLoadStandaloneSession}
           onStandaloneNotice={overrides.onStandaloneNotice}
@@ -752,6 +766,8 @@ beforeEach(() => {
   root = createRoot(container.appendChild(document.createElement('div')));
   archivedSessionsTarget = container.appendChild(document.createElement('div'));
   connection.sessionId = null;
+  connection.clientId = undefined;
+  connection.status = 'connected';
   connection.sessionContext = undefined;
   connection.workspaceCwd = '/tmp/project';
   connection.supportedCommands = undefined;
@@ -7475,7 +7491,7 @@ describe('WebShellSidebar standalone grouping', () => {
     expect(details?.textContent).not.toContain('/private/standalone');
   });
 
-  it('keeps delete disabled on the current no-workspace row', async () => {
+  it('enables delete on the current no-workspace row when it can leave first', async () => {
     const standaloneCapabilities = {
       ...capabilities,
       features: [...capabilities.features, 'standalone_sessions_v1'],
@@ -7483,6 +7499,7 @@ describe('WebShellSidebar standalone grouping', () => {
     connection.capabilities = standaloneCapabilities;
     workspace.capabilities = standaloneCapabilities;
     connection.sessionId = 'standalone-current';
+    connection.clientId = 'current-client';
     listStandaloneSessionsPage.mockImplementation(
       async ({ archiveState }: { archiveState: string }) => ({
         sessions:
@@ -7503,10 +7520,15 @@ describe('WebShellSidebar standalone grouping', () => {
       }),
     );
 
+    const onLeaveCurrentStandaloneForDelete = vi.fn().mockResolvedValue(false);
     renderSidebar({
       onLoadStandaloneSession: vi.fn(),
+      onLeaveCurrentStandaloneForDelete,
       onStandaloneNotice: vi.fn(),
       sessionActions: { items: ['delete'], inlineItems: ['delete'] },
+    });
+    await act(async () => {
+      await Promise.resolve();
     });
     await vi.waitFor(() => {
       expect(
@@ -7514,18 +7536,92 @@ describe('WebShellSidebar standalone grouping', () => {
       ).toBeDefined();
     });
 
-    // The attached no-workspace session answers `session_busy`, so the row must
-    // not offer a delete that can never succeed (#12619, option A): it stays
-    // disabled, like on main, and says what unblocks it.
     const current = inlineSessionAction('Current standalone chat', 'Delete')!;
-    expect(current.disabled).toBe(true);
-    expect(current.title).toContain('Open another chat first');
+    expect(current.disabled).toBe(false);
 
     // The guard is about the attachment, not about standalone sessions: a
     // no-workspace row this tab is not attached to stays deletable.
     const other = inlineSessionAction('Other standalone chat', 'Delete');
     expect(other).toBeDefined();
     expect(other!.disabled).toBe(false);
+
+    await act(async () => click(current));
+    const dialog = document.body.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    const confirm = Array.from(dialog!.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Delete',
+    );
+    expect(confirm).toBeDefined();
+    await act(async () => click(confirm!));
+    expect(onLeaveCurrentStandaloneForDelete).toHaveBeenCalledExactlyOnceWith(
+      'standalone-current',
+    );
+
+    connection.clientId = undefined;
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+      sessionActions: { items: ['delete'], inlineItems: ['delete'] },
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      inlineSessionAction('Current standalone chat', 'Delete')?.disabled,
+    ).toBe(true);
+    expect(
+      inlineSessionAction('Current standalone chat', 'Delete')?.title,
+    ).toContain('not ready yet');
+  });
+
+  it('keeps delete disabled on a running current no-workspace row', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    connection.sessionId = 'standalone-running';
+    connection.clientId = 'running-client';
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'standalone-running',
+          displayName: 'Running standalone chat',
+          context: { kind: 'standalone' },
+          hasActivePrompt: false,
+        },
+      ],
+    });
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onLeaveCurrentStandaloneForDelete: vi.fn().mockResolvedValue(true),
+      currentSessionRunning: false,
+      onStandaloneNotice: vi.fn(),
+      sessionActions: { items: ['delete'], inlineItems: ['delete'] },
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(
+        inlineSessionAction('Running standalone chat', 'Delete'),
+      ).toBeDefined();
+    });
+
+    expect(
+      inlineSessionAction('Running standalone chat', 'Delete')?.disabled,
+    ).toBe(false);
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onLeaveCurrentStandaloneForDelete: vi.fn().mockResolvedValue(true),
+      currentSessionRunning: true,
+      onStandaloneNotice: vi.fn(),
+      sessionActions: { items: ['delete'], inlineItems: ['delete'] },
+    });
+    const remove = inlineSessionAction('Running standalone chat', 'Delete')!;
+    expect(remove.disabled).toBe(true);
+    expect(remove.title).toContain('running');
   });
 
   it('puts No workspace beside Projects and hides it for a locked workspace', async () => {
