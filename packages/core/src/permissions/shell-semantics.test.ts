@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  commandContainsGitAmend,
   extractShellOperations,
   extractShellOperationsAcrossCommand,
 } from './shell-semantics.js';
@@ -841,6 +842,258 @@ describe('line continuations before a `$` construct', () => {
   });
 });
 
+describe('commandContainsGitAmend fail-closed backstop (#16075 R9 B1)', () => {
+  // The recognizer may only ADD denials to the base substring guard. These
+  // pin the backstop at the unit level; the end-to-end denial table lives in
+  // destructive-commands.test.ts.
+  it.each([
+    // Recognizer-missed spellings from doudouOUC's B1 probe: the literal
+    // phrase is present, no inert proof applies, so the backstop denies.
+    "X='git commit --amend --no-edit'; $X",
+    "trap 'git commit --amend --no-edit' EXIT",
+    "echo 'git commit --amend --no-edit' | cat | bash",
+    "env -u FOO -S 'git commit --amend --no-edit'",
+    // The phrase exists only in the wrapper-stripped expansion: zero raw
+    // occurrences are unclassifiable, not vacuously inert.
+    "bash -c '--amend' git commit",
+  ])('denies an unproven literal phrase: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+
+  it.each([
+    "echo 'git commit --amend'",
+    "grep 'git commit --amend' file.txt",
+    'git status # git commit --amend',
+    "cat <<'EOF'\ngit commit --amend\nEOF",
+    // No phrase at all: the backstop must not fire on unrelated commands.
+    'git status',
+    'git commit -m "fix"',
+    "echo 'set $IFS'",
+  ])('allows provably inert or phrase-free commands: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(false);
+  });
+
+  it('keeps recognizer denials that the raw phrase test cannot see', () => {
+    // Quote-split spellings the base regex never matched stay denied by the
+    // recognizer layer alone.
+    expect(
+      commandContainsGitAmend('git${IFS}commit${IFS}--amend --no-edit'),
+    ).toBe(true);
+    expect(
+      commandContainsGitAmend("bash -c $'git commit --amend\\x3btrue'"),
+    ).toBe(true);
+  });
+
+  // R9-1: the heredoc owner is resolved quote-aware per operator, every body
+  // on the opener line is read, and the LAST here-string is the one bash
+  // feeds to the program. Each body hides the phrase behind ANSI-C quoting,
+  // so only the shell-fed heredoc/here-string arms can see it.
+  it.each([
+    "echo \"a << b\" && bash <<'EOF'\ngit commit $'--amend' --no-edit\nEOF",
+    "bash <<'A' <<'B'\necho hi\nA\ngit commit $'--amend' --no-edit\nB",
+    "bash <<< 'echo hi' <<< $'git\\x20commit\\x20--amend --no-edit'",
+  ])('reads the body the shell actually executes: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+
+  // R10-2: a path-qualified program word may be any executable the caller
+  // placed there; the inert certificate is for bare allowlisted names only.
+  // The bare-name rows in the allow table above must stay allowed.
+  it.each([
+    "./cat <<'EOF'\ngit commit --amend\nEOF",
+    "/bin/cat <<'EOF'\ngit commit --amend\nEOF",
+    "/tmp/grep 'git commit --amend' f.txt",
+    "./echo 'git commit --amend'",
+  ])(
+    'refuses the inert certificate for a path-qualified program: %s',
+    (command) => {
+      expect(commandContainsGitAmend(command)).toBe(true);
+    },
+  );
+});
+
+// R1-1: wrapper spellings that really amend HEAD (witnessed with bash 5 and
+// git 2.x) but whose payload the old scans mislocated — an operand read as
+// the program, an option value skipped, a cluster tail read as an attached
+// payload bash never takes. Each row must be denied by the recognizer.
+describe('commandContainsGitAmend wrapper payload attribution (#16075 R1-1)', () => {
+  it.each([
+    // The acceptance row: the outer shell removes the backslashes before
+    // bash reads the payload, so the payload is `git commit --amend`.
+    'bash -c git\\ commit\\ --amend',
+    // xargs value flags consume their operand; the program follows it.
+    "ls | xargs -I {} sh -c 'git commit -m x --amend'",
+    "ls | xargs -n 1 bash -c 'git commit -m x --amend'",
+    // A glued redirection's target is not the program.
+    ">log bash -c 'git commit -m x --amend'",
+    "2>/dev/null bash -c $'git\\x20commit\\x20--amend'",
+    // env's -u consumes HOME; -S carries the payload behind it.
+    "env -u HOME -S $'git commit --am\\x65nd'",
+    // util-linux su spells -c as --command / --session-command (su(1)).
+    "su --command $'git commit --am\\x65nd'",
+    "su --session-command $'git commit --am\\x65nd'",
+    "su --command=$'git\\x20commit\\x20--amend'",
+    // bash reads letters after `c` as options, never as an attached payload
+    // (witnessed: `bash -c'…'` errors); the position is unclassifiable.
+    "find . -exec bash -ce $'git\\x20commit\\x20--amend' {} \\;",
+    // -o consumes its option name before -c reads the next word.
+    "sudo bash -o posix -c $'git commit --am\\x65nd'",
+    "ksh -o errexit -c $'git\\x20commit\\x20--amend'",
+    // setsid is a transparent prefix; the heredoc body is bash's program.
+    "setsid bash <<'EOF'\ngit commit --amend\nEOF",
+    // A process substitution is the script a stdin shell runs; its text is
+    // generated, so the position fails closed (witnessed to amend).
+    "bash <(printf $'git\\x20commit\\x20--amend')",
+    // A substitution body decodes to text with real separators before the
+    // producer shell writes it.
+    "echo $(printf $'git\\x20commit\\x20--amend') | bash",
+    // >| is the clobber-override redirection, not a pipe: one command.
+    'git >| /dev/null commit --amend',
+    'git <> /dev/null commit --amend',
+    // An unresolved expansion in payload position can be `--`, making the
+    // FOLLOWING word the command; no program is provable, so fail closed.
+    "bash -c $TERM $'git\\x20commit\\x20--amend'",
+  ])('denies a wrapper spelling that really amends: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+
+  it.each([
+    // An ANSI-C word in a plain argument is data: the recognizer must not
+    // decode it into a phantom invocation.
+    "grep $'git\\x20commit\\x20--amend' file.txt",
+    // A bare shell operand of xargs/find receives data, not a program.
+    'ls | xargs sh',
+    'find . -name bash',
+    // A decodable ANSI-C payload is readable text, not an unresolvable
+    // expansion: an inert one stays allowed.
+    "bash -c $'echo hi'",
+    "echo x && bash -c $'echo hi'",
+  ])('keeps inert wrapper-adjacent text allowed: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(false);
+  });
+});
+
+// R12-1 follow-up: `xargs -L N` carries its value as a detached word (GNU
+// `L:`), so the program is the word after it. The optional-value table used to
+// hold `-L`, which left the position unclassifiable and failed closed: every
+// `xargs -L N <program>` pipeline answered "amend" (#16075).
+describe('commandContainsGitAmend xargs value-flag attribution', () => {
+  it.each([
+    'find . -name "*.log" | xargs -L 5 rm',
+    'ls | xargs -L 2 echo',
+    'echo x | xargs -L 5 rm',
+    'find . -name "*.log" | xargs -L5 rm',
+    'find . -name "*.log" | xargs -n 1 rm',
+    'ls | xargs --max-lines 5 rm',
+  ])('reads the program after the value: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(false);
+  });
+
+  it.each([
+    'ls | xargs -L 5 git commit --amend',
+    "ls | xargs -L 5 sh -c 'git commit --amend'",
+    'ls | xargs -L5 git commit --amend',
+    'ls | xargs --max-lines 5 git commit -m x --amend',
+  ])('still sees an amend behind the value: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+
+  // `-e`/`-l` keep an OPTIONAL attached value, so a detached word there cannot
+  // be told from the program: that position stays fail-closed on purpose.
+  it.each([
+    'ls | xargs -e END rm',
+    'ls | xargs -l rm',
+    'ls | xargs -e END git commit --amend',
+  ])('still fails closed on a detached optional value: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+});
+
+// R1-1 (second round): constructs whose argv or data flow the hand-rolled
+// model cannot positively compute. Each row returns `false` at 3375347b8 while
+// real bash amends, so the recogniser now reads the construct both ways and
+// fails closed when neither reading proves the command amend-free.
+describe('commandContainsGitAmend fails closed on unprovable constructs', () => {
+  it.each([
+    // printf splices `%s` from its literal argument.
+    "printf 'g%s commit --amend' it | bash",
+    // A quoted `-c` payload keeps its backslashes for the printf that decodes
+    // them; the raw reading and the unescaped one both have to be analysed.
+    'bash -c "printf \'git\\x20commit\\x20--amend\' | bash"',
+    // A redirection glued to the shell, or between the shell and `-c`, does not
+    // hide the payload.
+    'bash<<\'X\' -c "git commit -C HEAD --amend"',
+    'bash 2>/dev/null -c "git commit -C HEAD --amend"',
+    // script's `-t` takes an ATTACHED value; `-c` still follows.
+    "script -t/dev/null -c $'git commit --am\\x65nd'",
+    // Pathname expansion decides the program/subcommand/flag word.
+    'git commi? --amend',
+    'git commit --?mend',
+    // IFS decides how the expansion word-splits.
+    "IFS=:; X='git:commit:--amend'; $X",
+    // An unset expansion expands to nothing, gluing the decisive words.
+    "A='git commit'; $A$UNSET_VAR --amend",
+    // Options between the shell and `-c`; a shell-fed heredoc; a fed payload
+    // shifted by the producer's own option word.
+    "bash -c -x 'git commit --amend'",
+    "cat <<'EOF' | cat | bash\ngit commit --amend\nEOF",
+    "echo -n 'cd /b && git commit --amend' | bash",
+  ])('denies a construct the model cannot compute: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+
+  it.each([
+    // The narrowing may only add denials: the inert and allowlisted shapes the
+    // base guard already kept have to stay amend-free.
+    "cat <<'EOF'\ngit commit --amend\nEOF",
+    'git status; echo done',
+    "grep $'git\\x20commit\\x20--amend' file.txt",
+    // A static value that is not git stays allowed, IFS or not.
+    "IFS=:; X='git:status'; $X",
+    // An assignment word in argument position sets nothing.
+    'echo X=ls; $X',
+  ])('keeps a computable or inert command allowed: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(false);
+  });
+});
+
+// R12-1 (second round): the static value proof may only trust a name when the
+// command has no OTHER construct that writes it.
+describe('commandContainsGitAmend static value proof is not a proof', () => {
+  it.each([
+    "X=ls; read X <<< $'git commit --am\\x65nd'; $X",
+    "mapfile -t X <<< $'git commit --amend'; $X",
+    "IFS=:; X='git:commit:--amend'; $X",
+  ])('denies a name written outside NAME=value: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+
+  // A program word that resolves to static text does not make the REST of the
+  // command static: `$Y` in flag position can still be `--amend`
+  // (#16075 review, R12-1 second round).
+  it.each([
+    "X='git commit'; Y='--amend'; $X $Y",
+    "X='git'; Y='commit --amend'; $X $Y",
+  ])(
+    'denies a static program with an expansion in flag position: %s',
+    (command) => {
+      expect(commandContainsGitAmend(command)).toBe(true);
+    },
+  );
+
+  it.each([
+    // Quoted message data is inert, and a static program with plain flags is
+    // not an amend.
+    "X='git commit'; $X -m 'msg'",
+    "X='git commit'; $X -m 'fix: --amend'",
+  ])('keeps a static program with inert arguments allowed: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(false);
+  });
+});
+
+// R8-2 / R10-1: a trailing `\c` in an ANSI-C word stays literal. Consuming
+// the closing quote as its operand left the quote state open and swallowed
+// the rest of the line, hiding both the amend and the file operations.
 describe('ANSI-C words ending in a literal trailing \\c', () => {
   it('keeps the redirect visible after the word', () => {
     expect(
@@ -854,6 +1107,12 @@ describe('ANSI-C words ending in a literal trailing \\c', () => {
       '/tmp',
     );
     expect(ops.map((op) => op.filePath)).toContain('/etc/passwd');
+  });
+
+  it('still decodes \\c with a real operand letter', () => {
+    expect(commandContainsGitAmend("git commit -m $'fix \\cZ' --amend")).toBe(
+      true,
+    );
   });
 });
 
@@ -891,3 +1150,58 @@ describe('fully quoted wrapper payload stays visible to op extraction', () => {
 // R12-1 (#16075): an expanded program word is an amend only when its assigned
 // value can yield `git commit --amend` (or is genuinely unresolvable), not for
 // every assigned name.
+describe('expanded program word resolves the assigned value', () => {
+  it.each([
+    'X="git status"; $X',
+    'PY=python; $PY --version',
+    'X="echo hi"; $X',
+    '$UNSET_VAR --version',
+  ])('allows a non-amend expansion: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(false);
+  });
+
+  it.each([
+    "X='git commit --amend --no-edit'; $X",
+    'X=git; $X commit --amend',
+    'X=git; X+=; $X commit --amend',
+    "X+=$'git\\x20commit\\x20--amend'; $X",
+    'git commit${IFS}--amend',
+  ])('denies an expansion that can amend: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+});
+
+// R1-1 (#16075): the recognizer must not answer "not an amend" for constructs
+// its model does not model; each row really amends HEAD under real bash.
+describe('recognizer closes the unmodelled amend spellings', () => {
+  it.each([
+    "timeout .5s bash -c $'git\\x20commit\\x20--amend'",
+    "exec -a foo bash -c $'git\\x20commit\\x20--amend'",
+    "env -S 'git' commit --amend",
+    "script -I /dev/null -c $'git\\x20commit\\x20--amend'",
+    "X+=$'git\\x20commit\\x20--amend'; $X",
+    'git commit -m x\\ #y --amend',
+    "bash<<'EOF'\ngit commit --amend\nEOF",
+    'bash<<<"git commit \'--amend\'"',
+    'echo "git commit $\'--amend\'" | cat | bash',
+    "printf 'git\\x20commit\\x20--amend' | bash",
+    "find . -exec bash +o posix -c 'git commit --am'end \\;",
+    "bash -c -x 'git commit --amend'",
+  ])('denies an amend the model used to miss: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+
+  it.each([
+    "bash -c $'echo hi'",
+    "timeout 5 bash -c $'echo hi'",
+    "env -S 'echo hi'",
+    "exec -a foo bash -c 'echo hi'",
+    'git status # git commit --amend',
+    "cat <<'EOF'\ngit commit --amend\nEOF",
+    "echo 'git commit --amend'",
+    "printf 'echo hi' | bash",
+    'git commit -m "x #y" --no-edit',
+  ])('keeps the inert twin allowed: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(false);
+  });
+});

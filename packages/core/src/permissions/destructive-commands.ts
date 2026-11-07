@@ -19,7 +19,13 @@
  */
 
 import type { Content, Part } from '@google/genai';
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
+import {
+  amendSegmentRelocations,
+  amendSegmentsForExemption,
+  commandContainsGitAmend,
+  stripShellQuotes,
+} from './shell-semantics.js';
 
 /**
  * Destructive git commands that discard local work.
@@ -31,13 +37,6 @@ const DESTRUCTIVE_GIT_PATTERNS: readonly RegExp[] = Object.freeze([
   /\bgit\s+clean\s+-[a-zA-Z]*f/,
   /\bgit\s+stash\s+drop\b/,
 ]);
-
-/**
- * `git commit --amend` is blocked unless the target commit was made by the
- * agent in this session. Session tracking is managed externally via
- * {@link registerSessionCommit} and {@link isAmendOfSessionCommit}.
- */
-const GIT_AMEND_PATTERN = /\bgit\s+commit\s+--amend\b/;
 
 /**
  * IaC destroy commands that tear down infrastructure.
@@ -74,19 +73,6 @@ const DISCARD_KEYWORDS: readonly RegExp[] = Object.freeze([
  */
 export function userMentionsDiscard(userPrompt: string): boolean {
   return DISCARD_KEYWORDS.some((kw) => kw.test(userPrompt));
-}
-
-/**
- * Strip one layer of shell quoting from a command string so destructive
- * patterns inside `bash -c "git reset --hard"` or `sh -c 'git clean -fd'`
- * are still detected.
- */
-function stripShellQuotes(command: string): string {
-  return command.replace(
-    /(?:^|\s)(?:bash|sh|zsh|fish|dash|ksh)\s+-[a-zA-Z]*c\s+(?:"([^"]*)"|'([^']*)')/g,
-    (_match, dq: string | undefined, sq: string | undefined) =>
-      ' ' + (dq ?? sq ?? ''),
-  );
 }
 
 /**
@@ -152,18 +138,121 @@ export function registerSessionCommit(sha: string): void {
 }
 
 /**
- * Check whether a `git commit --amend` targets a commit made this session.
- * Reads the current HEAD commit SHA and checks against registered session commits.
+ * Which repository a recognised amend actually targets (#16075 R9, B2).
+ * `null` means the command relocates the repository in a way this guard
+ * cannot statically resolve — the session exemption must then fail closed.
  */
-export function isAmendOfSessionCommit(cwd: string): boolean {
+interface AmendTarget {
+  /** Directory to run `git rev-parse HEAD` in. */
+  cwd: string;
+  /** Explicit git directory, when the command names one. */
+  gitDir?: string;
+}
+
+/**
+ * A static literal absolute path: no quotes, spaces, variables, tildes, or
+ * shell metacharacters. Anything else cannot be resolved without running
+ * shell expansion, which this guard must not do.
+ */
+const STATIC_ABSOLUTE_PATH = /^\/[A-Za-z0-9._/-]+$/;
+
+/**
+ * Resolve the repository an amend targets. Relocations are read ONLY from
+ * the compound segment that carries the amend, quote-aware: a `-C` inside a
+ * commit message, in an adjacent segment, or in a heredoc body is not a
+ * relocation, and a `-C` after the `commit` subcommand is git-commit's own
+ * reuse-message option. `cd`/`pushd` segments shift the cwd the amend runs
+ * under; subshells and dynamic cd targets fail closed (#16075 review, R7-2
+ * fix-induced).
+ *
+ * Deliberately narrow: exactly one relocation flag, with a static literal
+ * absolute path. Stacked or mixed flags (`-C a -C b`, `--git-dir` plus
+ * `--work-tree`), relative paths, and non-literal values all refuse the
+ * exemption rather than guess which HEAD gets amended. Commands without
+ * relocations keep the historical cwd-only answer.
+ */
+function resolveAmendTarget(cwd: string, command: string): AmendTarget | null {
+  const analysis = amendSegmentsForExemption(command, cwd);
+  if (analysis.kind === 'untrackable') return null;
+
+  let target: AmendTarget;
+  if (analysis.segments.length === 0) {
+    // The amend lives in a carrier the exemption walk does not attribute
+    // (su -c, env -S, xargs, find -exec, a process substitution, …). Its
+    // repository cannot be resolved to a registered HEAD, so the exemption
+    // fails closed rather than guess (#16075 review, R7-2).
+    return null;
+  } else {
+    const perSegment = analysis.segments.map(
+      ({ segment, cwd: segCwd, inherited }) => ({
+        // A carrier's prefix relocation (`GIT_DIR=B/.git bash -c '…'`) applies
+        // to the inner amend exactly as if it were spelled there; merge it with
+        // the segment's own relocations before the exactly-one rule (#16075
+        // review, R7-2).
+        relocations: [
+          ...(inherited ?? []),
+          ...amendSegmentRelocations(segment),
+        ],
+        cwd: segCwd,
+      }),
+    );
+    const relocated = perSegment.filter((s) => s.relocations.length > 0);
+    if (relocated.length === 0) {
+      // Plain amends: every one must run under the same cwd.
+      if (new Set(perSegment.map((s) => s.cwd)).size !== 1) return null;
+      target = { cwd: perSegment[0]!.cwd };
+    } else if (
+      perSegment.length === 1 &&
+      relocated[0]!.relocations.length === 1
+    ) {
+      const { flag, value } = relocated[0]!.relocations[0]!;
+      if (!STATIC_ABSOLUTE_PATH.test(value)) return null;
+      if (flag === '-C') target = { cwd: value };
+      else if (flag === '--git-dir') target = { cwd, gitDir: value };
+      // --work-tree moves the checkout, not HEAD: the amended repository is
+      // still the one discovered from the segment's cwd, which a leading
+      // `cd` may have moved (#16075 R11-1).
+      else target = { cwd: perSegment[0]!.cwd };
+    } else {
+      // Several amending segments, or stacked relocations: ambiguous.
+      return null;
+    }
+  }
+  return target;
+}
+
+/**
+ * Check whether a `git commit --amend` targets a commit made this session.
+ * Reads the current HEAD commit SHA of the repository the command actually
+ * targets and checks against registered session commits. Without a command,
+ * or with no repo-relocation flags, that is `cwd`'s HEAD exactly as before;
+ * a relocation this guard cannot resolve statically refuses the exemption
+ * (#16075 R9, B2).
+ */
+export function isAmendOfSessionCommit(cwd: string, command?: string): boolean {
   if (sessionCommitShas.size === 0) return false;
+  const target =
+    command === undefined ? { cwd } : resolveAmendTarget(cwd, command);
+  if (target === null) return false;
   try {
-    const headSha = execSync('git rev-parse HEAD', {
-      cwd,
-      encoding: 'utf-8',
-      timeout: 5000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
+    const headSha =
+      target.gitDir !== undefined
+        ? execFileSync(
+            'git',
+            ['--git-dir', target.gitDir, 'rev-parse', 'HEAD'],
+            {
+              cwd: target.cwd,
+              encoding: 'utf-8',
+              timeout: 5000,
+              stdio: ['ignore', 'pipe', 'ignore'],
+            },
+          ).trim()
+        : execSync('git rev-parse HEAD', {
+            cwd: target.cwd,
+            encoding: 'utf-8',
+            timeout: 5000,
+            stdio: ['ignore', 'pipe', 'ignore'],
+          }).trim();
     return sessionCommitShas.has(headSha);
   } catch {
     return false;
@@ -216,7 +305,10 @@ export function isDestructiveCommand(
     }
   }
 
-  if (GIT_AMEND_PATTERN.test(expanded) && !isAmendOfSessionCommit(cwd)) {
+  if (
+    commandContainsGitAmend(command) &&
+    !isAmendOfSessionCommit(cwd, command)
+  ) {
     return {
       blocked: true,
       reason:
