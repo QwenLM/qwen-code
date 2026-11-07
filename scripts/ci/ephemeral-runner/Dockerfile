@@ -10,7 +10,7 @@ ARG PIP_INDEX_URL=https://pypi.org/simple
 RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
     && apt-get update -o Acquire::http::Timeout=30 \
     && apt-get install -y --no-install-recommends \
-      build-essential ca-certificates curl gh git git-lfs jq libicu72 \
+      build-essential ca-certificates curl file gh git git-lfs jq libicu72 \
       libkrb5-3 libssl3 libunwind8 python3 python3-pip python3-venv \
       sudo tmux unzip zip zlib1g \
     && rm -rf /var/lib/apt/lists/* \
