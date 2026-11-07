@@ -8860,6 +8860,48 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'emits a max_session_turns marker on the default loop, where the turn ends without a model request (#15325)',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([{ type: LlmEventType.MaxSessionTurns }]),
+      );
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Second question',
+          'prompt-turn-cap-marker',
+        ),
+      ).resolves.toBe(0);
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'system',
+            subtype: 'max_session_turns',
+            data: expect.objectContaining({
+              maxSessionTurns: expect.any(Number),
+            }),
+          }),
+        ]),
+      );
+    },
+  );
+
   // Intended difference: headless charges a drain item one turn, while the
   // client counts each of its rounds, and only the shared loop honours the
   // client's limit.

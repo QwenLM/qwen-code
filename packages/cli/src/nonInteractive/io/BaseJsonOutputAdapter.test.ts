@@ -168,6 +168,7 @@ function createMockConfig(): Config {
   return {
     getSessionId: vi.fn().mockReturnValue('test-session-id'),
     getModel: vi.fn().mockReturnValue('test-model'),
+    getMaxSessionTurns: vi.fn().mockReturnValue(1),
   } as unknown as Config;
 }
 
@@ -878,6 +879,20 @@ describe('BaseJsonOutputAdapter', () => {
         input_tokens: 100,
         output_tokens: 50,
       });
+    });
+
+    it('should emit a system message for MaxSessionTurns', () => {
+      adapter.processEvent({ type: LlmEventType.MaxSessionTurns });
+
+      expect(adapter.emittedMessages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'system',
+            subtype: 'max_session_turns',
+            data: { maxSessionTurns: 1 },
+          }),
+        ]),
+      );
     });
 
     it('should ignore events after finalization', () => {
