@@ -33,3 +33,40 @@
 .navigation:not([hidden]) {
   display: flex;
 }
+
+.pinnedPrompt {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  z-index: 3;
+  display: flex;
+  justify-content: flex-end;
+  width: min(
+    100% - 40px,
+    var(--chat-content-width, var(--chat-regular-content-width, 1000px))
+  );
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.pinnedPromptText {
+  display: -webkit-box;
+  max-width: 80%;
+  padding: 4px 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+@media (max-height: 600px) {
+  .pinnedPromptText {
+    -webkit-line-clamp: 1;
+  }
+}

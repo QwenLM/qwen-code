@@ -77,8 +77,8 @@ export function followRangeFromRows(
 
 export const TranscriptViewport = forwardRef<
   MessageListHandle,
-  MessageListProps
->(function TranscriptViewport(props, ref) {
+  MessageListProps & { pinnedPrompt?: boolean }
+>(function TranscriptViewport({ pinnedPrompt, ...props }, ref) {
   const { onCanScrollToBottomChange } = props;
   const { t } = useI18n();
   const viewport = useTranscriptViewport(props.messages, t);
@@ -110,10 +110,12 @@ export const TranscriptViewport = forwardRef<
     selectSearchHit,
     continueLive,
   } = viewport;
+  const turnNavigation =
+    viewport.navigation.mode === 'ready' ||
+    viewport.navigation.mode === 'loading';
   const globalNavigation =
     !props.hideSessionTimeline &&
-    (viewport.navigation.mode === 'ready' ||
-      viewport.navigation.mode === 'loading') &&
+    turnNavigation &&
     viewport.navigation.effectiveTurnCount >=
       SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
   const root = useRef<HTMLDivElement>(null);
@@ -201,7 +203,8 @@ export const TranscriptViewport = forwardRef<
   };
 
   const blockOrdinal = useMemo(() => {
-    if (!globalNavigation) return undefined;
+    if (!globalNavigation && !(pinnedPrompt && turnNavigation))
+      return undefined;
     const navigation = viewport.navigation;
     const map = new Map<string, number>();
     for (const page of navigation.indexPages.values())
@@ -213,43 +216,83 @@ export const TranscriptViewport = forwardRef<
       if (turn.blockId) map.set(turn.blockId, navigation.totalTurns + index);
     });
     return map;
-  }, [globalNavigation, viewport.navigation]);
-  const [follow, setFollow] = useState<TurnFollowRange | undefined>(undefined);
+  }, [globalNavigation, pinnedPrompt, turnNavigation, viewport.navigation]);
+  // The prompt row of a long turn can leave the virtualizer's overscan, so the
+  // mounted rows alone cannot say which turn they belong to.
+  const turnOrdinal = useMemo(() => {
+    if (!blockOrdinal) return undefined;
+    const map = new Map<string, number>();
+    let ordinal: number | undefined;
+    for (const message of messages) {
+      const ids = message.sourceBlockIds ?? [];
+      for (const id of ids) ordinal = blockOrdinal.get(id) ?? ordinal;
+      if (ordinal !== undefined) for (const id of ids) map.set(id, ordinal);
+    }
+    return map;
+  }, [blockOrdinal, messages]);
+  const [follow, setFollow] = useState<
+    (TurnFollowRange & { promptInView: boolean }) | undefined
+  >(undefined);
   const followFrame = useRef<number | undefined>(undefined);
   const updateFollow = useCallback(() => {
     const scroll = scroller();
-    if (!scroll || !blockOrdinal || !navigationVisible) {
+    if (
+      !scroll ||
+      !blockOrdinal ||
+      !turnOrdinal ||
+      !(navigationVisible || pinnedPrompt)
+    ) {
       setFollow(undefined);
       return;
     }
     const rect = scroll.getBoundingClientRect();
-    const next = followRangeFromRows(
-      rows().map((row) => {
-        let ordinal: number | undefined;
-        for (const id of row.dataset.sourceBlockIds?.split(',') ?? []) {
-          const mapped = blockOrdinal.get(id);
-          if (
-            mapped !== undefined &&
-            (ordinal === undefined || mapped < ordinal)
-          )
-            ordinal = mapped;
-        }
-        const bounds = row.getBoundingClientRect();
-        return { top: bounds.top, bottom: bounds.bottom, ordinal };
-      }),
-      rect.top,
-      rect.bottom,
-    );
+    const measured = rows().map((row) => {
+      const ids = row.dataset.sourceBlockIds?.split(',') ?? [];
+      let ordinal: number | undefined;
+      for (const id of ids) {
+        const mapped = turnOrdinal.get(id);
+        if (mapped !== undefined && (ordinal === undefined || mapped < ordinal))
+          ordinal = mapped;
+      }
+      const bounds = row.getBoundingClientRect();
+      return {
+        top: bounds.top,
+        bottom: bounds.bottom,
+        ordinal,
+        // A turn's collapse and outputs rows carry its prompt's block id too.
+        prompts: row.dataset.messageRowKey?.startsWith('msg:')
+          ? ids.map((id) => blockOrdinal.get(id))
+          : [],
+      };
+    });
+    const range = followRangeFromRows(measured, rect.top, rect.bottom);
+    const next = range && {
+      ...range,
+      promptInView: measured.some(
+        (row) =>
+          row.prompts.includes(range.current) &&
+          row.bottom > rect.top &&
+          row.top < rect.bottom,
+      ),
+    };
     setFollow((previous) =>
       previous &&
       next &&
       previous.start === next.start &&
       previous.end === next.end &&
-      previous.current === next.current
+      previous.current === next.current &&
+      previous.promptInView === next.promptInView
         ? previous
         : next,
     );
-  }, [scroller, rows, blockOrdinal, navigationVisible]);
+  }, [
+    scroller,
+    rows,
+    blockOrdinal,
+    turnOrdinal,
+    navigationVisible,
+    pinnedPrompt,
+  ]);
   const scheduleFollow = useCallback(() => {
     if (followFrame.current !== undefined) return;
     followFrame.current = requestAnimationFrame(() => {
@@ -383,6 +426,16 @@ export const TranscriptViewport = forwardRef<
       restoring.current = false;
     };
   }, [messages, viewKey, historical, viewport.target, capture, rows, scroller]);
+
+  const pinnedLabel =
+    pinnedPrompt && follow && !follow.promptInView
+      ? ([...viewport.navigation.indexPages.values()]
+          .flatMap((page) => page.turns)
+          .find((entry) => entry.ordinal === follow.current)?.label ??
+        viewport.navigation.provisionalTurns[
+          follow.current - viewport.navigation.totalTurns
+        ]?.label)
+      : undefined;
 
   const load = (direction: 'older' | 'newer') => {
     if (loadFrame.current !== undefined) return;
@@ -595,6 +648,16 @@ export const TranscriptViewport = forwardRef<
                 : {})}
             />
           </TurnCallsProvider>
+          {pinnedLabel && (
+            <div className={styles.pinnedPrompt} aria-hidden="true">
+              <div
+                className={styles.pinnedPromptText}
+                data-pinned-turn-prompt={follow?.current}
+              >
+                {pinnedLabel}
+              </div>
+            </div>
+          )}
           {deletion && !historical && (
             <MessageDeletionToolbar controls={deletion} />
           )}
