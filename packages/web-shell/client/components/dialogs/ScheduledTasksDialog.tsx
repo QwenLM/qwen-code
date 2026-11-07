@@ -1879,6 +1879,19 @@ export function ScheduledTasksDialog({
                 disabled={submitting}
               />
             )}
+            {!deliveryAvailable && !sameDelivery(delivery, editedDelivery) && (
+              <button
+                type="button"
+                className={styles.secondaryButton}
+                disabled={submitting}
+                onClick={() => {
+                  setDelivery(editedDelivery);
+                  setFormError(null);
+                }}
+              >
+                {t('scheduledTasks.delivery.discardChanges')}
+              </button>
+            )}
 
             {runDestination === 'per_run' && (
               <div className={styles.routingFields}>
@@ -2124,7 +2137,11 @@ export function ScheduledTasksDialog({
               )}
             </div>
 
-            {formError && <div className={styles.formError}>{formError}</div>}
+            {formError && (
+              <div className={styles.formError} role="alert">
+                {formError}
+              </div>
+            )}
 
             <div className={styles.formActions}>
               <button
@@ -2170,7 +2187,7 @@ export function ScheduledTasksDialog({
           const title = task.name || task.prompt;
           const deliveryLabel = task.delivery
             ? `${t('scheduledTasks.delivery.cardPrefix')} ${task.delivery.target.channelName} · ${t(`scheduledTasks.delivery.${task.delivery.target.type}`)} · ${task.delivery.target.id}`
-            : t('scheduledTasks.delivery.off');
+            : undefined;
           const busy = busyId === taskKey(task);
           return (
             <div
@@ -2235,9 +2252,11 @@ export function ScheduledTasksDialog({
                   {task.prompt}
                 </div>
               )}
-              <div className={styles.cardPrompt} title={deliveryLabel}>
-                {deliveryLabel}
-              </div>
+              {task.delivery && (
+                <div className={styles.cardPrompt} title={deliveryLabel}>
+                  {deliveryLabel}
+                </div>
+              )}
               {task.gate && (
                 <div className={styles.cardPrompt} title={task.gate}>
                   {t('scheduledTasks.gate.cardPrefix')} {task.gate}

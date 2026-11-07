@@ -8,13 +8,13 @@ Issue #16516 exposes an existing daemon capability: delivering the final respons
 
 ## Design
 
-Reuse the SDK `DaemonChannelDelivery` contract on task reads and create/update requests. An omitted update preserves delivery; `null` explicitly clears it. Only actual user changes send the field, matching the existing gate field. Configuring a Channel never enables task delivery automatically.
+Reuse the SDK `DaemonChannelDelivery` contract on task reads and create/update requests. An omitted update preserves delivery; `null` explicitly clears it. Only actual user changes send the field, matching the existing gate field. Configuring a Channel never enables task delivery automatically. Destination IDs remain opaque: the form warns about leading or trailing whitespace and offers an explicit action to remove it, without changing IDs automatically.
 
-The form offers delivery off or a Channel instance with a user/chat target ID. Observed contacts supply optional suggestions; labels are accompanied by Channel name, target type, and raw ID to distinguish similar names. Manual IDs remain possible because discovery is not authorization. Cards show the saved Channel, type, and ID even when discovery fails or the daemon no longer advertises delivery.
+The form offers delivery off or a Channel instance with a user/chat target ID. Observed contacts supply optional suggestions and load only when a delivery target is selected; labels are accompanied by Channel name, target type, and raw ID to distinguish similar names. Manual IDs remain possible because discovery is not authorization. Cards show the saved Channel, type, and ID even when discovery fails or the daemon no longer advertises delivery. Cards without a saved target omit the delivery line.
 
 Configured Channels come from the existing workspace-aware Channel hook. Add a Web Shell action for the existing observed-contacts route, scoped with the same explicit workspace ID as task mutations. Only top-level users and groups become suggestions; threads/topics are not delivery target types. A form workspace change clears its draft destination and invalidates old discovery results. Editing stays pinned to the task's workspace. Missing or untrusted workspaces cannot silently fall back to another workspace.
 
-Gate editing on `channel_delivery` and discovery on `workspace_channel_observed_contacts`. Preserve saved values across capability loss, missing Channels, stale contacts, and request failures. Show understandable loading, failure, empty, and unavailable states. A changed draft cannot be silently ignored after capability loss.
+Gate editing on `channel_delivery` and discovery on `workspace_channel_observed_contacts`. Preserve saved values across capability loss, missing Channels, stale contacts, and request failures. Show understandable loading, failure, empty, and unavailable states. Only a successfully loaded Channel list establishes that a saved Channel is missing; an initial, loading, or failed request does not. A changed draft cannot be silently ignored after capability loss. The user can discard the unsaved delivery change, restoring the original target (or no target when creating a task), and save other form changes without sending a delivery update.
 
 Delivery requires `persistent`, including the current-session option. Selecting `per_run` never silently clears delivery or switches the chosen mode. Explain the restriction and reject submission until the user explicitly clears delivery or chooses a persistent mode. An unchanged existing destination can be saved without rediscovery.
 
@@ -28,8 +28,10 @@ Focused action tests verify route scoping and error handling. Form and browser c
 
 ## Open questions and follow-up
 
-There are no blocking implementation questions. Raw IDs are displayed to resolve the identity ambiguity raised in triage. Maintainer issue housekeeping and actual Channel delivery/retry enhancements are separate work. Stop before publishing the prepared PR as requested.
+There are no blocking implementation questions. Delivery guarantees, durable retries, and failure alerts remain separate work.
 
 ## Browser evidence
 
 Verified with the repository Playwright harness and intercepted daemon responses: [before](assets/scheduled-task-channel-delivery/before.png), [delivery form](assets/scheduled-task-channel-delivery/after-details.png), [saved task](assets/scheduled-task-channel-delivery/after-card.png), and [mobile restriction and long ID](assets/scheduled-task-channel-delivery/mobile.png). These screenshots demonstrate the UI, not real provider receipt.
+
+The built CLI was also verified with all six delivery scenarios selected by `@smoke`, including [explicit whitespace removal](assets/scheduled-task-channel-delivery/after-whitespace.png) and [a card after delivery is cleared](assets/scheduled-task-channel-delivery/after-cleared-card.png).

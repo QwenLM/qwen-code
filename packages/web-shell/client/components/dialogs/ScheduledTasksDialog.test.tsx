@@ -2723,9 +2723,26 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     ],
   };
 
+  const channelInstances = Object.fromEntries(
+    ['team-bot', 'ops-bot'].map((name) => [
+      name,
+      {
+        name,
+        config: { type: 'dingtalk' },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'stopped' as const },
+      },
+    ]),
+  );
+
   beforeEach(() => {
     useDaemonChannels.mockReturnValue({
-      channels: { 'team-bot': {} },
+      data: {
+        catalog: [],
+        snapshot: { revision: '1', instances: channelInstances },
+      },
+      channels: channelInstances,
       loading: false,
       error: undefined,
       reload: vi.fn(),
@@ -2766,6 +2783,62 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     await flush();
     enterPrompt();
   }
+
+  it.each([
+    { label: 'not started', loading: false, error: undefined },
+    { label: 'loading', loading: true, error: undefined },
+    { label: 'failed', loading: false, error: new Error('load failed') },
+  ])(
+    'does not mark an undiscovered saved Channel missing when $label',
+    async ({ loading, error }) => {
+      useDaemonChannels.mockReturnValue({
+        data: undefined,
+        channels: {},
+        loading,
+        error,
+        reload: vi.fn(),
+      });
+      await mount([baseTask({ delivery })], options);
+      click(document.querySelector('[aria-label="Edit"]'));
+      await flush();
+      expect(document.body.textContent).not.toContain(
+        'No Channels are configured',
+      );
+      expect(document.body.textContent).not.toContain(
+        'This Channel is unavailable',
+      );
+      expect(channelSelect().value).toBe('team-bot');
+      expect(targetInput().disabled).toBe(false);
+    },
+  );
+
+  it('does not discover contacts before delivery is enabled', async () => {
+    await mount([], options);
+    await openCreate();
+    expect(actions.listChannelObservedContacts).not.toHaveBeenCalled();
+    select(channelSelect(), 'team-bot');
+    await flush();
+    expect(actions.listChannelObservedContacts).toHaveBeenCalledTimes(1);
+    input(targetInput(), 'first');
+    input(targetInput(), 'second');
+    await flush();
+    expect(actions.listChannelObservedContacts).toHaveBeenCalledTimes(1);
+    select(channelSelect(), '');
+    await flush();
+    expect(actions.listChannelObservedContacts).toHaveBeenCalledTimes(1);
+    expect(suggestionSelect()).toBeNull();
+    select(channelSelect(), 'team-bot');
+    await flush();
+    expect(actions.listChannelObservedContacts).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([true, false])(
+    'omits the delivery row on an unconfigured card with capability %s',
+    async (deliveryAvailable) => {
+      await mount([baseTask({})], { ...options, deliveryAvailable });
+      expect(container?.textContent).not.toContain('Delivery off');
+    },
+  );
 
   it('keeps delivery off by default even with configured Channels', async () => {
     await mount([], options);
@@ -2810,11 +2883,15 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     );
     expect(actions.listChannelObservedContacts).toHaveBeenCalledWith(undefined);
     expect(useDaemonChannels).toHaveBeenCalledWith(
-      expect.objectContaining({ workspaceCwd: '/repo/main', enabled: true }),
+      expect.objectContaining({
+        workspaceCwd: '/repo/main',
+        enabled: true,
+        autoLoad: true,
+      }),
     );
   });
 
-  it('permits a manual target without observed-contact capability', async () => {
+  it('preserves a manually entered raw ID without observed-contact capability', async () => {
     await mount([], { ...options, observedContactsAvailable: false });
     await openCreate();
     select(findSessionModeSelect()!, 'dedicated');
@@ -2825,14 +2902,15 @@ describe('ScheduledTasksDialog Channel delivery', () => {
       )!,
       'user',
     );
-    input(targetInput(), 'manual-user');
+    input(targetInput(), ' manual-user ');
+    expect(findButton('Remove surrounding whitespace')?.disabled).toBe(false);
     click(findButton('Create'));
     await flush();
     expect(actions.listChannelObservedContacts).not.toHaveBeenCalled();
     expect(actions.createScheduledTask.mock.calls[0]?.[0]).toMatchObject({
       delivery: {
         kind: 'channel',
-        target: { channelName: 'team-bot', type: 'user', id: 'manual-user' },
+        target: { channelName: 'team-bot', type: 'user', id: ' manual-user ' },
       },
     });
   });
@@ -2868,6 +2946,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
 
   it('explains an empty Channel list without opting the task into delivery', async () => {
     useDaemonChannels.mockReturnValue({
+      data: { catalog: [], snapshot: { revision: '1', instances: {} } },
       channels: {},
       loading: false,
       error: undefined,
@@ -2887,15 +2966,23 @@ describe('ScheduledTasksDialog Channel delivery', () => {
   it('round-trips a saved target absent from discovery and omits unchanged delivery', async () => {
     const saved = {
       ...delivery,
-      target: { ...delivery.target, id: 'old-group' },
+      target: { ...delivery.target, id: ' old-group ' },
     };
-    await mount([baseTask({ delivery: saved })], options);
+    let stored = baseTask({ delivery: saved });
+    await mount([stored], options);
+    actions.listScheduledTasks.mockImplementation(async () => [stored]);
+    actions.updateScheduledTask.mockImplementation(
+      async (_id: string, patch: Partial<MockTask>) => {
+        stored = { ...stored, ...patch };
+        return stored;
+      },
+    );
     expect(container?.textContent).toContain('team-bot');
     expect(container?.textContent).toContain('old-group');
     click(document.querySelector('[aria-label="Edit"]'));
     await flush();
     expect(channelSelect().value).toBe('team-bot');
-    expect(targetInput().value).toBe('old-group');
+    expect(targetInput().value).toBe(' old-group ');
     input(
       document.querySelector<HTMLInputElement>('input[maxlength="200"]')!,
       'New name',
@@ -2905,9 +2992,13 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
       'delivery',
     );
+    expect(stored).toMatchObject({ name: 'New name', delivery: saved });
     click(document.querySelector('[aria-label="Edit"]'));
     await flush();
-    expect(targetInput().value).toBe('old-group');
+    expect(targetInput().value).toBe(' old-group ');
+    expect(
+      document.querySelector<HTMLInputElement>('input[maxlength="200"]')!.value,
+    ).toBe('New name');
   });
 
   it('updates a saved target and explicitly clears delivery with null', async () => {
@@ -2940,7 +3031,11 @@ describe('ScheduledTasksDialog Channel delivery', () => {
   });
 
   it('preserves saved delivery without capability and offers no discovery', async () => {
-    await mount([baseTask({ delivery })], {
+    const saved = {
+      ...delivery,
+      target: { ...delivery.target, id: ' group-1 ' },
+    };
+    await mount([baseTask({ delivery: saved })], {
       ...options,
       deliveryAvailable: false,
     });
@@ -2948,6 +3043,8 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     click(document.querySelector('[aria-label="Edit"]'));
     await flush();
     expect(actions.listChannelObservedContacts).not.toHaveBeenCalled();
+    expect(targetInput().value).toBe(' group-1 ');
+    expect(findButton('Remove surrounding whitespace')?.disabled).toBe(true);
     click(findButton('Save'));
     await flush();
     expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
@@ -2963,14 +3060,37 @@ describe('ScheduledTasksDialog Channel delivery', () => {
       await flush();
       if (operation === 'clear') select(channelSelect(), '');
       else input(targetInput(), 'group-2');
+      input(
+        document.querySelector<HTMLInputElement>('input[maxlength="200"]')!,
+        'Keep this name',
+      );
+      enterPrompt();
       await rerender({ ...options, deliveryAvailable: false });
+      expect(document.querySelector('[role="alert"]')).toBeNull();
       click(findButton('Save'));
       await flush();
       expect(actions.updateScheduledTask).not.toHaveBeenCalled();
-      expect(document.body.textContent).toContain(
+      expect(document.querySelector('[role="alert"]')?.textContent).toContain(
         'does not support Channel delivery changes',
       );
-      expect(document.body.textContent).toContain('delivery');
+      const discard = findButton('Discard delivery changes');
+      expect(discard).toBeDefined();
+      click(discard);
+      expect(targetInput().value).toBe('group-1');
+      expect(document.querySelector('[role="alert"]')).toBeNull();
+      click(findButton('Save'));
+      await flush();
+      expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+        't1',
+        expect.objectContaining({
+          name: 'Keep this name',
+          prompt: 'Summarize the project',
+        }),
+        undefined,
+      );
+      expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
+        'delivery',
+      );
     },
   );
 
@@ -2984,6 +3104,9 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     click(findButton('Save'));
     await flush();
     expect(actions.updateScheduledTask).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'A new session every run does not support Channel delivery.',
+    );
     select(channelSelect(), '');
     click(findButton('Save'));
     await flush();
@@ -3016,7 +3139,9 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     await act(async () => oldContacts.resolve(contacts));
     await flush();
     select(channelSelect(), 'team-bot');
-    expect(suggestionSelect()?.textContent ?? '').not.toContain('group-1');
+    await flush();
+    expect(suggestionSelect()).not.toBeNull();
+    expect(suggestionSelect().textContent).not.toContain('group-1');
     select(channelSelect(), '');
     click(findButton('Create'));
     await flush();
@@ -3075,7 +3200,183 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     click(document.querySelector('[aria-label="Edit"]'));
     await flush();
     expect(targetInput().value).toBe('group-1');
-    expect(document.body.textContent).toContain('unavailable');
+    expect(document.body.textContent).toContain('Could not load Channels.');
+    expect(document.body.textContent).toContain('Could not load suggestions.');
+    expect(document.body.textContent).not.toContain(
+      'This Channel is unavailable',
+    );
+    expect(targetInput().disabled).toBe(false);
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
+      'delivery',
+    );
+  });
+
+  it('allows a create draft to discard delivery after capability loss without losing other fields', async () => {
+    const { rerender } = await mount([], options);
+    await openCreate();
+    select(findSessionModeSelect()!, 'dedicated');
+    select(channelSelect(), 'team-bot');
+    input(targetInput(), 'group-2');
+    await rerender({ ...options, deliveryAvailable: false });
+    click(findButton('Create'));
+    await flush();
+    expect(actions.createScheduledTask).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'does not support Channel delivery changes',
+    );
+    click(findButton('Discard delivery changes'));
+    expect(channelSelect()).toBeNull();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    click(findButton('Create'));
+    await flush();
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: 'Summarize the project',
+        sessionMode: 'persistent',
+      }),
+      undefined,
+    );
+    expect(actions.createScheduledTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      'delivery',
+    );
+  });
+
+  it.each(['', '   '])(
+    'refuses an empty destination ID %j before creating a task',
+    async (id) => {
+      await mount([], options);
+      await openCreate();
+      select(findSessionModeSelect()!, 'dedicated');
+      select(channelSelect(), 'team-bot');
+      input(targetInput(), id);
+      click(findButton('Create'));
+      await flush();
+      expect(actions.createScheduledTask).not.toHaveBeenCalled();
+      expect(document.querySelector('[role="alert"]')?.textContent).toBe(
+        'Choose a Channel and enter a destination ID.',
+      );
+    },
+  );
+
+  it('resets the destination type and ID when switching Channels', async () => {
+    await mount([], options);
+    await openCreate();
+    select(findSessionModeSelect()!, 'dedicated');
+    select(channelSelect(), 'team-bot');
+    const typeSelect = document.querySelector<HTMLSelectElement>(
+      '#scheduled-task-delivery-type',
+    )!;
+    select(typeSelect, 'user');
+    input(targetInput(), 'user-1');
+    select(channelSelect(), 'ops-bot');
+    expect(typeSelect.value).toBe('chat');
+    expect(targetInput().value).toBe('');
+    click(findButton('Create'));
+    await flush();
+    expect(actions.createScheduledTask).not.toHaveBeenCalled();
+    input(targetInput(), 'ops-group');
+    click(findButton('Create'));
+    await flush();
+    expect(actions.createScheduledTask.mock.calls[0]?.[0]).toMatchObject({
+      delivery: {
+        kind: 'channel',
+        target: { channelName: 'ops-bot', type: 'chat', id: 'ops-group' },
+      },
+    });
+  });
+
+  it('ignores an old contact response after discovery capability changes without remounting the form', async () => {
+    const oldContacts = deferred<typeof contacts>();
+    const currentContacts = {
+      users: [],
+      groups: [{ ...contacts.groups[0]!, id: 'current-group' }],
+    };
+    actions.listChannelObservedContacts
+      .mockReturnValueOnce(oldContacts.promise)
+      .mockResolvedValue(currentContacts);
+    const { rerender } = await mount([baseTask({ delivery })], options);
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+    const originalInput = targetInput();
+    await rerender({ ...options, observedContactsAvailable: false });
+    expect(targetInput()).toBe(originalInput);
+    await rerender(options);
+    expect(actions.listChannelObservedContacts).toHaveBeenCalledTimes(2);
+    expect(suggestionSelect()).not.toBeNull();
+    expect(suggestionSelect().textContent).toContain('current-group');
+    await act(async () => oldContacts.resolve(contacts));
+    await flush();
+    expect(targetInput()).toBe(originalInput);
+    expect(suggestionSelect().textContent).toContain('current-group');
+    expect(suggestionSelect().textContent).not.toContain('group-1');
+  });
+
+  it.each(['create', 'update'])(
+    'offers explicit surrounding whitespace removal on %s',
+    async (operation) => {
+      const rawId = '  group with spaces  ';
+      await mount(
+        operation === 'create' ? [] : [baseTask({ delivery })],
+        options,
+      );
+      if (operation === 'create') {
+        await openCreate();
+        select(findSessionModeSelect()!, 'dedicated');
+        select(channelSelect(), 'team-bot');
+      } else {
+        click(document.querySelector('[aria-label="Edit"]'));
+        await flush();
+      }
+      input(targetInput(), rawId);
+      expect(targetInput().value).toBe(rawId);
+      expect(document.body.textContent).toContain(
+        'This ID has leading or trailing whitespace, which will be sent as part of the destination.',
+      );
+      const removeWhitespace = findButton('Remove surrounding whitespace');
+      expect(removeWhitespace).toBeDefined();
+      click(removeWhitespace);
+      expect(targetInput().value).toBe('group with spaces');
+      expect(findButton('Remove surrounding whitespace')).toBeUndefined();
+      click(findButton(operation === 'create' ? 'Create' : 'Save'));
+      await flush();
+      const payload =
+        operation === 'create'
+          ? actions.createScheduledTask.mock.calls[0]?.[0]
+          : actions.updateScheduledTask.mock.calls[0]?.[1];
+      expect(payload).toMatchObject({
+        delivery: {
+          kind: 'channel',
+          target: {
+            channelName: 'team-bot',
+            type: 'chat',
+            id: 'group with spaces',
+          },
+        },
+      });
+    },
+  );
+
+  it('marks a saved Channel unavailable only after discovery confirms it is missing', async () => {
+    useDaemonChannels.mockReturnValue({
+      data: { catalog: [], snapshot: { revision: '1', instances: {} } },
+      channels: {},
+      loading: false,
+      error: undefined,
+    });
+    const saved = {
+      ...delivery,
+      target: { ...delivery.target, id: ' group-1 ' },
+    };
+    await mount([baseTask({ delivery: saved })], options);
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+    expect(channelSelect().value).toBe('team-bot');
+    expect(targetInput().value).toBe(' group-1 ');
+    expect(findButton('Remove surrounding whitespace')?.disabled).toBe(true);
+    expect(targetInput().disabled).toBe(true);
+    expect(document.body.textContent).toContain('This Channel is unavailable');
     click(findButton('Save'));
     await flush();
     expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(

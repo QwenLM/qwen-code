@@ -47,6 +47,9 @@ async function install(
     tasks?: DaemonScheduledTask[];
     capable?: boolean;
     multiWorkspace?: boolean;
+    channelsFail?: boolean;
+    contactsFail?: boolean;
+    deferPrimaryContacts?: boolean;
   } = {},
 ) {
   const scenario = createWebShellDaemonScenario({
@@ -101,6 +104,7 @@ async function install(
     body: Record<string, unknown>;
   }> = [];
   const reads: string[] = [];
+  const pendingContacts: Array<() => Promise<void>> = [];
   let contactsVisible = true;
   await page.route('**/*', async (route) => {
     if (route.request().isNavigationRequest()) return route.continue();
@@ -113,38 +117,59 @@ async function install(
     const channelName = secondary ? 'secondary-bot' : 'release-bot';
     if (path.endsWith('/channels')) {
       reads.push(path);
+      if (options.channelsFail)
+        return route.fulfill({
+          status: 500,
+          json: { error: 'Channels temporarily unavailable' },
+        });
       return route.fulfill({
         json: {
           revision: '1',
-          instances: {
-            [channelName]: {
-              name: channelName,
-              config: { type: 'dingtalk' },
-              secrets: {},
-              startsWithServe: false,
-              runtime: { state: 'connected' },
-            },
-          },
+          instances: Object.fromEntries(
+            (secondary ? [channelName] : [channelName, 'ops-bot']).map(
+              (name) => [
+                name,
+                {
+                  name,
+                  config: { type: 'dingtalk' },
+                  secrets: {},
+                  startsWithServe: false,
+                  runtime: { state: 'connected' },
+                },
+              ],
+            ),
+          ),
         },
       });
     }
     if (path.endsWith('/channel/observed-contacts')) {
       reads.push(path);
-      return route.fulfill({
-        json: {
-          users: [],
-          groups: contactsVisible
-            ? ['chat-1', 'chat-2'].map((id) => ({
-                channelName,
-                id: secondary ? `secondary-${id}` : id,
-                label: 'Release team',
-                lastObservedAt: '2026-11-07T00:00:00Z',
-                users: [],
-                topics: [],
-              }))
-            : [],
-        },
-      });
+      if (options.contactsFail)
+        return route.fulfill({
+          status: 500,
+          json: { error: 'Contacts temporarily unavailable' },
+        });
+      const respond = () =>
+        route.fulfill({
+          json: {
+            users: [],
+            groups: contactsVisible
+              ? ['chat-1', 'chat-2'].map((id) => ({
+                  channelName,
+                  id: secondary ? `secondary-${id}` : id,
+                  label: 'Release team',
+                  lastObservedAt: '2026-11-07T00:00:00Z',
+                  users: [],
+                  topics: [],
+                }))
+              : [],
+          },
+        });
+      if (options.deferPrimaryContacts && !secondary) {
+        pendingContacts.push(respond);
+        return;
+      }
+      return respond();
     }
     const match = path.match(/\/scheduled-tasks(?:\/([^/]+))?$/);
     if (!match) return route.fallback();
@@ -172,6 +197,8 @@ async function install(
   return {
     writes,
     reads,
+    releaseContacts: () =>
+      Promise.all(pendingContacts.splice(0).map((respond) => respond())),
     hideContacts: () => {
       contactsVisible = false;
     },
@@ -199,7 +226,7 @@ async function selectDelivery(page: Page) {
     .selectOption(JSON.stringify(target));
 }
 
-test('creates, preserves, changes and explicitly clears scheduled delivery', async ({
+test('creates, preserves, changes and explicitly clears scheduled delivery @smoke', async ({
   page,
   baseURL,
 }, info) => {
@@ -224,6 +251,27 @@ test('creates, preserves, changes and explicitly clears scheduled delivery', asy
   await page.screenshot({
     path: info.outputPath('delivery-create-details.png'),
   });
+  await page
+    .getByRole('combobox', { name: 'Destination type', exact: true })
+    .selectOption('user');
+  await page
+    .getByRole('textbox', { name: 'Destination ID', exact: true })
+    .fill('previous-user');
+  await page
+    .getByRole('combobox', { name: 'Delivery Channel', exact: true })
+    .selectOption('ops-bot');
+  await expect(
+    page.getByRole('textbox', { name: 'Destination ID', exact: true }),
+  ).toHaveValue('');
+  await expect(
+    page.getByRole('combobox', { name: 'Destination type', exact: true }),
+  ).toHaveValue('chat');
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect(page.getByRole('alert')).toHaveText(
+    'Choose a Channel and enter a destination ID.',
+  );
+  expect(state.writes).toHaveLength(0);
+  await selectDelivery(page);
   await page.getByRole('button', { name: 'Create', exact: true }).click();
   await expect.poll(() => state.writes.length).toBe(1);
   expect(state.writes[0]).toMatchObject({
@@ -252,7 +300,23 @@ test('creates, preserves, changes and explicitly clears scheduled delivery', asy
     .selectOption('user');
   await page
     .getByRole('textbox', { name: 'Destination ID', exact: true })
-    .fill('api-only-user');
+    .fill(' api-only-user ');
+  await expect(
+    page.getByText(
+      'This ID has leading or trailing whitespace, which will be sent as part of the destination.',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await page
+    .getByRole('button', { name: 'Remove surrounding whitespace', exact: true })
+    .scrollIntoViewIfNeeded();
+  await page.screenshot({ path: info.outputPath('delivery-whitespace.png') });
+  await page
+    .getByRole('button', { name: 'Remove surrounding whitespace', exact: true })
+    .click();
+  await expect(
+    page.getByRole('textbox', { name: 'Destination ID', exact: true }),
+  ).toHaveValue('api-only-user');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect.poll(() => state.writes.length).toBe(3);
   expect(state.writes[2]!.body.delivery).toEqual({
@@ -269,10 +333,15 @@ test('creates, preserves, changes and explicitly clears scheduled delivery', asy
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect.poll(() => state.writes.length).toBe(4);
   expect(state.writes[3]!.body.delivery).toBeNull();
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expect(page.getByTestId('scheduled-tasks-page')).not.toContainText(
+    'Delivery off',
+  );
+  await page.screenshot({ path: info.outputPath('delivery-cleared-card.png') });
   expect(errors).toEqual([]);
 });
 
-test('requires an explicit resolution of per-run delivery and supports mobile layout', async ({
+test('requires an explicit resolution of per-run delivery and supports mobile layout @smoke', async ({
   page,
   baseURL,
 }, info) => {
@@ -319,7 +388,7 @@ test('requires an explicit resolution of per-run delivery and supports mobile la
   expect(state.writes[0]!.body).not.toHaveProperty('delivery');
 });
 
-test('preserves saved targets without delivery capability', async ({
+test('preserves saved targets without delivery capability @smoke', async ({
   page,
   baseURL,
 }) => {
@@ -343,13 +412,32 @@ test('preserves saved targets without delivery capability', async ({
   expect(state.reads).toEqual([]);
 });
 
-test('resets selection and scopes discovery and creation when workspace changes', async ({
+test('ignores late contacts and scopes discovery and creation when workspace changes @smoke', async ({
   page,
   baseURL,
 }) => {
-  const state = await install(page, baseURL!, { multiWorkspace: true });
+  const state = await install(page, baseURL!, {
+    multiWorkspace: true,
+    deferPrimaryContacts: true,
+  });
   await createForm(page);
-  await selectDelivery(page);
+  await page
+    .getByRole('combobox', { name: 'Delivery Channel', exact: true })
+    .selectOption('release-bot');
+  await expect
+    .poll(
+      () =>
+        state.reads.filter((path) =>
+          path.endsWith('/channel/observed-contacts'),
+        ).length,
+    )
+    .toBe(1);
+  await expect(
+    page.getByText('Loading suggested destinations…', { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole('textbox', { name: 'Destination ID', exact: true })
+    .fill('primary-manual');
   await page
     .getByRole('combobox', { name: 'Workspace', exact: true })
     .selectOption('secondary');
@@ -367,6 +455,16 @@ test('resets selection and scopes discovery and creation when workspace changes'
     type: 'chat',
     id: 'secondary-chat-2',
   };
+  await expect(
+    page.getByRole('combobox', { name: 'Suggested destination', exact: true }),
+  ).toContainText('secondary-chat-2');
+  const lateResponse = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname ===
+      '/workspace/channel/observed-contacts',
+  );
+  await state.releaseContacts();
+  await (await lateResponse).finished();
   await page
     .getByRole('combobox', { name: 'Suggested destination', exact: true })
     .selectOption(JSON.stringify(secondaryTarget));
@@ -382,4 +480,75 @@ test('resets selection and scopes discovery and creation when workspace changes'
   expect(state.reads).toContain(
     `/workspaces/${encodeURIComponent(secondaryCwd)}/channels`,
   );
+});
+
+test('loads contacts only for delivery and accepts manual IDs when discovery fails @smoke', async ({
+  page,
+  baseURL,
+}) => {
+  const state = await install(page, baseURL!, { contactsFail: true });
+  await createForm(page);
+  const channels = page.getByRole('combobox', {
+    name: 'Delivery Channel',
+    exact: true,
+  });
+  await expect(channels).toContainText('release-bot');
+  expect(
+    state.reads.filter((path) => path.endsWith('/channel/observed-contacts')),
+  ).toEqual([]);
+  await channels.selectOption('release-bot');
+  await expect(
+    page.getByText(
+      'Could not load suggestions. You can still enter a destination ID; existing delivery is preserved.',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText('Loading suggested destinations…', { exact: true }),
+  ).not.toBeVisible();
+  const id = page.getByRole('textbox', { name: 'Destination ID', exact: true });
+  await expect(id).toBeEnabled();
+  await id.fill('manual-chat');
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(1);
+  expect(state.writes[0]!.body.delivery).toEqual({
+    kind: 'channel',
+    target: { ...target, id: 'manual-chat' },
+  });
+});
+
+test('preserves saved delivery when Channels and contact discovery fail @smoke', async ({
+  page,
+  baseURL,
+}) => {
+  const state = await install(page, baseURL!, {
+    tasks: [task({ delivery })],
+    channelsFail: true,
+    contactsFail: true,
+  });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(
+    page.getByText(
+      'Could not load Channels. Close and reopen the form to retry; existing delivery is preserved.',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText('This Channel is unavailable in this workspace.', {
+      exact: false,
+    }),
+  ).not.toBeVisible();
+  const id = page.getByRole('textbox', { name: 'Destination ID', exact: true });
+  await expect(id).toBeEnabled();
+  await expect(id).toHaveValue('chat-1');
+  await page
+    .getByRole('textbox', { name: 'Name', exact: true })
+    .fill('Renamed after discovery failed');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(1);
+  expect(state.writes[0]!.body).not.toHaveProperty('delivery');
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(
+    page.getByRole('textbox', { name: 'Destination ID', exact: true }),
+  ).toHaveValue('chat-1');
 });

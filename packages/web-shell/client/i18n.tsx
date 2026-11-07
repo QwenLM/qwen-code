@@ -2118,11 +2118,15 @@ const EN: Messages = {
   'scheduledTasks.delivery.hint':
     'Send the final response of a successful scheduled run to this destination. Delivery depends on the Channel and does not guarantee receipt.',
   'scheduledTasks.delivery.unavailable':
-    'This daemon does not support Channel delivery changes. Existing delivery is preserved.',
+    'This daemon does not support Channel delivery changes.',
+  'scheduledTasks.delivery.discardChanges': 'Discard delivery changes',
   'scheduledTasks.delivery.perRun':
     'A new session every run does not support Channel delivery. Choose a persistent session or turn delivery off before saving.',
   'scheduledTasks.delivery.required':
     'Choose a Channel and enter a destination ID.',
+  'scheduledTasks.delivery.whitespace':
+    'This ID has leading or trailing whitespace, which will be sent as part of the destination.',
+  'scheduledTasks.delivery.trimWhitespace': 'Remove surrounding whitespace',
   'scheduledTasks.delivery.loading': 'Loading Channels…',
   'scheduledTasks.delivery.loadingContacts': 'Loading suggested destinations…',
   'scheduledTasks.delivery.channelsFailed':
@@ -7023,23 +7027,26 @@ const ZH: Messages = {
   'scheduledTasks.group.hint': '每次运行产生的会话都会放入这个分组。',
   'scheduledTasks.group.nameRequired': '请输入新分组名称。',
   'scheduledTasks.routing.loading': '正在加载模型和分组…',
-  'scheduledTasks.delivery.channel': '投递 Channel',
+  'scheduledTasks.delivery.channel': '投递频道',
   'scheduledTasks.delivery.off': '不投递',
   'scheduledTasks.delivery.hint':
-    '将成功完成的定时任务的最终回复发送到此目标。投递依赖 Channel，不保证送达。',
-  'scheduledTasks.delivery.unavailable':
-    '此 daemon 不支持修改 Channel 投递配置。已有配置会保留。',
+    '将成功完成的定时任务的最终回复发送到此目标。投递依赖频道，不保证送达。',
+  'scheduledTasks.delivery.unavailable': '此 daemon 不支持修改频道投递配置。',
+  'scheduledTasks.delivery.discardChanges': '放弃投递修改',
   'scheduledTasks.delivery.perRun':
-    '每次运行新建会话不支持 Channel 投递。请在保存前选择持久会话，或关闭投递。',
-  'scheduledTasks.delivery.required': '请选择 Channel 并输入目标 ID。',
-  'scheduledTasks.delivery.loading': '正在加载 Channel…',
+    '每次新会话不支持频道投递。请在保存前选择固定会话，或关闭投递。',
+  'scheduledTasks.delivery.required': '请选择频道并输入目标 ID。',
+  'scheduledTasks.delivery.whitespace':
+    '此 ID 的首尾含有空白字符，它们会作为目标 ID 的一部分原样发送。',
+  'scheduledTasks.delivery.trimWhitespace': '去除首尾空白',
+  'scheduledTasks.delivery.loading': '正在加载频道…',
   'scheduledTasks.delivery.loadingContacts': '正在加载目标候选…',
   'scheduledTasks.delivery.channelsFailed':
-    '无法加载 Channel。请关闭并重新打开表单重试；已有投递配置会保留。',
+    '无法加载频道。请关闭并重新打开表单重试；已有投递配置会保留。',
   'scheduledTasks.delivery.noChannels':
-    '此工作区尚未配置 Channel。请先在 Channel 页面中配置。',
+    '此工作区尚未配置频道。请先在频道页面中配置。',
   'scheduledTasks.delivery.targetUnavailable':
-    '此 Channel 在当前工作区不可用。已保存的目标会保留；你可以选择其他 Channel 或关闭投递。',
+    '此频道在当前工作区不可用。已保存的目标会保留；你可以选择其他频道或关闭投递。',
   'scheduledTasks.delivery.notObserved':
     '此目标不在最近的候选中。其 ID 会保留；联系人发现不是投递的必要条件。',
   'scheduledTasks.delivery.suggestion': '目标候选',
@@ -7047,7 +7054,7 @@ const ZH: Messages = {
   'scheduledTasks.delivery.contactsFailed':
     '无法加载候选。你仍可输入目标 ID；已有投递配置会保留。',
   'scheduledTasks.delivery.suggestionsHint':
-    '候选来自最近观察到的联系人。你也可以输入 Channel 支持的已知用户或群 ID。',
+    '候选来自最近观察到的联系人。你也可以输入频道支持的已知用户或群 ID。',
   'scheduledTasks.delivery.type': '目标类型',
   'scheduledTasks.delivery.id': '目标 ID',
   'scheduledTasks.delivery.user': '用户',

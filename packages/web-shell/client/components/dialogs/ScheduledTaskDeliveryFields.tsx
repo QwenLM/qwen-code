@@ -11,6 +11,7 @@ import {
   useWorkspaceActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { Button } from '../ui/button';
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '../ui/field';
 import { Input } from '../ui/input';
 import styles from './ScheduledTasksDialog.module.css';
@@ -64,12 +65,13 @@ export function ScheduledTaskDeliveryFields({
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [contactsError, setContactsError] = useState(false);
+  const hasTarget = delivery !== null;
   useEffect(() => {
     let cancelled = false;
     setSuggestions([]);
     setContactsError(false);
     setContactsLoading(false);
-    if (!canDiscover || !observedContactsAvailable) return;
+    if (!canDiscover || !observedContactsAvailable || !hasTarget) return;
     setContactsLoading(true);
     void actions.listChannelObservedContacts(workspaceId).then(
       (contacts) => {
@@ -95,11 +97,18 @@ export function ScheduledTaskDeliveryFields({
     return () => {
       cancelled = true;
     };
-  }, [actions, canDiscover, observedContactsAvailable, workspaceId]);
+  }, [actions, canDiscover, observedContactsAvailable, workspaceId, hasTarget]);
 
   const names = canDiscover ? Object.keys(channels.channels) : [];
+  const channelsReady =
+    canDiscover &&
+    channels.data !== undefined &&
+    !channels.loading &&
+    !channels.error;
   const target = delivery?.target;
-  const unavailableTarget = !!target && !names.includes(target.channelName);
+  const unavailableTarget =
+    !!target && channelsReady && !names.includes(target.channelName);
+  const hasSurroundingWhitespace = !!target && target.id !== target.id.trim();
   const matchingSuggestions = suggestions.filter(
     (suggestion) => suggestion.channelName === target?.channelName,
   );
@@ -150,7 +159,7 @@ export function ScheduledTaskDeliveryFields({
           }
         >
           <option value="">{t('scheduledTasks.delivery.off')}</option>
-          {unavailableTarget && (
+          {target && !names.includes(target.channelName) && (
             <option value={target.channelName}>{target.channelName}</option>
           )}
           {names.map((name) => (
@@ -185,21 +194,18 @@ export function ScheduledTaskDeliveryFields({
             {t('scheduledTasks.delivery.channelsFailed')}
           </FieldDescription>
         )}
-        {canDiscover &&
-          !channels.loading &&
-          !channels.error &&
-          names.length === 0 && (
-            <FieldDescription>
-              {t('scheduledTasks.delivery.noChannels')}
-            </FieldDescription>
-          )}
+        {channelsReady && names.length === 0 && (
+          <FieldDescription>
+            {t('scheduledTasks.delivery.noChannels')}
+          </FieldDescription>
+        )}
       </Field>
       {target && (
         <>
           <FieldDescription className="min-w-0 break-all">
             {identity(target)}
           </FieldDescription>
-          {unavailableTarget && !channels.loading && (
+          {unavailableTarget && (
             <FieldDescription>
               {t('scheduledTasks.delivery.targetUnavailable')}
             </FieldDescription>
@@ -286,8 +292,29 @@ export function ScheduledTaskDeliveryFields({
               id="scheduled-task-delivery-id"
               value={target.id}
               disabled={disabled || !available || unavailableTarget}
+              aria-describedby={
+                hasSurroundingWhitespace
+                  ? 'scheduled-task-delivery-id-whitespace'
+                  : undefined
+              }
               onChange={(event) => updateTarget({ id: event.target.value })}
             />
+            {hasSurroundingWhitespace && (
+              <>
+                <FieldDescription id="scheduled-task-delivery-id-whitespace">
+                  {t('scheduledTasks.delivery.whitespace')}
+                </FieldDescription>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={disabled || !available || unavailableTarget}
+                  onClick={() => updateTarget({ id: target.id.trim() })}
+                >
+                  {t('scheduledTasks.delivery.trimWhitespace')}
+                </Button>
+              </>
+            )}
           </Field>
         </>
       )}
