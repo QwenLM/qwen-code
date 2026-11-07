@@ -477,9 +477,7 @@ export function createJavaManagedAgentProvider(
                   result.permissionRules,
                 ),
               }),
-          ...(result.liveSupported === true
-            ? { liveSupported: true }
-            : {}),
+          ...(result.liveSupported === true ? { liveSupported: true } : {}),
           ...(typeof result.planMode === 'boolean'
             ? { planMode: result.planMode }
             : {}),
@@ -536,10 +534,7 @@ export function createJavaManagedAgentProvider(
     },
     modelChange: {
       async queryOptions(sessionId, request) {
-        const result = await client.getSessionModels(
-          sessionId,
-          request.signal,
-        );
+        const result = await client.getSessionModels(sessionId, request.signal);
         const selection = modelSelection(result.modelSelection);
         if (
           !selection ||
@@ -614,9 +609,7 @@ export function createJavaManagedAgentProvider(
           sessionId,
         );
         if (operation.operationId !== operationId)
-          throw new Error(
-            'Context compression operation identity mismatch',
-          );
+          throw new Error('Context compression operation identity mismatch');
         return operation;
       },
     },
