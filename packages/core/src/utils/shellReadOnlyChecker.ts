@@ -129,14 +129,30 @@ function containsWriteRedirection(command: string): boolean {
   return false;
 }
 
+/** shell-quote operators that take the next word as an input source. */
+const INPUT_REDIRECT_OPS = new Set(['<', '<<<', '<&']);
+
+/**
+ * bash splits words only at space, tab and newline, but shell-quote splits at
+ * every JS whitespace character, so `repo\r-n` would read as `repo` and `-n`.
+ */
+const NON_BASH_WORD_BREAK = /[^\S \t\n]/;
+
 function normalizeTokens(segment: string): string[] {
   const parsed = parse(segment, (key) => `\0${key}`);
   const tokens: string[] = [];
+  // The word after an input redirection is its source, not an argument: in
+  // `git remote show <url> <<<-n` git never receives `-n`.
+  let redirectSource = false;
   for (const token of parsed) {
     if (typeof token === 'string') {
-      tokens.push(token);
+      if (!redirectSource) tokens.push(token);
+      redirectSource = false;
     } else if ('op' in token && token.op === 'glob') {
       tokens.push(`\0${token.pattern}`);
+      redirectSource = false;
+    } else if ('op' in token && INPUT_REDIRECT_OPS.has(token.op)) {
+      redirectSource = true;
     }
   }
   return tokens;
@@ -207,6 +223,24 @@ function evaluateGitRemoteArgs(args: string[]): boolean {
   for (const arg of args) {
     if (BLOCKED_GIT_REMOTE_ACTIONS.has(arg.toLowerCase())) return false;
   }
+  // `git remote show` queries the remote over the network (git-upload-pack)
+  // unless `-n` is given, so without that flag it is not read-only — the
+  // argument can be any URL. `get-url` never connects. git ends option
+  // parsing at `--end-of-options` just as at `--`.
+  const end = args.findIndex(
+    (arg) => arg === '--' || arg === '--end-of-options',
+  );
+  const options = args.slice(0, end < 0 ? args.length : end);
+  // shell-quote leaves bracket globs as plain text, and bash expands one such
+  // as `[--][--]` to a real `--` when the cwd holds a file with that name,
+  // hiding the terminator from the slice above. Any `[` is refused, since
+  // `[]-]` and `[[:punct:]]` match `-` as well. `*`, `?` and brace globs
+  // never get here: the argument guard in isShellCommandReadOnly refuses them.
+  if (
+    action === 'show' &&
+    (!options.includes('-n') || args.some((arg) => arg.includes('[')))
+  )
+    return false;
   return true;
 }
 
@@ -339,6 +373,8 @@ export function isShellCommandReadOnly(command: string): boolean {
   if (typeof command !== 'string' || !command.trim()) {
     return false;
   }
+  // The tokens would not be the words bash hands the command.
+  if (NON_BASH_WORD_BREAK.test(command)) return false;
   if (MALFORMED_CONTROL_OPERATOR.test(command)) return false;
   if (
     /[({;&|]\s*[A-Za-z_][A-Za-z0-9_]*=/.test(command) ||
