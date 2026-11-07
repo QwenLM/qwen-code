@@ -37,6 +37,22 @@ The sidebar trigger, dialog heading, and non-browse submit button all use
 The Recent heading and its region name continue to share the same translation
 key; a separate descriptive region label is outside this copy-only update.
 
+## Sidebar category headers
+
+Pinned, Workspaces, No-workspace sessions, and Recent are peer collapsible
+categories. Their active sidebar headers use the same height, spacing, muted
+text, and trailing expansion chevron, including hover and keyboard-focus reveal
+rules. No-workspace sessions retains its independent saved expansion preference
+and search behavior. Its header in Archived settings keeps the workspace-entry
+presentation.
+
+Chromium comparison with simulated daemon responses (hovering the collapsed
+No-workspace sessions category):
+
+| Before                                                                     | After                                                                   |
+| -------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| ![Workspace-entry header](../../assets/sidebar-category-header-before.png) | ![Peer category header](../../assets/sidebar-category-header-after.png) |
+
 ## Shared UI Contract
 
 Use the TypeScript SDK daemon UI exports as the common boundary:
@@ -91,6 +107,20 @@ The provider creates or attaches a daemon session, subscribes to SSE, keeps the
 last event id on `DaemonSessionClient`, and reconnects the stream by default.
 Callers can disable that with `autoReconnect={false}` for tests or custom
 connection management.
+
+### Deleting selected sessions
+
+Session Overview supports deleting more than 100 selected sessions. It groups
+the selection by owning workspace and sends sequential requests of at most
+100 session IDs through each workspace's client. Successful deletions remain
+accounted for if a later request fails, including cleanup of a deleted current
+session, while the failure is shown in the overview.
+
+The batch size follows the daemon's shared 100-ID request validation for
+session deletion and archiving, including workspace-qualified routes. During
+deletion, per-session and request failures are retained across batches and
+workspaces, regardless of their order. A rejected request stops the remaining
+batches in its workspace; other workspace groups are still processed.
 
 ### Removing composer attachments
 

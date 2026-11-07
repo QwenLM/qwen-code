@@ -1,5 +1,7 @@
 # Release Jobs Off the Hosted Pool
 
+> Superseded for activation by [release runner slots](2026-10-28-release-queue-optimization.md): reserve runner processes on existing shared hosts; an exclusive machine is not required.
+
 [English](2026-10-16-release-jobs-off-hosted-pool.md) | [简体中文](2026-10-16-release-jobs-off-hosted-pool.zh-CN.md)
 
 ## Problem and Scope

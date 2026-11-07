@@ -9,6 +9,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import type {
   ACPToolCall,
   PermissionRequest,
@@ -1453,9 +1454,12 @@ export const ToolLine = memo(function ToolLine({
   // Document exports carry a bounded, safe text preview. Keep the full answer
   // in an expanded row instead of reducing it to the one-line header summary.
   const result =
-    transcriptRenderMode === 'document' && expanded
+    (tool.status === 'failed'
+      ? formatSubscriptionQuotaDisplay(tool.rawOutput, t)
+      : undefined) ??
+    (transcriptRenderMode === 'document' && expanded
       ? (extractText(tool) ?? getToolResultSummary(tool))
-      : getToolResultSummary(tool);
+      : getToolResultSummary(tool));
   const summaryShell = isShellToolName(tool.toolName);
   const description = summaryShell
     ? getToolSummaryDescription(tool, workspaceCwd)

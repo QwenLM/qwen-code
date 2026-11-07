@@ -5,7 +5,7 @@
  */
 
 import path from 'node:path';
-import { promises as fs, unlinkSync } from 'node:fs';
+import { promises as fs, readFileSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
 import type { IQwenOAuth2Client } from './qwenOAuth2.js';
@@ -150,6 +150,14 @@ export class SharedTokenManager {
   private cleanupFunction: (() => void) | null = null;
 
   /**
+   * Ownership token of the lock file this instance currently holds, or null
+   * when it holds no lock. Used to avoid deleting another process's lock.
+   * Refreshes are deduplicated through `refreshPromise`, so a single instance
+   * never holds two locks at once.
+   */
+  private lockOwnerId: string | null = null;
+
+  /**
    * Lock configuration for testing purposes
    */
   private lockConfig: LockConfig = DEFAULT_LOCK_CONFIG;
@@ -181,12 +189,25 @@ export class SharedTokenManager {
     }
 
     this.cleanupFunction = () => {
+      if (this.lockOwnerId === null) {
+        return;
+      }
+
       try {
         const lockPath = this.getLockFilePath();
-        // Use synchronous unlink for process exit handlers
-        unlinkSync(lockPath);
-      } catch (_error) {
-        // Ignore cleanup errors - lock file might not exist or already be cleaned up
+        // Only remove the lock while this process still owns it. Our lock may
+        // have been evicted as stale and replaced by another process's lock.
+        if (readFileSync(lockPath, 'utf8') === this.lockOwnerId) {
+          // Use synchronous unlink for process exit handlers
+          unlinkSync(lockPath);
+        }
+        this.lockOwnerId = null;
+      } catch (error) {
+        // A missing lock means ownership has already ended; any other failure
+        // keeps the token so a later handler invocation can retry.
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          this.lockOwnerId = null;
+        }
       }
     };
 
@@ -708,6 +729,7 @@ export class SharedTokenManager {
       try {
         // Attempt to create lock file atomically (exclusive mode)
         await fs.writeFile(lockPath, lockId, { flag: 'wx' });
+        this.lockOwnerId = lockId;
         return; // Successfully acquired lock
       } catch (error: unknown) {
         if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
@@ -770,12 +792,23 @@ export class SharedTokenManager {
    * @param lockPath - Path to the lock file
    */
   private async releaseLock(lockPath: string): Promise<void> {
+    const ownerId = this.lockOwnerId;
     try {
-      await fs.unlink(lockPath);
+      // Only remove the lock while this process still owns it. A slow refresh
+      // may have let another process evict our lock and take over.
+      if (
+        ownerId !== null &&
+        (await fs.readFile(lockPath, 'utf8')) === ownerId
+      ) {
+        await fs.unlink(lockPath);
+      }
+      this.lockOwnerId = null;
     } catch (error) {
-      // Lock file might already be removed by another process or timeout cleanup
-      // This is not an error condition, but log for debugging
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      // A missing lock means ownership has already ended; any other failure
+      // keeps the token so the exit handler can retry.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.lockOwnerId = null;
+      } else {
         debugLogger.warn(
           `Failed to release lock file ${lockPath}: ${error instanceof Error ? error.message : String(error)}`,
         );

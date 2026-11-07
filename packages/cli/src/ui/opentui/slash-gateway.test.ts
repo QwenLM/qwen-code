@@ -54,7 +54,7 @@ describe('OpenTuiSlashGateway', () => {
       kind: 'dispatched',
       outcome: { kind: 'handled' },
     });
-    expect(dispatcher.handle).toHaveBeenCalledWith('/help');
+    expect(dispatcher.handle).toHaveBeenCalledWith('/help', undefined);
   });
 
   it('rejects dispatches after the queue drains post-attach', async () => {
