@@ -85,13 +85,6 @@ jobs:
       contents: 'read'
     outputs:
       should_run: '${{ steps.perm.outputs.should_run }}'
-      # Real write-permission check on the PR AUTHOR (collaborator-permission
-      # API, not the coarse author_association), computed only on
-      # pull_request_target events; empty on every other event. Consumed by
-      # the triage job's runner routing so a maintainer's fork PR uses the
-      # ECS pool while a read-only collaborator's or org member's fork PR
-      # stays on ephemeral hosted runners.
-      author_can_write: '${{ steps.perm.outputs.author_can_write }}'
       # /verify trust level: 'trusted' when the PR author has write,
       # 'external' when they do not. Both run on the persistent ECS pool
       # (maintainer decision, 2026-07-29: the pool is network-isolated and
@@ -192,7 +185,6 @@ jobs:
           # issues; compare against null rather than truthiness so the shell
           # receives a plain true/false.
           IS_PR: '${{ github.event.issue.pull_request != null }}'
-          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
         run: |-
           set -euo pipefail
           IS_VERIFY=false
@@ -210,18 +202,6 @@ jobs:
             # says the PR is ready to be worth that.
             echo "Automatic PR triage allowed for PR #${PR_NUMBER} after same-repo/precheck gate." >> "$GITHUB_STEP_SUMMARY"
             echo "should_run=true" >> "$GITHUB_OUTPUT"
-            # Runner-routing input for the triage job: the REAL author write
-            # check (author_association admits org members and read-only
-            # collaborators). Fail OPEN on purpose — unlike the deny gates
-            # below, this selects a runner pool, not a decision: an API
-            # hiccup merely routes the triage to a hosted runner, it must
-            # never skip or fail the triage itself.
-            if [ -n "$PR_AUTHOR" ] &&
-               author_perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${PR_AUTHOR}/permission" --jq '.permission' 2>/dev/null)"; then
-              case "$author_perm" in
-                admin|maintain|write) echo "author_can_write=true" >> "$GITHUB_OUTPUT" ;;
-              esac
-            fi
             exit 0
           fi
           case "$EVENT_NAME" in
@@ -483,26 +463,40 @@ jobs:
         }}
     # Triage is a static-analysis agent: it checks out the trusted base repo,
     # reaches the PR/issue only via the API, and must NEVER execute PR-derived
-    # code — its step env carries a write PAT that executed code could read.
-    # This is defended in layers, none of which is a hard boundary on its own
-    # (see the long note on the Qwen step for why a `--yolo` command denylist
-    # cannot be): the skill forbids executing PR code
-    # (.qwen/skills/triage/SKILL.md Rules), the `settings` deny rules block the
-    # direct interpreter/build/network invocations, and the routing below keeps
-    # foreign code off the persistent pool.
-    # Runner routing: the persistent ECS pool serves events whose payload
-    # carries no foreign code — issue triage and same-repo PR events — plus
-    # fork PRs whose author REALLY has write access, per the collaborator-
-    # permission lookup the authorize job already performs (the coarse
-    # author_association would admit org members and read-only collaborators
-    # to this secret-bearing agent; the pool is network-isolated, but a
-    # write-access author is the trust bar for reusing it). authorize is
-    # skipped on the issues/dispatch paths, so the explicit `issues` clause
-    # must stay; there its output is ''. PRs by other fork authors, and
-    # comment/dispatch-triggered reruns (which may target fork PRs), go to
-    # ephemeral hosted runners so a steered agent cannot persist anything
-    # across runs. Forks of this repo fall back to ubuntu-latest as before.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''issues'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || needs.authorize.outputs.author_can_write == ''true'')))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # code. The agent no longer carries a write credential: it reads GitHub
+    # with the job's read-only GITHUB_TOKEN and expresses every write as a
+    # draft that the separate publish-triage job validates and executes with
+    # the bot PAT (see the long note on the Qwen step). The container below
+    # and the per-run workspace sanitize bound what a steered agent could
+    # persist on the reusable pool.
+    # Runner routing: with the write PAT out of the agent environment, every
+    # triage trigger — issues, same-repo and fork PRs, comment reruns,
+    # dispatch — may use the persistent ECS pool. The pool is
+    # maintainer-provided and network-isolated; hosted capacity is the scarce
+    # side. Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED falls back to
+    # ubuntu-latest, which stays safe because the controls are additive.
+    # Forks of this repo fall back to ubuntu-latest as before.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Read-only by construction: the agent's GH_TOKEN is this job's
+    # GITHUB_TOKEN. Every write goes through publish-triage's PAT. The
+    # pre-agent reaction step uses the PAT explicitly (reactions need write).
+    permissions:
+      contents: 'read'
+      issues: 'read'
+      pull-requests: 'read'
+      checks: 'read'
+      actions: 'read'
+    # The agent reads untrusted PR content on a reusable machine. Run the
+    # steps in a container so nothing it does persists on the runner host
+    # beyond the sanitized workspace (same contract as tmux/verify).
+    container:
+      image: 'node:22-bookworm'
+      options: '--init'
+    defaults:
+      run:
+        shell: 'bash'
+    outputs:
+      pr_number: '${{ steps.resolve.outputs.number }}'
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
@@ -531,10 +525,33 @@ jobs:
         )
       )
     steps:
+      # The job runs in a bare node container; gh/jq/git are not in the image.
+      # Same toolchain step as the tmux lane.
+      - name: 'Install triage tools'
+        run: |-
+          set -euo pipefail
+          apt-get update
+          # util-linux provides runuser for the agent launch (tmux/verify
+          # install it explicitly for the same reason).
+          apt-get install -y --no-install-recommends ca-certificates curl git gnupg jq util-linux
+
+          install -d -m 755 /etc/apt/keyrings
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            > /etc/apt/sources.list.d/github-cli.list
+          apt-get update
+          apt-get install -y --no-install-recommends gh
+
+          gh --version
+          git config --global --add safe.directory '*'
+
       - name: 'Acknowledge triage request'
         if: "github.event_name == 'issue_comment'"
         env:
-          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          # Reactions need write scope; the job's GITHUB_TOKEN is read-only.
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           COMMENT_ID: '${{ github.event.comment.id }}'
         run: |-
           gh api \
@@ -619,6 +636,9 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           token: '${{ secrets.GITHUB_TOKEN }}'
+          # The agent reads this workspace; keep even the read-only token out
+          # of .git/config.
+          persist-credentials: false
 
       - name: 'Resolve target number'
         id: 'resolve'
@@ -711,90 +731,95 @@ jobs:
         id: 'ensure_qwen'
         run: |-
           set -euo pipefail
-          if command -v qwen >/dev/null 2>&1; then
-            echo "qwen already installed:"
-          else
-            npm install -g --loglevel=error --no-audit @qwen-code/qwen-code@latest
+          # Install from RUNNER_TEMP: the persistent workspace may hold a
+          # previous run's tree, and npm reads a cwd .npmrc whose settings a
+          # --registry flag does not override (same rule as the tmux lane).
+          if ! command -v qwen >/dev/null 2>&1; then
+            (cd "${RUNNER_TEMP:?}" && npm install -g --loglevel=error --no-audit --registry=https://registry.npmjs.org @qwen-code/qwen-code@latest)
           fi
           qwen --version
           echo "version=$(qwen --version)" >> "${GITHUB_OUTPUT}"
 
-      - name: 'Run Qwen Triage'
-        id: 'triage'
-        uses: 'QwenLM/qwen-code-action@05f81718976f3b7da657422e6e8e4d372b8621d7'
+      # Everything the agent needs that it must NOT fetch with a write
+      # credential: the bot identity for its author filters, the optional
+      # cross-repo direction signal, the draft drop zone, and its settings.
+      - name: 'Prepare agent context'
+        id: 'context'
         env:
-          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
-          REPOSITORY: '${{ github.repository }}'
-          # Per-run agent home so this run's session/memory cannot leak into the
-          # next on the reused self-hosted workspace (reset in "Clean stale
-          # agent state"). Must match the QWEN_HOME computed there.
-          QWEN_HOME: '${{ runner.temp }}/qwen-home'
-        with:
-          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
-          # vars.QWEN_TRIAGE_EFFORT sets model.reasoningEffort in `settings`
-          # below (low|medium|high|xhigh|max; the CLI has no flag). Unset, it
-          # renders "", which the CLI ignores — the provider default.
-          # Pin the action's unconditional global reinstall to the version
-          # this job already runs. Left at `latest`, the action installs with
-          # --prefer-offline and resolves the dist-tag from the runner's
-          # persistent npm cache, which lags npm publishes and has downgraded
-          # the shared ECS box back to a stale release.
-          qwen_cli_version: '${{ steps.ensure_qwen.outputs.version }}'
-          # The input name is `settings` — this action version has no
-          # `settings_json` input. The old `settings_json:` block was silently
-          # dropped ("Unexpected input(s) 'settings_json'" in the run log), so
-          # the agent ran with the full default toolset. Do not rename it back.
-          #
+        run: |-
+          set -euo pipefail
+          QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
+          mkdir -p "$QWEN_HOME"
+          # Under the read-only GITHUB_TOKEN the agent will run with,
+          # `gh api user` returns github-actions[bot]; the skill's duplicate
+          # guard, reopen guard, and review dedup filter on the PAT's bot
+          # login, so resolve it here and pass it in.
+          BOT_LOGIN="$(gh api user --jq '.login')"
+          if [ -z "$BOT_LOGIN" ]; then
+            echo "::error::Cannot resolve the bot identity; refusing to run the agent without it."
+            exit 1
+          fi
+          echo "bot_login=$BOT_LOGIN" >> "$GITHUB_OUTPUT"
+          # Stage 1c's optional cross-repo direction signal. GITHUB_TOKEN is
+          # scoped to this repository, so prefetch with the PAT; a missing
+          # file means "signal unavailable", which the skill accepts.
+          mkdir -p "$RUNNER_TEMP/triage-context"
+          gh api repos/anthropics/claude-code/contents/CHANGELOG.md \
+            -H 'Accept: application/vnd.github.raw+json' \
+            > "$RUNNER_TEMP/triage-context/claude-code-changelog.md" 2>/dev/null ||
+            echo "::warning::CHANGELOG prefetch failed; the skill treats the signal as unavailable."
+          # Draft drop zone: the agent writes actions.jsonl + bodies here;
+          # publish-triage is the only writer to GitHub. RUNNER_TEMP survives
+          # across runs on the persistent pool — clear any previous run's
+          # drafts so a re-run cannot append to stale actions.
+          rm -rf "$RUNNER_TEMP/triage-drafts" "$RUNNER_TEMP/triage-results"
+          mkdir -p "$RUNNER_TEMP/triage-drafts/bodies" "$RUNNER_TEMP/triage-results"
+          chown -R node:node "$GITHUB_WORKSPACE" "$QWEN_HOME" \
+            "$RUNNER_TEMP/triage-drafts" "$RUNNER_TEMP/triage-results"
           # ── What these settings are, and are NOT ────────────────────────────
-          # The action runs `qwen --yolo`, so every permission resolves to
-          # auto-approve EXCEPT a `permissions.deny` match, which the scheduler
-          # errors out before approval mode is consulted (verified in
-          # coreToolScheduler L5 + permissionFlow.needsConfirmation). `tools.core`
-          # additionally filters which tools register at all (fail-safe: an
-          # unlisted tool like web_fetch/web_search/save_memory never loads, so
-          # those network/persistence tool channels are gone). No `sandbox` key
-          # — a deliberate omission, not a capability gap: the ECS pool does run
-          # containers (this workflow's own container jobs, and autofix's
-          # `sandbox: "docker"` agent, both land on those labels). Adding one
-          # here is an open decision, NOT tracked in #9556 — that issue is
-          # scoped to the /review pipeline's execution steps.
+          # The agent runs under --approval-mode yolo, so every permission
+          # resolves to auto-approve EXCEPT a `permissions.deny` match, which
+          # the scheduler errors out before approval mode is consulted.
+          # `tools.core` additionally filters which tools register at all
+          # (fail-safe: an unlisted tool like web_fetch/web_search/save_memory
+          # never loads). No `sandbox` key: the job itself is the container.
           #
-          # ⚠️ A command denylist is NOT a security boundary under --yolo, and
+          # ⚠️ A command denylist is NOT a security boundary under yolo, and
           # is not treated as one here. It is defense-in-depth against the
-          # NORMAL failure (the agent running `npm test`/`npx`/a build because a
-          # prompt implied it) and low-effort injection. It does NOT stop a
+          # NORMAL failure (the agent running `npm test`/`npx`/a build because
+          # a prompt implied it) and low-effort injection. It does NOT stop a
           # determined prompt-injection: `$(...)` substitution is not reliably
-          # deny-matchable (parser-dependent), and even with it blocked, exec
-          # can hide in `sed s///e`, env-var interpreters, etc. — an unwinnable
-          # denylist game. Backtick and `<(` ARE hard-blocked below (verified,
-          # they were free); `$(` and `>(` are not reliably matchable and are
-          # left to the layers below, not papered over with a rule that no-ops.
+          # deny-matchable, and exec can hide in `sed s///e`, env-var
+          # interpreters, etc. Backtick and `<(` ARE hard-blocked below.
           #
           # The REAL controls, in order of strength:
-          #   1. No PR code is ever executed (skill Rules; every legit triage
-          #      command is a gh-API call, a read-only git command, or text
-          #      processing — none touch the PR's tree in an executable way).
-          #   2. Fork PRs run on ephemeral hosted runners (see the triage job
-          #      `runs-on`), bounding persistence/lateral movement.
-          #   3. Stale git exec vectors (hooks/config/aliases) are wiped each
-          #      run (see "Clean stale agent state").
-          # RESIDUAL RISK: the agent still holds a write PAT (GH_TOKEN above),
-          # and under a successful injection it could exfiltrate it or forge bot
-          # writes — it even has a legitimate comment-posting capability. The
-          # structural fix is token isolation (agent runs read-only; a separate
-          # PR-code-free step publishes its drafted output with the PAT, as
-          # publish-tmux already does). Tracked as a follow-up; not yet wired.
+          #   1. No PR code is ever executed (skill Rules; the agent reads the
+          #      PR only through the API and the base checkout).
+          #   2. Token isolation: the agent's GH_TOKEN is the job's read-only
+          #      GITHUB_TOKEN; every write is a draft executed by
+          #      publish-triage with the PAT. There is no write credential in
+          #      the agent environment to exfiltrate, and the model key sits
+          #      behind the loopback proxy started in the run step.
+          #   3. The job container plus the per-run workspace sanitize bound
+          #      persistence on the reusable pool (see "Clean stale agent
+          #      state" and the ownership restores).
+          # A steered agent can still draft malicious content within triage's
+          # intended capability (a wrong review, a misleading comment); that
+          # surface is inherent to the product and reviewed by humans. The
+          # publisher validates shape, not semantics.
           #
-          # The deny list below therefore backs the skill's no-PR-code rule as
-          # a speed bump: interpreters/build tools, shells, exec wrappers,
-          # network binaries, path execution, and the git/gh subcommands that
-          # execute configured commands or materialize PR code. Prefix match is
-          # word-boundary ("npm" blocks `npm test`, not `npmx`); shell redirects
-          # are also checked against the write_file path rules.
-          settings: |-
+          # The deny list below backs the skill's no-PR-code rule as a speed
+          # bump: interpreters/build tools, shells, exec wrappers, network
+          # binaries, path execution, and the git/gh subcommands that execute
+          # configured commands or materialize PR code. Prefix match is
+          # word-boundary ("npm" blocks `npm test`, not `npmx`). It also
+          # blocks `node`, which structurally prevents the agent from running
+          # the publisher itself in CI mode.
+          # vars.QWEN_TRIAGE_EFFORT sets model.reasoningEffort
+          # (low|medium|high|xhigh|max; the CLI has no flag). Unset, it
+          # renders "", which the CLI ignores — the provider default.
+          cat > "$QWEN_HOME/settings.json" <<'SETTINGS_JSON'
             {
               "model": {
                 "reasoningEffort": "${{ vars.QWEN_TRIAGE_EFFORT }}"
@@ -925,7 +950,357 @@ jobs:
                 ]
               }
             }
-          prompt: '/triage ${{ steps.resolve.outputs.number }} --repo ${{ github.repository }}'
+          SETTINGS_JSON
+
+      # Direct CLI launch (the tmux/verify contract), replacing the former
+      # qwen-code-action step: the proxy must live and die in the same step as
+      # the agent, and env -i is what keeps the write credential out. The step
+      # keeps the id `triage` and emits the same `summary` output so 'Check
+      # triage response' stays unchanged.
+      - name: 'Run Qwen Triage'
+        id: 'triage'
+        env:
+          # Upstream model credentials — consumed by the loopback proxy below,
+          # never passed to the agent (it gets the dummy PROXY_TOKEN instead).
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          # The agent's read credential: this job's read-only GITHUB_TOKEN.
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          BOT_LOGIN: '${{ steps.context.outputs.bot_login }}'
+          NUMBER: '${{ steps.resolve.outputs.number }}'
+          REPOSITORY: '${{ github.repository }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          TRIAGE_TIMEOUT_MINUTES: '${{ needs.authorize.outputs.triage_timeout_minutes || 60 }}'
+        run: |-
+          set -euo pipefail
+          if ! command -v qwen >/dev/null 2>&1; then
+            echo "::error::qwen CLI not found on runner"
+            exit 1
+          fi
+
+          # Bypass the runner proxy for qwen itself (it cuts SSE streams and
+          # qwen reads HTTP(S)_PROXY without honoring NO_PROXY), while
+          # restoring it for child gh/git commands the agent spawns. Same
+          # shape as the tmux lane; wrappers live on the container's own disk
+          # so no root-owned files leak onto the host through RUNNER_TEMP.
+          # shellcheck disable=SC2016
+          configure_qwen_network() {
+            local openai_host proxy_bin
+            openai_host="$(node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)')"
+            if [ -z "$openai_host" ]; then
+              echo "::error::Could not parse a hostname from OPENAI_BASE_URL"
+              exit 1
+            fi
+            export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${openai_host}"
+            export no_proxy="${no_proxy:+$no_proxy,}${openai_host}"
+            export QWEN_CI_HTTPS_PROXY="${HTTPS_PROXY:-}"
+            export QWEN_CI_https_proxy="${https_proxy:-}"
+            export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
+            export QWEN_CI_http_proxy="${http_proxy:-}"
+            proxy_bin="$(mktemp -d /tmp/qwen-network-bin.XXXXXX)"
+            # mktemp -d is 700 root-owned; the agent runs as node and must be
+            # able to traverse it, or the wrappers silently fall out of PATH
+            # and child gh/git lose the runner proxy. The wrappers hold no
+            # secrets (env-var names only).
+            chmod 755 "$proxy_bin"
+            if command -v gh >/dev/null 2>&1; then
+              local real_gh
+              real_gh="$(command -v gh)"
+              export QWEN_CI_REAL_GH="$real_gh"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GH" "$@"'
+              } > "$proxy_bin/gh"
+              chmod +x "$proxy_bin/gh"
+            fi
+            if command -v git >/dev/null 2>&1; then
+              local real_git
+              real_git="$(command -v git)"
+              export QWEN_CI_REAL_GIT="$real_git"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GIT" "$@"'
+              } > "$proxy_bin/git"
+              chmod +x "$proxy_bin/git"
+            fi
+            export PATH="$proxy_bin:$PATH"
+            unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
+          }
+          configure_qwen_network
+
+          unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
+
+          # Root-owned loopback proxy: the real model key never enters the
+          # agent environment. Ephemeral port + nonce health check + bearer
+          # token defend against a squatter on the reused runner (proven
+          # exploitable on the verify lane; same defences as tmux).
+          start_openai_proxy() {
+            local proxy_port proxy_script proxy_nonce port_file
+            proxy_script="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy-triage.js"
+            port_file="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy-triage.port"
+            proxy_nonce="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            # NOT local on purpose: the agent env reads it as OPENAI_API_KEY
+            # and the proxy receives it as PROXY_TOKEN (tmux lane rule).
+            PROXY_TOKEN="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            export PROXY_TOKEN
+            rm -f "$port_file"
+            cat > "$proxy_script" <<'NODE'
+          const http = require('node:http');
+          const { writeFileSync } = require('node:fs');
+          const { Readable } = require('node:stream');
+
+          const portFile = process.argv[2];
+          const baseUrl = process.env.OPENAI_BASE_URL;
+          const apiKey = process.env.OPENAI_API_KEY;
+          const nonce = process.env.QWEN_PROXY_NONCE;
+          const token = process.env.PROXY_TOKEN;
+          if (!baseUrl || !apiKey || !portFile || !nonce || !token) {
+            console.error('missing proxy configuration');
+            process.exit(1);
+          }
+
+          const base = new URL(baseUrl);
+          const basePath = base.pathname.replace(/\/+$/, '');
+
+          const server = http.createServer(async (req, res) => {
+            if (req.url === '/__health') {
+              res.writeHead(200, { 'content-type': 'text/plain' });
+              res.end(nonce);
+              return;
+            }
+
+            let timer;
+            try {
+              const incoming = new URL(req.url || '/', 'http://127.0.0.1');
+              const target = new URL(base.origin);
+              let path = incoming.pathname;
+              if (
+                basePath &&
+                basePath !== '/' &&
+                path !== basePath &&
+                !path.startsWith(`${basePath}/`)
+              ) {
+                path = `${basePath}${path.startsWith('/') ? '' : '/'}${path}`;
+              }
+              target.pathname = path;
+              target.search = incoming.search;
+
+              if (req.method !== 'POST' || !target.pathname.endsWith('/chat/completions')) {
+                res.writeHead(403, { 'content-type': 'text/plain' });
+                res.end('proxy: only POST /chat/completions is allowed\n');
+                return;
+              }
+
+              if (req.headers.authorization !== `Bearer ${token}`) {
+                res.writeHead(401, { 'content-type': 'text/plain' });
+                res.end('proxy: unauthorized\n');
+                return;
+              }
+
+              const headers = new Headers(req.headers);
+              headers.delete('host');
+              headers.delete('content-length');
+              headers.set('authorization', `Bearer ${apiKey}`);
+
+              const init = { method: req.method, headers };
+              if (req.method !== 'GET' && req.method !== 'HEAD') {
+                init.body = req;
+                init.duplex = 'half';
+              }
+
+              const controller = new AbortController();
+              timer = setTimeout(() => controller.abort(), 120_000);
+              let upstream;
+              try {
+                upstream = await fetch(target, { ...init, signal: controller.signal });
+              } catch (error) {
+                if (error instanceof Error && error.name === 'AbortError') {
+                  res.writeHead(504, { 'content-type': 'text/plain' });
+                  res.end('proxy error: upstream request timed out\n');
+                  return;
+                }
+                throw error;
+              }
+              // The timer deliberately stays armed after fetch() resolves on
+              // headers: it doubles as the first idle window for the body,
+              // refreshed per chunk below (tmux lane rule).
+              const responseHeaders = {};
+              upstream.headers.forEach((value, key) => {
+                const lower = key.toLowerCase();
+                if (lower !== 'content-encoding' && lower !== 'content-length') {
+                  responseHeaders[key] = value;
+                }
+              });
+              res.writeHead(upstream.status, responseHeaders);
+              if (upstream.body) {
+                const body = Readable.fromWeb(upstream.body);
+                const done = () => clearTimeout(timer);
+                body.on('end', done);
+                body.on('error', () => {
+                  done();
+                  res.destroy();
+                });
+                res.on('close', () => {
+                  done();
+                  controller.abort();
+                });
+                body.pipe(res);
+                body.on('data', () => {
+                  clearTimeout(timer);
+                  timer = setTimeout(() => controller.abort(), 120_000);
+                });
+              } else {
+                clearTimeout(timer);
+                res.end();
+              }
+            } catch (error) {
+              clearTimeout(timer);
+              console.error('proxy upstream failure:', error);
+              res.writeHead(502, { 'content-type': 'text/plain' });
+              res.end('proxy error: upstream request failed\n');
+            }
+          });
+
+          server.listen(0, '127.0.0.1', () => {
+            writeFileSync(portFile, String(server.address().port));
+          });
+          NODE
+
+            OPENAI_API_KEY="$OPENAI_API_KEY" \
+              OPENAI_BASE_URL="$OPENAI_BASE_URL" \
+              QWEN_PROXY_NONCE="$proxy_nonce" \
+              node "$proxy_script" "$port_file" &
+            OPENAI_PROXY_PID=$!
+            trap 'kill "$OPENAI_PROXY_PID" 2>/dev/null || true' EXIT
+
+            proxy_port=''
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+              if ! kill -0 "$OPENAI_PROXY_PID" 2>/dev/null; then
+                echo "::error::OpenAI proxy exited before becoming ready"
+                exit 1
+              fi
+              if [ -z "$proxy_port" ] && [ -s "$port_file" ]; then
+                proxy_port="$(tr -cd '0-9' < "$port_file")"
+              fi
+              if [ -n "$proxy_port" ] &&
+                 [ "$(curl -fsS "http://127.0.0.1:${proxy_port}/__health" 2>/dev/null)" = "$proxy_nonce" ]; then
+                break
+              fi
+              proxy_port=''
+              sleep 1
+            done
+            if [ -z "$proxy_port" ] ||
+               ! kill -0 "$OPENAI_PROXY_PID" 2>/dev/null ||
+               [ "$(curl -fsS "http://127.0.0.1:${proxy_port}/__health" 2>/dev/null)" != "$proxy_nonce" ]; then
+              echo "::error::OpenAI proxy did not become ready (or another process answered on its port)"
+              exit 1
+            fi
+
+            LOCAL_OPENAI_BASE_URL="$(
+              OPENAI_BASE_URL="$OPENAI_BASE_URL" node -e '
+                const base = new URL(process.env.OPENAI_BASE_URL);
+                const path = base.pathname.replace(/\/+$/, "");
+                console.log("http://127.0.0.1:" + process.argv[1] + (path && path !== "/" ? path : ""));
+              ' "$proxy_port"
+            )"
+            export LOCAL_OPENAI_BASE_URL
+            unset OPENAI_API_KEY OPENAI_BASE_URL
+            echo "openai_proxy=enabled (${LOCAL_OPENAI_BASE_URL})"
+          }
+          start_openai_proxy
+
+          QWEN_CMD=(qwen --auth-type openai --approval-mode yolo)
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            QWEN_CMD+=(--model "$OPENAI_MODEL")
+          fi
+
+          # The agent's graceful budget stays BELOW the job timeout so a
+          # timeout still reaches the drafts upload, the publisher, and the
+          # lifecycle finalize instead of the runner killing the container.
+          AGENT_BUDGET_M=$(( ${TRIAGE_TIMEOUT_MINUTES:-60} - 10 ))
+          if (( AGENT_BUDGET_M < 5 )); then
+            AGENT_BUDGET_M=5
+          fi
+
+          QWEN_ENV=(
+            "HOME=/home/node"
+            "USER=node"
+            "SHELL=/bin/bash"
+            "PATH=$PATH"
+            "TERM=${TERM:-xterm-256color}"
+            "LANG=${LANG:-C.UTF-8}"
+            "CI=${CI:-true}"
+            "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+            "GITHUB_EVENT_NAME=$EVENT_NAME"
+            # Read-only job token: the agent's sole GitHub credential.
+            "GITHUB_TOKEN=$GH_TOKEN"
+            "GH_TOKEN=$GH_TOKEN"
+            "BOT_LOGIN=$BOT_LOGIN"
+            "REPOSITORY=$REPOSITORY"
+            "QWEN_HOME=${RUNNER_TEMP:?}/qwen-home"
+            "QWEN_TRIAGE_DRAFT_DIR=${RUNNER_TEMP:?}/triage-drafts"
+            "QWEN_TRIAGE_PUBLISH=workflow"
+            "QWEN_TRIAGE_CHANGELOG=${RUNNER_TEMP:?}/triage-context/claude-code-changelog.md"
+            "OPENAI_API_KEY=$PROXY_TOKEN"
+            "OPENAI_BASE_URL=$LOCAL_OPENAI_BASE_URL"
+            "NO_PROXY=${NO_PROXY:-}"
+            "no_proxy=${no_proxy:-}"
+            "QWEN_CI_HTTPS_PROXY=${QWEN_CI_HTTPS_PROXY:-}"
+            "QWEN_CI_https_proxy=${QWEN_CI_https_proxy:-}"
+            "QWEN_CI_HTTP_PROXY=${QWEN_CI_HTTP_PROXY:-}"
+            "QWEN_CI_http_proxy=${QWEN_CI_http_proxy:-}"
+            "QWEN_CI_REAL_GH=${QWEN_CI_REAL_GH:-}"
+            "QWEN_CI_REAL_GIT=${QWEN_CI_REAL_GIT:-}"
+          )
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            QWEN_ENV+=("OPENAI_MODEL=$OPENAI_MODEL")
+          fi
+
+          set +e
+          timeout --kill-after=10s "${AGENT_BUDGET_M}m" runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
+            --prompt "/triage ${NUMBER} --repo ${REPOSITORY}" \
+            --output-format stream-json \
+            | tee "$RUNNER_TEMP/triage-results/output.jsonl"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+
+          # Same `summary` output the action used to emit: the last result
+          # frame's text. 'Check triage response' consumes it unchanged.
+          SUMMARY="$(node -e '
+            const fs = require("node:fs");
+            let summary = "";
+            for (const line of fs.readFileSync(process.argv[1], "utf8").split("\n")) {
+              if (!line.trim()) continue;
+              try {
+                const frame = JSON.parse(line);
+                if (frame.type === "result" && typeof frame.result === "string") {
+                  summary = frame.result;
+                }
+              } catch {}
+            }
+            process.stdout.write(summary);
+          ' "$RUNNER_TEMP/triage-results/output.jsonl" 2>/dev/null || true)"
+          # Random delimiter: the summary is agent-controlled text; a fixed
+          # delimiter would let a steered result frame inject extra outputs
+          # into this step's GITHUB_OUTPUT.
+          SUMMARY_DELIM="TRIAGE_SUMMARY_$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          {
+            echo "summary<<${SUMMARY_DELIM}"
+            printf '%s\n' "$SUMMARY"
+            echo "${SUMMARY_DELIM}"
+          } >> "$GITHUB_OUTPUT"
+          echo "triage exit code: $EXIT_CODE (budget ${AGENT_BUDGET_M}m)" >> "$GITHUB_STEP_SUMMARY"
+          exit "$EXIT_CODE"
 
       - name: 'Check triage response'
         if: 'success() || failure()'
@@ -979,6 +1354,216 @@ jobs:
           esac
           echo "Triage response received (${#RESPONSE} chars)."
 
+      # Flip the early status comment to a terminal state so a lingering
+      # "running" line doesn't outlive the run. Neutral wording — the verdict
+      # lives in the stage comments above; this only records that the run ended
+      # and keeps the run link. PATCHes exactly the comment id the claim step
+      # exported. An empty id means this run never ended up owning a comment:
+      # a cancel landing before the claim posted, or a transient failure of the
+      # claim's write (both the fresh-POST and PATCH arms export an empty id on
+      # failure). Either way nothing is flipped and a previous run's terminal
+      # wording stays untouched. A failed claim therefore leaves no lifecycle
+      # breadcrumb even when the comments API recovers during the minutes-long
+      # agent run — accepted: the verdict still lands in the stage comments,
+      # and a list-then-POST recovery here would reintroduce exactly the
+      # selection this coupling removes. Best-effort, on success, failure, AND
+      # cancellation: always() (not success() || failure()) because
+      # cancellation — cancel-in-progress superseding this run on a newer push
+      # or comment, job timeout, or manual cancel — would skip this step and
+      # leave the comment claiming the run is still in progress — the verify
+      # lane has publish-verify to catch that case, this lane only has us.
+      - name: 'Finalize triage status comment'
+        if: "always() && steps.resolve.outputs.number != ''"
+        shell: 'bash'
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          STATUS_COMMENT_ID: '${{ steps.status.outputs.comment_id }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'
+          JOB_STATUS: '${{ job.status }}'
+        run: |-
+          set -uo pipefail
+          if [ -z "${STATUS_COMMENT_ID:-}" ]; then
+            echo "This run claimed no status comment; nothing to finalize." >&2
+          else
+            # A step success is not a green job: 'Check triage response' exits
+            # 1 on an empty summary while steps.triage.outcome stays 'success',
+            # and a later step can still fail. Only a non-failed job may claim
+            # "finished".
+            if [ "${TRIAGE_OUTCOME:-}" = 'success' ] && [ "${JOB_STATUS:-}" != 'failure' ]; then
+              EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments in this thread for the result."
+              ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见本线程中的各阶段评论。"
+            elif [ "${JOB_STATUS:-}" = 'cancelled' ]; then
+              EN="🚫 **Qwen Triage was cancelled** — [view run]($RUN_URL). The run was cancelled before finishing. Check for a newer run before re-running."
+              ZH="🚫 **Qwen Triage 已取消** —— [查看运行]($RUN_URL)。运行未完成即被取消。重跑前请先确认是否有更新的运行。"
+            else
+              EN="⚠️ **Qwen Triage ended early** — [view run]($RUN_URL). It stopped before finishing; check the run log."
+              ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完，请查看运行日志。"
+            fi
+            printf -v BODY '%s\n\n%s\n\n%s' '<!-- qwen-triage lifecycle -->' "$EN" "$ZH"
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_COMMENT_ID" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to finalize triage status comment; continuing." >&2
+          fi
+
+      # Drafts are the agent's only output channel to GitHub. Upload on every
+      # outcome so a timeout or a failed check still publishes what was
+      # drafted. Strip non-regular files first: actions/upload-artifact
+      # FOLLOWS symlinks, and a node-planted link would exfiltrate its target
+      # into the artifact (tmux/verify rule).
+      - name: 'Sanitize triage drafts'
+        if: 'always()'
+        run: |-
+          set -uo pipefail
+          # A steered agent can background children (the denylist is not a
+          # boundary), and a detached child could re-plant symlinks between
+          # the strip below and the upload — RUNNER_TEMP is shared across
+          # jobs on the host, so a followed link exfiltrates other lanes'
+          # data. Kill everything still running as the agent user FIRST
+          # (tmux/verify rule). Zombies do not count: they hold nothing open
+          # and cannot be killed, so counting them would never clear.
+          live_agent_processes() {
+            ps -o pid=,stat=,args= -u node 2>/dev/null | awk '$2 !~ /^Z/'
+          }
+          pkill -KILL -u node 2>/dev/null || true
+          for _ in 1 2 3; do
+            [ -n "$(live_agent_processes)" ] || break
+            sleep 1
+            pkill -KILL -u node 2>/dev/null || true
+          done
+          survivors="$(live_agent_processes)" || true
+          if [ -n "$survivors" ]; then
+            # Deny by default: an unkillable writer makes the draft set
+            # untrustworthy, so drop it instead of uploading a race loser.
+            echo "::error::Processes owned by the agent user survived SIGKILL; dropping drafts as possibly tainted."
+            printf '%s\n' "$survivors"
+            rm -rf "${RUNNER_TEMP:?}/triage-drafts"
+            exit 0
+          fi
+          [ -d "${RUNNER_TEMP:?}/triage-drafts" ] || exit 0
+          find "$RUNNER_TEMP/triage-drafts" \( -type l -o -type p -o -type s -o -type b -o -type c \) -delete 2>/dev/null || true
+
+      - name: 'Upload triage drafts'
+        if: 'always()'
+        # A missing drafts dir (agent died before writing any) must not mask
+        # the original error; the publisher reports the absence itself.
+        continue-on-error: true
+        uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
+        with:
+          # Same expression as the download side: if the run died before
+          # 'Resolve target number', both sides fall back to the event's
+          # issue number instead of disagreeing on an empty segment.
+          name: 'triage-drafts-${{ steps.resolve.outputs.number || github.event.issue.number }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/triage-drafts/'
+          retention-days: 7
+          if-no-files-found: 'warn'
+
+      # Restore workspace ownership while the container still runs as root so
+      # the next job on this runner can check out without EACCES (the context
+      # step chowned everything to node; tmux lane rule).
+      - name: 'Restore workspace ownership after agent'
+        if: 'always()'
+        run: |-
+          set -uo pipefail
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace write permissions"
+          RUNNER_UID="$(stat -c '%u' "$RUNNER_TEMP" 2>/dev/null || stat -f '%u' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
+          RUNNER_GID="$(stat -c '%g' "$RUNNER_TEMP" 2>/dev/null || stat -f '%g' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership"
+          else
+            echo "::warning::could not determine runner UID; skipping ownership restore"
+          fi
+
+  # Publish the triage agent's drafts. Runs on a clean runner with the write
+  # PAT and never executes agent-provided code — only validated data. The
+  # triage job above holds no write credential in the agent environment; this
+  # job is the sole writer to GitHub for the triage lane. Same isolation
+  # shape as publish-tmux / publish-verify.
+  publish-triage:
+    needs: ['triage']
+    # Publish even when the agent run failed or timed out: drafts written
+    # before the failure still reach the PR, and the lifecycle comment in the
+    # triage job records the early end. 'skipped' means no triage ran at all.
+    if: >-
+      always() &&
+      needs.triage.result != 'skipped' &&
+      github.repository == 'QwenLM/qwen-code'
+    # Per-RUN group, deliberately not per-PR (publish-tmux rule): a per-PR
+    # group would let a second run replace a completed run's pending
+    # publisher and drop its drafts. Overlap is made safe by the publisher's
+    # bot-owned marker upserts.
+    concurrency:
+      group: "${{ format('{0}-publish-triage-{1}', github.workflow, github.run_id) }}"
+      cancel-in-progress: false
+    timeout-minutes: 10
+    # Checks out only trusted base-repo scripts at the default-branch head
+    # (issue_comment/pull_request_target events resolve github.sha there);
+    # no PR code, so the persistent pool is safe (publish-tmux rule).
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; artifact download may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; artifact download may fail on leftover root-owned files"
+
+      # Sparse and pinned: the publisher, the owner-assignment helpers it
+      # imports, and the owner policy — nothing else (publish-verify pattern).
+      - name: 'Checkout the triage publisher scripts'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.sha }}'
+          sparse-checkout: |-
+            /.github/scripts/triage-publish.mjs
+            /.github/scripts/assign-issue-owner.mjs
+            /.github/issue-owners.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: 'Download triage drafts'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
+        with:
+          name: 'triage-drafts-${{ needs.triage.outputs.pr_number || github.event.issue.number }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: 'triage-drafts'
+        continue-on-error: true
+
+      - name: 'Publish triage drafts'
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          NUMBER: '${{ needs.triage.outputs.pr_number || github.event.issue.number }}'
+          TRIAGE_RESULT: '${{ needs.triage.result }}'
+          QWEN_MAINTAINER_HANDLE: '${{ vars.QWEN_MAINTAINER_HANDLE }}'
+        run: |-
+          set -euo pipefail
+          if [ -z "${NUMBER:-}" ]; then
+            echo "::warning::No target number resolved; nothing to publish."
+            exit 0
+          fi
+          if [ ! -f triage-drafts/actions.jsonl ]; then
+            if [ "${TRIAGE_RESULT:-}" = 'success' ]; then
+              echo "::error::The triage agent succeeded but produced no drafts; nothing was published."
+              exit 1
+            fi
+            echo "::warning::The triage run ended before writing drafts; nothing to publish."
+            exit 0
+          fi
+          node .github/scripts/triage-publish.mjs \
+            --drafts triage-drafts \
+            --repo "$GITHUB_REPOSITORY" \
+            --number "$NUMBER"
+
+      # Moved here from the triage job: it inspects the reviews the run
+      # posted, and those now land in the publish step above, so it must run
+      # AFTER publishing. Body unchanged otherwise.
       - name: 'Notify silent triage re-run'
         if: >-
           success() &&
@@ -988,7 +1573,7 @@ jobs:
         shell: 'bash'
         env:
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
-          NUMBER: '${{ steps.resolve.outputs.number }}'
+          NUMBER: '${{ needs.triage.outputs.pr_number || github.event.issue.number }}'
           TRIGGERED_AT: '${{ github.event.comment.created_at }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
@@ -1106,59 +1691,6 @@ jobs:
             "上方各阶段评论已更新为最新结果。[查看工作流运行]($RUN_URL)。"
           gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
             -f body="$BODY" >/dev/null
-
-      # Flip the early status comment to a terminal state so a lingering
-      # "running" line doesn't outlive the run. Neutral wording — the verdict
-      # lives in the stage comments above; this only records that the run ended
-      # and keeps the run link. PATCHes exactly the comment id the claim step
-      # exported. An empty id means this run never ended up owning a comment:
-      # a cancel landing before the claim posted, or a transient failure of the
-      # claim's write (both the fresh-POST and PATCH arms export an empty id on
-      # failure). Either way nothing is flipped and a previous run's terminal
-      # wording stays untouched. A failed claim therefore leaves no lifecycle
-      # breadcrumb even when the comments API recovers during the minutes-long
-      # agent run — accepted: the verdict still lands in the stage comments,
-      # and a list-then-POST recovery here would reintroduce exactly the
-      # selection this coupling removes. Best-effort, on success, failure, AND
-      # cancellation: always() (not success() || failure()) because
-      # cancellation — cancel-in-progress superseding this run on a newer push
-      # or comment, job timeout, or manual cancel — would skip this step and
-      # leave the comment claiming the run is still in progress — the verify
-      # lane has publish-verify to catch that case, this lane only has us.
-      - name: 'Finalize triage status comment'
-        if: "always() && steps.resolve.outputs.number != ''"
-        shell: 'bash'
-        env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
-          STATUS_COMMENT_ID: '${{ steps.status.outputs.comment_id }}'
-          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
-          TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'
-          JOB_STATUS: '${{ job.status }}'
-        run: |-
-          set -uo pipefail
-          if [ -z "${STATUS_COMMENT_ID:-}" ]; then
-            echo "This run claimed no status comment; nothing to finalize." >&2
-          else
-            # A step success is not a green job: 'Check triage response' exits
-            # 1 on an empty summary while steps.triage.outcome stays 'success',
-            # and a later step can still fail. Only a non-failed job may claim
-            # "finished".
-            if [ "${TRIAGE_OUTCOME:-}" = 'success' ] && [ "${JOB_STATUS:-}" != 'failure' ]; then
-              EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments in this thread for the result."
-              ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见本线程中的各阶段评论。"
-            elif [ "${JOB_STATUS:-}" = 'cancelled' ]; then
-              EN="🚫 **Qwen Triage was cancelled** — [view run]($RUN_URL). The run was cancelled before finishing. Check for a newer run before re-running."
-              ZH="🚫 **Qwen Triage 已取消** —— [查看运行]($RUN_URL)。运行未完成即被取消。重跑前请先确认是否有更新的运行。"
-            else
-              EN="⚠️ **Qwen Triage ended early** — [view run]($RUN_URL). It stopped before finishing; check the run log."
-              ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完，请查看运行日志。"
-            fi
-            printf -v BODY '%s\n\n%s\n\n%s' '<!-- qwen-triage lifecycle -->' "$EN" "$ZH"
-            gh api --method PATCH \
-              "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_COMMENT_ID" \
-              -f body="$BODY" >/dev/null ||
-              echo "::warning::Failed to finalize triage status comment; continuing." >&2
-          fi
 
   # On-demand real-user testing: a write-permission user comments
   # `@qwen-code /tmux` on a PR to launch the changed app in a tmux TUI and
@@ -2551,6 +3083,32 @@ jobs:
               echo "skip_reason=the pre-execution risk screen refused this sponsored run: ${flag_reasons}. A maintainer who has reviewed the diff can run the verification manually in a disposable environment" >> "$GITHUB_OUTPUT"
               exit 0
             fi
+          fi
+          # Review threads, resolved ones included, and standing change
+          # requests for the same token-free agent: a round that never sees a
+          # reviewer's Critical, or the author's claim to have fixed one, can
+          # certify a head that still carries it. Same query and shape as
+          # scripts/verify-pr-prepare.mjs; a test runs both over one set of
+          # pages. Best-effort, and absent on failure: the skill reads a
+          # missing file as unknown, never as nothing open.
+          # shellcheck disable=SC2016 # $owner and friends are GraphQL's
+          if ! gh api graphql --paginate --slurp -f owner="${GITHUB_REPOSITORY%/*}" \
+              -f name="${GITHUB_REPOSITORY#*/}" -F number="$PR_NUMBER" \
+              -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { latestOpinionatedReviews(first: 100) { nodes { state submittedAt url body author { login } authorAssociation commit { oid } } } reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line originalLine comments(first: 50) { totalCount nodes { createdAt url body author { login } authorAssociation originalCommit { oid } pullRequestReview { url } } } } } } } }' |
+            jq 'def who: {author: .author.login, association: .authorAssociation};
+              [.[].data.repository.pullRequest] as $p
+              | {threads: [$p[].reviewThreads.nodes[]
+                  | {resolved: .isResolved, outdated: .isOutdated, path, line, originalLine,
+                     commentCount: .comments.totalCount,
+                     comments: [.comments.nodes[] | who + {createdAt, url,
+                       review: .pullRequestReview.url, commit: .originalCommit.oid, body}]}],
+                 changeRequests: [$p[0].latestOpinionatedReviews.nodes[]
+                  | select(.state == "CHANGES_REQUESTED")
+                  | who + {submittedAt, commit: .commit.oid, url, body}]}' \
+              > "$RUNNER_TEMP/verify-context/review-threads.json" ||
+            [ ! -s "$RUNNER_TEMP/verify-context/review-threads.json" ]; then
+            rm -f "$RUNNER_TEMP/verify-context/review-threads.json"
+            echo "::warning::Could not snapshot the PR's review threads; the round reports them as not covered."
           fi
           # Status comment with the live run link; publish-verify rewrites
           # this same comment with the final report. Best-effort.
@@ -5775,11 +6333,20 @@ jobs:
           PARTIAL_ZH='本次验证运行未正常结束，下列内容可能不完整甚至缺失。仅作为评审证据，**不构成评审、批准或 CI 检查**。'
 
           # Every body opens with a header: the verify marker, this run's
-          # marker and, on a body that carries findings, the substantive
-          # marker, ended by a blank line. Every lookup reads markers only
+          # marker, the flaky marker when the gate demoted the run and, on a
+          # body that carries findings, the substantive marker, ended by a
+          # blank line. Every lookup reads markers only
           # from a header, so it is started once, here, and each branch below
           # appends to it.
           printf '%s\n%s\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER" > "$BODY_FILE"
+          # Every branch a flaky verdict can reach demotes on it (the gate step
+          # runs only on a prepared round it was asked to verify), so the
+          # header records it once, here: a later attempt of this run can
+          # then tell whether the report it would post beside carries it.
+          FLAKY_MARKER='<!-- qwen-triage:verify-flaky -->'
+          if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
+            printf '%s\n' "$FLAKY_MARKER" >> "$BODY_FILE"
+          fi
 
           # The gate verdict travels via job outputs: it survives a later
           # agent-step failure, a job timeout, and a cancellation. A
@@ -5863,16 +6430,16 @@ jobs:
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); result artifact unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
-                printf 'The verification ran and its deterministic flakiness gate observed run-to-run divergence, but the result artifact (report and per-round matrix) could not be retrieved for publishing. The run log still has the full output; re-run `@qwen-code /verify` for a fresh report.\n\n'
+                printf 'The verification ran and its deterministic flakiness gate observed run-to-run divergence, but the result artifact (report and per-round matrix) could not be retrieved for publishing. The run log still has the full output; while the PR is open, re-run `@qwen-code /verify` for a fresh report.\n\n'
                 printf '<details>\n<summary>中文 — 判定：❌ 不通过 · 测试结果不确定（抖动门）；结果产物不可用</summary>\n\n'
                 printf '抖动门：❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
-                printf '验证已执行，其确定性抖动门观测到轮间分歧，但结果产物（报告与各轮矩阵）未能取回用于发布。运行日志中仍有完整输出；如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
+                printf '验证已执行，其确定性抖动门观测到轮间分歧，但结果产物（报告与各轮矩阵）未能取回用于发布。运行日志中仍有完整输出；PR 未关闭时，如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
                 printf '</details>\n\n'
               else
                 printf '**Sandboxed verification: ⚠️ incomplete — results unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
-                printf 'The verification ran, but its result artifact could not be retrieved for publishing, so there is nothing to report here. The run log still has the agent output; re-run `@qwen-code /verify` for a fresh report.\n\n'
+                printf 'The verification ran, but its result artifact could not be retrieved for publishing, so there is nothing to report here. The run log still has the agent output; while the PR is open, re-run `@qwen-code /verify` for a fresh report.\n\n'
                 printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 结果不可用</summary>\n\n'
-                printf '验证已执行，但结果产物未能取回用于发布，因此此处没有可报告的内容。运行日志中仍有 agent 输出；如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
+                printf '验证已执行，但结果产物未能取回用于发布，因此此处没有可报告的内容。运行日志中仍有 agent 输出；PR 未关闭时，如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
                 printf '</details>\n\n'
               fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
@@ -6013,10 +6580,12 @@ jobs:
                 # table pins the parity: a blank suite or a non-count skipped
                 # (false/null) is refused, not defaulted, and counts stop at
                 # 2^53-1, the last integer JSON literals parse to exactly.
+                # Blank means JSON whitespace only: jq's \S and JS's trim()
+                # disagree on U+0085 and U+FEFF.
                 GATES_META="$(
                   jq -r 'def count: type == "number" and . >= 0 and . == floor and . <= 9007199254740991;
                          if (.gates | type) == "array" and (.gates | length) > 0
-                            and (.gates | all(type == "object" and (.suite | type) == "string" and (.suite | test("\\S")) and (.pass | count) and (.fail | count) and ((has("skipped") | not) or (.skipped | count))))
+                            and (.gates | all(type == "object" and (.suite | type) == "string" and (.suite | test("[^ \t\n\r]")) and (.pass | count) and (.fail | count) and ((has("skipped") | not) or (.skipped | count))))
                          then "\(.gates | length) \(.gates | map(.pass) | add | floor) \(.gates | map(.fail) | add | floor) \(.gates | map(.skipped // 0) | add | floor) \(.gates | map(select(.skipped != null)) | length)"
                          else empty end' "$ASSERTIONS_FILE" 2>/dev/null || true
                 )"
@@ -6031,8 +6600,8 @@ jobs:
                     G_SKIP_CLAUSE=" · ${G_SKIP} skipped"
                     G_SKIP_CLAUSE_ZH=" · ${G_SKIP} 跳过"
                   fi
-                  GATES_LINE="Targeted gates (existing tests, not counted above): ${G_PASS} passed · ${G_FAIL} failed${G_SKIP_CLAUSE} across ${G_SUITES} suite(s)"
-                  GATES_LINE_ZH="定向门禁（已有测试，不计入上面的断言）：${G_PASS} 通过 · ${G_FAIL} 失败${G_SKIP_CLAUSE_ZH}，共 ${G_SUITES} 个套件"
+                  GATES_LINE="Targeted gates (existing tests, not counted individually above): ${G_PASS} passed · ${G_FAIL} failed${G_SKIP_CLAUSE} across ${G_SUITES} suite(s)"
+                  GATES_LINE_ZH="定向门禁（已有测试，不逐条计入上面的断言）：${G_PASS} 通过 · ${G_FAIL} 失败${G_SKIP_CLAUSE_ZH}，共 ${G_SUITES} 个套件"
                 fi
               else
                 echo "::warning::assertions.json missing or inconsistent; not treating it as evidence."
@@ -6308,6 +6877,7 @@ jobs:
           # run produced, can quote one further down.
           OWN_ID=''
           OWN_SUBSTANTIVE=''
+          OWN_FLAKY=''
           if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
             echo "::warning::Could not resolve the bot identity; posting a fresh comment instead of reusing one."
             BOT_LOGIN=''
@@ -6317,15 +6887,17 @@ jobs:
               --method GET \
               --paginate \
               -F per_page=100 \
-              | jq -sr --arg bot "$BOT_LOGIN" --arg run "$RUN_MARKER" --arg sub "$SUBSTANTIVE_MARKER" \
+              | jq -sr --arg bot "$BOT_LOGIN" --arg run "$RUN_MARKER" --arg sub "$SUBSTANTIVE_MARKER" --arg flaky "$FLAKY_MARKER" \
                 'def header: split("\n\n")[0] | split("\n");
                  [.[][] | select((.body | startswith("<!-- qwen-triage:verify -->")) and .user.login == $bot)
                     | (.body | header) as $h | select(any($h[]; . == $run))
-                    | "\(.id)\t\(any($h[]; . == $sub))"]
+                    | "\(.id)\t\(any($h[]; . == $sub))\t\(any($h[]; . == $flaky))"]
                  | last // empty'
           )"; then
             OWN_ID="${OWN_META%%$'\t'*}"
-            OWN_SUBSTANTIVE="${OWN_META#*$'\t'}"
+            OWN_META="${OWN_META#*$'\t'}"
+            OWN_SUBSTANTIVE="${OWN_META%%$'\t'*}"
+            OWN_FLAKY="${OWN_META#*$'\t'}"
           elif [ -n "$BOT_LOGIN" ]; then
             echo "::warning::Failed to look up this run's comment; will create a new one."
           fi
@@ -6338,6 +6910,19 @@ jobs:
           )"
           if [ "$OWN_SUBSTANTIVE" = true ] && [ "$BODY_SUBSTANTIVE" != true ]; then
             OWN_ID=''
+          fi
+          # A round can queue for hours: a notice with no status of its own
+          # to finalize is noise on a PR that closed meanwhile. A flaky
+          # demotion still posts, since on a merged PR it names tests now on
+          # main, unless this run's own report already carries it. An
+          # attempt whose own live status is missing (that post is
+          # best-effort) finds an earlier attempt's report instead, which
+          # can predate the verdict. A failed lookup posts.
+          if [ -z "$OWN_ID" ] && [ "$BODY_SUBSTANTIVE" != true ] &&
+            { [ "${FLAKE_VERDICT:-}" != flaky ] || [ "$OWN_FLAKY" = true ]; } &&
+            [ "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.state' 2>/dev/null || true)" = closed ]; then
+            echo "PR #${PR_NUMBER} closed before this round published; notice not posted (verdict=${VERDICT})." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
           # A failed PATCH (comment deleted, or ownership changed under us)
           # must still leave a terminal report on the PR, never silence.

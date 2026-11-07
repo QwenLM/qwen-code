@@ -22,8 +22,6 @@ import static com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRe
 
 /** Private offline entry; it never boots the application or a Runtime. */
 public final class WorkspaceRecoveryMain {
-    private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
-
     private WorkspaceRecoveryMain() {
     }
 

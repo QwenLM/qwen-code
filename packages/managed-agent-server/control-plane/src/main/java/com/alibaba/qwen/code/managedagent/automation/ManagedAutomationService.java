@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent.automation;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.HarnessConflictCodes;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
@@ -65,7 +65,7 @@ public class ManagedAutomationService {
     private static final int MAX_DEFINITIONS = 32;
 
     private final AutomationLedgerStore ledger;
-    private final AgentStateStore sessions;
+    private final SessionQueryStore sessions;
     private final ManagedWorkspaceRegistry workspaces;
     private final HarnessConnector harness;
     private final AutomationScanner scanner;
@@ -79,7 +79,7 @@ public class ManagedAutomationService {
 
     @Autowired
     public ManagedAutomationService(AutomationLedgerStore ledger,
-            AgentStateStore sessions, ManagedWorkspaceRegistry workspaces,
+            SessionQueryStore sessions, ManagedWorkspaceRegistry workspaces,
             HarnessConnector harness, AutomationScanner scanner,
             RequestDigests digests, @Qualifier("managedAgentObjectMapper") ObjectMapper mapper,
             ManagedAgentSettings properties) {
@@ -90,7 +90,7 @@ public class ManagedAutomationService {
     }
 
     ManagedAutomationService(AutomationLedgerStore ledger,
-            AgentStateStore sessions, ManagedWorkspaceRegistry workspaces,
+            SessionQueryStore sessions, ManagedWorkspaceRegistry workspaces,
             HarnessConnector harness, AutomationScanner scanner,
             RequestDigests digests, ObjectMapper mapper,
             ManagedAgentSettings.Automation settings,

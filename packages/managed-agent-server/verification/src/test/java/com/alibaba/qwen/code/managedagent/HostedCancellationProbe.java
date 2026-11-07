@@ -33,6 +33,8 @@ final class HostedCancellationProbe implements AutoCloseable {
     private final String tenant;
     private final List<Map<String, Object>> sessions;
     private final Object service;
+    private final Object dispatcher;
+    private final Object cancellation;
     private final RuntimeTransport transport;
     private final Map<String, AtomicInteger> executions = new ConcurrentHashMap<>();
     private final Map<String, AtomicInteger> completions = new ConcurrentHashMap<>();
@@ -46,7 +48,9 @@ final class HostedCancellationProbe implements AutoCloseable {
         this.tenant = tenant;
         this.sessions = sessions;
         service = ReflectionTestUtils.getField(broker, "service");
-        transport = (RuntimeTransport) ReflectionTestUtils.getField(service, "transport");
+        dispatcher = ReflectionTestUtils.getField(service, "executionDispatcher");
+        cancellation = ReflectionTestUtils.getField(service, "executionCancellation");
+        transport = (RuntimeTransport) ReflectionTestUtils.getField(dispatcher, "transport");
         RuntimeTransport observed = (RuntimeTransport) Proxy.newProxyInstance(RuntimeTransport.class.getClassLoader(),
                 new Class<?>[] {RuntimeTransport.class}, (proxy, method, args) -> {
                     String session = args != null && args.length > 1 && args[1] instanceof RuntimeSession runtime
@@ -71,7 +75,8 @@ final class HostedCancellationProbe implements AutoCloseable {
                     }
                     return result;
                 });
-        ReflectionTestUtils.setField(service, "transport", observed);
+        ReflectionTestUtils.setField(dispatcher, "transport", observed);
+        ReflectionTestUtils.setField(cancellation, "transport", observed);
         server.createContext("/cancellation/", exchange -> {
             try {
                 assertThat(exchange.getRequestMethod()).isEqualTo("POST");
@@ -258,7 +263,8 @@ final class HostedCancellationProbe implements AutoCloseable {
 
     @Override
     public void close() throws InterruptedException {
-        ReflectionTestUtils.setField(service, "transport", transport);
+        ReflectionTestUtils.setField(dispatcher, "transport", transport);
+        ReflectionTestUtils.setField(cancellation, "transport", transport);
         Object provisioner = ReflectionTestUtils.getField(service, "provisioner");
         Object local = ReflectionTestUtils.getField(provisioner, "delegate");
         var owned = (Map<?, ?>) ReflectionTestUtils.getField(local, "owned");

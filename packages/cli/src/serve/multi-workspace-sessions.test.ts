@@ -597,6 +597,7 @@ function makeBridge(
           maxSessions: 20,
           maxPendingPromptsPerSession: 5,
           eventRingSize: 8_000,
+          eventRingMaxBytes: 8 * 1024 * 1024,
           compactedReplayMaxBytes: 4 * 1024 * 1024,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
@@ -621,6 +622,11 @@ function makeBridge(
           pendingPermissionCount: 0,
           hasActivePrompt: summary.hasActivePrompt,
           lastEventId: 0,
+          eventRingCount: 0,
+          eventRingBytes: 0,
+          eventRingEvictedEvents: 0,
+          eventRingEvictedBytes: 0,
+          availableCommandsSnapshotBytes: 0,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
         })),
@@ -1324,6 +1330,7 @@ describe('multi-workspace session dispatch', () => {
       },
     ]);
     expect(res.body.runtime.sessions.active).toBe(2);
+    expect(res.body.limits.eventRingMaxBytes).toBe(8 * 1024 * 1024);
     expect(res.body.runtime.channel.live).toBe(true);
 
     const full = await request(app)
@@ -1338,6 +1345,16 @@ describe('multi-workspace session dispatch', () => {
       '11111111-1111-4111-a111-111111111111',
       '22222222-2222-4222-a222-222222222222',
     ]);
+    for (const session of full.body.full.sessions) {
+      expect(session).toMatchObject({
+        eventRingCount: 0,
+        eventRingBytes: 0,
+        eventRingEvictedEvents: 0,
+        eventRingEvictedBytes: 0,
+        availableCommandsSnapshotBytes: 0,
+      });
+      expect(session).not.toHaveProperty('eventRingEarliestEventId');
+    }
   });
 
   it('rolls up secondary runtime channel issues in daemon status', async () => {
@@ -3194,9 +3211,11 @@ describe('multi-workspace session dispatch', () => {
       .set('Host', host())
       .send({ cwd: UNKNOWN_CWD });
 
-    expect(unknownRes.status).toBe(400);
-    expect(unknownRes.body.code).toBe('workspace_mismatch');
-    expect(unknownRes.body.workspaceCount).toBe(2);
+    // An explicit cwd with no registry entry is a permanent absence: 404
+    // workspace_not_found (the channel wake path keys Gone on it), not the
+    // reversible-state 400 workspace_mismatch.
+    expect(unknownRes.status).toBe(404);
+    expect(unknownRes.body.code).toBe('workspace_not_found');
     expect(unknownRes.body.boundWorkspace).toBe(PRIMARY_CWD);
     expect(unknownRes.body.requestedWorkspace).toBe(UNKNOWN_CWD);
     expect(unknown.primaryBridge.restoreCalls).toEqual([]);
@@ -8452,9 +8471,8 @@ describe('workspace session live-state route', () => {
       generation: expect.any(String),
       revision: expect.any(Number),
     });
-    // Exactly the volatile overlay plus the activity watermark — the static
-    // catalog field (displayName) and the deliberately excluded volatile
-    // extras (pendingInteractionCount, hasTurnError) all stay out.
+    // The overlay includes turn errors but excludes static catalog fields
+    // and interaction details.
     expect(res.body.sessions).toEqual([
       {
         sessionId: '11111111-1111-4111-a111-111111111111',
@@ -8462,6 +8480,7 @@ describe('workspace session live-state route', () => {
         hasActivePrompt: true,
         isWaitingForPermission: true,
         isWaitingForUserQuestion: false,
+        hasTurnError: true,
         updatedAt: '2026-07-08T00:02:00.000Z',
       },
     ]);
@@ -8563,8 +8582,8 @@ describe('workspace session live-state route', () => {
     expect(res.body.sessions[0]).not.toHaveProperty('updatedAt');
   });
 
-  it('defaults both wait flags to false when the bridge omits them', async () => {
-    // BridgeSessionSummary types both wait flags optional; a bridge that omits
+  it('defaults wait and error flags to false when the bridge omits them', async () => {
+    // BridgeSessionSummary types these flags optional; a bridge that omits
     // them must not serialize a missing key where the SDK snapshot promises a
     // boolean.
     const { app } = makeHarness({
@@ -8585,6 +8604,7 @@ describe('workspace session live-state route', () => {
         hasActivePrompt: false,
         isWaitingForPermission: false,
         isWaitingForUserQuestion: false,
+        hasTurnError: false,
         updatedAt: '2026-07-08T00:01:00.000Z',
       },
     ]);
