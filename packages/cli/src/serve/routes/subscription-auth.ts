@@ -13,10 +13,15 @@ import {
   type SubscriptionUserInfo,
 } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import {
-  getQwenOAuthConfig,
+  getQwenSubscriptionAuthorizationUrl,
   getQwenSubscriptionPlansUrl,
+  type QwenPaywallScene,
 } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import type { DaemonSubscriptionFlow } from '@qwen-code/sdk/daemon';
+
+function paywallScene(value: unknown): QwenPaywallScene {
+  return value === 'cli' || value === 'plugin' ? value : 'desktop';
+}
 
 const PUBLIC_ERRORS = new Set([
   'access_denied',
@@ -66,8 +71,6 @@ export function registerSubscriptionAuthRoutes(
   mutate: (opts?: { strict?: boolean }) => RequestHandler,
   onSignedOut?: () => Promise<void>,
 ): () => void {
-  const { webOrigin } = getQwenOAuthConfig();
-  const plansUrl = getQwenSubscriptionPlansUrl();
   const flows = new Map<
     string,
     {
@@ -94,18 +97,20 @@ export function registerSubscriptionAuthRoutes(
     flows.delete(id);
   };
 
-  app.get('/auth/subscription', (_req, res) => {
+  app.get('/auth/subscription', (req, res) => {
     res.json({
       enabled: !disposed,
       signedIn: !disposed && new QwenSubscriptionSession().isSignedIn(),
-      plansUrl,
+      plansUrl: getQwenSubscriptionPlansUrl(
+        paywallScene(req.query['paywallScene']),
+      ),
     });
   });
   app.post(
     '/auth/subscription/flows',
     mutate({ strict: true }),
     allowed,
-    (_req, res) => {
+    (req, res) => {
       if (signingOut) {
         res.status(409).json({ code: 'session_changed' });
         return;
@@ -115,6 +120,7 @@ export function registerSubscriptionAuthRoutes(
         return;
       }
       const id = randomUUID();
+      const scene = paywallScene(req.query['paywallScene']);
       const controller = new AbortController();
       const flow = {
         view: { id, status: 'waiting' } as DaemonSubscriptionFlow,
@@ -133,10 +139,10 @@ export function registerSubscriptionAuthRoutes(
         const session = new QwenSubscriptionSession();
         const user = await session.signIn((device) => {
           controller.signal.throwIfAborted();
-          const url = new URL('/authorize', webOrigin);
-          url.searchParams.set('user_code', device.user_code);
-          url.searchParams.set('client', 'qwen-code');
-          const authorizationUrl = url.toString();
+          const authorizationUrl = getQwenSubscriptionAuthorizationUrl(
+            device.user_code,
+            scene,
+          );
           flow.view = { id, status: 'waiting', authorizationUrl };
         }, controller.signal);
         controller.signal.throwIfAborted();

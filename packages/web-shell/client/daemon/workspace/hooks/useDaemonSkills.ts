@@ -8,6 +8,8 @@ import { useDaemonAvailability } from '../../availability-context.js';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   DaemonSkillInstallRequest,
+  DaemonSkillArchiveInstallRequest,
+  DaemonSkillScope,
   DaemonWorkspaceRuntimeStatus,
 } from '@qwen-code/sdk/daemon';
 import { useDaemonWorkspaceEventSignals } from '../../session/DaemonSessionProvider.js';
@@ -77,25 +79,33 @@ export function useDaemonSkills(options: DaemonSkillsOptions = {}) {
   const [coordinatorStatus, setCoordinatorStatus] = useState<
     DaemonWorkspaceRuntimeStatus | undefined
   >();
-  const ensureRuntime = useCallback(async () => {
-    if (!splitRuntimeAvailable || !workspaceClient) return undefined;
-    setPreparing(true);
-    setPrepareError(undefined);
-    try {
-      const prepared = await workspaceClient.ensureRuntime();
-      setCoordinatorStatus(prepared);
-      const capabilityError = prepared.capabilities?.skills?.error;
-      if (capabilityError) setPrepareError(new Error(capabilityError.message));
-      return await reloadRuntime();
-    } catch (error) {
-      setPrepareError(
-        error instanceof Error ? error : new Error(String(error)),
-      );
-      return undefined;
-    } finally {
-      setPreparing(false);
-    }
-  }, [reloadRuntime, splitRuntimeAvailable, workspaceClient]);
+  const ensureRuntime = useCallback(
+    async (options?: { throwOnError?: boolean }) => {
+      if (!splitRuntimeAvailable || !workspaceClient) return undefined;
+      setPreparing(true);
+      setPrepareError(undefined);
+      try {
+        const prepared = await workspaceClient.ensureRuntime();
+        setCoordinatorStatus(prepared);
+        const capabilityError = prepared.capabilities?.skills?.error;
+        if (capabilityError) {
+          const error = new Error(capabilityError.message);
+          if (options?.throwOnError) throw error;
+          setPrepareError(error);
+        }
+        return await reloadRuntime();
+      } catch (error) {
+        if (options?.throwOnError) throw error;
+        setPrepareError(
+          error instanceof Error ? error : new Error(String(error)),
+        );
+        return undefined;
+      } finally {
+        setPreparing(false);
+      }
+    },
+    [reloadRuntime, splitRuntimeAvailable, workspaceClient],
+  );
   useEffect(() => {
     if (
       !daemonAvailable ||
@@ -272,6 +282,30 @@ export function useDaemonSkills(options: DaemonSkillsOptions = {}) {
       }
       await ensureRuntime();
       return result;
+    },
+    installArchive: async (
+      request: DaemonSkillArchiveInstallRequest,
+      scope: DaemonSkillScope,
+    ) => {
+      if (!capabilities?.features.includes('skill_archive_install'))
+        throw new Error('Native Skill archive installation is unavailable.');
+      if (scope === 'global')
+        return client.installWorkspaceConfigSkillArchive(request);
+      if (!workspaceClient) throw new Error('Workspace is unavailable.');
+      return workspaceClient.installWorkspaceConfigSkillArchive(request);
+    },
+    lookupInstallAttempt: async (
+      scope: DaemonSkillScope,
+      attemptId: string,
+    ) => {
+      if (scope === 'global')
+        return client.getWorkspaceSkillInstallAttempt(attemptId, {
+          timeoutMs: 5_000,
+        });
+      if (!workspaceClient) throw new Error('Workspace is unavailable.');
+      return workspaceClient.getWorkspaceSkillInstallAttempt(attemptId, {
+        timeoutMs: 5_000,
+      });
     },
     remove: async (skillName: string, scope: 'workspace' | 'global') => {
       if (!splitRuntimeAvailable) {
