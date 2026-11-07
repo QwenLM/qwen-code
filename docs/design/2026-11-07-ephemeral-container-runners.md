@@ -2,8 +2,9 @@
 
 [English](2026-11-07-ephemeral-container-runners.md) | [简体中文](2026-11-07-ephemeral-container-runners.zh-CN.md)
 
-Date: 2026-11-07. Status: implemented; a five-slot systemd trial is deployed on
-hz4. Production external-PR routing remains disabled.
+Date: 2026-11-07. Status: runner lifecycle implemented; ten systemd-managed
+slots are deployed on hz4. The fork-variable routing fix below still needs
+default-branch deployment and real external-PR acceptance.
 
 Ten slots registering and running ten keyless test jobs of a private repository
 at the same time on the Hangzhou shared test machine; containers, networks and
@@ -55,7 +56,7 @@ Each container
 ```
 
 The manager keeps a configured number of slots, at most one container per slot.
-The Hangzhou trial ran ten slots at once; the hz4 deployment now maintains five slots. It takes no webhook, schedules no PR
+The Hangzhou trial ran ten slots at once; the hz4 deployment now maintains ten slots. It takes no webhook, schedules no PR
 itself, and introduces neither Kubernetes nor a database. GitHub assigns work by
 runner label. Each ECS runs its own manager against its local Docker socket,
 with a unique `poolId` and a per-host `slots` count. Hosts share the scheduling
@@ -127,6 +128,33 @@ before accepting new work.
   introduce a privileged pull_request_target flow that executes PR code.
 
 ## Initial routing decision
+
+Repository configuration variables are unavailable in fork-triggered
+`pull_request` runs. Real run 42382582937, attempt 2, read both new and existing
+variables as empty despite their nonempty repository settings. Injecting values
+in the local selector matrix did not cover this platform boundary.
+
+Keep the repository-variable switch. A separate `workflow_run: in_progress`
+controller executes the default-branch workflow, reads the variables, and
+publishes only `hosted`, `ephemeral-x64` or `ephemeral-arm64` as a commit status
+bound to the CI run ID and attempt. It never checks out PR code or downloads PR
+artifacts. Its token can write statuses; the fork classifier only reads them.
+Unlike the `requested` activity, `in_progress` also covers reruns.
+
+```text
+PR → existing unprivileged CI → classifier waits for its routing decision
+            │                                     │
+            └→ default-branch routing controller ─┘
+               reads repository variables; publishes only the destination
+```
+
+When variables are absent, the classifier accepts only a successful status from
+`github-actions[bot]` for the same source SHA, run and attempt. Missing, invalid
+or mismatched decisions fall back to hosted after bounded polling. The
+controller must be merged onto the default branch before automatic admission
+can work. No PAT, model key, secret inheritance or privileged PR build is added.
+This relay fixes configuration visibility; it does not close the separately
+recorded PR-editable-workflow or host/network isolation boundaries.
 
 Keep the existing `ubuntu_runner` output and all of its former semantics, and add
 a `pr_test_runner` output used by `test_build` and `test`. For an untrusted fork

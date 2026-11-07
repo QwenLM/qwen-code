@@ -2,8 +2,8 @@
 
 [English](2026-11-07-ephemeral-container-runners.md) | [简体中文](2026-11-07-ephemeral-container-runners.zh-CN.md)
 
-日期：2026-11-07。状态：已实现并在 hz4 部署五槽位 systemd 试运行服务；
-外部 PR 的生产路由仍未启用。
+日期：2026-11-07。状态：runner 生命周期已实现，hz4 已部署十个 systemd
+管理的槽位。下文的 fork 变量路由修复仍需部署到默认分支，并完成真实外部 PR 验收。
 
 杭州共享测试机上已验证 10 个槽位同时注册，并执行同一个私有测试仓库的 10 个无密钥
 测试 job，容器、网络和注册均已回收。后续单槽位试运行使用真实 PAT，
@@ -47,7 +47,7 @@
 ```
 
 管理程序按配置维护固定数量的槽位，每个槽位最多一个容器；杭州十槽位试验同时使用
-十个槽位，hz4 部署目前维持五个槽位。不接 webhook、不自行调度 PR、不引入 Kubernetes 或数据库。
+十个槽位，hz4 部署目前维持十个槽位。不接 webhook、不自行调度 PR、不引入 Kubernetes 或数据库。
 GitHub 根据 runner 标签分配任务。每台 ECS 各运行一个管理程序，只连接本机
 Docker socket，使用独立的 `poolId` 和按主机配置的 `slots`。各主机共用调度
 标签，无需中央管理器。新名称使用 `ecs-qwen-` 前缀以兼容 CI 并发上限和超时；
@@ -103,6 +103,29 @@ JIT 提供正常协议下的单任务注册语义；宿主机管理程序负责�
   pull_request_target 特权流程。
 
 ## 首期路由决策
+
+外部 fork 触发的 `pull_request` 运行无法读取仓库配置变量。真实 run
+42382582937 的第二次尝试中，新旧变量都为空，而仓库设置里均有值。
+本地选择器矩阵直接注入变量，没有覆盖这个平台边界。
+
+保留仓库变量开关。独立的 `workflow_run: in_progress` 控制流程运行默认分支
+上的 workflow，读取变量，仅将 `hosted`、`ephemeral-x64` 或
+`ephemeral-arm64` 发布为绑定 CI run ID 和 attempt 的 commit status。
+它不检出 PR 代码、不下载 PR 产物。控制流程 token 可以写 status；外部 PR
+分类任务只能读取。与 `requested` 活动不同，`in_progress` 也覆盖重跑。
+
+```text
+PR → 现有非特权 CI → 分类任务等待属于本次运行的路由决定
+          │                           │
+          └→ 默认分支路由控制流程 ──────┘
+             读取仓库变量；仅发布执行目标
+```
+
+变量缺失时，分类任务只接受 `github-actions[bot]` 发布且属于同一个源 SHA、
+run 和 attempt 的成功 status。决定缺失、非法或不匹配时，有限轮询后回到托管
+机器。控制流程必须合并到默认分支后，自动导流才能工作。不增加 PAT、模型
+密钥、secret 继承或执行 PR 代码的特权构建。这个中继修复配置可见性，
+不解决已单独记录的 PR 可修改 workflow 以及宿主机、网络隔离边界。
 
 保留现有 `ubuntu_runner` 输出及其所有旧语义，新增 `pr_test_runner` 输出，
 用于 `test_build` 和 `test`。对于非可信作者的外部 fork PR，变量
