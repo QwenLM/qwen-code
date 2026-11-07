@@ -126,6 +126,10 @@ import {
   type SplitSessionOutcome,
 } from './utils/standalone-session-routing';
 import { setBoundedMapEntry } from './utils/bounded-map';
+import {
+  buildWaitingActivity,
+  buildWaitingTokenUsage,
+} from './utils/waitingActivity';
 import { type SessionGitIntent } from './components/GitModePopover';
 import { gitModeIntentMustReset } from './utils/gitModeIntent';
 import { LocalControlQrButton } from './components/LocalControlQrButton';
@@ -211,6 +215,11 @@ import { SessionRecoveryBanner } from './components/SessionRecoveryBanner';
 import composerStatusStyles from './components/ComposerStatusStack.module.css';
 import { GoalEditDialog } from './components/dialogs/GoalEditDialog';
 import { StreamingStatus } from './components/StreamingStatus';
+import {
+  WaitingMinigame,
+  WaitingMinigameButton,
+} from './components/WaitingMinigame';
+import { readWaitingGamesEnabled } from './utils/waitingGamesConfig';
 import {
   ToastHost,
   TOAST_REQUEST_EVENT,
@@ -4845,6 +4854,25 @@ export function App({
   }, []);
 
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
+  const waitingMinigameActivity = useMemo(
+    () => buildWaitingActivity(messages),
+    [messages],
+  );
+  const waitingMinigameTokens = useMemo(
+    () =>
+      buildWaitingTokenUsage(
+        messages,
+        connection.tokenUsage ?? {},
+        connection.tokenCount,
+        connection.contextWindow,
+      ),
+    [
+      messages,
+      connection.tokenUsage,
+      connection.tokenCount,
+      connection.contextWindow,
+    ],
+  );
   const messagesRef = useRef(messages);
   const [failedPrompt, setFailedPrompt] = useState<FailedPrompt | null>(null);
   const failedPromptRef = useRef<FailedPrompt | null>(failedPrompt);
@@ -8888,6 +8916,9 @@ export function App({
   );
   const statusBarRef = useRef<StatusBarHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
+  const locateWaitingActivity = useCallback((messageId: string) => {
+    messageListRef.current?.scrollToMessage(messageId);
+  }, []);
   const editorRef = useRef<EditorHandle | null>(null);
   const chatFocusBlockedRef = useRef(false);
   const focusChatAfterNavigation = useCallback(() => {
@@ -9000,6 +9031,14 @@ export function App({
       failedPromptRetryIsCurrent &&
       (!failedPromptRetry.admitted || failedPromptRetry.settled),
   );
+  const waitingMinigameVisible =
+    !suppressFailedPromptRetryStreaming &&
+    (streamingState !== 'idle' || sessionHasActivePrompt);
+  const waitingGamesEnabled = useMemo(() => readWaitingGamesEnabled(), []);
+  const [waitingMinigameOpen, setWaitingMinigameOpen] = useState(false);
+  useEffect(() => {
+    if (!waitingMinigameVisible) setWaitingMinigameOpen(false);
+  }, [waitingMinigameVisible]);
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
   streamingStateRef.current = streamingState;
   // Cleared in three places: the session-switch effect, the drain loop, and
@@ -20431,6 +20470,7 @@ export function App({
     handleCancel,
     handleCycleMode,
     artifactPanelFullscreen,
+    waitingMinigameOpen,
   });
   escLiveRef.current = {
     streamingState,
@@ -20442,6 +20482,7 @@ export function App({
     handleCancel,
     handleCycleMode,
     artifactPanelFullscreen,
+    waitingMinigameOpen,
   };
 
   // Clear a half-armed two-press whenever the streaming/idle boundary flips — the
@@ -20533,6 +20574,11 @@ export function App({
         }
         return;
       }
+
+      // The open waiting minigame owns Escape: its own window listener
+      // collapses the board. Don't also arm the two-press stream cancel
+      // behind it, or a second Escape would stop the turn by surprise.
+      if (live.waitingMinigameOpen) return;
 
       // Streaming takes priority over clearing text (queued prompts stay intact
       // and drain after the turn settles); see decideEscapeIntent for the rules.
@@ -24870,6 +24916,16 @@ export function App({
                             </span>
                           </div>
                         )}
+                        {waitingMinigameVisible && (
+                          <WaitingMinigame
+                            open={waitingMinigameOpen}
+                            onClose={() => setWaitingMinigameOpen(false)}
+                            activity={waitingMinigameActivity}
+                            tokenUsage={waitingMinigameTokens}
+                            onSelectActivity={locateWaitingActivity}
+                            gamesEnabled={waitingGamesEnabled}
+                          />
+                        )}
                         {streamingState !== 'idle' ||
                         sessionHasActivePrompt ? (
                           suppressFailedPromptRetryStreaming ? null : (
@@ -24884,6 +24940,14 @@ export function App({
                               backgroundLabel={
                                 connection.backgroundTurn?.label ??
                                 connection.backgroundTurn?.kind
+                              }
+                              trailing={
+                                <WaitingMinigameButton
+                                  open={waitingMinigameOpen}
+                                  onToggle={() =>
+                                    setWaitingMinigameOpen((value) => !value)
+                                  }
+                                />
                               }
                             />
                           )
