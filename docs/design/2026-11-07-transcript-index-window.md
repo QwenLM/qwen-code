@@ -42,7 +42,7 @@ the JSONL by hand.
 ## Goals
 
 - Serve an over-cap transcript from its last `SESSION_TRANSCRIPT_MAX_INDEX_BYTES`
-  instead of refusing it, keeping the cap as the bound on index memory.
+  instead of refusing it, bounding both the window and additional prefix state.
 - Report where the indexed history starts, distinguishable from lost history.
 - Restore the session-level state a resumed session needs even when it was
   recorded before the window.
@@ -64,12 +64,14 @@ When the snapshot is larger than the cap, `buildIndex` starts at the first line
 that begins within the last `SESSION_TRANSCRIPT_MAX_INDEX_BYTES`
 (`findWindowStart`). It indexes those lines exactly as it indexes a whole file
 today, with absolute byte offsets, so page reads, cursors and the index cache
-work unchanged. The window never exceeds the cap, so index memory stays bounded
-as before.
+work unchanged. The window never exceeds the cap. Additional prefix state has
+its own budget of the same size, so indexing stays bounded independently of the
+whole transcript's size.
 
 The index still refuses with `SessionTranscriptTooLargeError` when no line
 starts within the window, when the window holds no conversation record, when a
-line before the window is longer than the cap, or when the log is Managed.
+line before the window is longer than the cap, a reassembled logical record or
+the retained prefix exceeds its budget, or when the log is Managed.
 
 ### B. Prefix scan
 
@@ -93,7 +95,23 @@ uuid when the index has no entry for them.
 
 A record written as several lines with one uuid can start before the window.
 The scan records where its earlier lines are and puts them in front of the
-window entry's segments, so the record still reads whole.
+window entry's segments, so the record still reads whole. Its index is seeded
+from the true first fragment. The bounded window fragments are then reread
+through the same indexing rules as an ordinary record, preserving its turn and
+daemon prompt identities, navigation and display suppression even when the
+tail has no visible text. The active chain is walked again after this repair.
+If its missing parent changes, a second prefix scan checks whether that parent
+exists before the window, preserving the distinction between a window gap and
+lost history.
+
+The fragments of one logical record, including those inside the window, must
+fit within the cap together. Prefix segment references and retained prefix
+records also share an additional source-byte budget equal to the cap. Replaced
+settings release their retained bytes. These checks happen before retaining
+each fragment; exceeding either budget refuses the transcript with
+`SessionTranscriptTooLargeError` instead of silently shortening a record or
+materializing an unbounded prefix. Source bytes are counted conservatively when
+a line is both retained state and a referenced fragment.
 
 A prefix line is never read past the cap: the scan stops as soon as a line
 exceeds it and the index refuses, so no line larger than the cap is parsed, as
@@ -125,11 +143,14 @@ catalogs, which translate the existing notice, translate the new one too.
 
 ## Key design decisions
 
-- **Read side only.** It makes every existing over-cap file usable again
+- **Read side only.** It makes supported existing over-cap files usable again
   without touching disk or the writer lease. A writer-side cap would only help
   files written after the change.
-- **One scan of the prefix, no index entries.** The prefix still costs a parse,
-  but not memory beyond the few retained records.
+- **No full prefix index.** The prefix normally costs one parse; a repaired
+  parent can require another membership scan. Only the bounded retained state
+  and fragments of window records occupy additional memory. Cut records'
+  window fragments are reread using the existing single-line cache and
+  cooperative scheduling.
 - **Prefix settings in file order.** The prefix is not indexed, so it has no
   chain to walk. `ChatRecordingService.rewindRecording` appends the current
   model, approval mode and workflow mode again after its rewind marker, so for
@@ -163,8 +184,9 @@ catalogs, which translate the existing notice, translate the new one too.
   Earlier UI telemetry, goal records, artifacts and file history are not
   restored, and the window gap marks the session as partial.
 - The model history starts at the window, or at the last compression inside it.
-- Memory while scanning the prefix is bounded by the cap for a single line,
-  which is the same bound a file under the cap has today.
+- Memory while scanning the prefix is bounded by the single-line cap and the
+  separate retained-prefix budget. An individual logical record larger than
+  the cap remains unsupported even if each of its physical lines is smaller.
 
 ## Validation plan
 
@@ -172,7 +194,8 @@ catalogs, which translate the existing notice, translate the new one too.
   from the whole file, settings recorded only before the window, a setting the
   window records again, a window without conversation, a window with no line
   start, a record the window cuts through, a prefix line longer than the cap,
-  and a first record kept as metadata only.
+  a first record kept as metadata only, first-fragment prompt identity, a cut
+  logical record over the cap, and total retained prefix fragments over budget.
 - Mutation checks that turn those tests red: window start off by one byte, the
   reason never or always set, no prefix fallback, prefix records read after the
   window, and the first record not taken from the prefix.
@@ -182,8 +205,9 @@ catalogs, which translate the existing notice, translate the new one too.
 
 ## Acceptance criteria
 
-- An over-cap transcript loads, pages and restores without
-  `transcript_too_large`, and its first loaded page shows the window notice.
+- An over-cap transcript within the record and prefix budgets loads, pages and
+  restores without `transcript_too_large`, and its first loaded page shows the
+  window notice.
 - Session-level settings recorded only before the window are restored.
 - A gap whose parent is missing from the whole file is still reported as a
   storage gap.

@@ -2147,7 +2147,7 @@ async function forEachAggregatedRecord(
 }
 
 async function withAggregatedRecordReadContext<T>(
-  index: TranscriptIndex,
+  index: Pick<TranscriptIndex, 'filePath' | 'projectedRecords'>,
   callback: (context: AggregatedRecordReadContext) => Promise<T>,
 ): Promise<T> {
   let handle: fsp.FileHandle;
@@ -2294,6 +2294,43 @@ function retainedPrefixSlot(
   }
 }
 
+function appendIndexFragment(
+  entry: UuidIndexEntry,
+  record: ChatRecord,
+  sessionId: string,
+  segment: RecordSegment,
+): void {
+  const fragmentRecord = {
+    ...record,
+    type: entry.type,
+    subtype: entry.subtype,
+    systemPayload: entry.navigationTextSuppressed
+      ? { displayText: '', hookContext: '' }
+      : undefined,
+  } as ChatRecord;
+  entry.segments.push(segment);
+  entry.sessionIdMatchesFile &&= record.sessionId === sessionId;
+  entry.navigationKind ??= navigationKindForRecord(fragmentRecord);
+  entry.assistantPreviewCandidate ||=
+    isAssistantPreviewCandidate(fragmentRecord);
+  if (entry.type === 'assistant' && record.usageMetadata) {
+    entry.resumeTokenCountsCandidate = isResumeTokenCountsCandidate({
+      ...record,
+      type: entry.type,
+      subtype: entry.subtype,
+    } as unknown as ChatRecord);
+  }
+  entry.turnHint.countsAsUserPrompt ||= getSessionTurnRecordHint(
+    record,
+    sessionId,
+  ).countsAsUserPrompt;
+}
+
+interface PrefixSplitRecord {
+  entry: UuidIndexEntry;
+  bytes: number;
+}
+
 /**
  * Parses the lines before an over-cap index window without indexing them. They
  * still go through `executionEngine`, so ownership and completeness cover the
@@ -2302,8 +2339,9 @@ function retainedPrefixSlot(
  */
 async function scanTranscriptPrefix(params: {
   filePath: string;
+  snapshotSize: number;
   windowStart: number;
-  maxLineBytes: number;
+  maxIndexBytes: number;
   sessionId: string;
   executionEngine: SessionExecutionEngineAccumulator;
   missingParentUuid: string | undefined;
@@ -2316,11 +2354,22 @@ async function scanTranscriptPrefix(params: {
   sourceReadComplete: boolean;
   containsMissingParent: boolean;
   managed: boolean;
-  /** Prefix segments of records that continue into the window, in file order. */
-  splitSegments: Map<string, RecordSegment[]>;
+  /** Earlier fragments and their authoritative first-fragment identity. */
+  splitRecords: Map<string, PrefixSplitRecord>;
 }> {
   const { filePath, windowStart, sessionId, executionEngine } = params;
-  const splitSegments = new Map<string, RecordSegment[]>();
+  const splitRecords = new Map<string, PrefixSplitRecord>();
+  let prefixBytes = 0;
+  const reserve = (bytes: number): void => {
+    if (prefixBytes + bytes > params.maxIndexBytes) {
+      throw new SessionTranscriptTooLargeError(
+        sessionId,
+        params.snapshotSize,
+        params.maxIndexBytes,
+      );
+    }
+    prefixBytes += bytes;
+  };
   let firstMetadata: ChatRecord | undefined;
   const slots = new Map<RetainedPrefixSlot, string>();
   const fragments = new Map<string, { records: ChatRecord[]; bytes: number }>();
@@ -2341,9 +2390,11 @@ async function scanTranscriptPrefix(params: {
       previous !== record.uuid &&
       ![...slots.values()].includes(previous)
     ) {
+      prefixBytes -= fragments.get(previous)?.bytes ?? 0;
       fragments.delete(previous);
     }
     if (!fragments.has(record.uuid)) {
+      reserve(bytes);
       fragments.set(record.uuid, { records: [record], bytes });
     }
   };
@@ -2376,13 +2427,37 @@ async function scanTranscriptPrefix(params: {
           containsMissingParent = true;
         }
         if (record.subtype === MANAGED_SESSION_HEADER_SUBTYPE) managed = true;
-        if (params.windowEntries.has(record.uuid)) {
-          const segments = splitSegments.get(record.uuid);
-          if (segments) segments.push(segment);
-          else splitSegments.set(record.uuid, [segment]);
+        const windowEntry = params.windowEntries.get(record.uuid);
+        if (windowEntry) {
+          let split = splitRecords.get(record.uuid);
+          const bytes =
+            (split?.bytes ??
+              windowEntry.segments.reduce(
+                (total, segment) => total + segment.length,
+                0,
+              )) + length;
+          if (bytes > params.maxIndexBytes) {
+            throw new SessionTranscriptTooLargeError(
+              sessionId,
+              params.snapshotSize,
+              params.maxIndexBytes,
+            );
+          }
+          reserve(length);
+          if (!split) {
+            split = {
+              entry: newIndexEntry(record, sessionId, [segment]),
+              bytes,
+            };
+            splitRecords.set(record.uuid, split);
+          } else {
+            split.bytes = bytes;
+            appendIndexFragment(split.entry, record, sessionId, segment);
+          }
         }
         const retained = fragments.get(record.uuid);
         if (retained) {
+          reserve(line.length);
           retained.records.push(record);
           retained.bytes += line.length;
           continue;
@@ -2410,6 +2485,7 @@ async function scanTranscriptPrefix(params: {
               ...metadata
             } = record;
             firstMetadata = metadata as ChatRecord;
+            reserve(Buffer.byteLength(JSON.stringify(firstMetadata), 'utf8'));
             slots.set('first', record.uuid);
           }
         }
@@ -2417,7 +2493,7 @@ async function scanTranscriptPrefix(params: {
       }
     },
     0,
-    params.maxLineBytes,
+    params.maxIndexBytes,
   );
 
   const retainedRecords = new Map<string, ChatRecord>();
@@ -2449,7 +2525,7 @@ async function scanTranscriptPrefix(params: {
     sourceReadComplete,
     containsMissingParent,
     managed,
-    splitSegments,
+    splitRecords,
   };
 }
 
@@ -2543,31 +2619,12 @@ async function buildIndex(params: {
           };
           fragmentIndex++;
           if (existing) {
-            const fragmentRecord = {
-              ...(record as unknown as ChatRecord),
-              type: existing.type,
-              subtype: existing.subtype,
-              systemPayload: existing.navigationTextSuppressed
-                ? { displayText: '', hookContext: '' }
-                : undefined,
-            } as ChatRecord;
-            existing.segments.push(segment);
-            existing.sessionIdMatchesFile &&= record.sessionId === sessionId;
-            existing.navigationKind ??= navigationKindForRecord(fragmentRecord);
-            existing.assistantPreviewCandidate ||=
-              isAssistantPreviewCandidate(fragmentRecord);
-            if (existing.type === 'assistant' && record.usageMetadata) {
-              existing.resumeTokenCountsCandidate =
-                isResumeTokenCountsCandidate({
-                  ...(record as unknown as ChatRecord),
-                  type: existing.type,
-                  subtype: existing.subtype,
-                } as unknown as ChatRecord);
-            }
-            existing.turnHint.countsAsUserPrompt ||= getSessionTurnRecordHint(
+            appendIndexFragment(
+              existing,
               record as unknown as ChatRecord,
               sessionId,
-            ).countsAsUserPrompt;
+              segment,
+            );
           } else {
             const chatRecord = record as unknown as ChatRecord;
             const entry = newIndexEntry(chatRecord, sessionId, [segment]);
@@ -2603,32 +2660,36 @@ async function buildIndex(params: {
   startTime ??= lastUpdated;
   let restoreStartTime = firstRecordTimestamp ?? startTime;
 
-  const chain = walkTranscriptUuidChain(leafUuid, (uuid) => {
-    const entry = byUuid.get(uuid);
-    return entry && isTranscriptConversationRecord(entry)
-      ? {
-          uuid,
-          parentUuid: entry.parentUuid,
-          sessionId,
-          timestamp: startTime,
-          type: 'system',
-        }
-      : undefined;
-  });
+  const walkChain = (leaf: string) =>
+    walkTranscriptUuidChain(leaf, (uuid) => {
+      const entry = byUuid.get(uuid);
+      return entry && isTranscriptConversationRecord(entry)
+        ? {
+            uuid,
+            parentUuid: entry.parentUuid,
+            sessionId,
+            timestamp: startTime,
+            type: 'system',
+          }
+        : undefined;
+    });
+  let chain = walkChain(leafUuid);
 
   let window: TranscriptWindow | undefined;
   let indexStartTime = startTime;
   let gapReason: TranscriptGapReason | undefined;
   if (windowStart > 0) {
     let prefix: Awaited<ReturnType<typeof scanTranscriptPrefix>>;
+    const missingParentUuid = chain.gaps[0]?.missingParentUuid;
     try {
       prefix = await scanTranscriptPrefix({
         filePath,
+        snapshotSize,
         windowStart,
-        maxLineBytes: maxIndexBytes,
+        maxIndexBytes,
         sessionId,
         executionEngine,
-        missingParentUuid: chain.gaps[0]?.missingParentUuid,
+        missingParentUuid,
         windowEntries: byUuid,
       });
     } catch (error) {
@@ -2642,9 +2703,25 @@ async function buildIndex(params: {
       throw error;
     }
     if (prefix.managed) throw tooLarge('managed log');
-    // A record the window cut through reads whole: its earlier lines come first.
-    for (const [uuid, segments] of prefix.splitSegments) {
-      byUuid.get(uuid)?.segments.unshift(...segments);
+    if (prefix.splitRecords.size > 0) {
+      await withAggregatedRecordReadContext({ filePath }, async (context) => {
+        for (const [uuid, split] of prefix.splitRecords) {
+          const windowEntry = byUuid.get(uuid)!;
+          for (const segment of windowEntry.segments) {
+            for (const record of await readSegmentRecords(
+              context.handle,
+              filePath,
+              segment,
+              uuid,
+              context.lineCache,
+            )) {
+              appendIndexFragment(split.entry, record, sessionId, segment);
+            }
+            await context.scheduler.afterUnit(segment.length);
+          }
+          byUuid.set(uuid, split.entry);
+        }
+      });
     }
     sourceReadComplete &&= prefix.sourceReadComplete;
     window = prefix.window;
@@ -2653,7 +2730,49 @@ async function buildIndex(params: {
       firstRecordUuid = prefix.firstRecord.uuid;
       restoreStartTime = prefix.firstRecord.timestamp ?? indexStartTime;
     }
-    if (prefix.containsMissingParent) gapReason = 'transcript_window';
+    chain = walkChain(leafUuid);
+    const restoredMissingParentUuid = chain.gaps[0]?.missingParentUuid;
+    let containsMissingParent = prefix.containsMissingParent;
+    if (restoredMissingParentUuid !== missingParentUuid) {
+      containsMissingParent = false;
+      if (restoredMissingParentUuid) {
+        try {
+          await forEachLineInSnapshot(
+            filePath,
+            windowStart,
+            (line) => {
+              const text = line.toString('utf8').trim();
+              if (text.length === 0) return;
+              for (const value of jsonl.parseLineTolerant<unknown>(
+                text,
+                filePath,
+              )) {
+                const record = validateTranscriptRecord(value).record;
+                if (record && record.sessionId !== sessionId) {
+                  throw new SessionTranscriptSnapshotUnavailableError(
+                    sessionId,
+                  );
+                }
+                if (record?.uuid === restoredMissingParentUuid) {
+                  containsMissingParent = true;
+                }
+              }
+            },
+            0,
+            maxIndexBytes,
+          );
+        } catch (error) {
+          if (isFileMissingError(error)) {
+            throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+          }
+          if (error instanceof TranscriptLineTooLongError) {
+            throw tooLarge('prefix line over cap');
+          }
+          throw error;
+        }
+      }
+    }
+    if (containsMissingParent) gapReason = 'transcript_window';
   }
   sourceReadComplete &&= executionEngine.sourceComplete;
 

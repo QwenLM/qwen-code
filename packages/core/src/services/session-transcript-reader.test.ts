@@ -2675,10 +2675,14 @@ describe('SessionTranscriptReader', () => {
         record('u1', 'workflow', 'one'),
         { ...record('a1', 'u1', 'reply one'), model: 'old-model' },
         sys('sources', 'a1', 'session_sources_snapshot', sourcesSnapshot),
+        ...Array.from({ length: 4 }, (_, index) =>
+          record(`old-${index}`, 'a1', 'x'.repeat(2048)),
+        ),
         record('u2', 'a1', 'two'),
         record('a2', 'u2', 'reply two'),
       ];
-      await writeOverCap(records, 2);
+      await writeRecords(records);
+      setSessionTranscriptMaxIndexBytesForTest(4096);
       const validated: string[] = [];
       const projection = await newReader().readRestoreProjection(
         sessionId,
@@ -2756,6 +2760,155 @@ describe('SessionTranscriptReader', () => {
         parts.map((text) => ({ text })),
       );
       expect(page.gaps).toEqual([]);
+    });
+
+    it.each([
+      { name: 'text', tail: userText('last part') },
+      { name: 'empty', tail: content('user') },
+      {
+        name: 'PDF',
+        tail: content('user', {
+          inlineData: { mimeType: 'application/pdf', data: 'JVBERg==' },
+        }),
+      },
+    ])(
+      'preserves first-fragment identity with a $name tail',
+      async ({ tail }) => {
+        const promptId = `${sessionId}########42`;
+        await writeRecords([
+          {
+            ...record('u1', null, 'first part'),
+            promptId,
+            daemonPromptId: 'daemon-prompt-42',
+          },
+          ...Array.from({ length: 4 }, (_, index) =>
+            record(`old-${index}`, 'u1', 'x'.repeat(2048)),
+          ),
+          { ...record('u1', null, ''), message: tail },
+          record('a1', 'u1', 'reply'),
+        ]);
+        setSessionTranscriptMaxIndexBytesForTest(4096);
+
+        const projection = await coldProjection();
+        expect(projection?.runtime.initialTurn).toBe(42);
+        expect(projection?.runtime.recording.turnPromptIds).toEqual([promptId]);
+        expect(projection?.runtime.recording.turnDaemonPromptIds).toEqual([
+          'daemon-prompt-42',
+        ]);
+        expect(projection?.runtime.apiHistory[0]?.parts).toEqual([
+          { text: 'first part' },
+          ...(tail.parts ?? []),
+        ]);
+        expect(getApiHistoryPromptId(projection!.runtime.apiHistory[0]!)).toBe(
+          promptId,
+        );
+        expect((await turnIndex()).turns[0]).toMatchObject({
+          turnId: 'u1',
+          promptId: 'daemon-prompt-42',
+        });
+      },
+    );
+
+    it('preserves first-fragment display suppression across the window', async () => {
+      await writeRecords([
+        {
+          ...record('u1', null, 'internal context'),
+          systemPayload: { displayText: '', hookContext: 'internal context' },
+        },
+        ...Array.from({ length: 4 }, (_, index) =>
+          record(`old-${index}`, 'u1', 'x'.repeat(2048)),
+        ),
+        record('u1', null, 'later text'),
+        record('a1', 'u1', 'reply'),
+      ]);
+      setSessionTranscriptMaxIndexBytesForTest(4096);
+
+      expect((await turnIndex()).turns).toEqual([]);
+    });
+
+    it.each([true, false])(
+      'uses the first-fragment parent when the parent is present: %s',
+      async (parentPresent) => {
+        await writeRecords([
+          ...(parentPresent ? chain('old prompt', 'old reply') : []),
+          record('u42', 'a1', 'first part'),
+          ...Array.from({ length: 4 }, (_, index) =>
+            record(`old-${index}`, null, 'x'.repeat(2048)),
+          ),
+          record('u42', null, 'last part'),
+          record('a42', 'u42', 'reply'),
+        ]);
+        setSessionTranscriptMaxIndexBytesForTest(4096);
+
+        const expectedGap = {
+          childUuid: 'u42',
+          missingParentUuid: 'a1',
+          ...(parentPresent ? { reason: 'transcript_window' } : {}),
+        };
+        expect((await readPage()).gaps).toEqual([expectedGap]);
+        expect((await coldProjection())?.runtime.historyGaps).toEqual([
+          expectedGap,
+        ]);
+      },
+    );
+
+    it('rejects a cut logical record whose fragments exceed the cap together', async () => {
+      await writeRecords([
+        ...Array.from({ length: 3 }, () =>
+          record('u1', null, 'x'.repeat(1200)),
+        ),
+        record('a1', 'u1', 'reply'),
+      ]);
+      setSessionTranscriptMaxIndexBytesForTest(3500);
+
+      await expect(readPage()).rejects.toMatchObject({
+        name: 'SessionTranscriptTooLargeError',
+        sessionId,
+        maxBytes: 3500,
+      });
+      await expect(coldProjection()).rejects.toMatchObject({
+        name: 'SessionTranscriptTooLargeError',
+      });
+    });
+
+    it('bounds the total prefix fragments of individually small cut records', async () => {
+      const ids = Array.from({ length: 12 }, (_, index) => `u${index}`);
+      await writeRecords([
+        ...ids.map((uuid) => record(uuid, null, 'x'.repeat(600))),
+        ...Array.from({ length: 4 }, (_, index) =>
+          record(`old-${index}`, null, 'x'.repeat(2048)),
+        ),
+        ...ids.map((uuid) => record(uuid, null, 'last part')),
+      ]);
+      setSessionTranscriptMaxIndexBytesForTest(8192);
+
+      await expect(readPage()).rejects.toMatchObject({
+        name: 'SessionTranscriptTooLargeError',
+        maxBytes: 8192,
+      });
+    });
+
+    it('releases the prefix budget of replaced settings', async () => {
+      await writeRecords([
+        record('u1', null, 'one'),
+        ...Array.from({ length: 20 }, (_, index) =>
+          sys(`model-${index}`, 'u1', 'session_model', {
+            modelId: `model-${index}`,
+            authType: 'openai',
+          }),
+        ),
+        ...Array.from({ length: 4 }, (_, index) =>
+          record(`old-${index}`, 'u1', 'x'.repeat(2048)),
+        ),
+        record('u2', 'model-19', 'two'),
+        record('a2', 'u2', 'reply'),
+      ]);
+      setSessionTranscriptMaxIndexBytesForTest(4096);
+
+      expect((await coldProjection())?.runtime.recording.sessionModel).toEqual({
+        modelId: 'model-19',
+        authType: 'openai',
+      });
     });
 
     it('rejects a prefix line longer than the cap without reading it whole', async () => {
