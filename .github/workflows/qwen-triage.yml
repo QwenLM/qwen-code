@@ -2848,17 +2848,20 @@ jobs:
     #                                (≤~345s)
     #   resolver/tools, checkout,
     #   pin, upload, cleanup         ~5m
+    #   deepen history               ≤ 3m: `timeout -k 10 140` on the
+    #                                history fetch, `timeout -k 5 25` on
+    #                                the previous head; 7-10s measured
     #   java toolchain + Maven repo
     #   + sibling modules            ≤ ~20m, and only when the diff touches
     #                                a Java module. curl --max-time caps
     #                                each download; `timeout 300` caps each
     #                                mvn install
     #   ------------------------------------
-    #   worst case                   ~200m  ⇒ 210 leaves 10m of headroom.
+    #   worst case                   ~203m  ⇒ 213 leaves 10m of headroom.
     #
     # Cost of the raise, stated so it is a decision and not a surprise: a
     # verify run now occupies one ECS slot for up to ~3.5h instead of 1h.
-    timeout-minutes: 210
+    timeout-minutes: 213
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     # The job checks out and executes PR code. Run the steps in a container so
     # package scripts/builds cannot persist changes in the self-hosted runner's
@@ -2996,7 +2999,7 @@ jobs:
           # Snapshot PR metadata for the token-free agent: the agent env
           # carries no GitHub credential, so everything it may cite (title,
           # body, commit messages) is read from this file, and the tree/diff
-          # comes from git parents (see the depth-2 checkout below).
+          # comes from git (see the checkout and 'Deepen history' below).
           # rm first: RUNNER_TEMP hygiene between jobs is runner-managed and
           # this pool is persistent — a stale previous-report.md from another
           # PR's run must never masquerade as this PR's prior round.
@@ -3194,6 +3197,25 @@ jobs:
             rm -f "$RUNNER_TEMP/verify-context/review-threads.json"
             echo "::warning::Could not snapshot the PR's review threads; the round reports them as not covered."
           fi
+          # How far back 'Deepen history for the verify round' fetches: the
+          # oldest date among the PR's commits AND their parents. A fetch cut
+          # at a date also cuts every commit with one parent older than it,
+          # so a merge of an older base would hide the PR's earlier commits.
+          # Only for the head pr.json pinned: after a push the list is
+          # another head's. Here because this step holds the token; empty
+          # on failure.
+          # shellcheck disable=SC2016 # $owner and friends are GraphQL's
+          history_since="$(gh api graphql --paginate --slurp -f owner="${GITHUB_REPOSITORY%/*}" \
+              -f name="${GITHUB_REPOSITORY#*/}" -F number="$PR_NUMBER" \
+              -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid commits(first: 100, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { commit { committedDate parents(first: 10) { nodes { committedDate } } } } } } } }' |
+            jq -r --slurpfile pr "$RUNNER_TEMP/verify-context/pr.json" '
+              select(all(.[]; .data.repository.pullRequest.headRefOid == $pr[0].headRefOid))
+              | [.[].data.repository.pullRequest.commits.nodes[].commit
+              | .committedDate, .parents.nodes[].committedDate] | min // empty')" ||
+            history_since=''
+          [[ "$history_since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] ||
+            history_since=''
+          echo "history_since=${history_since}" >> "$GITHUB_OUTPUT"
           # Status comment with the live run link; publish-verify rewrites
           # this same comment with the final report. Best-effort.
           MARKER='<!-- qwen-triage:verify -->'
@@ -3615,6 +3637,50 @@ jobs:
             exit 1
           fi
           echo "agent inputs pinned from base $(git rev-parse --short 'HEAD^1'); head ${ACTUAL_HEAD} matches the authorized head"
+
+      # Depth 2 holds the merge commit and its two parents only: 38 of 67
+      # follow-up rounds re-ran everything because the previous head or a
+      # merge base was out of reach, and multi-commit rounds could not diff
+      # commit by commit. Deepen both sides to the resolve step's date, and
+      # fetch the previous report's verified head when a force-push dropped
+      # it. Root and before PR code, like the checkout, with no token.
+      # Best-effort: on failure the round keeps depth 2 and the skill's
+      # shallow fallbacks.
+      - name: 'Deepen history for the verify round'
+        if: "steps.pr.outputs.decision == 'run'"
+        env:
+          HISTORY_SINCE: '${{ steps.pr.outputs.history_since }}'
+        run: |-
+          set -uo pipefail
+          base="$(git rev-parse 'HEAD^1')"
+          head="$(git rev-parse 'HEAD^2')"
+          since="$HISTORY_SINCE"
+          # A long-lived branch would pull its whole life of the base;
+          # 90 days is about a third of main's history.
+          floor="$(date -u -d '90 days ago' +%Y-%m-%dT%H:%M:%SZ)" || floor=''
+          if [ -n "$since" ] && [[ "$since" < "$floor" ]]; then
+            echo "::warning::The PR reaches back to ${since}; history stops at ${floor}."
+            since="$floor"
+          fi
+          if [ -z "$since" ]; then
+            echo "::warning::No date to deepen to; the round sees the merge commit and its two parents only."
+          elif ! timeout -k 10 140 git fetch --no-tags --quiet --shallow-since="$since" origin "$base" "$head"; then
+            echo "::warning::Could not deepen the checkout to ${since}; the round sees the merge commit and its two parents only."
+          fi
+          # The previous round's verified head: the first OID after
+          # "verified head" in the bot's own report. Deepening brings it
+          # when it is an ancestor; otherwise, after a force-push or a
+          # deepen that fell short, it arrives alone, without its parents.
+          # `sed`, not `head`: under pipefail, grep's SIGPIPE would drop
+          # the OID found. `-k`: SIGKILL if a fetch outlives its SIGTERM.
+          prev="$(grep -io 'verified head.*' "$RUNNER_TEMP/verify-context/previous-report.md" 2>/dev/null |
+            grep -oE '\b[0-9a-f]{40}\b' | sed -n 1p)" || prev=''
+          if [ -n "$prev" ] && ! git cat-file -e "${prev}^{commit}" 2>/dev/null; then
+            timeout -k 5 25 git fetch --no-tags --quiet --depth=1 origin "${prev}:refs/verify/previous" ||
+              echo "::warning::Could not fetch the previous verified head ${prev}."
+          fi
+          mb="$(git merge-base "$base" "$head" 2>/dev/null)" || mb=''
+          echo "history from ${since:-nowhere}: $(git rev-list --count "$head" --not "$base") PR commits, merge base ${mb:-not reachable}"
 
       # The flakiness gate (#9125) re-runs the PR's changed test files and
       # compares outcomes across identical rounds. The file list is recorded

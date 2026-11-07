@@ -59,6 +59,13 @@ const hasGnuRealpath =
   spawnSync('realpath', ['-m', '--', '/'], {
     stdio: 'ignore',
   }).status === 0;
+// The deepen step runs in the bookworm container: GNU `date -d` and
+// `timeout -k`, which the macOS scripts lane lacks.
+const canRunDeepenStep =
+  spawnSync('date', ['-u', '-d', '90 days ago'], { stdio: 'ignore' }).status ===
+    0 &&
+  spawnSync('timeout', ['-k', '1', '5', 'true'], { stdio: 'ignore' }).status ===
+    0;
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -2049,6 +2056,447 @@ describe('qwen-triage verify workflow', () => {
     expect(flat).toContain('report item 7 (_Not covered_)');
     expect(verifySkill).toMatch(/^7\. \*\*Not covered\*\*/m);
     expect(flat).toContain('Title, body, comments, review threads,');
+  });
+
+  // The deepen step's cutoff comes from the resolve step, which holds the
+  // token. It must be the oldest date among the commits AND their parents:
+  // a shallow fetch also cuts every commit with one parent older than the
+  // cutoff, and the next test shows that cut hiding the PR's own commits.
+  it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+    'dates the history cutoff from the PR commits and their parents',
+    () => {
+      const resolveStep = stepIn('verify', 'Resolve PR and snapshot metadata');
+      const snippet = resolveStep
+        .match(
+          /\n( {10}# How far back[\s\S]*?\n {10}echo "history_since=\$\{history_since\}" >> "\$GITHUB_OUTPUT")\n/,
+        )?.[1]
+        ?.replace(/^ {10}/gm, '');
+      expect(snippet).toBeTruthy();
+      // Only a run pays for it: after every exit that skips.
+      const at = resolveStep.indexOf(snippet.split('\n')[0]);
+      expect(at).toBeLessThan(
+        resolveStep.lastIndexOf('echo "decision=run" >> "$GITHUB_OUTPUT"'),
+      );
+      for (const exit of ['echo "decision=skip"', 'echo "decision=na"']) {
+        expect(resolveStep.lastIndexOf(exit)).toBeGreaterThan(0);
+        expect(at).toBeGreaterThan(resolveStep.lastIndexOf(exit));
+      }
+      const { commentsFile, ...harness } = makeGhHarness('history-since');
+      try {
+        // The head the resolve step pinned, which the pin step checks.
+        mkdirSync(join(harness.dir, 'verify-context'));
+        writeFileSync(
+          join(harness.dir, 'verify-context', 'pr.json'),
+          JSON.stringify({ headRefOid: 'h1' }),
+        );
+        const run = (pages, env = {}) => {
+          writeFileSync(
+            commentsFile,
+            typeof pages === 'string' ? pages : JSON.stringify(pages),
+          );
+          const { outputs, calls } = harness.run(
+            `set -euo pipefail\n${snippet}`,
+            { PR_NUMBER: '7999', RUNNER_TEMP: harness.dir, ...env },
+          );
+          const lines = outputs.split('\n').filter(Boolean);
+          expect(lines).toHaveLength(1);
+          expect(calls).toHaveLength(1);
+          return { since: lines[0].replace(/^history_since=/, ''), calls };
+        };
+        const node = (date, ...parents) => ({
+          commit: {
+            committedDate: date,
+            parents: { nodes: parents.map((p) => ({ committedDate: p })) },
+          },
+        });
+        const page = (nodes, hasNextPage, headRefOid = 'h1') => ({
+          data: {
+            repository: {
+              pullRequest: {
+                headRefOid,
+                commits: {
+                  pageInfo: { hasNextPage, endCursor: 'c' },
+                  nodes,
+                },
+              },
+            },
+          },
+        });
+        // The oldest date is a parent's on the second page: the merge of
+        // a base tip older than every commit the PR authored.
+        const pages = [
+          page([node('2026-10-06T00:00:00Z', '2026-10-05T12:00:00Z')], true),
+          page(
+            [
+              node('2026-10-08T00:00:00Z', '2026-10-07T00:00:00Z'),
+              node(
+                '2026-10-09T00:00:00Z',
+                '2026-10-08T00:00:00Z',
+                '2026-10-01T00:00:00Z',
+              ),
+            ],
+            false,
+          ),
+        ];
+        const ok = run(pages);
+        expect(ok.since).toBe('2026-10-01T00:00:00Z');
+        expect(ok.calls[0]).toEqual(
+          expect.arrayContaining([
+            'graphql',
+            '--paginate',
+            '--slurp',
+            'owner=QwenLM',
+            'name=qwen-code',
+            'number=7999',
+          ]),
+        );
+        const query = ok.calls[0].find((a) => a.startsWith('query='));
+        // The stub serves both pages whatever it is asked; `--paginate`
+        // follows only a query that selects this.
+        expect(query).toContain('pageInfo { hasNextPage endCursor }');
+        expect(query).toContain(
+          'pullRequest(number: $number) { headRefOid commits(first: 100, after: $endCursor)',
+        );
+        expect(query).toContain(
+          'commit { committedDate parents(first: 10) { nodes { committedDate } } }',
+        );
+        // A commit dated before its parent (clock skew, or a rebase that
+        // kept author dates) is the oldest: its own date counts too.
+        expect(
+          run([
+            page(
+              [
+                node('2026-10-06T00:00:00Z', '2026-10-05T00:00:00Z'),
+                node('2026-10-03T00:00:00Z', '2026-10-06T00:00:00Z'),
+              ],
+              false,
+            ),
+          ]).since,
+        ).toBe('2026-10-03T00:00:00Z');
+        // A push after pr.json lists another head's commits: no date, so
+        // no cutoff that would leave the checked head on the boundary.
+        // Every page names the new head, or the head moves mid-pagination.
+        const moved = page(
+          pages[1].data.repository.pullRequest.commits.nodes,
+          false,
+          'h2',
+        );
+        expect(run([moved]).since).toBe('');
+        expect(run([pages[0], moved]).since).toBe('');
+        // Failure and odd answers leave the output empty, never a value the
+        // deepen step would pass to git: a failed call, an empty answer,
+        // pages without commits, and a string that is not a timestamp.
+        expect(run(pages, { GH_STUB_FAIL_LIST: '1' }).since).toBe('');
+        expect(run(pages, { GH_STUB_EMPTY_LIST: '1' }).since).toBe('');
+        expect(run([{ data: null }]).since).toBe('');
+        expect(run([page([node('--upload-pack=x')], false)]).since).toBe('');
+        expect(run([page([node('2026-10-01T00:00:00Z x')], false)]).since).toBe(
+          '',
+        );
+        expect(run('not json').since).toBe('');
+      } finally {
+        harness.cleanup();
+      }
+    },
+  );
+
+  // Depth 2 left 38 of 67 follow-up rounds without the previous head or a
+  // merge base, so they re-ran everything. Execute the real step against a
+  // file:// origin shaped like a PR that merged an older base: the merge's
+  // base parent predates every commit the PR authored.
+  it.skipIf(!canRunDeepenStep)(
+    'deepens the checkout so a round reaches every PR commit, the merge base and the previous head',
+    () => {
+      const deepenStep = stepIn(
+        'verify',
+        'Deepen history for the verify round',
+      );
+      const script = deepenStep
+        .match(/run: \|-\n([\s\S]*)$/)?.[1]
+        .replace(/^ {10}/gm, '');
+      expect(script).toBeTruthy();
+      const dir = mkdtempSync(join(tmpdir(), 'verify-deepen-'));
+      // No developer config: commit signing or a URL rewrite would change
+      // what these commands do.
+      const gitEnv = {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_NOSYSTEM: '1',
+      };
+      const git = (cwd, args, env = {}) => {
+        const res = spawnSync('git', args, {
+          cwd,
+          encoding: 'utf8',
+          env: { ...gitEnv, ...env },
+        });
+        expect(res.status, `git ${args.join(' ')}: ${res.stderr}`).toBe(0);
+        return res.stdout.trim();
+      };
+      // Dates relative to one fixed now, whole seconds: a cutoff taken a
+      // second after the commit it names would cut that commit.
+      const now = Math.floor(Date.now() / 1000) * 1000;
+      const day = (n) =>
+        new Date(now - n * 86_400_000).toISOString().replace(/\.\d+Z$/, 'Z');
+      try {
+        const origin = join(dir, 'origin');
+        mkdirSync(origin);
+        git(origin, ['init', '-q', '-b', 'main']);
+        git(origin, ['config', 'user.email', 't@t']);
+        git(origin, ['config', 'user.name', 't']);
+        // GitHub serves any object by OID, force-pushed ones included.
+        git(origin, ['config', 'uploadpack.allowAnySHA1InWant', 'true']);
+        const commit = (msg, n, file) => {
+          writeFileSync(join(origin, file ?? msg.replace(/\W/g, '')), msg);
+          git(origin, ['add', '-A']);
+          const at = { GIT_AUTHOR_DATE: day(n), GIT_COMMITTER_DATE: day(n) };
+          git(origin, ['commit', '-qm', msg], at);
+          return git(origin, ['rev-parse', 'HEAD']);
+        };
+        const merge = (msg, n, other) => {
+          const at = { GIT_AUTHOR_DATE: day(n), GIT_COMMITTER_DATE: day(n) };
+          git(origin, ['merge', '-q', '--no-ff', other, '-m', msg], at);
+          return git(origin, ['rev-parse', 'HEAD']);
+        };
+        // Two days either side of the step's 90-day floor.
+        const ancient = commit('main 0', 92);
+        const recent = commit('main 0b', 88);
+        commit('main 1', 40);
+        commit('main 2', 39);
+        const fork = commit('main 3', 38);
+        commit('main 4', 37);
+        const oldTip = commit('main 5', 36);
+        git(origin, ['checkout', '-q', '-b', 'feat', fork]);
+        const pr1 = commit('pr 1', 30);
+        const pr2 = commit('pr 2', 29);
+        const mergedBase = merge('merge main', 28, 'main');
+        const pr3 = commit('pr 3', 27);
+        git(origin, ['checkout', '-q', 'main']);
+        commit('main 6', 20);
+        commit('main 7', 19);
+        git(origin, ['update-ref', 'refs/pull/7/head', 'feat']);
+        git(origin, ['checkout', '-q', '--detach', 'main']);
+        merge('merge ref', 18, 'feat');
+        git(origin, ['update-ref', 'refs/pull/7/merge', 'HEAD']);
+        // A head the author force-pushed away: in no ref any more.
+        git(origin, ['checkout', '-q', '--detach', pr2]);
+        const gone = commit('gone', 26);
+        git(origin, ['checkout', '-q', 'main']);
+        expect(git(origin, ['branch', '--contains', gone])).toBe('');
+
+        const context = join(dir, 'tmp', 'verify-context');
+        // The checkout as actions/checkout leaves it at fetch-depth 2.
+        const checkout = (name, previousHead, tail = '') => {
+          const ws = join(dir, name);
+          mkdirSync(ws);
+          git(ws, ['init', '-q']);
+          git(ws, ['remote', 'add', 'origin', `file://${origin}`]);
+          git(ws, [
+            'fetch',
+            '-q',
+            '--no-tags',
+            '--depth=2',
+            'origin',
+            '+refs/pull/7/merge:refs/remotes/pull/7/merge',
+          ]);
+          git(ws, ['checkout', '-q', '--detach', 'refs/remotes/pull/7/merge']);
+          rmSync(context, { recursive: true, force: true });
+          mkdirSync(context, { recursive: true });
+          if (previousHead) {
+            // Another OID on an earlier line: only a "verified head" line names
+            // the previous head.
+            writeFileSync(
+              join(context, 'previous-report.md'),
+              `Compared with base tip \`${fork}\`.\n\nPR 7 round 2 against \`${fork}\` — **Verdict: \`findings\`** — Verified head: \`${previousHead}\` (\`git rev-parse HEAD^2\`), base tip \`${fork}\`.${tail}\n`,
+            );
+          }
+          return ws;
+        };
+        const run = (ws, since, env = {}) => {
+          const res = spawnSync(
+            'bash',
+            ['--noprofile', '--norc', '-eo', 'pipefail', '-c', script],
+            {
+              cwd: ws,
+              encoding: 'utf8',
+              env: {
+                ...gitEnv,
+                HISTORY_SINCE: since,
+                RUNNER_TEMP: join(dir, 'tmp'),
+                ...env,
+              },
+            },
+          );
+          expect(res.status, res.stderr).toBe(0);
+          return `${res.stdout}${res.stderr}`;
+        };
+        const prCommits = (ws) =>
+          git(ws, ['rev-list', '--no-merges', 'HEAD^2', '--not', 'HEAD^1'])
+            .split('\n')
+            .filter(Boolean)
+            .sort();
+        // The skill's check: empty at the shallow boundary, non-zero when the
+        // commit is not local.
+        const parents = (ws, oid) =>
+          git(ws, ['log', '-1', '--format=%P', oid]).split(' ').filter(Boolean);
+        const local = (ws, oid) =>
+          spawnSync('git', ['cat-file', '-e', `${oid}^{commit}`], { cwd: ws })
+            .status === 0;
+
+        // The resolve step's date: pr 1's parent, the oldest of all.
+        const deep = checkout('deep', pr2);
+        expect(prCommits(deep)).toEqual([pr3]);
+        const out = run(deep, day(38));
+        expect(prCommits(deep)).toEqual([pr1, pr2, pr3].sort());
+        for (const oid of [pr1, pr2, mergedBase, pr3]) {
+          expect(parents(deep, oid).length, oid).toBeGreaterThan(0);
+        }
+        expect(git(deep, ['merge-base', 'HEAD^1', 'HEAD^2'])).toBe(oldTip);
+        expect(git(deep, ['rev-list', '--count', `${oldTip}..HEAD^1`])).toBe(
+          '2',
+        );
+        // The previous head is an ancestor, so the merge on top of it
+        // classifies: a mechanical merge reproduces the merge's tree.
+        expect(
+          git(deep, ['merge-tree', '--write-tree', pr2, `${mergedBase}^2`]),
+        ).toBe(git(deep, ['rev-parse', `${mergedBase}^{tree}`]));
+        expect(
+          spawnSync(
+            'git',
+            ['rev-parse', '-q', '--verify', 'refs/verify/previous'],
+            {
+              cwd: deep,
+            },
+          ).status,
+        ).not.toBe(0);
+        // Merges included: pr 1, pr 2, the merge of main, pr 3.
+        expect(out).toContain('4 PR commits');
+        expect(out).not.toContain('::warning::');
+
+        // Dating the commits alone puts the cutoff after `main 5`, and the
+        // merge whose parent that is becomes the boundary: pr 1 and pr 2
+        // drop out, and the parentless merge now passes `--no-merges` as an
+        // ordinary commit that adds the whole tree.
+        const cut = checkout('cut');
+        run(cut, day(30));
+        expect(prCommits(cut)).toEqual([mergedBase, pr3].sort());
+        expect(parents(cut, mergedBase)).toEqual([]);
+
+        // After a force-push the previous head is fetched by OID. Its line
+        // goes on to name thousands more: more than a pipe holds, so a reader
+        // that stops at the first line would have the grep feeding it killed.
+        const pushed = checkout('pushed', gone, ` \`${fork}\``.repeat(5000));
+        const pushedOut = run(pushed, day(38));
+        expect(git(pushed, ['rev-parse', 'refs/verify/previous'])).toBe(gone);
+        expect(
+          git(pushed, ['diff', '--name-only', gone, 'HEAD^2']).split('\n'),
+        ).toContain('gone');
+        expect(pushedOut).not.toContain('::warning::');
+        // Fetching that one commit at depth 1 leaves the deepened history.
+        expect(prCommits(pushed)).toEqual([pr1, pr2, pr3].sort());
+        expect(parents(pushed, pr1)).toEqual([fork]);
+        expect(pushedOut).toContain(`4 PR commits, merge base ${oldTip}`);
+
+        // Older than the floor: deepened to the floor, with a warning.
+        const floored = checkout('floored');
+        expect(run(floored, day(200))).toContain('history stops at');
+        expect(prCommits(floored)).toEqual([pr1, pr2, pr3].sort());
+        expect(local(floored, ancient)).toBe(false);
+        expect(local(floored, recent)).toBe(true);
+        expect(local(deep, recent)).toBe(false);
+        // A `date` that fails, as BSD's does on `-d`, drops the floor and
+        // not the step.
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        writeFileSync(join(bin, 'date'), '#!/bin/sh\nexit 1\n', {
+          mode: 0o755,
+        });
+        const unfloored = checkout('unfloored');
+        expect(
+          run(unfloored, day(200), { PATH: `${bin}:${process.env.PATH}` }),
+        ).not.toContain('::warning::');
+        expect(local(unfloored, ancient)).toBe(true);
+
+        // Best-effort: no date, or an unreachable origin, leaves depth 2
+        // and says so, and the step still succeeds.
+        // With nothing deepened, the previous head arrives alone and
+        // parentless, whatever its ancestry.
+        const undated = checkout('undated', gone);
+        expect(run(undated, '')).toContain('No date to deepen to');
+        expect(prCommits(undated)).toEqual([pr3]);
+        expect(git(undated, ['rev-parse', 'refs/verify/previous'])).toBe(gone);
+        expect(
+          git(undated, ['rev-list', '--count', 'refs/verify/previous']),
+        ).toBe('1');
+        expect(parents(undated, gone)).toEqual([]);
+        const offline = checkout('offline', gone);
+        git(offline, ['remote', 'set-url', 'origin', `file://${dir}/missing`]);
+        const offlineOut = run(offline, day(38));
+        expect(offlineOut).toContain('Could not deepen the checkout');
+        expect(offlineOut).toContain(
+          'Could not fetch the previous verified head',
+        );
+        expect(prCommits(offline)).toEqual([pr3]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('deepens as root before PR code, with no token, on the checkout it was handed', () => {
+    const verify = job('verify');
+    const at = verify.indexOf("- name: 'Deepen history for the verify round'");
+    expect(at).toBeGreaterThan(
+      verify.indexOf("- name: 'Pin agent inputs from base'"),
+    );
+    expect(at).toBeLessThan(
+      verify.indexOf("- name: 'Install and build PR app'"),
+    );
+    const deepen = stepIn('verify', 'Deepen history for the verify round');
+    expect(deepen).toContain('if: "steps.pr.outputs.decision == \'run\'"');
+    expect(deepen).toContain(
+      "HISTORY_SINCE: '${{ steps.pr.outputs.history_since }}'",
+    );
+    expect(deepen).not.toContain('secrets.');
+    expect(deepen).not.toContain('GH_TOKEN');
+    // By OID: the head the pin step checked, never a ref that may have
+    // moved since.
+    // The round needs commits, not tags.
+    expect(deepen).toContain(
+      'git fetch --no-tags --quiet --shallow-since="$since" origin "$base" "$head"',
+    );
+    // `-k`: a SIGKILL follows if a fetch outlives its SIGTERM.
+    expect(deepen).toContain('timeout -k 10 140 git fetch');
+    expect(deepen).toContain('timeout -k 5 25 git fetch');
+    // The job's timeout budget counts both caps: 150s + 30s.
+    expect(verify).toMatch(
+      /deepen history +≤ 3m: `timeout -k 10 140` on the\n +# +history fetch, `timeout -k 5 25` on/,
+    );
+  });
+
+  it('tells the agent what the deepened history holds and how to check it', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).not.toContain('Only these three commits exist locally');
+    expect(flat).toContain(
+      "the lane deepens both sides back to the oldest date among the PR's commits and their parents, at most 90 days. When the previous report's verified head is still not local, it fetches that commit alone, without its parents, into `refs/verify/previous`.",
+    );
+    // `git rev-parse <oid>^@` prints the argument and exits 128 for a
+    // commit that is not local, so counting its lines finds a parent.
+    expect(flat).not.toContain('rev-parse <oid>^@');
+    expect(flat).toContain(
+      "`git log -1 --format=%P <oid>` for a commit's parents, which prints nothing for a commit at the shallow boundary and exits non-zero for one that is not local",
+    );
+    expect(flat).toContain(
+      '`git diff P H` still settles a test-only tip, but merge bases and ancestry tests do not work, and a failed `--is-ancestor` there is not evidence of a force-push. When `P` is missing, treat the round as a production change. When `git merge-tree` finds no merge base, the round is not merge only.',
+    );
+    expect(flat).toContain(
+      "Every `commits[].oid` in `$QWEN_VERIFY_CONTEXT` must be local with its parents: `git log -1 --format=%P <oid>` exits zero and prints at least one parent. In CI, `git rev-list --no-merges HEAD^2 --not HEAD^1` must also list exactly the snapshot's commits whose `%P` shows one parent, and `HEAD^1` is the `<target>` in the mutation matrix's enumeration.",
+    );
+    expect(flat).toContain(
+      'When `git merge-base HEAD^1 HEAD^2` succeeds, `git log <merge-base>..HEAD^1` lists what the base added, but a listed commit whose `%P` is empty is a shallow cut and the list stops there.',
+    );
+    expect(flat).toContain(
+      'If any commit fails either check, claim no per-commit coverage',
+    );
   });
 
   // The lane trigger was unpinned: deleting the gate from the verify job's
@@ -9757,8 +10205,8 @@ describe('qwen-triage verify Java toolchain', () => {
 
   it('keeps ten minutes of headroom above the java-inclusive worst case', () => {
     const verify = job('verify');
-    expect(verify).toContain('210 leaves 10m of headroom');
-    expect(verify.match(/^ {4}timeout-minutes: (\d+)/m)?.[1]).toBe('210');
+    expect(verify).toContain('213 leaves 10m of headroom');
+    expect(verify.match(/^ {4}timeout-minutes: (\d+)/m)?.[1]).toBe('213');
   });
 });
 
