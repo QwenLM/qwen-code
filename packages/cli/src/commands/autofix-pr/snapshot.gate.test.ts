@@ -37,6 +37,11 @@ import {
   type AutofixPrGateCursor,
   type AutofixPrState,
 } from './state.js';
+import type { RefusalCode } from './refusal.js';
+
+/** A refusal with its code: what the skill acts on. */
+const refused = (code: RefusalCode, message: RegExp) =>
+  expect.objectContaining({ code, message: expect.stringMatching(message) });
 
 const mockGh = vi.hoisted(() => vi.fn());
 const mocks = vi.hoisted(() => ({
@@ -1467,7 +1472,12 @@ describe('fetchPrData', () => {
     });
     expect(() =>
       fetchPrData({ owner: 'o', repo: 'r', prNumber: 7 }, strict),
-    ).toThrow(/asked GitHub about 1 bot comments .* run snapshot again/);
+    ).toThrow(
+      refused(
+        'partial',
+        /asked GitHub about 1 bot comments .* run snapshot again/,
+      ),
+    );
     roundNow.mockRestore();
     expect(JSON.parse(readFileSync(cachePath, 'utf8'))).toEqual({ A: null });
 

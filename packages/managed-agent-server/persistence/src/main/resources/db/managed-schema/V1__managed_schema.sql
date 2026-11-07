@@ -256,7 +256,12 @@ CREATE TABLE ma_session_journal_tx (
     record_digest CHAR(64) NOT NULL COMMENT 'Digest of the stored transaction bytes.',
     activation_lease_until BIGINT UNSIGNED COMMENT 'Latest activation lease expiry in Unix epoch milliseconds.',
     activation_renewal_seq BIGINT UNSIGNED COMMENT 'Monotonic activation lease renewal sequence.',
+    -- WorkspaceCsiApplicationImage.ACTIVATION_OPERATIONS mirrors this CASE, so keep the two in sync.
+    is_activation_record TINYINT UNSIGNED GENERATED ALWAYS AS (CASE operation WHEN 'installActivation' THEN 1 WHEN 'renewActivation' THEN 1 ELSE 0 END)
+        COMMENT 'Generated flag marking the transaction that carries an activation lease.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
+    INDEX idx_ma_session_journal_tx_activation
+        (tenant_id, session_id, activation_epoch, is_activation_record, journal_revision),
     CONSTRAINT uk_ma_session_journal_tx_business_key UNIQUE (tenant_id, session_id, journal_revision),
     CONSTRAINT uk_managed_session_command
         UNIQUE (tenant_id, session_id, command_key_hash),
@@ -920,6 +925,7 @@ CREATE TABLE ma_runtime_slot (
     storage_id VARBINARY(1024) COMMENT 'Logical storage identity.',
     last_generation BIGINT UNSIGNED NOT NULL COMMENT 'Last allocated Runtime generation, retained after binding collection.',
     active_binding_id VARBINARY(2048) COMMENT 'Current binding identity, if the slot has an active binding.',
+    INDEX idx_ma_runtime_slot_isolation (isolation_key),
     CONSTRAINT uk_ma_runtime_slot_business_key UNIQUE (request_key),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_runtime_slot_id PRIMARY KEY (id)
@@ -1002,10 +1008,10 @@ CREATE TABLE ma_runtime_session (
         (binding_id, runtime_generation, session_state),
     INDEX idx_runtime_session_id (runtime_session_id),
     execution_storage_key CHAR(64) COMMENT 'Physical storage coordination key for active execution membership.',
-    is_execution_exclusive TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether this execution membership requires exclusive storage access.',
+    is_rewind_pending TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether this Runtime Session has an active or unconfirmed rewind.',
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_runtime_session_id PRIMARY KEY (id),
-    CONSTRAINT ck_ma_runtime_session_boolean_values CHECK ((is_execution_exclusive >= 0 AND is_execution_exclusive <= 1))
+    CONSTRAINT ck_ma_runtime_session_boolean_values CHECK ((is_rewind_pending >= 0 AND is_rewind_pending <= 1))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Runtime execution Sessions attached to a binding and originating Harness Session.';
 
 CREATE TABLE ma_tool_execution (
@@ -1081,10 +1087,8 @@ CREATE TABLE ma_storage_owner (
     INDEX idx_execution_lease_maintenance (maintenance_id),
     physical_key CHAR(64) COMMENT 'Canonical physical storage identity shared by logical aliases.',
     member_count BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Number of Runtime Session memberships and running uploads on this storage.',
-    exclusive_member_key CHAR(64) COMMENT 'Identity of the execution member holding exclusive rewind access.',
     CONSTRAINT uk_ma_storage_owner_physical UNIQUE (physical_key),
     CONSTRAINT ck_ma_storage_owner_members CHECK (member_count >= 0),
-    CONSTRAINT ck_ma_storage_owner_exclusive CHECK (exclusive_member_key IS NULL OR member_count >= 1),
     CONSTRAINT uk_ma_storage_owner_business_key UNIQUE (storage_key),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_storage_owner_id PRIMARY KEY (id)

@@ -55,6 +55,12 @@ export class MessageHandler {
   /**
    * Set auth interactive handler — interactive auth flow.
    */
+  setSubscriptionAuthHandler(
+    handler: (action?: 'logout' | 'upgrade') => Promise<void>,
+  ): void {
+    this.router.setSubscriptionAuthHandler(handler);
+  }
+
   setAuthInteractiveHandler(
     handler: (
       config: import('@qwen-code/qwen-code-core').ProviderConfig,

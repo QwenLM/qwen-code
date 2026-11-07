@@ -36,7 +36,7 @@ The browser never edits your configuration: to add, change or remove a hook, edi
 
 Reloading requires this explicit menu-open action: saving a file, pulling changes or switching branches does not automatically arm new hook commands. The non-interactive `/hooks list` only displays the registry currently loaded by that process; it does not reload settings. In an interactive terminal, `/hooks list` opens the same menu as `/hooks`.
 
-This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `disableAllHooks`, `stopHookBlockingCap`, `security.allowedHttpHookUrls`, `security.allowPrivateNetworkHooks` and `security.folderTrust` (including trust-store entries) still require a restart. `security.folderTrust` is read from user, system and system-default settings only; a workspace file cannot enable it. Hooks registered at runtime by skills or the SDK are not affected. In interactive sessions, project hooks from a project's `.qwen/settings.json` run with either authority: your **approval of the exact configuration** (see [Approving project hooks](#approving-project-hooks)) or **explicit folder trust** (enable `security.folderTrust.enabled` in user settings and trust the directory, or grant workspace trust through your IDE). An approved block runs even with the folder-trust feature off. While a block awaits its first decision it is withheld and the approval dialog asks; when the folder is also untrusted the session shows a startup warning and the `/hooks` browser lists the block as disabled (untrusted). With `security.folderTrust.enabled` on and the folder untrusted, workspace settings do not load at all, so the dialog cannot appear — trust the folder first. Settings-file hooks are registered once at startup, so an IDE trust change does not retroactively arm or silence them — reopen the `/hooks` menu or restart to apply it. In non-interactive sessions (`--prompt`/`-p`, piped stdin, ACP/SDK embeddings) folder trust is implicit — the caller chose the directory and there is no prompt surface — so approved project hooks load as before; only run non-interactive sessions in directories you trust. A reload that changes the project hooks asks for approval again. When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, none load and the browser says so at the top.
+This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `disableAllHooks`, `stopHookBlockingCap`, `security.allowedHttpHookUrls`, `security.allowPrivateNetworkHooks` and `security.folderTrust` (including trust-store entries) still require a restart. `security.folderTrust` is read from user, system and system-default settings only; a workspace file cannot enable it. Hooks registered at runtime by skills or the SDK are not affected. Project hooks from a project's `.qwen/settings.json` run with either authority, in every mode: your **approval of the exact configuration** (see [Approving project hooks](#approving-project-hooks)) or **explicit folder trust** (enable `security.folderTrust.enabled` in user settings and trust the directory, or grant workspace trust through your IDE). An approved block runs even with the folder-trust feature off. While a block awaits its first decision it is withheld and the interactive approval dialog asks; when the folder is also untrusted the session shows a startup warning and the `/hooks` browser lists the block as disabled (untrusted). With `security.folderTrust.enabled` on and the folder untrusted, workspace settings do not load at all, so the dialog cannot appear — trust the folder first. Settings-file hooks are registered once at startup, so an IDE trust change does not retroactively arm or silence them — reopen the `/hooks` menu or restart to apply it. Non-interactive sessions (`--prompt`/`-p`, piped stdin, ACP/SDK embeddings) follow the same either-or rule; there is no implicit-trust exemption. A fresh default environment with neither an approval nor a trust decision executes no repository hooks; a headless run prints one stderr line when hooks are withheld. Platform embedders record the approval in the home they manage, or enable the feature and pre-trust their directories (a single `TRUST_PARENT` entry can cover a workspace tree). A reload that changes the project hooks asks for approval again. When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, none load and the browser says so at the top.
 
 ### Agent frontmatter scope
 
@@ -394,6 +394,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | `TodoCreated`         | When a new todo item is created                                        | None (always fires)                                              |
 | `TodoCompleted`       | When a todo item is marked as completed                                | None (always fires)                                              |
 | `InstructionsLoaded`  | When a context file such as `QWEN.md`, or a file it imports, is loaded | File path of the loaded file                                     |
+| `FileChanged`         | After an explicitly watched file is added, modified, or deleted        | Basename of the changed file                                     |
 
 ### Matcher Patterns
 
@@ -416,6 +417,9 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | Stop Events         | `StopFailure`                                                                              | ✅ Regex        | Error type: `rate_limit`, `authentication_failed`, `billing_error`, `invalid_request`, `server_error`, `max_output_tokens`, `loop_detected`, `unknown` |
 | Message Display     | `MessageDisplay`                                                                           | ❌ No           | N/A                                                                                                                                                    |
 | Instruction Events  | `InstructionsLoaded`                                                                       | ✅ Regex        | File path of the loaded file                                                                                                                           |
+| File Events         | `FileChanged`                                                                              | ✅ Regex        | Basename of the changed file                                                                                                                           |
+
+For `FileChanged`, registering static paths uses literal filenames in cwd; filtering events uses the basename and the rules below. See [FileChanged hooks](file-changed-hooks.md) for dynamic files and recursive directories.
 
 **Matcher Syntax:**
 
@@ -902,6 +906,7 @@ A command hook that exits 0 with plain-text `stdout` has that text treated as `a
 **Output Options**:
 
 - `hookSpecificOutput.additionalContext`: context to be available in the session
+- `hookSpecificOutput.watchPaths`: absolute files or recursive directories to watch for `FileChanged`, from synchronous output with `hookEventName: "SessionStart"`. See [FileChanged path registration](file-changed-hooks.md#watch-directories-and-paths-outside-cwd) for replacement, clearing, and validation rules.
 - Standard hook output fields
 
 **Example Output**:
@@ -1526,6 +1531,29 @@ It fires when the session starts, when context files are reloaded during the ses
 
 - **None** - InstructionsLoaded output and exit codes are ignored.
 
+#### FileChanged
+
+**Purpose**: Observes additions, modifications, and deletions of explicitly watched files in local, non-managed sessions. Changes may come from Qwen Code, shell commands, editors, or other processes. The common input fields identify the listening session, including when another session writes a shared directory.
+
+**Matcher**: Filters against the file basename using the existing matcher rules. Literal cwd filenames separated by `|` also register static paths. Omitted or empty matchers, `*`, and `.*` register no static paths; they receive events from the session's watched paths, including dynamically registered paths.
+
+**Event-specific fields**:
+
+```json
+{
+  "file_path": "/home/me/work/demo/.envrc",
+  "event": "change"
+}
+```
+
+`file_path` is absolute. `event` is `add`, `change`, or `unlink`. The initial directory scan is not replayed, but native filesystem events from a recent write may arrive after registration. Symbolic links are not traversed; register the real directory root. Notifications are best effort after writes settle. Hook output cannot veto or undo a write or add model context.
+
+**Output Options**:
+
+- Successful synchronous `hookSpecificOutput.watchPaths`, with `hookEventName: "FileChanged"`, replaces the dynamic watch list with absolute files or recursive directories. The last valid, explicit list in hook execution order wins; `[]` clears it, while omitted or invalid lists leave it unchanged. Async output does not register paths. Static registrations remain active.
+
+See [FileChanged hooks](file-changed-hooks.md) for configuration, a memory-directory example, session ownership, and self-trigger and delivery limits. Memory directories are watched only when explicitly registered; there is no dedicated auto-memory enable/disable event.
+
 ## Hook Configuration
 
 Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files. Hooks in the system settings files (System and SystemDefaults) load with the source System and, like user hooks, regardless of folder trust. Within one event, sequential hooks from settings and extensions run in this order: Project, User, System, Extension.
@@ -1632,7 +1660,7 @@ fi
 ### Security Model
 
 - Hooks run in the user's environment with user privileges
-- Project-level hooks in `.qwen/settings.json` run with either authority: your approval of the exact hooks configuration (see [Approving project hooks](#approving-project-hooks)) or explicit folder trust (enable `security.folderTrust.enabled` and trust the folder, or grant IDE workspace trust). Non-interactive sessions (`-p`, piped stdin, ACP/SDK) treat folder trust as implicit — only use directories you trust. Hooks in project skill or subagent frontmatter need explicit folder trust
+- Project-level hooks in `.qwen/settings.json` run with either authority, in every mode: your approval of the exact hooks configuration (see [Approving project hooks](#approving-project-hooks)) or explicit folder trust (enable `security.folderTrust.enabled` and trust the folder, or grant IDE workspace trust). Non-interactive sessions (`-p`, piped stdin, ACP/SDK) follow the same rule — there is no implicit-trust exemption; embedders record approvals or pre-trust their managed directories. Hooks in project skill or subagent frontmatter need explicit folder trust
 - Timeouts prevent hanging hooks (default: 60 seconds for command hooks)
 
 ## Best Practices
@@ -1794,7 +1822,7 @@ sys.exit(0)
 
 1. **Event name.** The key must be one of the events in [Hook Events](#hook-events), spelled exactly, including case. An unknown event name is skipped with the warning `Invalid hook event name`.
 2. **Matcher.** Tool events match the runtime tool id, such as `run_shell_command` or `write_file`, or an accepted alias such as Claude Code's `Bash` or `Write` (see [Matcher Patterns](#matcher-patterns)). On events without matcher support, `matcher` is ignored.
-3. **Folder trust or approval.** In interactive sessions, hooks in a project's `.qwen/settings.json` run when you have approved the exact configuration (see [Approving project hooks](#approving-project-hooks)) or the folder is explicitly trusted: enable `security.folderTrust.enabled` in user settings and trust the directory, or grant workspace trust through your IDE (see [Trusted Folders](../configuration/trusted-folders.md)). With neither authority they stay withheld; with the trust feature on and the folder untrusted, workspace settings do not load at all — trust the folder first. In non-interactive sessions (`-p`, piped stdin, ACP/SDK embeddings) trust is implicit. User hooks load regardless of folder trust.
+3. **Folder trust or approval.** Hooks in a project's `.qwen/settings.json` run when you have approved the exact configuration (see [Approving project hooks](#approving-project-hooks)) or the folder is explicitly trusted: enable `security.folderTrust.enabled` in user settings and trust the directory, or grant workspace trust through your IDE (see [Trusted Folders](../configuration/trusted-folders.md)). With neither authority they stay withheld in every mode, headless included; with the trust feature on and the folder untrusted, workspace settings do not load at all — trust the folder first. User hooks load regardless of folder trust.
 4. **Hooks disabled.** `"disableAllHooks": true`, `--safe-mode` (or `QWEN_CODE_SAFE_MODE`) and `--bare` (or `QWEN_CODE_SIMPLE`) turn off all hooks, including user hooks.
 5. **Debug log.** Start Qwen Code with `--debug`, or set `QWEN_DEBUG_LOG_FILE=1`, then read the session log at `~/.qwen/debug/latest` (under `$QWEN_RUNTIME_DIR` when that is set). Each line is tagged with a namespace:
    - `[HOOK_REGISTRY]`: `Hook registry initialized with N hook entries`, and hook definitions discarded as invalid
