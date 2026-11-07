@@ -30,6 +30,19 @@ function reloadPage(url: string) {
   window.location.reload();
 }
 
+// Backstop above the daemon's own staging ceilings. Those are larger than a
+// single timeout constant suggests: a standalone archive download tries OSS
+// and then GitHub sequentially with a five-minute budget *each*, and the
+// checksum and signature fetches add up to two more minutes, so one restage
+// can spend about twelve minutes downloading and verifying before activation;
+// the managed npm child is capped at ten. A daemon that stays reachable but
+// wedged in `restarting` — a hung activation or process replacement — must not
+// leave the control disabled forever with no error, and the cap must stay far
+// enough above that real chain that a slow but progressing update never
+// reaches it.
+const RESTART_ABSOLUTE_CAP_MS = 20 * 60_000;
+const RESTART_UNREACHABLE_CAP_MS = 60_000;
+
 export function UpdateControl({
   client,
   collapsed,
@@ -45,7 +58,17 @@ export function UpdateControl({
     version: string;
     url: string;
   } | null>(null);
+  // Giving up must not take the entry with it. A wedged daemon keeps reporting
+  // `restarting`, which the render gate below does not display, so without this
+  // the user would get one error notification and then no update affordance at
+  // all. The flag keeps a retryable entry on screen until the daemon offers a
+  // displayable state again or the user clicks.
+  const [gaveUp, setGaveUp] = useState(false);
   const restartRequested = useRef(false);
+  // Polling starts when the click sets `restarting`, before the restart POST
+  // resolves, so the first poll can still observe the pre-click state. Only
+  // an acknowledged restart makes a settled state meaningful.
+  const restartAcknowledged = useRef(false);
   const clientGeneration = useRef(0);
   const callbacks = useRef({ onError, onRestarted, t });
   callbacks.current = { onError, onRestarted, t };
@@ -53,7 +76,9 @@ export function UpdateControl({
   useEffect(() => {
     setStatus(null);
     setRestarting(null);
+    setGaveUp(false);
     restartRequested.current = false;
+    restartAcknowledged.current = false;
     return () => {
       clientGeneration.current += 1;
     };
@@ -62,12 +87,23 @@ export function UpdateControl({
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
+    // The daemon answers while it re-resolves and stages the current latest,
+    // which can outlast any fixed deadline measured from the click. Time how
+    // long it has been unreachable instead — a daemon that died and never came
+    // back is the failure this timeout exists to detect.
+    let unreachableSince: number | undefined;
     const check = async () => {
       let delay = restarting !== null ? 2000 : 60_000;
       let failure: unknown;
+      // Sample before the request, not after: this poll may have been started
+      // while the restart was still unacknowledged and deliver its pre-restart
+      // snapshot afterwards. Reading the ref after the await would treat that
+      // stale snapshot as a daemon that settled after restarting.
+      const acknowledged = restartAcknowledged.current;
       try {
         let next = await client.daemonUpdateStatus();
         if (cancelled) return;
+        unreachableSince = undefined;
         if (restarting !== null) {
           if (
             next.currentVersion &&
@@ -79,8 +115,27 @@ export function UpdateControl({
           if (next.state === 'error') {
             restartRequested.current = false;
             setRestarting(null);
+            setGaveUp(true);
             callbacks.current.onError(
               new Error(next.message),
+              callbacks.current.t('update.failed'),
+            );
+            return;
+          }
+          if (acknowledged && next.state !== 'restarting') {
+            // The daemon settled without changing version, so the process
+            // replacement did not land on the new build. Nothing further will
+            // arrive; waiting for a version change would hang the control.
+            restartRequested.current = false;
+            restartAcknowledged.current = false;
+            // Publish the settled state: leaving the last `restarting` status
+            // in place would hide the control entirely instead of handing the
+            // user back whatever the daemon now offers.
+            setStatus(next);
+            setGaveUp(false);
+            setRestarting(null);
+            callbacks.current.onError(
+              new Error(callbacks.current.t('update.failed')),
               callbacks.current.t('update.failed'),
             );
             return;
@@ -93,11 +148,20 @@ export function UpdateControl({
         if (next.state === 'installing' || restarting !== null) delay = 2000;
       } catch (error) {
         failure = error;
+        unreachableSince ??= Date.now();
       }
       if (cancelled) return;
-      if (restarting !== null && Date.now() - restarting.startedAt >= 60_000) {
+      if (
+        restarting !== null &&
+        ((unreachableSince !== undefined &&
+          Date.now() - unreachableSince >= RESTART_UNREACHABLE_CAP_MS) ||
+          Date.now() - restarting.startedAt >= RESTART_ABSOLUTE_CAP_MS)
+      ) {
         restartRequested.current = false;
         setRestarting(null);
+        // Keep a retryable entry: the daemon may still be reporting
+        // `restarting`, which the render gate does not display on its own.
+        setGaveUp(true);
         callbacks.current.onError(
           failure ?? new Error(callbacks.current.t('update.failed')),
           callbacks.current.t('update.failed'),
@@ -116,6 +180,8 @@ export function UpdateControl({
   const restart = async () => {
     if (restartRequested.current) return;
     restartRequested.current = true;
+    restartAcknowledged.current = false;
+    setGaveUp(false);
     const generation = clientGeneration.current;
     setRestarting({
       startedAt: Date.now(),
@@ -124,6 +190,8 @@ export function UpdateControl({
     });
     try {
       await client.restartDaemonForUpdate();
+      if (generation !== clientGeneration.current) return;
+      restartAcknowledged.current = true;
     } catch (error) {
       if (generation !== clientGeneration.current) return;
       restartRequested.current = false;
@@ -139,7 +207,12 @@ export function UpdateControl({
     status.instructions?.length
       ? status.instructions
       : undefined;
-  if (status?.state !== 'ready' && restarting === null && !manualInstructions)
+  if (
+    status?.state !== 'ready' &&
+    restarting === null &&
+    !manualInstructions &&
+    !gaveUp
+  )
     return null;
   const label = t(restarting !== null ? 'update.restarting' : 'update.button');
   const Icon = restarting !== null ? LoaderCircleIcon : ArrowUpCircleIcon;

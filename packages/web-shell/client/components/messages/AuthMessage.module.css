@@ -181,3 +181,8 @@
   cursor: not-allowed;
   opacity: 0.45;
 }
+
+.newBadge {
+  color: var(--agent-purple-500, #c4a0ed);
+  margin-left: 6px;
+}

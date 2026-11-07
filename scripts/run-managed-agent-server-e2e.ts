@@ -4264,7 +4264,7 @@ try {
           ? Number(
               runMysql(
                 mysqlPort,
-                `SELECT gmt_create FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE ORDER BY sequence_id DESC LIMIT 1`,
+                `SELECT gmt_create FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE ORDER BY sequence_id DESC LIMIT 1`,
               ),
             )
           : undefined;
@@ -4515,7 +4515,7 @@ try {
       const terminalCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
         ),
       );
       const requests = (fake?.requests ?? []).filter(({ body }) =>
@@ -4629,7 +4629,7 @@ try {
       const terminalCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
         ),
       );
       const requests = (fake?.requests ?? []).filter(({ body }) =>
@@ -4822,7 +4822,7 @@ try {
         const awakeTerminalCount = Number(
           runMysql(
             mysqlPort,
-            `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
           ),
         );
         if (
@@ -4853,7 +4853,7 @@ try {
         Number(
           runMysql(
             mysqlPort,
-            `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
           ),
         );
       const currentBoot = () =>
@@ -5111,14 +5111,14 @@ try {
             ),
             turns: runMysql(
               mysqlPort,
-              `SELECT turn_id, status, version, dispatch_owner, dispatch_lease_until, retry_count, submission_attempted, harness_event_epoch, harness_last_event_id, error_code FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY turn_id`,
+              `SELECT turn_id, status, version, dispatch_owner, dispatch_lease_until, retry_count, is_submission_attempted, harness_event_epoch, harness_last_event_id, error_code FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY turn_id`,
               probeMs,
             ),
             // Row by row: a retraction rewrites delta payloads and identities
             // in place, which no count or maximum would notice.
             events: runMysql(
               mysqlPort,
-              `SELECT stream_kind, HEX(stream_id), sequence_id, event_type, terminal, HEX(source_key), SHA2(data_json, 256), HEX(item_id), HEX(content_part_id), SHA2(text, 256), state FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} ORDER BY stream_kind, stream_id, sequence_id`,
+              `SELECT stream_kind, HEX(stream_id), sequence_id, event_type, is_terminal, HEX(source_key), SHA2(data_json, 256), HEX(item_id), HEX(content_part_id), SHA2(text, 256), state FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} ORDER BY stream_kind, stream_id, sequence_id`,
               probeMs,
             ),
             // Every Spring also sweeps expired operation claims on a timer, so
@@ -5531,7 +5531,7 @@ try {
       const terminalCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
         ),
       );
       if (
@@ -5677,7 +5677,7 @@ try {
       const finalTerminalCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
         ),
       );
       if (finalTerminalCount !== 2)
@@ -5900,7 +5900,7 @@ try {
     }
     const durable = runMysql(
       mysqlPort,
-      `SELECT COUNT(*), COUNT(DISTINCT sequence_id), SUM(terminal) FROM qwen_managed_agent.ma_public_event WHERE tenant_id='${tenant}' AND session_id='${session.id}' AND stream_kind='SESSION' AND stream_id=X''`,
+      `SELECT COUNT(*), COUNT(DISTINCT sequence_id), SUM(is_terminal) FROM qwen_managed_agent.ma_public_event WHERE tenant_id='${tenant}' AND session_id='${session.id}' AND stream_kind='SESSION' AND stream_id=X''`,
     ).split('\t');
     if (
       durable.length !== 3 ||
@@ -5935,7 +5935,7 @@ try {
   if (dumpPort !== undefined) {
     try {
       console.error(
-        `\n--- Durable state ---\nturns:\n${runMysql(dumpPort, 'SELECT turn_id, status, error_code, submission_attempted, harness_event_epoch, dispatch_owner, dispatch_lease_until FROM qwen_managed_agent.ma_turn')}\nevents:\n${runMysql(dumpPort, 'SELECT stream_kind, HEX(stream_id), sequence_id, turn_id, event_type, terminal, source_key FROM qwen_managed_agent.ma_public_event ORDER BY stream_kind, stream_id, sequence_id')}\nsessions:\n${runMysql(dumpPort, 'SELECT session_id, harness_boot_id, harness_event_epoch, harness_last_event_id FROM qwen_managed_agent.ma_session')}\nexecutions:\n${runMysql(dumpPort, 'SELECT execution_call_id, execution_state, dispatch_generation FROM qwen_managed_agent.ma_tool_execution')}\njournal:\n${runMysql(dumpPort, 'SELECT session_id, state, writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head')}`,
+        `\n--- Durable state ---\nturns:\n${runMysql(dumpPort, 'SELECT turn_id, status, error_code, is_submission_attempted, harness_event_epoch, dispatch_owner, dispatch_lease_until FROM qwen_managed_agent.ma_turn')}\nevents:\n${runMysql(dumpPort, 'SELECT stream_kind, HEX(stream_id), sequence_id, turn_id, event_type, is_terminal, source_key FROM qwen_managed_agent.ma_public_event ORDER BY stream_kind, stream_id, sequence_id')}\nsessions:\n${runMysql(dumpPort, 'SELECT session_id, harness_boot_id, harness_event_epoch, harness_last_event_id FROM qwen_managed_agent.ma_session')}\nexecutions:\n${runMysql(dumpPort, 'SELECT execution_call_id, execution_state, dispatch_generation FROM qwen_managed_agent.ma_tool_execution')}\njournal:\n${runMysql(dumpPort, 'SELECT session_id, state, writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head')}`,
       );
     } catch (dumpError) {
       console.error(`Durable state dump failed: ${String(dumpError)}`);

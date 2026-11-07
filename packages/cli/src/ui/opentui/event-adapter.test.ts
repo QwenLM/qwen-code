@@ -18,6 +18,22 @@ import {
 type AnyEv = Parameters<ReturnType<typeof createEventMapper>>[0];
 
 describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
+  it('formats marked quota results without touching ordinary text', async () => {
+    const { initializeI18n, setLanguageAsync } = await import(
+      '../../i18n/index.js'
+    );
+    await initializeI18n('zh-TW');
+    try {
+      expect(
+        renderResultDisplay({ type: 'subscription_quota', memberType: 'pro' }),
+      ).toBe('週額度已用完，請在額度恢復後重試。');
+      const text =
+        "You've used up your weekly credits. Please try again after the reset.";
+      expect(renderResultDisplay(text)).toBe(text);
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
   it('formats native Advisor advice and historical structured reviews', () => {
     expect(
       toolResultEvent('consult', {

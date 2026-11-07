@@ -32,17 +32,19 @@ public interface WorkspaceExecutionStore {
 
     public void claim(ContextBinding binding, RuntimeSessionRecord session);
 
-    public boolean beginRewind(ContextBinding binding, RuntimeSessionRecord session);
+    public void beginRewind(ContextBinding binding, RuntimeSessionRecord session);
 
     public void endRewind(ContextBinding binding, RuntimeSessionRecord session);
 
-    public boolean hasExclusiveClaim(RuntimeSessionRecord session);
+    public boolean hasPendingRewind(RuntimeSessionRecord session);
 
     public void assertHeld(ContextBinding binding, RuntimeSessionRecord session);
 
     public boolean isHeld(ContextBinding binding, RuntimeSessionRecord session);
 
     public void release(ContextBinding binding, RuntimeSessionRecord session);
+
+    public void releaseMount(ContextBinding binding, RuntimeSessionRecord session);
 
     public String holdForMaintenance(ContextBinding binding, String maintenanceId,
             long claimGeneration);
