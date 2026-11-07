@@ -208,6 +208,12 @@ interface ChannelMemoryReadToken {
 
 interface PreflightInboundOptions {
   deferPairingRequests?: boolean;
+  /**
+   * Admit a group message that only fails the group's mention requirement.
+   * For private deliveries: the requirement keeps ambient chatter out of
+   * public replies. Every other group, sender and pairing check still runs.
+   */
+  waiveGroupMention?: boolean;
 }
 
 interface ChannelMemoryRecallCacheEntry {
@@ -6366,7 +6372,7 @@ export abstract class ChannelBase {
     );
   }
 
-  private groupSendersFor(target: { chatId: string }): GroupSenderPolicy {
+  protected groupSendersFor(target: { chatId: string }): GroupSenderPolicy {
     return (
       this.groupConfigFor(target.chatId)?.senders ??
       this.groupConfigFor('*')?.senders ??
@@ -6427,7 +6433,10 @@ export abstract class ChannelBase {
       options.deferPairingRequests === true &&
       groupResult.reason === 'pairing_trigger_required' &&
       (envelope.isMentioned || envelope.isReplyToBot);
-    if (!groupResult.allowed && !deferredGroupPairing) {
+    const waivedGroupMention =
+      options.waiveGroupMention === true &&
+      groupResult.reason === 'mention_required';
+    if (!groupResult.allowed && !deferredGroupPairing && !waivedGroupMention) {
       if (groupResult.pairing !== undefined) {
         this.logPreflightRejected('group_pairing_required', envelope);
         return this.onGroupPairingRequired(
@@ -6799,6 +6808,21 @@ export abstract class ChannelBase {
 
   protected markPreflighted(envelope: Envelope): void {
     this.preflightedEnvelopes.add(envelope);
+  }
+
+  /**
+   * Whether a message with this text passes the channel's message routes the
+   * way preflight would route it. Has no side effects.
+   */
+  protected admitsMessageRoute(text: string): boolean {
+    return (
+      this.messageRoutes.size === 0 ||
+      matchMessageRoute(
+        text,
+        this.messageRoutes,
+        this.config.defaultMessageRoute,
+      ) !== undefined
+    );
   }
 
   private applyMessageRoute(envelope: Envelope): boolean {
@@ -7586,7 +7610,12 @@ export abstract class ChannelBase {
         // bridge only after the latest recovery has restored session routing.
         await this.waitForBridgeRecovery();
         const promptBridge = this.bridge;
+        let turnNotice = '';
+        const onTurnNotice = (sid: string, notice: string) => {
+          if (sid === sessionId) turnNotice = notice;
+        };
         promptBridge.on('textChunk', onChunk);
+        promptBridge.on('turnNotice', onTurnNotice);
         promptBridge.on('responseBoundary', onResponseBoundary);
 
         let taskResultPartial = false;
@@ -7594,7 +7623,7 @@ export abstract class ChannelBase {
           if (!this.canStartInboundTurn()) {
             throw new ChannelPromptCancelledError();
           }
-          const response = await promptBridge.prompt(sessionId, promptToSend, {
+          let response = await promptBridge.prompt(sessionId, promptToSend, {
             ...(this.config.outputMode === 'per_task'
               ? {
                   outputMode: 'per_task' as const,
@@ -7619,6 +7648,11 @@ export abstract class ChannelBase {
           // If cancelled, skip sending the response
           if (!promptState.cancelled && response) {
             promptState.deliveryStarted = true;
+            if (turnNotice) {
+              response = response.slice(turnNotice.length + 2);
+            }
+          }
+          if (!promptState.cancelled && response) {
             const segment = this.ensureOutputSegment(sessionId, promptState);
             if (segment && taskResultPartial) segment.partial = true;
             await this.onResponseComplete(
@@ -7630,6 +7664,16 @@ export abstract class ChannelBase {
             if (segment && promptState.activeSegmentId === segment.segmentId) {
               promptState.activeSegmentId = undefined;
             }
+          }
+          if (!promptState.cancelled && turnNotice) {
+            // Keep notices out of stream buffers and let the answer consume
+            // adapter-specific reply metadata (such as DingTalk mentions) first.
+            await this.sendResponseMessage(
+              envelope.chatId,
+              turnNotice,
+              sessionId,
+              sourceLabel,
+            );
           }
           // Once delivery started the turn's outcome is fixed — don't let a
           // cancel settling during the send rewrite completed into cancelled.
@@ -7706,6 +7750,7 @@ export abstract class ChannelBase {
           throw err;
         } finally {
           promptBridge.off('textChunk', onChunk);
+          promptBridge.off('turnNotice', onTurnNotice);
           promptBridge.off('responseBoundary', onResponseBoundary);
           // Identity guard: a turn that wedged past /clear's bounded wait gets
           // EVICTED — /clear gives up on active.done, deletes activePrompts, and a

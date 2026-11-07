@@ -873,7 +873,7 @@ Stopping a parent Turn durably stops new launches and requests cancellation for 
 ### Initial Workspace Turn (G0)
 
 `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true` opts in to an initial
-Workspace Turn supplied with public Session creation: Read/Write/Edit under
+Workspace Turn supplied with public Session creation: Read/Write/Edit and `glob` under
 `hosted-workspace-files/1`, or file tools plus mandatory-approval foreground Shell
 under `hosted-workspace-shell/1` when the Shell opt-in above is enabled. The
 WebShell creation adapter uses the same admission. This requires the Hosted
@@ -947,11 +947,48 @@ The initial approval mode is pinned at Session creation and must be confirmed by
 Harness on creation and load. Built-in Workspace Sessions can select a different
 policy for later Turns while retaining the original definition.
 
+### Structured user questions
+
+Root Sessions using `hosted-workspace-files/1`, `/2`, `/3`, or
+`hosted-workspace-shell/1` expose `ask_user_question`, including public Plan
+mode. The tool asks one to four required questions, each offering two to four
+choices and a custom-text answer. Single-choice questions accept one option or
+custom text; multiple-choice questions also allow both together. The tool must
+be the only call in its batch. MCP/Hook Sessions, child Sessions,
+foreground-only workers and resident CSI profiles do not expose it.
+
+The question appears as a pending Action with `kind: question`. WebShell keeps
+the answer draft visible until delivery is confirmed; refreshing retrieves the
+same pending Action. Public responses use `kind: question`, `answers` with
+`question_id`, optional `option_ids` and optional `text`, plus the Action's
+`input_revision` and `policy_revision`. WebShell uses their camelCase names.
+Use the returned question and option IDs, not their labels, and the existing
+Action response endpoints and idempotency key. Response authorization is the
+same as permission Actions, including the Shell owner restriction.
+
+Questions always wait for a human answer, including Full Access and live
+approval-policy changes. The existing approval timeout, cancellation and
+expiry rules apply. Invalid or conflicting answers cannot replace the durable
+decision; an equivalent retry returns the original result. The original
+question and answer survive service/Harness restart and resume the same tool
+call. Answer text is limited to 8192 UTF-16 code units per question and the
+canonical answer array to 32 KiB; the complete tool input is limited to 16 KiB.
+
+Deploy compatible Java server, Java SDK, Harness and WebShell artifacts
+together. Drain and fence older writers before reopening execution; older
+binaries cannot interpret the new question options/decisions and must not
+resume Sessions with pending questions. No database schema change is required.
+See the [question design](../../docs/design/2026-11-06-managed-user-questions.md)
+([简体中文](../../docs/design/2026-11-06-managed-user-questions.zh-CN.md)) for
+the continuation contract and acceptance scope.
+
+### Approval policy selection
+
 For new Workspace-bound WebShell Sessions, the shared composer queries `POST /api/agent/web-shell/v1/session-options/query` with `agentId` using the authenticated tenant actor. The response contains the effective `approvalMode` and `availableApprovalModes`; Workspace discovery advertises `approvalModeSelection` for this contract. Built-in Sessions allow `default`, `auto-edit`, and `yolo` (Full Access). Shell Full Access additionally requires the Harness feature `approval-selection/1`; without it Shell offers only `default` and `auto-edit`. The Shell deployment opt-in and its deployment default remain unchanged. Hosted execution does not support classifier `auto` or `plan`. An AgentDefinition exposes only its compiled policy, which a creation request cannot override.
 
 The WebShell create request may include `approvalMode` only with a Workspace binding. Omission preserves the existing default and request digest; explicit selection is persisted in the Session and joins its idempotency digest. Retrying the same key reads the original pin even if deployment defaults, the AgentDefinition, or a later Session selection changed. Workspace-bound and definition-pinned Session summaries expose the current `approvalMode`, immutable `initialApprovalMode`, and `approvalRevision`. Legacy unbound built-in Sessions omit this metadata because their execution policy is supplied by the deployment. The public REST create contract is unchanged.
 
-The only ordinary Shell profile is `hosted-workspace-shell/1`, including native `glob` alongside Read/Write/Edit, Shell and Monitor. The unshipped `/2` Shell profile was removed; development Sessions using it must be recreated. See the [consolidation design](../../docs/design/2026-10-23-managed-shell-profile.md) ([简体中文](../../docs/design/2026-10-23-managed-shell-profile.zh-CN.md)).
+The ordinary file profile `hosted-workspace-files/1` includes native `glob`. The only ordinary Shell profile is `hosted-workspace-shell/1`, including `glob` and durable Session `todo_write` alongside Read/Write/Edit, Shell and Monitor. Plan mode excludes todo writes. Normal Hosted `read_file` exposes PDF `pages`; resident/CSI keeps its restricted read/write/edit contract without `pages`. Creation and load use the current tool declarations, with no fallback for outdated saved tool schemas. Deploy matching control-plane, Harness and Runtime artifacts together; an older Runtime capability identity does not prove support for the tools now included in these profiles. See the [basic tool alignment design](../../docs/design/2026-11-06-managed-basic-tools.md) ([简体中文](../../docs/design/2026-11-06-managed-basic-tools.zh-CN.md)). The unshipped `/2` Shell profile was removed; development Sessions using it must be recreated. See the [consolidation design](../../docs/design/2026-10-23-managed-shell-profile.md) ([简体中文](../../docs/design/2026-10-23-managed-shell-profile.zh-CN.md)).
 
 Eligible Workspace Sessions can change their execution approval policy. With the Harness feature `live-approval-selection/1`, a selection affects subsequent permission checks in the current Turn, and ordinary pending tools are durably allowed when the selected mode permits them. Already dispatched tools and explicit Hook or Plan-exit approvals retain their existing decisions. Built-in `qwen-code` Sessions require the Harness feature `approval-selection/1`. Stored AgentDefinition Sessions using exactly `hosted-workspace-files/1`, `hosted-workspace-files/3` or `hosted-workspace-shell/1` additionally require `agent-definition-approval-selection/1`; both features must remain available for execution after any override, including a return to the initial mode. `POST /api/agent/web-shell/v1/session-approval/query` returns the current mode, revision, available modes, and support. `POST /api/agent/web-shell/v1/session-approval/change` accepts `sessionId`, `approvalMode`, `expectedRevision`, `idempotencyKey`, and `requestId`. Only the recorded Session owner with current Workspace OPERATOR or OWNER access may change it or replay a receipt. Without live support, the Session must be idle, with no pending approval or retained Runtime. Context/lifecycle and recovery barriers always apply; Plan changes remain idle-only. The options response advertises live behavior with `liveSupported`. Upgrade the control plane and Harness together in a maintenance window, fencing old Java writers before reopening execution; new Harness tool Turns refuse a missing live-policy endpoint. See the [live approval design](../../docs/design/2026-10-20-managed-live-approval.md) ([简体中文](../../docs/design/2026-10-20-managed-live-approval.zh-CN.md)). Identical retries return the original result without another revision; different content under the same key and stale revisions conflict. The definition pin and initial creation policy remain immutable; later user Turns freeze the selected mode and revision. Creation options still expose only the compiled initial policy. Files/2, MCP, read-only child, team-lead, CSI, unknown profiles, and unbound text Sessions do not gain policy selection; `hosted-workspace-files/3` does. There is no public REST mutation endpoint. See the [stored-definition approval design](../../docs/design/2026-10-17-managed-definition-approval-selection.md) ([简体中文](../../docs/design/2026-10-17-managed-definition-approval-selection.zh-CN.md)).
 
