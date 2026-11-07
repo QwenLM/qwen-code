@@ -88,11 +88,36 @@ jobs:
             esac
           fi
 
-          # A candidate is trusted only when it is a regular, non-symlink
-          # executable that the job uid can write neither directly nor by
-          # replacing it through its containing directory. Every test here is a
-          # bash builtin, and ${c%/*} replaces dirname, so establishing the base
-          # resolves no external command at all.
+          # A candidate is trusted only when it is an executable the job uid can
+          # write neither directly nor by replacing it through its containing
+          # directory. Every test here is a bash builtin and ${c%/*} replaces
+          # dirname. readlink is the one external command the predicate needs,
+          # so it is established by builtins FIRST and invoked absolutely below:
+          # resolving it by name would hand the trust anchor to the same
+          # plantable PATH this step exists to distrust, and a planted readlink
+          # runs with $GITHUB_OUTPUT and $GITHUB_ENV in its environment.
+          # Non-symlink only — resolving a link would need the tool being built.
+          readlink=''
+          for root in ${PATROL_BIN_ROOTS:?}; do
+            c="${root}/readlink"
+            if [ -e "${c}" ] && [ ! -L "${c}" ] && [ -x "${c}" ] && [ ! -w "${c}" ] && [ ! -w "${c%/*}" ]; then
+              readlink="${c}"
+              break
+            fi
+          done
+          if [ -z "${readlink}" ]; then
+            # Hosted runners are ephemeral and single-tenant, so the ambient
+            # resolution is trustworthy there; the pool is not.
+            if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
+              echo "::error::no verified readlink among [${PATROL_BIN_ROOTS}] on this pool host; refusing to run."
+              exit 1
+            fi
+            readlink="$(command -v readlink || true)"
+            if [ -z "${readlink}" ]; then
+              echo "::error::readlink not found on this hosted runner."
+              exit 1
+            fi
+          fi
           system_path=''
           add_dir() {
             case ":${system_path}:" in
@@ -119,7 +144,7 @@ jobs:
             d="${p%/*}"
             [ -n "${d}" ] && [ ! -w "${d}" ] || return 1
             if [ -L "${p}" ]; then
-              t="$(readlink -f "${p}" 2>/dev/null)" || return 1
+              t="$("${readlink:?}" -f "${p}" 2>/dev/null)" || return 1
               [ -n "${t}" ] && [ -f "${t}" ] && [ ! -w "${t}" ] || return 1
               td="${t%/*}"
               [ -n "${td}" ] && [ ! -w "${td}" ] || return 1
@@ -138,7 +163,7 @@ jobs:
               # Name the exact reason per candidate, so a refused round tells
               # the operator whether the tool is missing, plantable, or a link
               # into a plantable target — instead of one opaque refusal.
-              echo "::notice::${label} candidate ${c}: exists=$([ -e "${c}" ] && echo yes || echo no) symlink=$([ -L "${c}" ] && echo yes || echo no) target=$(readlink -f "${c}" 2>/dev/null || echo none) file_writable=$([ -w "${c}" ] && echo yes || echo no) dir_writable=$([ -w "${c%/*}" ] && echo yes || echo no)"
+              echo "::notice::${label} candidate ${c}: exists=$([ -e "${c}" ] && echo yes || echo no) symlink=$([ -L "${c}" ] && echo yes || echo no) target=$("${readlink:?}" -f "${c}" 2>/dev/null || echo none) file_writable=$([ -w "${c}" ] && echo yes || echo no) dir_writable=$([ -w "${c%/*}" ] && echo yes || echo no)"
             done
             if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
               echo "::error::no verified ${label} among [$*] on this pool host; refusing to run rather than resolve it through a plantable PATH."
@@ -158,10 +183,10 @@ jobs:
           # $GITHUB_ENV, so a co-tenant cannot redirect the trust root. The
           # production default is pinned by the meta-test. A fixture points it
           # at a directory it controls to exercise both verdicts with real
-          # files: a test running as the job uid cannot create the root-owned
-          # binaries the accept path requires, so without this the self-hosted
-          # branch would be untestable rather than tested.
-          for tool in rm git timeout mktemp gh node; do
+          # files. Mode bits alone reach both verdicts for a non-root uid: a
+          # 0555 stub in a 0555 root is not writable by its owner, so the accept
+          # path is testable without root-owned files.
+          for tool in rm git timeout mktemp gh node mkdir grep; do
             candidates=''
             for root in ${PATROL_BIN_ROOTS:?}; do
               candidates="${candidates} ${root}/${tool}"
@@ -180,8 +205,7 @@ jobs:
           # post-setup-node capture. Checking the ambient PATH here would prove
           # nothing about that later, different PATH.
           # Unconditional: a wedged daemon is just as fatal on the hosted
-          # fallback, and gating this on self-hosted made the timeout path
-          # unreachable from a fixture that cannot create root-owned binaries.
+          # fallback, and a fixture can drive both verdicts with mode bits.
           probe_rc=0
           probe_output="$("${timeout}" 10 "${docker}" info 2>&1)" || probe_rc=$?
           if [ "${probe_rc}" -ne 0 ]; then
@@ -210,22 +234,22 @@ jobs:
         if: "${{ runner.environment == 'self-hosted' }}"
         env:
           RM_BIN: '${{ steps.guard.outputs.rm }}'
-          MKTEMP_BIN: '${{ steps.guard.outputs.mktemp }}'
         run: |-
           # Verified absolute binaries: this step runs before any PATH capture,
           # so a bare `rm` here would resolve through the plantable ambient PATH
           # and could silently leave .git in place.
           "${RM_BIN:?}" -rf -- "$GITHUB_WORKSPACE/.git"
-          # An unpredictable name, not a fixed one: $RUNNER_TEMP is enumerable
-          # and same-uid writable, so a pre-planted symlink at a guessable path
-          # survives `: >` and a co-tenant can refill it before git reads it.
-          if ! GIT_CONFIG_FILE="$("${MKTEMP_BIN:?}" "${RUNNER_TEMP}/patrol-empty-gitconfig.XXXXXX")"; then
-            echo "::error::could not mint a private git config; refusing to check out with the shared one."
-            exit 1
-          fi
-          echo "gitconfig=${GIT_CONFIG_FILE}" >> "${GITHUB_OUTPUT}"
-          echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_FILE}" >> "${GITHUB_ENV}"
-          echo "GIT_CONFIG_SYSTEM=${GIT_CONFIG_FILE}" >> "${GITHUB_ENV}"
+          # /dev/null, not a minted file. An unguessable name does not protect a
+          # LISTABLE one: $RUNNER_TEMP is enumerable and same-uid writable, so a
+          # co-tenant can list it, match the minted name and refill the config
+          # before git reads it — mode 0600 does not stop the same uid, and
+          # git checkout --force would then fire the planted post-checkout hook
+          # inside the very checkout this step exists to make trustworthy.
+          # /dev/null is root-owned, reads as empty and offers nothing to race.
+          # repo-hygiene already makes this choice for its PAT-bearing step.
+          echo "gitconfig=/dev/null" >> "${GITHUB_OUTPUT}"
+          echo "GIT_CONFIG_GLOBAL=/dev/null" >> "${GITHUB_ENV}"
+          echo "GIT_CONFIG_SYSTEM=/dev/null" >> "${GITHUB_ENV}"
 
       - name: 'Checkout trusted event commit'
         id: 'checkout'
@@ -253,19 +277,29 @@ jobs:
       # and this workflow itself writes a PATH directory (`npm install -g`), so
       # a co-located job can leave a planted `gh`, `node` or `docker` behind;
       # the next round would then execute it with the bot PAT already in its
-      # environment. After setup-node on purpose: capturing earlier would pin
-      # the ambient node and silently drop the version this job asked for.
-      # Builtins only, so the capture resolves no command word itself.
+      # environment. Builtins only, so the capture resolves no command word.
+      # On the pool the verified directories lead, so a bare-name lookup hits a
+      # verified binary before any plantable dir; credential-bearing steps do not
+      # rely on that order at all and use the guard's absolute paths. The honest
+      # consequence: setup-node's tool-cache node does NOT win there, so
+      # node-version below is not the interpreter the driver runs, and a pool
+      # host whose system node is below the repo's floor would run that older
+      # node. On a hosted runner the guard already trusts ambient resolution
+      # (ephemeral, single-tenant), so leading with system directories would buy
+      # nothing and would cost the toolchain: the system npm's global prefix is
+      # root-owned, and Ensure Qwen Code's install would fail EACCES. Hosted
+      # therefore keeps the post-setup-node PATH as-is.
       - name: 'Capture trusted PATH'
         id: 'stage'
         env:
           SYSTEM_PATH: '${{ steps.guard.outputs.system_path }}'
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
-          # Verified directories FIRST, then the post-setup-node PATH so the
-          # action can still reach its tool-cache node and npm. Bare-name
-          # lookups therefore hit a verified binary before any plantable dir;
-          # credential-bearing steps do not rely on that and use absolute paths.
-          echo "trusted_path=${SYSTEM_PATH}:${PATH}" >> "${GITHUB_OUTPUT}"
+          if [ "${RUNNER_ENVIRONMENT}" = 'self-hosted' ]; then
+            echo "trusted_path=${SYSTEM_PATH}:${PATH}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
+          fi
 
       # The classifier resolves `docker` as a bare name on the PATH above, which
       # is not the ambient PATH the guard ran on. Re-check the resolution on the
@@ -324,6 +358,15 @@ jobs:
           GH_BIN: '${{ steps.guard.outputs.gh }}'
           MKTEMP_BIN: '${{ steps.guard.outputs.mktemp }}'
           PATROL_GH: '${{ steps.guard.outputs.gh }}'
+          # Every external command this step runs is the guard's verified
+          # absolute, including the resets and the grep whose output becomes
+          # target_found/input_sha. A bare name here resolves through the
+          # post-setup-node PATH, whose tool-cache and global npm prefix are
+          # uid-writable; a planted rm that exits 0 without deleting would let a
+          # previous round's decisions file survive and be replayed by act.
+          RM_BIN: '${{ steps.guard.outputs.rm }}'
+          MKDIR_BIN: '${{ steps.guard.outputs.mkdir }}'
+          GREP_BIN: '${{ steps.guard.outputs.grep }}'
           # Step env, not a job-level value: this name is the target of the
           # rm -rf below, and on the shared pool $GITHUB_ENV is writable by
           # anything running at the runner's uid. Must match the classifier's
@@ -337,13 +380,13 @@ jobs:
             exit 1
           fi
           export GH_CONFIG_DIR
-          mkdir -p "${WORKDIR}"
+          "${MKDIR_BIN:?}" -p "${WORKDIR}"
           # The ECS workspace persists across jobs. A decisions file left by an
           # earlier round would pass Validate and be acted on even when this
           # round's classifier timed out without writing anything.
-          rm -f "${WORKDIR}/ci-flaky-decisions.json"
-          rm -rf "${QWEN_HOME}"
-          mkdir -p "${QWEN_HOME}"
+          "${RM_BIN:?}" -f -- "${WORKDIR}/ci-flaky-decisions.json"
+          "${RM_BIN:?}" -rf -- "${QWEN_HOME}"
+          "${MKDIR_BIN:?}" -p "${QWEN_HOME}"
           "${NODE_BIN:?}" .github/scripts/ci-flaky-rerun.mjs scan \
             --repo "${{ github.repository }}" \
             --workdir "${WORKDIR}" \
@@ -351,13 +394,20 @@ jobs:
             --active-days "${ACTIVE_DAYS}" \
             --max-candidates "${MAX_CANDIDATES_PER_RUN}" \
             --trusted-marker-login "${{ steps.identity.outputs.bot_login }}" > "${WORKDIR}/scan.out"
-          grep -E '^(target_found|input_sha)=' "${WORKDIR}/scan.out" >> "${GITHUB_OUTPUT}"
+          "${GREP_BIN:?}" -E '^(target_found|input_sha)=' "${WORKDIR}/scan.out" >> "${GITHUB_OUTPUT}"
 
       # After scan and gated on it: most ticks find no candidate, and the
       # hosted fallback must not pay a global npm install on those rounds.
       - name: 'Ensure Qwen Code'
         id: 'ensure_qwen'
         if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        # The hosted fallback has no preinstalled qwen, so every candidate-bearing
+        # round pays a cold global npm install here. Unbounded, a slow registry
+        # spends the job's remaining slack and the runner then cancels the job
+        # INSIDE the classifier, where continue-on-error does not apply — so
+        # validate, upload and the verdict step never run and the round concludes
+        # cancelled, saying nothing. 5 keeps the capped sum at 31 of 35.
+        timeout-minutes: 5
         env:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
@@ -481,14 +531,18 @@ jobs:
           NODE_BIN: '${{ steps.guard.outputs.node }}'
         run: |-
           # A timeout can kill the classifier mid-write, leaving a non-empty
-          # but unparseable file, so validate JSON syntax alongside the size
-          # check. This step exits 0 either way; the run-level verdict is the
-          # next step's job. Treating "candidates found, zero decisions" as a
-          # clean no-op is what let this patrol report success for twenty
-          # consecutive ineffective rounds, and a pool probe reproduced it
-          # again: 2s pull, classifier timed out, upload and act skipped, run
-          # conclusion `success`.
-          if [[ -s "${WORKDIR}/ci-flaky-decisions.json" ]] && "${NODE_BIN:?}" -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "${WORKDIR}/ci-flaky-decisions.json" 2>/dev/null; then
+          # but unparseable file. Parseability alone is not enough either:
+          # {"decisions":[]} parses, act iterates zero entries and the run still
+          # concludes success — the same "candidates existed, nothing actionable
+          # came back" shape this step exists to reject. The skill requires one
+          # decision per candidate, so a compliant candidate-bearing round never
+          # produces an empty array and this adds no false failure path.
+          # This step exits 0 either way; the run-level verdict is the next
+          # step's job. Treating that shape as a clean no-op is what let this
+          # patrol report success for twenty consecutive ineffective rounds, and
+          # a pool probe reproduced it again: 2s pull, classifier timed out,
+          # upload and act skipped, run conclusion `success`.
+          if [[ -s "${WORKDIR}/ci-flaky-decisions.json" ]] && "${NODE_BIN:?}" -e "const d=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).decisions;process.exit(Array.isArray(d)&&d.length>0?0:1)" "${WORKDIR}/ci-flaky-decisions.json" 2>/dev/null; then
             echo 'has_decisions=true' >> "${GITHUB_OUTPUT}"
           else
             echo 'has_decisions=false' >> "${GITHUB_OUTPUT}"
@@ -514,7 +568,7 @@ jobs:
       - name: 'Fail the round when candidates produced no decisions'
         if: "${{ steps.scan.outputs.target_found == 'true' && steps.decisions.outputs.has_decisions != 'true' }}"
         run: |-
-          echo "::error::patrol found stale candidates but produced no valid decisions; the classifier timed out or wrote unparseable output. This round did nothing."
+          echo "::error::patrol found stale candidates but produced no usable decisions; the classifier timed out, wrote unparseable output, or returned an empty decision list. This round did nothing."
           exit 1
 
   act:
@@ -564,11 +618,36 @@ jobs:
             esac
           fi
 
-          # A candidate is trusted only when it is a regular, non-symlink
-          # executable that the job uid can write neither directly nor by
-          # replacing it through its containing directory. Every test here is a
-          # bash builtin, and ${c%/*} replaces dirname, so establishing the base
-          # resolves no external command at all.
+          # A candidate is trusted only when it is an executable the job uid can
+          # write neither directly nor by replacing it through its containing
+          # directory. Every test here is a bash builtin and ${c%/*} replaces
+          # dirname. readlink is the one external command the predicate needs,
+          # so it is established by builtins FIRST and invoked absolutely below:
+          # resolving it by name would hand the trust anchor to the same
+          # plantable PATH this step exists to distrust, and a planted readlink
+          # runs with $GITHUB_OUTPUT and $GITHUB_ENV in its environment.
+          # Non-symlink only — resolving a link would need the tool being built.
+          readlink=''
+          for root in ${PATROL_BIN_ROOTS:?}; do
+            c="${root}/readlink"
+            if [ -e "${c}" ] && [ ! -L "${c}" ] && [ -x "${c}" ] && [ ! -w "${c}" ] && [ ! -w "${c%/*}" ]; then
+              readlink="${c}"
+              break
+            fi
+          done
+          if [ -z "${readlink}" ]; then
+            # Hosted runners are ephemeral and single-tenant, so the ambient
+            # resolution is trustworthy there; the pool is not.
+            if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
+              echo "::error::no verified readlink among [${PATROL_BIN_ROOTS}] on this pool host; refusing to run."
+              exit 1
+            fi
+            readlink="$(command -v readlink || true)"
+            if [ -z "${readlink}" ]; then
+              echo "::error::readlink not found on this hosted runner."
+              exit 1
+            fi
+          fi
           system_path=''
           add_dir() {
             case ":${system_path}:" in
@@ -595,7 +674,7 @@ jobs:
             d="${p%/*}"
             [ -n "${d}" ] && [ ! -w "${d}" ] || return 1
             if [ -L "${p}" ]; then
-              t="$(readlink -f "${p}" 2>/dev/null)" || return 1
+              t="$("${readlink:?}" -f "${p}" 2>/dev/null)" || return 1
               [ -n "${t}" ] && [ -f "${t}" ] && [ ! -w "${t}" ] || return 1
               td="${t%/*}"
               [ -n "${td}" ] && [ ! -w "${td}" ] || return 1
@@ -614,7 +693,7 @@ jobs:
               # Name the exact reason per candidate, so a refused round tells
               # the operator whether the tool is missing, plantable, or a link
               # into a plantable target — instead of one opaque refusal.
-              echo "::notice::${label} candidate ${c}: exists=$([ -e "${c}" ] && echo yes || echo no) symlink=$([ -L "${c}" ] && echo yes || echo no) target=$(readlink -f "${c}" 2>/dev/null || echo none) file_writable=$([ -w "${c}" ] && echo yes || echo no) dir_writable=$([ -w "${c%/*}" ] && echo yes || echo no)"
+              echo "::notice::${label} candidate ${c}: exists=$([ -e "${c}" ] && echo yes || echo no) symlink=$([ -L "${c}" ] && echo yes || echo no) target=$("${readlink:?}" -f "${c}" 2>/dev/null || echo none) file_writable=$([ -w "${c}" ] && echo yes || echo no) dir_writable=$([ -w "${c%/*}" ] && echo yes || echo no)"
             done
             if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
               echo "::error::no verified ${label} among [$*] on this pool host; refusing to run rather than resolve it through a plantable PATH."
@@ -634,10 +713,10 @@ jobs:
           # $GITHUB_ENV, so a co-tenant cannot redirect the trust root. The
           # production default is pinned by the meta-test. A fixture points it
           # at a directory it controls to exercise both verdicts with real
-          # files: a test running as the job uid cannot create the root-owned
-          # binaries the accept path requires, so without this the self-hosted
-          # branch would be untestable rather than tested.
-          for tool in rm git timeout mktemp gh node; do
+          # files. Mode bits alone reach both verdicts for a non-root uid: a
+          # 0555 stub in a 0555 root is not writable by its owner, so the accept
+          # path is testable without root-owned files.
+          for tool in rm git timeout mktemp gh node mkdir grep; do
             candidates=''
             for root in ${PATROL_BIN_ROOTS:?}; do
               candidates="${candidates} ${root}/${tool}"
@@ -661,22 +740,22 @@ jobs:
         if: "${{ runner.environment == 'self-hosted' }}"
         env:
           RM_BIN: '${{ steps.guard.outputs.rm }}'
-          MKTEMP_BIN: '${{ steps.guard.outputs.mktemp }}'
         run: |-
           # Verified absolute binaries: this step runs before any PATH capture,
           # so a bare `rm` here would resolve through the plantable ambient PATH
           # and could silently leave .git in place.
           "${RM_BIN:?}" -rf -- "$GITHUB_WORKSPACE/.git"
-          # An unpredictable name, not a fixed one: $RUNNER_TEMP is enumerable
-          # and same-uid writable, so a pre-planted symlink at a guessable path
-          # survives `: >` and a co-tenant can refill it before git reads it.
-          if ! GIT_CONFIG_FILE="$("${MKTEMP_BIN:?}" "${RUNNER_TEMP}/patrol-empty-gitconfig.XXXXXX")"; then
-            echo "::error::could not mint a private git config; refusing to check out with the shared one."
-            exit 1
-          fi
-          echo "gitconfig=${GIT_CONFIG_FILE}" >> "${GITHUB_OUTPUT}"
-          echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_FILE}" >> "${GITHUB_ENV}"
-          echo "GIT_CONFIG_SYSTEM=${GIT_CONFIG_FILE}" >> "${GITHUB_ENV}"
+          # /dev/null, not a minted file. An unguessable name does not protect a
+          # LISTABLE one: $RUNNER_TEMP is enumerable and same-uid writable, so a
+          # co-tenant can list it, match the minted name and refill the config
+          # before git reads it — mode 0600 does not stop the same uid, and
+          # git checkout --force would then fire the planted post-checkout hook
+          # inside the very checkout this step exists to make trustworthy.
+          # /dev/null is root-owned, reads as empty and offers nothing to race.
+          # repo-hygiene already makes this choice for its PAT-bearing step.
+          echo "gitconfig=/dev/null" >> "${GITHUB_OUTPUT}"
+          echo "GIT_CONFIG_GLOBAL=/dev/null" >> "${GITHUB_ENV}"
+          echo "GIT_CONFIG_SYSTEM=/dev/null" >> "${GITHUB_ENV}"
 
       - name: 'Checkout trusted event commit'
         id: 'checkout'
@@ -693,20 +772,6 @@ jobs:
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
         with:
           node-version: '22'
-
-      # Same capture as classify, after setup-node so the pinned PATH still
-      # contains the node version this job asked for. Both steps below hold the
-      # write-capable PAT and resolve `node` by name.
-      - name: 'Capture trusted PATH'
-        id: 'stage'
-        env:
-          SYSTEM_PATH: '${{ steps.guard.outputs.system_path }}'
-        run: |-
-          # Verified directories FIRST, then the post-setup-node PATH so the
-          # action can still reach its tool-cache node and npm. Bare-name
-          # lookups therefore hit a verified binary before any plantable dir;
-          # credential-bearing steps do not rely on that and use absolute paths.
-          echo "trusted_path=${SYSTEM_PATH}:${PATH}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Download patrol decisions'
         if: "${{ needs.classify.outputs.target_found == 'true' }}"

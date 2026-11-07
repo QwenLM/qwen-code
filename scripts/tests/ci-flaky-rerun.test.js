@@ -271,42 +271,51 @@ describe('ci flaky rerun patrol', () => {
     }
   });
 
-  it('spawns the pinned gh, never a bare name from PATH', async () => {
-    // Every other GhClient test stubs api.gh, so none of them exercise the
-    // spawn. On the shared pool a bare `gh` resolves through a PATH whose
-    // directories the job uid can write, and this client runs with the bot PAT
-    // in its environment — a co-tenant's gh would receive it.
-    const dir = mkdtempSync(join(tmpdir(), 'patrol-gh-'));
-    const planted = join(dir, 'planted');
-    const trusted = join(dir, 'trusted');
-    mkdirSync(planted);
-    mkdirSync(trusted);
-    const leaked = join(dir, 'LEAKED');
-    writeFileSync(
-      join(planted, 'gh'),
-      `#!/bin/sh\nprintf '%s' "\${GH_TOKEN:-}" > '${leaked}'\necho planted\n`,
-    );
-    writeFileSync(join(trusted, 'gh'), '#!/bin/sh\necho trusted\n');
-    for (const d of [planted, trusted]) chmodSync(join(d, 'gh'), 0o755);
-    const prevPath = process.env.PATH;
-    const prevGh = process.env.PATROL_GH;
-    const prevToken = process.env.GH_TOKEN;
-    try {
-      process.env.PATH = `${planted}:${prevPath}`;
-      process.env.GH_TOKEN = 'SENTINEL-PAT-VALUE';
-      process.env.PATROL_GH = join(trusted, 'gh');
-      const api = new GhClient('QwenLM/qwen-code');
-      await expect(api.gh(['api', 'user'])).resolves.toBe('trusted\n');
-      expect(existsSync(leaked)).toBe(false);
-    } finally {
-      if (prevGh === undefined) delete process.env.PATROL_GH;
-      else process.env.PATROL_GH = prevGh;
-      if (prevToken === undefined) delete process.env.GH_TOKEN;
-      else process.env.GH_TOKEN = prevToken;
-      process.env.PATH = prevPath;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  // Windows cannot express this fixture: chmodSync sets no executable bit and
+  // execFile cannot run an extensionless #!/bin/sh script (no PATHEXT match),
+  // and the PATH join below is the POSIX spelling. Gate the case rather than
+  // the file, so the rest of the driver suite still runs on the Windows lane —
+  // which downgrades a test:scripts failure to a warning and would otherwise
+  // deposit a permanent silent failure in its log.
+  it.skipIf(process.platform === 'win32')(
+    'spawns the pinned gh, never a bare name from PATH',
+    async () => {
+      // Every other GhClient test stubs api.gh, so none of them exercise the
+      // spawn. On the shared pool a bare `gh` resolves through a PATH whose
+      // directories the job uid can write, and this client runs with the bot PAT
+      // in its environment — a co-tenant's gh would receive it.
+      const dir = mkdtempSync(join(tmpdir(), 'patrol-gh-'));
+      const planted = join(dir, 'planted');
+      const trusted = join(dir, 'trusted');
+      mkdirSync(planted);
+      mkdirSync(trusted);
+      const leaked = join(dir, 'LEAKED');
+      writeFileSync(
+        join(planted, 'gh'),
+        `#!/bin/sh\nprintf '%s' "\${GH_TOKEN:-}" > '${leaked}'\necho planted\n`,
+      );
+      writeFileSync(join(trusted, 'gh'), '#!/bin/sh\necho trusted\n');
+      for (const d of [planted, trusted]) chmodSync(join(d, 'gh'), 0o755);
+      const prevPath = process.env.PATH;
+      const prevGh = process.env.PATROL_GH;
+      const prevToken = process.env.GH_TOKEN;
+      try {
+        process.env.PATH = `${planted}:${prevPath}`;
+        process.env.GH_TOKEN = 'SENTINEL-PAT-VALUE';
+        process.env.PATROL_GH = join(trusted, 'gh');
+        const api = new GhClient('QwenLM/qwen-code');
+        await expect(api.gh(['api', 'user'])).resolves.toBe('trusted\n');
+        expect(existsSync(leaked)).toBe(false);
+      } finally {
+        if (prevGh === undefined) delete process.env.PATROL_GH;
+        else process.env.PATROL_GH = prevGh;
+        if (prevToken === undefined) delete process.env.GH_TOKEN;
+        else process.env.GH_TOKEN = prevToken;
+        process.env.PATH = prevPath;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('ignores empty lines in paginated comment output', async () => {
     const api = new GhClient('QwenLM/qwen-code');

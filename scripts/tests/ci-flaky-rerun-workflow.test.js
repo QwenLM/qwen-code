@@ -1,11 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,6 +21,150 @@ const workflow = readFileSync(
 );
 const yml = parse(workflow);
 const skill = readFileSync('.qwen/skills/ci-flaky-patrol/SKILL.md', 'utf8');
+
+// Shared by the refusal cases and the accept cases below. Mode bits alone reach
+// both verdicts for a non-root uid, so the accept path is testable without
+// root-owned files; root bypasses -w entirely and must skip it.
+const runGuard = (
+  step,
+  {
+    environment,
+    name,
+    dockerOk,
+    dockerStderr = '',
+    sandboxCommand,
+    // Mode bits alone reach both verdicts for a non-root uid: a 0555 file
+    // in a 0555 directory is not writable by its owner. Root bypasses -w
+    // entirely, so the accept cases gate on the uid, not the platform.
+    fileMode = 0o755,
+    rootMode = 0o755,
+    nodeLink = null,
+    omitDocker = false,
+    plantReadlink = false,
+    // The readlink bootstrap has its OWN directory-writability test, so with a
+    // single root it refuses first and usable()'s directory check is never
+    // reached. A separate non-writable readlink root isolates the two: the
+    // bootstrap succeeds while the tool candidates sit in a writable directory,
+    // which is exactly the case usable() must refuse on its own.
+    separateReadlinkRoot = false,
+  },
+) => {
+  const dir = mkdtempSync(join(tmpdir(), 'patrol-guard-'));
+  const root = join(dir, 'bin');
+  mkdirSync(root);
+  for (const tool of ['rm', 'git', 'mktemp', 'gh', 'node', 'mkdir', 'grep']) {
+    writeFileSync(join(root, tool), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(root, tool), fileMode);
+  }
+  // The guard bootstraps readlink with builtins and then invokes it
+  // absolutely, so the fixture must supply a real one: a stub would make
+  // the symlink cases assert nothing about target resolution.
+  const realReadlink = execFileSync('bash', ['-c', 'command -v readlink'], {
+    encoding: 'utf8',
+  }).trim();
+  const rlRoot = separateReadlinkRoot ? join(dir, 'rlbin') : root;
+  if (separateReadlinkRoot) mkdirSync(rlRoot);
+  copyFileSync(realReadlink, join(rlRoot, 'readlink'));
+  chmodSync(join(rlRoot, 'readlink'), separateReadlinkRoot ? 0o555 : fileMode);
+  if (separateReadlinkRoot) chmodSync(rlRoot, 0o555);
+  if (nodeLink) {
+    // A symlinked node, the shape that made a blanket -L refusal reject a
+    // correctly provisioned pool host.
+    const targetDir = join(dir, nodeLink.targetDir ?? 'target-bin');
+    mkdirSync(targetDir, { recursive: true });
+    const target = join(targetDir, 'node-real');
+    writeFileSync(target, '#!/bin/sh\nexit 0\n');
+    chmodSync(target, nodeLink.targetMode ?? fileMode);
+    chmodSync(targetDir, nodeLink.targetDirMode ?? rootMode);
+    rmSync(join(root, 'node'));
+    symlinkSync(target, join(root, 'node'));
+  }
+  // The probe runs `"${timeout}" 10 "${docker}" info`, both from the
+  // verified base, so the fixture controls the outcome through these two.
+  writeFileSync(join(root, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
+  chmodSync(join(root, 'timeout'), fileMode);
+  // The stub answers only for the endpoint the workflow pins, so dropping
+  // DOCKER_CONTEXT or DOCKER_HOST from the step's env fails the approved
+  // host case instead of silently probing whatever the ambient shell had.
+  const dockerStub =
+    '#!/bin/sh\n' +
+    '[ "${DOCKER_CONTEXT:-}" = "default" ] || exit 91\n' +
+    '[ -z "${DOCKER_HOST:-}" ] || exit 92\n' +
+    (dockerStderr ? `echo '${dockerStderr}' >&2\n` : '') +
+    `exit ${dockerOk ? 0 : 1}\n`;
+  if (!omitDocker) {
+    writeFileSync(join(root, 'docker'), dockerStub);
+    chmodSync(join(root, 'docker'), fileMode);
+  }
+  writeFileSync(join(dir, 'docker'), dockerStub);
+  chmodSync(join(dir, 'docker'), 0o755);
+  // The guard body ends in `timeout 10 …`, and coreutils timeout is absent
+  // on a stock macOS host. Shim it here so the allowlist assertions stay
+  // live on every platform; the separate wedged-daemon test deliberately
+  // uses the real binary behind its own capability probe.
+  writeFileSync(join(dir, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
+  chmodSync(join(dir, 'timeout'), 0o755);
+  if (plantReadlink) {
+    // A co-tenant's readlink, first on the ambient PATH. It lies about the
+    // target so a symlink into a writable directory looks safe, and it appends
+    // its own output line — the runner takes the last value for a duplicated
+    // key, so that would override the verified gh. The guard must never run it.
+    writeFileSync(
+      join(dir, 'readlink'),
+      '#!/bin/sh\necho /usr/bin/true\n' +
+        'echo "gh=/attacker/bin/gh" >> "${GITHUB_OUTPUT}"\n',
+    );
+    chmodSync(join(dir, 'readlink'), 0o755);
+  }
+  writeFileSync(join(dir, 'gh_output'), '');
+  // chmod the root LAST: creating files inside a 0555 directory would fail.
+  chmodSync(root, rootMode);
+  const childEnv = {
+    ...process.env,
+    PATH: `${dir}:${process.env.PATH}`,
+    RUNNER_ENVIRONMENT: environment,
+    RUNNER_NAME: name,
+    // Probe the stub rather than the host's real docker. The production
+    // value is pinned structurally against the resolver's below. A caller
+    // can point it elsewhere to prove the guard compares the two.
+    SANDBOX_COMMAND: sandboxCommand ?? join(root, 'docker'),
+    PATROL_BIN_ROOTS: separateReadlinkRoot ? `${rlRoot} ${root}` : root,
+    GITHUB_OUTPUT: join(dir, 'gh_output'),
+  };
+  // Only the pins the workflow itself declares may reach the stub.
+  delete childEnv.DOCKER_HOST;
+  delete childEnv.DOCKER_CONTEXT;
+  for (const key of ['DOCKER_HOST', 'DOCKER_CONTEXT']) {
+    if (step.env?.[key] !== undefined) childEnv[key] = step.env[key];
+  }
+  let status = 0;
+  let output = '';
+  try {
+    output = execFileSync('bash', ['-c', step.run], {
+      env: childEnv,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    status = e.status;
+    output = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+  }
+  // Read the outputs back: dropping publish's echo line would otherwise
+  // leave every assertion green while a real round aborts at ${RM_BIN:?}.
+  const outputs = {};
+  for (const line of readFileSync(join(dir, 'gh_output'), 'utf8').split('\n')) {
+    const eq = line.indexOf('=');
+    if (eq > 0) outputs[line.slice(0, eq)] = line.slice(eq + 1);
+  }
+  // Restore write permission so the recursive cleanup can unlink children.
+  chmodSync(root, 0o755);
+  if (separateReadlinkRoot) chmodSync(rlRoot, 0o755);
+  if (nodeLink) {
+    chmodSync(join(dir, nodeLink.targetDir ?? 'target-bin'), 0o755);
+  }
+  rmSync(dir, { recursive: true, force: true });
+  return { status, output, outputs };
+};
 
 // coreutils timeout is present on both runner families this workflow targets,
 // but not on a stock macOS dev host. Probe it the way the autofix suite probes
@@ -115,9 +261,18 @@ describe('ci failure patrol workflow', () => {
       rmSync(dir, { recursive: true, force: true });
       return { status, result };
     };
-    // Decisions present -> act downstream.
-    expect(run('{"decisions":[]}')).toMatchObject({ status: 0 });
-    expect(run('{"decisions":[]}').result).toContain('has_decisions=true');
+    // A non-empty decision list -> act downstream.
+    const usable = run('{"decisions":[{"pr":123,"action":"rerun"}]}');
+    expect(usable).toMatchObject({ status: 0 });
+    expect(usable.result).toContain('has_decisions=true');
+    // Parseable but empty is NOT actionable: act would iterate zero entries and
+    // the run would conclude success on a round that did nothing. The verdict
+    // step must see has_decisions=false for these.
+    for (const empty of ['{"decisions":[]}', '{"decisions":{}}', '[]']) {
+      const r = run(empty);
+      expect(r, empty).toMatchObject({ status: 0 });
+      expect(r.result, empty).toContain('has_decisions=false');
+    }
     // Classifier timed out and wrote nothing -> still exit 0, just no work.
     expect(run(null)).toMatchObject({ status: 0 });
     expect(run(null).result).toContain('has_decisions=false');
@@ -248,85 +403,6 @@ describe('ci failure patrol workflow', () => {
   it('behaviorally proves the guard rejects unapproved and daemon-less hosts', () => {
     // Structural assertions cannot catch a shell quoting bug that silently
     // disables the allowlist, so run the real step body against a stub docker.
-    const runGuard = (
-      step,
-      { environment, name, dockerOk, dockerStderr = '', sandboxCommand },
-    ) => {
-      const dir = mkdtempSync(join(tmpdir(), 'patrol-guard-'));
-      const root = join(dir, 'bin');
-      mkdirSync(root);
-      for (const tool of ['rm', 'git', 'mktemp', 'gh', 'node']) {
-        writeFileSync(join(root, tool), '#!/bin/sh\nexit 0\n');
-        chmodSync(join(root, tool), 0o755);
-      }
-      // The probe runs `"${timeout}" 10 "${docker}" info`, both from the
-      // verified base, so the fixture controls the outcome through these two.
-      writeFileSync(join(root, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
-      chmodSync(join(root, 'timeout'), 0o755);
-      writeFileSync(
-        join(root, 'docker'),
-        '#!/bin/sh\n' +
-          '[ "${DOCKER_CONTEXT:-}" = "default" ] || exit 91\n' +
-          '[ -z "${DOCKER_HOST:-}" ] || exit 92\n' +
-          (dockerStderr ? `echo '${dockerStderr}' >&2\n` : '') +
-          `exit ${dockerOk ? 0 : 1}\n`,
-      );
-      chmodSync(join(root, 'docker'), 0o755);
-      // The fixture runs as the job uid, so it cannot create the root-owned
-      // binaries the accept path requires. Run the guard in hosted mode for the
-      // wiring cases and use the self-hosted mode only to prove refusal.
-      writeFileSync(join(dir, 'gh_output'), '');
-      // The stub answers only for the endpoint the workflow pins, so dropping
-      // DOCKER_CONTEXT or DOCKER_HOST from the step's env fails the approved
-      // host case instead of silently probing whatever the ambient shell had.
-      writeFileSync(
-        join(dir, 'docker'),
-        '#!/bin/sh\n' +
-          '[ "${DOCKER_CONTEXT:-}" = "default" ] || exit 91\n' +
-          '[ -z "${DOCKER_HOST:-}" ] || exit 92\n' +
-          (dockerStderr ? `echo '${dockerStderr}' >&2\n` : '') +
-          `exit ${dockerOk ? 0 : 1}\n`,
-      );
-      chmodSync(join(dir, 'docker'), 0o755);
-      // The guard body ends in `timeout 10 …`, and coreutils timeout is absent
-      // on a stock macOS host. Shim it here so the allowlist assertions stay
-      // live on every platform; the separate wedged-daemon test deliberately
-      // uses the real binary behind its own capability probe.
-      writeFileSync(join(dir, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
-      chmodSync(join(dir, 'timeout'), 0o755);
-      const childEnv = {
-        ...process.env,
-        PATH: `${dir}:${process.env.PATH}`,
-        RUNNER_ENVIRONMENT: environment,
-        RUNNER_NAME: name,
-        // Probe the stub rather than the host's real docker. The production
-        // value is pinned structurally against the resolver's below. A caller
-        // can point it elsewhere to prove the guard compares the two.
-        SANDBOX_COMMAND: sandboxCommand ?? join(root, 'docker'),
-        PATROL_BIN_ROOTS: root,
-        GITHUB_OUTPUT: join(dir, 'gh_output'),
-      };
-      // Only the pins the workflow itself declares may reach the stub.
-      delete childEnv.DOCKER_HOST;
-      delete childEnv.DOCKER_CONTEXT;
-      for (const key of ['DOCKER_HOST', 'DOCKER_CONTEXT']) {
-        if (step.env?.[key] !== undefined) childEnv[key] = step.env[key];
-      }
-      let status = 0;
-      let output = '';
-      try {
-        output = execFileSync('bash', ['-c', step.run], {
-          env: childEnv,
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'pipe'],
-        });
-      } catch (e) {
-        status = e.status;
-        output = `${e.stdout ?? ''}${e.stderr ?? ''}`;
-      }
-      rmSync(dir, { recursive: true, force: true });
-      return { status, output };
-    };
     const guardStatus = (...args) => runGuard(...args).status;
     const classifyGuard = yml.jobs.classify.steps[0];
     const actGuard = yml.jobs.act.steps[0];
@@ -415,6 +491,105 @@ describe('ci failure patrol workflow', () => {
     expect(diagnostic.output).not.toContain('did not answer within 10s');
   });
 
+  // Root bypasses every -w test, so the accept path is only meaningful for a
+  // non-root uid; macOS readlink has no -f, so the symlink cases need Linux.
+  it.skipIf(process.getuid?.() === 0 || process.platform !== 'linux')(
+    'behaviorally proves the guard accepts a non-writable base and publishes it',
+    () => {
+      const guard = yml.jobs.classify.steps[0];
+      const approved = {
+        environment: 'self-hosted',
+        name: 'ecs-qwen-hk1-1',
+        dockerOk: true,
+      };
+      const modes = { fileMode: 0o555, rootMode: 0o555 };
+
+      // Without an accept case, a guard that refuses EVERY pool host — a total
+      // patrol outage, the class this PR exists to fix — passes the whole suite.
+      const ok = runGuard(guard, { ...approved, ...modes });
+      expect(ok.output).toBe('');
+      expect(ok.status).toBe(0);
+      for (const tool of [
+        'rm',
+        'git',
+        'timeout',
+        'mktemp',
+        'gh',
+        'node',
+        'mkdir',
+        'grep',
+        'docker',
+      ]) {
+        expect(ok.outputs[tool], `published ${tool}`).toMatch(
+          new RegExp(`/bin/${tool}$`),
+        );
+      }
+      // publish must really write $GITHUB_OUTPUT: dropping its echo line leaves
+      // every refusal assertion green while a real round aborts at ${RM_BIN:?}.
+      expect(ok.outputs.system_path).toBeTruthy();
+      for (const dir of ok.outputs.system_path.split(':')) {
+        expect(dir.length).toBeGreaterThan(0);
+      }
+      expect(ok.outputs.system_path.split(':')).toContain(
+        ok.outputs.rm.replace(/\/rm$/, ''),
+      );
+
+      // The directory check is load-bearing on its own: a non-writable file
+      // inside a WRITABLE directory can be replaced by a co-tenant.
+      const writableDir = runGuard(guard, {
+        ...approved,
+        fileMode: 0o555,
+        rootMode: 0o755,
+        separateReadlinkRoot: true,
+      });
+      expect(writableDir.status).not.toBe(0);
+      expect(writableDir.output).toContain('no verified rm');
+      expect(writableDir.outputs.system_path).toBeUndefined();
+
+      // A symlink is accepted only when the link's directory, the resolved
+      // target and the target's directory are all non-writable.
+      const linkOk = runGuard(guard, {
+        ...approved,
+        ...modes,
+        nodeLink: { targetMode: 0o555, targetDirMode: 0o555 },
+      });
+      expect(linkOk.status).toBe(0);
+      expect(linkOk.outputs.node).toMatch(/\/bin\/node$/);
+      const linkBad = runGuard(guard, {
+        ...approved,
+        ...modes,
+        nodeLink: { targetMode: 0o555, targetDirMode: 0o755 },
+      });
+      expect(linkBad.status).not.toBe(0);
+      expect(linkBad.output).toContain('no verified node');
+
+      // The trust anchor itself: a lying readlink first on the ambient PATH
+      // must never run. If it did, it would report a harmless target for the
+      // writable-directory symlink above AND append its own gh= output line,
+      // which the runner would take as the last value for that key.
+      const planted = runGuard(guard, {
+        ...approved,
+        ...modes,
+        nodeLink: { targetMode: 0o555, targetDirMode: 0o755 },
+        plantReadlink: true,
+      });
+      expect(planted.status).not.toBe(0);
+      expect(planted.output).toContain('no verified node');
+      expect(planted.outputs.gh).not.toBe('/attacker/bin/gh');
+      expect(planted.outputs.node).toBeUndefined();
+
+      // The docker branch has its own refusal: the pinned binary missing must
+      // name docker, not whichever tool the fixture happened to fail on first.
+      const noDocker = runGuard(guard, {
+        ...approved,
+        ...modes,
+        omitDocker: true,
+      });
+      expect(noDocker.status).not.toBe(0);
+      expect(noDocker.output).toContain('no verified docker');
+    },
+  );
+
   it('preflights the same daemon and binary the classifier and resolver use', () => {
     // An unpinned probe answers for the pool-shared currentContext, which is
     // not the context the classifier is pinned to: it can reject a host whose
@@ -437,10 +612,19 @@ describe('ci failure patrol workflow', () => {
     // The probe must go through that pinned binary, not a PATH lookup.
     expect(guard.run).toContain('"${timeout}" 10 "${docker}" info');
     expect(guard.run).not.toMatch(/timeout 10 docker/);
-    // The guard must establish its base without resolving any name.
+    // The guard must establish its base without resolving any name. readlink is
+    // the one external command the predicate needs, so it has to be bootstrapped
+    // by builtins and invoked absolutely — a bare `readlink -f` would resolve
+    // through the plantable PATH this step exists to distrust, and a planted
+    // readlink runs with $GITHUB_OUTPUT and $GITHUB_ENV in its environment.
     expect(guard.env.PATROL_BIN_ROOTS).toBe('/usr/bin /bin /usr/local/bin');
     expect(guard.run).toContain('usable()');
-    expect(guard.run).toContain('readlink -f');
+    expect(guard.run).toContain('[ ! -L "${c}" ] && [ -x "${c}" ]');
+    expect(guard.run).toContain('readlink="${c}"');
+    expect(guard.run).toContain('"${readlink:?}" -f "${p}"');
+    expect(guard.run).toContain('"${readlink:?}" -f "${c}"');
+    expect(guard.run).not.toContain('$(readlink -f');
+    expect(guard.run).toContain('no verified readlink');
     // A blanket symlink refusal rejected node on a correctly provisioned pool
     // host; the target and its directory must be checked, not the link alone.
     expect(guard.run).toContain('if [ -L "${p}" ]; then');
@@ -459,6 +643,14 @@ describe('ci failure patrol workflow', () => {
       (s) => s.name === 'Fail the round when candidates produced no decisions',
     );
     expect(verdict).toBeTruthy();
+    // Pin the operator, not just the operands: both substring assertions below
+    // pass for `||` too, and on the most common tick (target_found='false',
+    // has_decisions unset) `false || ('' != 'true')` is TRUE — every idle round
+    // would go red with this suite green.
+    expect(verdict.if).not.toContain('||');
+    expect(verdict.if).toBe(
+      "${{ steps.scan.outputs.target_found == 'true' && steps.decisions.outputs.has_decisions != 'true' }}",
+    );
     expect(verdict.if).toContain("steps.scan.outputs.target_found == 'true'");
     expect(verdict.if).toContain(
       "steps.decisions.outputs.has_decisions != 'true'",
@@ -472,10 +664,19 @@ describe('ci failure patrol workflow', () => {
     expect(verdict['continue-on-error']).toBeUndefined();
     expect(verdict.run).toContain('exit 1');
 
-    // Behavioural: the gate expression is what decides, so evaluate it against
-    // the three shapes that actually occur.
-    const fires = (targetFound, hasDecisions) =>
-      targetFound === 'true' && hasDecisions !== 'true';
+    // Behavioural: evaluate the WORKFLOW's expression, not a hand-copied
+    // replica — a replica only ever makes statements about itself.
+    const fires = (targetFound, hasDecisions) => {
+      const expr = verdict.if
+        .replace(/^\$\{\{\s*/, '')
+        .replace(/\s*\}\}$/, '')
+        .split('steps.scan.outputs.target_found')
+        .join(JSON.stringify(targetFound))
+        .split('steps.decisions.outputs.has_decisions')
+        .join(JSON.stringify(hasDecisions));
+      expect(expr).not.toMatch(/steps\./);
+      return new Function(`return (${expr});`)();
+    };
     expect(fires('true', 'false')).toBe(true); // outage -> red
     expect(fires('true', '')).toBe(true); // validate skipped -> red
     expect(fires('true', 'true')).toBe(false); // real decisions -> green
@@ -494,7 +695,7 @@ describe('ci failure patrol workflow', () => {
       output = `${e.stdout ?? ''}${e.stderr ?? ''}`;
     }
     expect(status).toBe(1);
-    expect(output).toContain('produced no valid decisions');
+    expect(output).toContain('produced no usable decisions');
   });
 
   it('behaviorally proves the classifier PATH docker equality fails closed', () => {
@@ -623,6 +824,15 @@ describe('ci failure patrol workflow', () => {
     const ensure = classify.steps.find((step) => step.id === 'ensure_qwen');
     expect(resolve.if).toBe(ensure.if);
     expect(classifier.if).toBe(ensure.if);
+    // Ensure is network-bound: on the hosted fallback qwen is absent, so every
+    // candidate-bearing round pays a cold global npm install. Unbounded, a slow
+    // registry spends the job's remaining slack and the runner then cancels the
+    // job INSIDE the classifier, where continue-on-error does not apply — so
+    // validate, upload and the verdict step never run and the round concludes
+    // cancelled, saying nothing. It must carry its own cap, counted in the sum
+    // above like every other capped step.
+    expect(ensure['timeout-minutes']).toBeGreaterThan(0);
+    expect(ensure['timeout-minutes']).toBeLessThan(classify['timeout-minutes']);
   });
 
   it('behaviorally proves the resolve step reports timing and propagates failure', () => {
@@ -721,8 +931,37 @@ describe('ci failure patrol workflow', () => {
     // classifier timed out without writing anything — acting on stale reruns.
     const classify = yml.jobs.classify;
     const scan = classify.steps.find((step) => step.id === 'scan');
-    expect(scan.run).toContain('rm -f "${WORKDIR}/ci-flaky-decisions.json"');
-    expect(scan.run).toContain('rm -rf "${QWEN_HOME}"');
+    // Strip comments first: a commented-out reset still contains the substring,
+    // and this step declares no PATH, so every external command it runs must be
+    // the guard's verified absolute. A planted `rm` that exits 0 without
+    // deleting leaves the previous round's decisions file in place, validate
+    // accepts it, has_decisions becomes true and act replays stale decisions —
+    // a failure the verdict step cannot catch because has_decisions is true.
+    const code = scan.run
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('#'))
+      .join('\n');
+    expect(code).toContain(
+      '"${RM_BIN:?}" -f -- "${WORKDIR}/ci-flaky-decisions.json"',
+    );
+    expect(code).toContain('"${RM_BIN:?}" -rf -- "${QWEN_HOME}"');
+    expect(code).toContain('"${MKDIR_BIN:?}" -p "${QWEN_HOME}"');
+    expect(code).toContain('"${MKDIR_BIN:?}" -p "${WORKDIR}"');
+    // grep writes target_found/input_sha into $GITHUB_OUTPUT, so it is the same
+    // class of trust anchor as the resets.
+    expect(code).toContain('"${GREP_BIN:?}" -E');
+    for (const bare of ['rm ', 'mkdir ', 'grep ']) {
+      expect(code, `bare ${bare}`).not.toMatch(
+        new RegExp(`(^|[\\s;&|])${bare.trim()}\\s`, 'm'),
+      );
+    }
+    expect(scan.env.RM_BIN).toBe('${{ steps.guard.outputs.rm }}');
+    expect(scan.env.MKDIR_BIN).toBe('${{ steps.guard.outputs.mkdir }}');
+    expect(scan.env.GREP_BIN).toBe('${{ steps.guard.outputs.grep }}');
+    // The guard must actually verify the two tools this step newly binds.
+    expect(classify.steps[0].run).toContain(
+      'for tool in rm git timeout mktemp gh node mkdir grep; do',
+    );
     // The rm -rf target is pinned in the step's own env rather than inherited
     // from a job-level value: on the shared pool $GITHUB_ENV is writable by
     // anything running at the runner's uid. Both ends must name one directory.
@@ -954,27 +1193,39 @@ describe('ci failure patrol workflow', () => {
     // writes a PATH directory, so a co-located job can plant `gh` or `node`.
     // The allowlist decides which host runs the job; it says nothing about
     // which binary a credential-bearing step then executes.
+    // Only classify consumes a captured PATH (the docker recheck, Ensure Qwen
+    // Code and the classifier). act's credential steps invoke absolute binaries
+    // and read no PATH, so it has no capture step — requiring one there pinned a
+    // no-op and, worse, a comment telling maintainers that act's PAT steps
+    // resolve node by name when they do not.
+    const classify = yml.jobs.classify;
+    const names = classify.steps.map((step) => step.name);
+    const stage = classify.steps.find((step) => step.id === 'stage');
+    expect(stage).toBeTruthy();
+    expect(names.indexOf('Capture trusted PATH')).toBeGreaterThan(
+      names.indexOf('Set up Node.js'),
+    );
+    expect(yml.jobs.act.steps.some((step) => step.id === 'stage')).toBe(false);
+    // Builtins only: the capture must resolve no command word itself. The pool
+    // leads with the verified directories; hosted keeps the post-setup-node PATH
+    // so the toolchain npm (writable prefix) still wins there — leading with the
+    // root-owned system prefix would fail Ensure Qwen Code's global install.
+    const stageLines = stage.run
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l !== '' && !l.startsWith('#'));
+    expect(stageLines).toEqual([
+      'if [ "${RUNNER_ENVIRONMENT}" = \'self-hosted\' ]; then',
+      'echo "trusted_path=${SYSTEM_PATH}:${PATH}" >> "${GITHUB_OUTPUT}"',
+      'else',
+      'echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"',
+      'fi',
+    ]);
+    expect(stage.env.SYSTEM_PATH).toBe(
+      '${{ steps.guard.outputs.system_path }}',
+    );
+    expect(stage.env.RUNNER_ENVIRONMENT).toBe('${{ runner.environment }}');
     for (const job of [yml.jobs.classify, yml.jobs.act]) {
-      const names = job.steps.map((step) => step.name);
-      const stage = job.steps.find((step) => step.id === 'stage');
-      expect(stage, `${job.name} needs a PATH capture`).toBeTruthy();
-      // After setup-node: capturing earlier would pin the ambient node and
-      // silently drop the version the job asked for.
-      expect(names.indexOf('Capture trusted PATH')).toBeGreaterThan(
-        names.indexOf('Set up Node.js'),
-      );
-      // Builtins only, so the capture itself resolves no command word.
-      // Builtins only: the capture must resolve no command word itself.
-      const stageLines = stage.run
-        .split('\n')
-        .map((l) => l.trim())
-        .filter((l) => l !== '' && !l.startsWith('#'));
-      expect(stageLines).toEqual([
-        'echo "trusted_path=${SYSTEM_PATH}:${PATH}" >> "${GITHUB_OUTPUT}"',
-      ]);
-      expect(stage.env.SYSTEM_PATH).toBe(
-        '${{ steps.guard.outputs.system_path }}',
-      );
       // Every step that runs a command AFTER the capture, whether or not it
       // holds a token: validate runs `node` with no credential, but a planted
       // node there could rewrite the driver that act then runs with the PAT.
@@ -1003,6 +1254,21 @@ describe('ci failure patrol workflow', () => {
         expect(code).toContain('unset GH_ENTERPRISE_TOKEN GH_TOKEN');
         expect(code).toContain('patrol-gh-config.XXXXXX');
         expect(code).toContain('export GH_CONFIG_DIR');
+        // Scoped to the steps that actually spawn the driver: GhClient falls
+        // back to `process.env.PATROL_GH || 'gh'`, so dropping that pin makes
+        // the spawn resolve a bare name on a PATH whose tail is plantable —
+        // with CI_BOT_PAT in the environment. NODE_BIN decides which
+        // interpreter runs the driver at all. The "no bare node" loop below
+        // cannot see either, because it rewrites ${NODE_BIN:?} before matching.
+        // identity also holds the PAT but spawns no driver and has neither key.
+        if (/ci-flaky-rerun\.mjs/.test(code)) {
+          expect(step.env.PATROL_GH, `${job.name}/${step.name}`).toBe(
+            '${{ steps.guard.outputs.gh }}',
+          );
+          expect(step.env.NODE_BIN, `${job.name}/${step.name}`).toBe(
+            '${{ steps.guard.outputs.node }}',
+          );
+        }
       }
       // Every node invocation in the job goes through the verified path.
       for (const step of job.steps) {
@@ -1083,16 +1349,18 @@ describe('ci failure patrol workflow', () => {
         '"${RM_BIN:?}" -rf -- "$GITHUB_WORKSPACE/.git"',
       );
       expect(rebuild.env.RM_BIN).toBe('${{ steps.guard.outputs.rm }}');
-      expect(rebuild.env.MKTEMP_BIN).toBe('${{ steps.guard.outputs.mktemp }}');
-      // An unpredictable name: a fixed path in enumerable $RUNNER_TEMP can be
-      // pre-planted as a symlink or refilled before git reads it.
-      expect(rebuild.run).toContain('patrol-empty-gitconfig.XXXXXX');
-      expect(rebuild.run).not.toContain(
-        ': > "${RUNNER_TEMP}/patrol-empty-gitconfig"',
-      );
+      // /dev/null, not a minted file. An unguessable name does not protect a
+      // LISTABLE one: $RUNNER_TEMP is enumerable and same-uid writable, so a
+      // co-tenant can list it, match the minted name and refill the config
+      // before git reads it (0600 does not stop the same uid). /dev/null is
+      // root-owned, reads as empty and offers nothing to race.
+      expect(rebuild.env.MKTEMP_BIN).toBeUndefined();
+      expect(rebuild.run).not.toContain('patrol-empty-gitconfig');
+      expect(rebuild.run).not.toContain('mktemp');
+      expect(rebuild.run).toContain('echo "gitconfig=/dev/null"');
       for (const scope of ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM']) {
         expect(rebuild.run).toContain(
-          `echo "${scope}=\${GIT_CONFIG_FILE}" >> "\${GITHUB_ENV}"`,
+          `echo "${scope}=/dev/null" >> "\${GITHUB_ENV}"`,
         );
       }
       const checkout = job.steps.find((step) => step.id === 'checkout');
@@ -1163,7 +1431,6 @@ describe('ci failure patrol workflow', () => {
         GITHUB_ENV: envFile,
         GITHUB_OUTPUT: join(root, 'gh_output'),
         RM_BIN: '/usr/bin/rm',
-        MKTEMP_BIN: '/usr/bin/mktemp',
       };
       execFileSync('bash', ['-c', rebuild.run], {
         env: stepEnv,
@@ -1176,10 +1443,11 @@ describe('ci failure patrol workflow', () => {
         const eq = line.indexOf('=');
         if (eq > 0) exported[line.slice(0, eq)] = line.slice(eq + 1);
       }
-      expect(exported.GIT_CONFIG_GLOBAL).toMatch(
-        new RegExp(`^${runnerTemp}/patrol-empty-gitconfig\\.[A-Za-z0-9]+$`),
-      );
-      expect(exported.GIT_CONFIG_SYSTEM).toBe(exported.GIT_CONFIG_GLOBAL);
+      // /dev/null exactly: a minted file in enumerable, same-uid-writable
+      // $RUNNER_TEMP can be listed and refilled before git reads it, which is
+      // the attack the positive control above demonstrates.
+      expect(exported.GIT_CONFIG_GLOBAL).toBe('/dev/null');
+      expect(exported.GIT_CONFIG_SYSTEM).toBe('/dev/null');
       expect(existsSync(join(workspace, '.git'))).toBe(false);
 
       seed();
