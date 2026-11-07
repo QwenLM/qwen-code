@@ -562,6 +562,41 @@ cat "\${RUNNER_TEMP}/pulls.json"
       expect(resolved.output).toContain('file_issue=false');
       expect(resolved.output).toContain('rerun_pending=false');
       expect(resolved.stdout).toContain('no filing destination');
+
+      // That combination has no other writer: no rerun, no issue. The summary
+      // step must still build the body, or report_pr has nothing to post and
+      // the timeout disappears entirely.
+      const evaluate = (condition, needs) =>
+        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
+          needs,
+          () => true,
+        );
+      const summary = jobs.analyze.steps.find((step) => step.id === 'summary');
+      const evaluateSummary = (steps) =>
+        new Function(
+          'steps',
+          'success',
+          `return (${String(summary.if).slice(3, -2)});`,
+        )(steps, () => true);
+      const destinationOutputs = () => ({
+        pr_number: '14472',
+        file_issue: 'false',
+        rerun_pending: 'false',
+      });
+      expect(
+        evaluateSummary({
+          destination: { outputs: destinationOutputs() },
+          live: { outputs: { cancellation_kind: 'timeout' } },
+        }),
+      ).toBe(true);
+      // A superseded run is not a timeout, so it must not start building a
+      // comment just because it resolves to a PR.
+      expect(
+        evaluateSummary({
+          destination: { outputs: destinationOutputs() },
+          live: { outputs: { cancellation_kind: 'superseded' } },
+        }),
+      ).toBe(false);
     });
 
     it('files when the rerun it deferred to could not be dispatched', () => {

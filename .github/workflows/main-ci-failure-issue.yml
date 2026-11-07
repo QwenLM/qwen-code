@@ -625,9 +625,12 @@ jobs:
         # Same rule as file_issue's `if`, restricted to analyze's own outputs:
         # a body must exist whenever that job can file, including the deferred
         # timeout whose rerun could not be dispatched, or the fallback files an
-        # empty issue. `success()` is deliberately absent — it is satisfied
-        # here, but spelling it keeps the two expressions diffable.
-        if: "${{ success() && (steps.destination.outputs.file_issue == 'true' || steps.destination.outputs.rerun_pending == 'true') }}"
+        # empty issue.
+        # A timed-out dispatch that resolves to an open PR is not rerun and is
+        # not filed (see `destination`), so the comment is its only record and
+        # the body must be built for it too. Superseded runs are excluded: they
+        # never reach `cancellation_kind == 'timeout'`.
+        if: "${{ success() && (steps.destination.outputs.file_issue == 'true' || steps.destination.outputs.rerun_pending == 'true' || (steps.live.outputs.cancellation_kind == 'timeout' && steps.destination.outputs.pr_number != '')) }}"
         env:
           WORKFLOW_NAME: '${{ github.event.workflow.name }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
@@ -1241,9 +1244,11 @@ jobs:
     # dispatched rerun suppresses the comment, and a timeout still inside its
     # rerun budget suppresses it too: that run is rerun whole and its own
     # completion reports the outcome, so posting "failed" now would leave a red
-    # comment that a green rerun never retracts. A rerun that could not be
-    # dispatched is the exception — `file_issue` is also false on that path, so
-    # the comment is the only record left and must post.
+    # comment that a green rerun never retracts. Two paths reach here with no
+    # other writer: a rerun that could not be dispatched, and a timed-out
+    # dispatch that resolves to an open PR (never rerun, never filed because
+    # there is no filing destination). On the main-push dispatch there is no
+    # PR, so only the issue exists; on a merged PR's dispatch both writers run.
     if: "${{ always() && (needs.analyze.outputs.rerun_pending != 'true' || needs.rerun_infra.result != 'success') && needs.analyze.outputs.comment_body != '' && needs.analyze.outputs.pr_number != '' && (needs.analyze.outputs.infra_only != 'true' || needs.rerun_infra.result != 'success') }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
