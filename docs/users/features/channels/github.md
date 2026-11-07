@@ -199,7 +199,8 @@ with private file permissions and retries it on the next channel start. That
 retry stops sending at the first stored reply GitHub still rate-limits and
 keeps the later ones for the following start, together with that reply when
 GitHub's headers prove it was not posted; replies the audit already records as
-posted are dropped. The corresponding inbound task
+posted are dropped, and so is a reply whose audit records an ambiguous failure
+carrying that reply's pending id. The corresponding inbound task
 remains in `reply_pending` state until that delivery succeeds or reaches a
 definite terminal failure. Ambiguous delivery failures are not retried
 automatically because GitHub may have created the comment: the audit records
