@@ -679,6 +679,58 @@ describe('stripShellWrapper', () => {
   it('does not append bash -c positional argv to the executable command', async () => {
     expect(stripShellWrapper("bash -c 'echo ok' 'sleep 5'")).toEqual('echo ok');
   });
+
+  // R11-2: an ANSI-C encoded `--` is still the option terminator (witnessed:
+  // `sh -c $'\x2d\x2d' 'echo B_OK'` prints B_OK), so the payload after it is
+  // the command. A locale `$"…"` word does NOT decode ANSI-C escapes
+  // (witnessed: bash runs `x2dx2d`), so it is not a terminator.
+  it('reads the payload after an ANSI-C encoded option terminator', async () => {
+    expect(stripShellWrapper("sh -c $'\\x2d\\x2d' 'ls -l'")).toEqual('ls -l');
+    expect(stripShellWrapper("sh -c $'\\055\\055' 'ls -l'")).toEqual('ls -l');
+    expect(stripShellWrapper("sh -c -'-' 'ls -l'")).toEqual('ls -l');
+  });
+
+  it('does not treat a locale word as an option terminator', async () => {
+    // `$"…"` does not decode ANSI-C escapes: bash runs a program literally
+    // named `x2dx2d` (witnessed), so the locale word IS the payload and the
+    // following word is only $0.
+    expect(stripShellWrapper('sh -c $"\\x2d\\x2d" \'ls -l\'')).toEqual(
+      '$"\\x2d\\x2d"',
+    );
+  });
+
+  it('fails closed on an expansion in the terminator position', async () => {
+    // The expansion may be the terminator or the program itself; neither
+    // reading is provable, so the whole command goes back to the monitor.
+    const command = "sh -c $TERM 'ls -l'";
+    expect(stripShellWrapper(command)).toEqual(command);
+  });
+
+  // R11-2 (#16075): a NUL ends the word bash builds, so `$'--\0x'` is the
+  // terminator `--` and the following word is the script (witnessed: bash runs
+  // it). The truncation stays inside the ANSI-C word.
+  it.each([
+    "sh -c $'--\\0x' 'ls -l'",
+    "sh -c $'--\\x00x' 'ls -l'",
+    "sh -c $'--\\0' 'ls -l'",
+  ])(
+    'reads a NUL-truncated ANSI-C word as the option terminator: %s',
+    (command) => {
+      expect(stripShellWrapper(command)).toEqual('ls -l');
+    },
+  );
+
+  // R13-1 (#16075): a payload that is one fully quoted word is unwrapped even
+  // when it carries an expansion, so op extraction and the self-kill gate see
+  // the script instead of a wrapper-free command.
+  it('unwraps a fully quoted payload that carries an expansion', () => {
+    expect(
+      stripShellWrapper('bash -c "echo hi; $(echo x > /etc/passwd)"'),
+    ).toEqual('echo hi; $(echo x > /etc/passwd)');
+    expect(stripShellWrapper('sh -c "pkill -f $(echo qwen)"')).toEqual(
+      'pkill -f $(echo qwen)',
+    );
+  });
 });
 
 describe('stripTrailingBackgroundAmp', () => {
@@ -719,6 +771,36 @@ describe('detectSelfKillCommand', () => {
       'pkill -f /usr/bin/node',
       'pkill -9f node',
       "bash -lc 'pkill -f qwen'",
+    ]);
+  });
+
+  // R11-2: the option terminator can be spelled with ANSI-C escapes, octal
+  // escapes or quote concatenation; each still ends option parsing, so the
+  // self-kill payload after it is the command (witnessed with sh/bash).
+  it('detects self-kill behind an encoded option terminator', () => {
+    expectEach(detectSelfKillCommand, true, [
+      "sh -c $'\\x2d\\x2d' 'pkill -f qwen'",
+      "sh -c $'\\055\\055' 'pkill -f qwen'",
+      "sh -c -'-' 'pkill -f qwen'",
+      "sh -c -- 'pkill -f qwen'",
+      // R11-2: a NUL ends the word, so `$'--\0x'` is the terminator `--`.
+      "sh -c $'--\\0x' 'pkill -f qwen'",
+      "sh -c $'--\\x00x' 'pkill -f qwen'",
+      "sh -c $'--\\0' 'pkill -f qwen'",
+    ]);
+  });
+
+  // R13-1: a fully quoted payload with a substitution is still unwrapped, so
+  // the self-kill gate sees the pkill the shell really runs.
+  it('detects self-kill inside a fully quoted payload with a substitution', () => {
+    expect(detectSelfKillCommand('sh -c "pkill -f $(echo qwen)"')).toBe(true);
+  });
+
+  it('does not read a locale word as an option terminator', () => {
+    // `$"…"` does not decode ANSI-C escapes: bash runs a program literally
+    // named `x2dx2d`, so the payload is positional argv, not the command.
+    expectEach(detectSelfKillCommand, false, [
+      'sh -c $"\\x2d\\x2d" \'pkill -f qwen\'',
     ]);
   });
 
@@ -837,6 +919,15 @@ describe('normalizeMonitorCommand', () => {
       strippedTrailingAmp,
     });
 
+  it('reads `--` as the -c option terminator', () => {
+    expect(normalizeMonitorCommand("sh -c -- 'ls -l'")).toEqual({
+      analysisCommand: 'ls -l',
+      safetyCommand: 'ls -l',
+      spawnCommand: "sh -c -- 'ls -l'",
+      strippedTrailingAmp: false,
+    });
+  });
+
   it('unwraps quoted env-prefixed shell wrappers for analysis', () => {
     expectNormalized(
       `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
@@ -910,6 +1001,56 @@ describe('normalizeMonitorCommand', () => {
       'echo ok',
       'FOO=$(cat secret.txt) echo ok',
     );
+  });
+
+  // R11-2 consumer regression (#16075): a wrapper whose -c payload word
+  // carries an unresolvable expansion is handed back whole for the monitor to
+  // scan, but that must not read as "not a wrapper" to the cron gate, which
+  // refuses any wrapper whose glued script the rules would read differently.
+  it('flags an unresolvable wrapper payload while keeping the whole command for scanning', () => {
+    const glued = "bash -c 'cat /etc/hostname '$(touch${IFS}/tmp/x)''";
+    expect(normalizeMonitorCommand(glued)).toEqual({
+      analysisCommand: glued,
+      safetyCommand: glued,
+      spawnCommand: glued,
+      strippedTrailingAmp: false,
+      wrapperPayloadUnresolved: true,
+    });
+    const terminator = "sh -c $TERM 'ls -l'";
+    expect(normalizeMonitorCommand(terminator).safetyCommand).toBe(terminator);
+    expect(normalizeMonitorCommand(terminator).wrapperPayloadUnresolved).toBe(
+      true,
+    );
+  });
+
+  // R13-1 (#16075): a fully quoted payload that carries an expansion is
+  // unwrapped for analysis/safety, but the unresolved signal stays observable
+  // and spawnCommand keeps the whole command so the cron gate still refuses and
+  // the monitor still spawns exactly what the user wrote.
+  // R13-1 (second round, #16540): the spawn override keeps the payload word
+  // verbatim but normalises the trailing background `&` away. Keeping it made
+  // the monitor's tracked child fork the payload and exit, so a non-zero exit
+  // was reported as success.
+  it('strips a trailing background & from the spawn override', () => {
+    const command = 'bash -c "echo $(id)" &';
+    expect(normalizeMonitorCommand(command)).toEqual({
+      analysisCommand: 'echo $(id)',
+      safetyCommand: 'echo $(id)',
+      spawnCommand: 'bash -c "echo $(id)"',
+      strippedTrailingAmp: true,
+      wrapperPayloadUnresolved: true,
+    });
+  });
+
+  it('unwraps a fully quoted unresolved payload but keeps the spawn whole', () => {
+    const command = 'bash -c "echo hi; $(echo x > /etc/passwd)"';
+    expect(normalizeMonitorCommand(command)).toEqual({
+      analysisCommand: 'echo hi; $(echo x > /etc/passwd)',
+      safetyCommand: 'echo hi; $(echo x > /etc/passwd)',
+      spawnCommand: command,
+      strippedTrailingAmp: false,
+      wrapperPayloadUnresolved: true,
+    });
   });
 });
 
