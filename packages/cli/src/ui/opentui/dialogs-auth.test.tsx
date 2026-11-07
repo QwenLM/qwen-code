@@ -1374,6 +1374,23 @@ describe('caret editing in dialog text fields (#107)', () => {
     }
   });
 
+  it('keeps the context window when a same-read arrow left the row before Ctrl+C', async () => {
+    await runToContextWindowRow();
+    await typeText('128000');
+    // Focus wraps, so the ↓ of this read leaves the context-window row and the
+    // Ctrl+C behind it belongs to the toggle row it landed on. Read from the
+    // render that armed the handler, the clear still sees the old row and
+    // silently turns the stored number into auto.
+    const handler = lastKeyboardHandler();
+    await act(async () => {
+      handler(baseKeyEvent({ name: 'down', sequence: 'down' }));
+      handler(baseKeyEvent({ name: 'c', ctrl: true, sequence: '\x03' }));
+    });
+    await press('up'); // back onto the context-window row
+    expect(focusedField().text.trimEnd()).toBe('128000');
+    expect(contextRow()).toMatch(/Context window: 128000\s*$/);
+  });
+
   it('does not spend Undo on a numeric Space in the same read before submit', async () => {
     const observed: string[] = [];
     const useOriginal = providerSetupFlow.useProviderSetupFlow;
@@ -1644,6 +1661,31 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     await typeText('flash');
     expect(screen.queryByText(/^deepseek-v4-pro(\s|$)/)).toBeNull();
     expect(recommendedRow('deepseek-flash')).toContain(ICON.RADIO_FILLED);
+  });
+
+  it('clears the search query on Ctrl+C and paints the whole list again', async () => {
+    await runToModelsStep();
+    await press('tab'); // custom-ID input → search field
+    await typeText('flash');
+    expect(screen.queryByText(/^deepseek-v4-pro(\s|$)/)).toBeNull();
+    await press('c', { ctrl: true, sequence: '\x03' });
+    // The empty active field paints its placeholder under the caret cell.
+    expect(
+      screen.getByText((_, element) => element?.textContent === '> search'),
+    ).toBeTruthy();
+    expect(recommendedRow('deepseek-v4-pro')).toContain(ICON.RADIO_FILLED);
+    expect(recommendedRow('deepseek-flash')).toContain(ICON.RADIO_FILLED);
+  });
+
+  it('clears the custom-model-ID field on Ctrl+C before the step submits', async () => {
+    await runToModelsStep();
+    await typeText('my-model');
+    expect(document.body.textContent).toContain('my-model');
+    await press('c', { ctrl: true, sequence: '\x03' });
+    expect(document.body.textContent).not.toContain('my-model');
+    // The field stays editable: the clear is an edit, not a submit.
+    await typeText('next-model');
+    expect(document.body.textContent).toContain('next-model');
   });
 });
 

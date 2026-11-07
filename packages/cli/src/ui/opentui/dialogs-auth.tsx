@@ -1057,6 +1057,11 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
   } = flow.state;
   const ctxIdx = modalityEnabled ? 6 : 2;
   const onCtxRow = focusedConfigIndex === ctxIdx;
+  // One stdin read dispatches every key to the render that armed the handler,
+  // so a ↓ followed by Ctrl+C would clear a row the ↓ already left. Mirror the
+  // flow's index and advance it with the flow's own wraparound count.
+  const focusRef = useRef(focusedConfigIndex);
+  focusRef.current = focusedConfigIndex;
   const ctxField = useLineEdit(contextWindowSize, flow.changeContextWindowSize);
   useKeyboard((key) => {
     if (ctxField.settled) return;
@@ -1064,10 +1069,18 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
     // Focus-row navigation restricted to unambiguous shortcuts (ink parity:
     // a letter typed into the context-window field must not move the row).
     if (o.name === 'up' || (o.ctrl && o.name === 'p')) {
+      focusRef.current =
+        focusRef.current <= 0
+          ? flow.advancedOptionCount - 1
+          : focusRef.current - 1;
       flow.moveAdvancedFocusUp();
       return;
     }
     if (o.name === 'down' || (o.ctrl && o.name === 'n')) {
+      focusRef.current =
+        focusRef.current >= flow.advancedOptionCount - 1
+          ? 0
+          : focusRef.current + 1;
       flow.moveAdvancedFocusDown();
       return;
     }
@@ -1081,11 +1094,15 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
       ctxField.settle();
       return;
     }
-    if (onCtxRow && keyMatchers[Command.CLEAR_INPUT](o)) {
+    if (focusRef.current === ctxIdx && keyMatchers[Command.CLEAR_INPUT](o)) {
       ctxField.clear();
       return;
     }
-    if (onCtxRow && !ctxField.handleKey(o) && isPrintableKeyInput(key)) {
+    if (
+      focusRef.current === ctxIdx &&
+      !ctxField.handleKey(o) &&
+      isPrintableKeyInput(key)
+    ) {
       ctxField.insert(key.sequence.replace(/[^0-9]/g, ''));
     }
   });

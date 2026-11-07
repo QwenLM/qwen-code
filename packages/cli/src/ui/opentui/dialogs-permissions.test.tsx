@@ -136,11 +136,13 @@ function renderPermissions(
 const temporaryDirectories: string[] = [];
 
 function paste(text: string) {
+  const event = { bytes: Buffer.from(text), preventDefault: vi.fn() };
   act(() => {
     for (const handler of [...mocks.state.pasteHandlers]) {
-      handler({ bytes: Buffer.from(text), preventDefault: vi.fn() });
+      handler(event);
     }
   });
+  return event;
 }
 
 describe('OpenTuiPermissionsDialog rule rows', () => {
@@ -178,6 +180,37 @@ describe('OpenTuiPermissionsDialog rule rows', () => {
     press('return');
     expect(screen.getByText('Bash(x)')).toBeTruthy();
     expect(screen.getByText('Where should this rule be saved?')).toBeTruthy();
+  });
+
+  it('paints a pasted rule whose clipboard trailing newline would hide it', () => {
+    // A single-line field paints only the caret's line, so a kept LF leaves
+    // the caret on an empty second line: the row reads blank while Enter
+    // still submits the trimmed buffer the user never saw.
+    const { container } = renderPermissions([]);
+    press('return');
+    const event = paste('Bash(ls)\n');
+    expect(container.textContent).toContain('Bash(ls)');
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    press('return');
+    expect(screen.getByText('Where should this rule be saved?')).toBeTruthy();
+  });
+
+  it('paints both lines of a two-line rule paste as the one row it submits', () => {
+    const { container } = renderPermissions([]);
+    press('return');
+    paste('Bash(rm)\nBash(curl)');
+    expect(container.textContent).toContain('Bash(rm) Bash(curl)');
+  });
+
+  it('paints a pasted directory path whose trailing newline would hide it', () => {
+    const { container } = renderPermissions([]);
+    press('tab');
+    press('tab');
+    press('tab');
+    press('return');
+    expect(screen.getByText('Enter directory path…')).toBeTruthy();
+    paste('/tmp/pasted-directory\n');
+    expect(container.textContent).toContain('/tmp/pasted-directory');
   });
 
   it('lists directory candidates and applies the selected one with Tab', () => {

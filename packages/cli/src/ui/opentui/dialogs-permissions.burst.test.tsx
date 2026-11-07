@@ -458,6 +458,31 @@ describe('Permissions field ownership across reads', () => {
     );
   });
 
+  it('completes the prefix a same-read character typed, not the painted list', () => {
+    const parent = fs.mkdtempSync(
+      nodePath.join(tmpdir(), 'permission-same-read-tab-'),
+    );
+    fs.mkdirSync(nodePath.join(parent, 'alpha'));
+    fs.mkdirSync(nodePath.join(parent, 'beta'));
+    try {
+      const { onAddDirectory } = renderDialog();
+      openDirInput();
+      burst((parent + '/').split('').map(text));
+      expect(screen.getByText(/^alpha\/\s+directory$/)).toBeTruthy();
+      expect(screen.getByText(/^beta\/\s+directory$/)).toBeTruthy();
+      // 'b' and Tab share one read, so the handler still sees the render that
+      // painted alpha first. Dropping the Tab loses the key; selecting from
+      // that painted list applies alpha over the b the user just typed.
+      burst([text('b'), TAB]);
+      press(ENTER);
+      expect(onAddDirectory).toHaveBeenCalledExactlyOnceWith(
+        fs.realpathSync(nodePath.join(parent, 'beta')),
+      );
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
   it('clears a prior directory error when Tab accepts a real completion', () => {
     const parent = fs.mkdtempSync(
       nodePath.join(tmpdir(), 'permission-error-tab-'),

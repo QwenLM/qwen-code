@@ -704,34 +704,30 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         setView('ws-dir-list');
         return;
       }
-      if (
-        visibleCompletions.length > 0 &&
-        (name === 'tab' || name === 'up' || name === 'down')
-      ) {
-        // A same-read edit must not select suggestions from the preceding render.
-        if (dirLine.text !== newDirInput) return;
+      if (name === 'tab' || name === 'up' || name === 'down') {
+        // One stdin read keeps dispatching to the render that armed it, so the
+        // painted list can lag a character typed in this same read. Recompute
+        // from the live value: dropping the key loses the Tab, and selecting
+        // from the painted list applies a candidate the edit already ruled out.
+        const candidates = directoryCompletions(dirLine.text).slice(
+          0,
+          completionRows,
+        );
+        if (candidates.length === 0) return;
+        const index = Math.min(
+          completionIndexRef.current,
+          candidates.length - 1,
+        );
         if (name === 'tab') {
-          const selected =
-            visibleCompletions[
-              Math.min(
-                completionIndexRef.current,
-                visibleCompletions.length - 1,
-              )
-            ];
           dirLine.settle();
-          setNewDirInput(selected + '/');
+          setNewDirInput(candidates[index] + '/');
           setDirInputError('');
           setDirInputEpoch((epoch) => epoch + 1);
           setCompletionIndex(0);
         } else {
           setCompletionIndex(
-            (Math.min(
-              completionIndexRef.current,
-              visibleCompletions.length - 1,
-            ) +
-              (name === 'up' ? -1 : 1) +
-              visibleCompletions.length) %
-              visibleCompletions.length,
+            (index + (name === 'up' ? -1 : 1) + candidates.length) %
+              candidates.length,
           );
         }
         return;
@@ -768,7 +764,13 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
           ? dirLine
           : null;
     if (!line || line.settled) return;
-    const text = normalizePastedText(decodePasteBytes(event.bytes));
+    // These fields paint one line, so a kept break hides everything the caret
+    // left behind while Enter still submits the whole buffer. The shared
+    // normalizer must keep breaks for the composer; flatten here only.
+    const text = normalizePastedText(decodePasteBytes(event.bytes)).replace(
+      /[\r\n]+/g,
+      ' ',
+    );
     if (!text) return;
     event.preventDefault();
     line.insert(text);
