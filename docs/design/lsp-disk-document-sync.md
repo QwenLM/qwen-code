@@ -168,7 +168,18 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   as never asked. That relevance rule excuses a server from vetoing
   _another_ server's answer, never from being the only answer: a document
   query that no queried server answered rejects even when every recorded
-  failure belongs to a server the queried file excludes. Other request/pull
+  failure belongs to a server the queried file excludes. When an answer was
+  retrieved, the same ledger is not dropped: both diagnostics queries resolve
+  to `{ items, unqueried }`, where `unqueried` names every failed pull that
+  would have vetoed an empty answer and every unreachable server, bounded like
+  the rejection (last line per cause, shared aggregate budget). The tool keeps
+  the items as a success and appends
+  `Note: some LSP servers could not be queried (…); this report is partial.`
+  to the model-facing text only. A `-32601` refusal and a server the queried
+  file excludes stay out of the note. A workspace sweep that stopped at its
+  result limit does not name the ready servers it left unasked; truncation
+  itself is not reported.
+  Other request/pull
   catches and public
   query catches other than hierarchy provenance handling are unchanged and can
   return empty arrays or null; these are **not evidence of clean diagnostics**.

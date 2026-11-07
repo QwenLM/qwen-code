@@ -22,6 +22,7 @@ import type {
   LspCodeActionKind,
   LspDefinition,
   LspDiagnostic,
+  LspDiagnosticsReport,
   LspFileDiagnostics,
   LspLocation,
   LspRange,
@@ -647,9 +648,9 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       return { llmContent: message, returnDisplay: message };
     }
 
-    let diagnostics: LspDiagnostic[] = [];
+    let report: LspDiagnosticsReport<LspDiagnostic>;
     try {
-      diagnostics = await client.diagnostics(uri, this.params.serverName);
+      report = await client.diagnostics(uri, this.params.serverName);
     } catch (error) {
       const message = `LSP diagnostics failed: ${
         (error as Error)?.message || String(error)
@@ -661,6 +662,7 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       };
     }
 
+    const diagnostics = report.items;
     if (!diagnostics.length) {
       const fileLabel = this.formatUriForDisplay(uri, workspaceRoot);
       const message = `No diagnostics found for ${fileLabel}.`;
@@ -678,21 +680,35 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     const fileLabel = this.formatUriForDisplay(uri, workspaceRoot);
     const heading = `Diagnostics for ${fileLabel} (${diagnostics.length} issues):`;
     return {
-      llmContent: [heading, ...lines].join('\n'),
+      llmContent: [heading, ...lines, ...this.partialReportNote(report)].join(
+        '\n',
+      ),
       returnDisplay: lines.join('\n'),
     };
+  }
+
+  /**
+   * A failed or unreached server beside a successful one still yields a
+   * success, so the model must be told the list is incomplete; setting
+   * `error` instead would replace the retrieved diagnostics with the error
+   * message. The note is model-facing only; `returnDisplay` keeps the plain
+   * list the user already sees.
+   */
+  private partialReportNote(report: LspDiagnosticsReport<unknown>): string[] {
+    return report.unqueried
+      ? [
+          `Note: some LSP servers could not be queried (${report.unqueried}); this report is partial.`,
+        ]
+      : [];
   }
 
   private async executeWorkspaceDiagnostics(
     client: LspClient,
   ): Promise<ToolResult> {
     const limit = this.params.limit ?? 50;
-    let fileDiagnostics: LspFileDiagnostics[] = [];
+    let report: LspDiagnosticsReport<LspFileDiagnostics>;
     try {
-      fileDiagnostics = await client.workspaceDiagnostics(
-        this.params.serverName,
-        limit,
-      );
+      report = await client.workspaceDiagnostics(this.params.serverName, limit);
     } catch (error) {
       const message = `LSP workspace diagnostics failed: ${
         (error as Error)?.message || String(error)
@@ -704,6 +720,7 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       };
     }
 
+    const fileDiagnostics = report.items;
     if (!fileDiagnostics.length) {
       const message = 'No diagnostics found in the workspace.';
       return { llmContent: message, returnDisplay: message };
@@ -733,7 +750,9 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
 
     const heading = `Workspace diagnostics (${totalIssues} issues in ${fileDiagnostics.length} files):`;
     return {
-      llmContent: [heading, ...lines].join('\n'),
+      llmContent: [heading, ...lines, ...this.partialReportNote(report)].join(
+        '\n',
+      ),
       returnDisplay: lines.join('\n'),
     };
   }

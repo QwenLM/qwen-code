@@ -156,6 +156,16 @@ export interface LspFileDiagnostics {
 }
 
 /**
+ * Diagnostics retrieved from the servers that answered. `unqueried` is set
+ * when a server that could contribute failed its pull or was never reached,
+ * so `items` is partial; it is a bounded, human-readable description.
+ */
+export interface LspDiagnosticsReport<T> {
+  items: T[];
+  unqueried?: string;
+}
+
+/**
  * A code action represents a change that can be performed in code.
  */
 export interface LspCodeAction {
@@ -365,7 +375,10 @@ export interface LspClient {
   /**
    * Get diagnostics for a specific document.
    */
-  diagnostics(uri: string, serverName?: string): Promise<LspDiagnostic[]>;
+  diagnostics(
+    uri: string,
+    serverName?: string,
+  ): Promise<LspDiagnosticsReport<LspDiagnostic>>;
 
   /**
    * Get diagnostics for all open documents in the workspace.
@@ -373,7 +386,7 @@ export interface LspClient {
   workspaceDiagnostics(
     serverName?: string,
     limit?: number,
-  ): Promise<LspFileDiagnostics[]>;
+  ): Promise<LspDiagnosticsReport<LspFileDiagnostics>>;
 
   /**
    * Get code actions available at a specific location.

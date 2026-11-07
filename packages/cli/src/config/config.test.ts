@@ -136,8 +136,8 @@ const createNativeLspServiceInstance = () => ({
   prepareCallHierarchy: vi.fn().mockResolvedValue([]),
   incomingCalls: vi.fn().mockResolvedValue([]),
   outgoingCalls: vi.fn().mockResolvedValue([]),
-  diagnostics: vi.fn().mockResolvedValue([]),
-  workspaceDiagnostics: vi.fn().mockResolvedValue([]),
+  diagnostics: vi.fn().mockResolvedValue({ items: [] }),
+  workspaceDiagnostics: vi.fn().mockResolvedValue({ items: [] }),
   codeActions: vi.fn().mockResolvedValue([]),
   applyWorkspaceEdit: vi.fn().mockResolvedValue(false),
   getStatusSnapshot: vi.fn().mockReturnValue({
