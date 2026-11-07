@@ -2686,13 +2686,14 @@ test('start and verify use server.env when the configuration does not resolve', 
   for (const harnessUrl of [
     'http://127.0.0.1:4172/@acme/harness',
     'http://gateway.example.com/@acme/harness',
-    // An escape, an IPv6 address, one that ends in an IPv4 address, a
-    // label that starts with a digit before the last one, and the final dot
-    // of a fully qualified name, all of which java.net.URI reads as a host.
+    // An escape, an IPv6 address, one that ends in an IPv4 address, digit-led
+    // labels including the last one, and the final dot of a fully qualified
+    // name, all of which java.net.URI reads as a host.
     'http://127.0.0.1:4172/a%20b',
     'http://[::1]:4172',
     'http://[::ffff:127.0.0.1]:4172',
     'http://1st.harness.internal:4172/',
+    'http://4harness:4172',
     'http://harness.internal.:4170/',
   ]) {
     await writeFile(
@@ -2880,11 +2881,14 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     // A space java.net.URI refuses in a path, and a malformed escape.
     'http://127.0.0.1:4170/a b',
     'http://127.0.0.1:4170/a%zz',
-    // Hosts java.net.URI reads no host in: an empty label, a label that
-    // ends in a hyphen, and a last label that starts with a digit.
+    // Plain-URL refusals: an empty label, a label that ends in a hyphen,
+    // and a non-IPv4 name whose last label is purely numeric.
     'http://harness..internal:4170',
     'http://harness-.internal:4170',
     'http://1.2.3:4170',
+    // Fetch reads these as 0.0.4.210 and 8.0.0.1 respectively.
+    'http://1234:4170',
+    'http://010.0.0.1:4170',
   ]) {
     host.resolved = { harnessBaseUrl, harnessOrigin: undefined };
     assert.equal(
@@ -2972,7 +2976,10 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     /puts the health endpoint at "http:\/\/127\.0\.0\.1:6000\/actuator\/health", which is on port 6000, so fetch refuses to dial it\. Bind it where fetch can reach it, or pass --server-url/,
   );
   host.resolved = {};
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  host.requests = [];
   for (const [serverUrl, refusal, shown = serverUrl.replace(/\/$/, '')] of [
+    ['', 'is not a URL'],
     ['proxy.test:8443', 'is not an http or https URL'],
     [
       'http://admin:secret@127.0.0.1:18080',
@@ -3028,6 +3035,7 @@ test('start refuses listeners it cannot reach before it starts anything', async 
       host.output.join('\n'),
     );
   }
+  assert.deepEqual(host.requests, []);
   assert.equal(host.units[HARNESS].ActiveState, 'inactive');
   assert.equal(host.units[SERVER].ActiveState, 'inactive');
   assert.ok(host.services.every(({ args }) => args.includes(RESOLVER)));
@@ -3403,6 +3411,7 @@ test('check judges the --server-url its plan repeats', async (t) => {
     // What --server-url "https://$HOST" leaves with HOST unset, which the
     // option parser strips to https:, though https:/actuator/health parses.
     ['https://', 'https:', 'is not a URL'],
+    ['', '', 'is not a URL'],
   ]) {
     assert.equal(await host.check('--server-url', serverUrl), 1);
     assert.equal(
@@ -3421,7 +3430,7 @@ test('check judges the --server-url its plan repeats', async (t) => {
     plan,
   );
   // A control character in a value the plan repeats reaches the terminal as
-  // an escape, which the shell reads back as the value.
+  // an escape, which bash reads back as the value.
   const releases = `${host.root}/rel\u001b[2K'\u009b\\x`;
   assert.equal(await host.check('--releases', releases), 0);
   const printed = host.output.slice(host.output.indexOf('Plan:')).join('\n');

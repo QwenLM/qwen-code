@@ -1848,7 +1848,7 @@ function planFlags(options, names) {
 async function phaseCheck(system, deployment, options) {
   // The plan repeats --server-url, so check judges it as start and verify
   // will.
-  if (options.serverUrl) {
+  if (options.serverUrl !== undefined) {
     refuseServerUrl(options.serverUrl);
   }
   const rows = await compatibilityRows(system, deployment);
@@ -2648,7 +2648,7 @@ async function listeners(
       };
     }
   }
-  if (options.serverUrl) {
+  if (options.serverUrl !== undefined) {
     refuseServerUrl(options.serverUrl);
     urls.server = options.serverUrl;
     urls.health = `${options.serverUrl}/actuator/health`;
@@ -2870,15 +2870,15 @@ function harnessUrlReason(text, url) {
 
 // The Harness base URLs start takes when the server gives no verdict: an
 // http(s) URL whose authority is a host name as java.net.URI reads one,
-// labels of letters, digits and inner hyphens whose last starts with a
-// letter, with or without the final dot of a fully qualified name, a
+// labels of letters, digits and inner hyphens whose last is not purely
+// numeric, with or without the final dot of a fully qualified name, a
 // dotted-quad IPv4 address or a bracketed IPv6 address, which may end in an
 // IPv4 one, as ::ffff:127.0.0.1 does, and an optional port, and whose path
 // holds only the characters a URI path may, untrimmed, a % only as the start
 // of an escape. It is narrower than the server's rule, never wider: it
-// refuses a name of one label that starts with a digit, as the URL parser
-// fetch uses reads 1234 as an IPv4 address, an octet with a leading zero,
-// which it reads as octal, and an empty port.
+// refuses a non-IPv4 name whose last label is purely numeric, since the URL
+// parser fetch uses reads 1234 as an IPv4 address, an octet with a leading
+// zero, which it reads as octal, and an empty port.
 const LABEL = '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?';
 const OCTET = '(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])';
 const IPV4 = `${OCTET}(?:\\.${OCTET}){3}`;
@@ -2899,7 +2899,7 @@ const IPV6 = [
   ),
 ].join('|');
 const PLAIN_HTTP_URL = new RegExp(
-  `^https?://(?:(?:${LABEL}\\.)*[A-Za-z](?:[A-Za-z0-9-]*[A-Za-z0-9])?\\.?|${IPV4}|\\[(?:${IPV6})\\])(?::[0-9]{1,5})?(?:/(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9\\-._~!$&'()*+,;=:@/])*)?$`,
+  `^https?://(?:(?:${LABEL}\\.)*(?![0-9]+\\.?(?::|/|$))${LABEL}\\.?|${IPV4}|\\[(?:${IPV6})\\])(?::[0-9]{1,5})?(?:/(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9\\-._~!$&'()*+,;=:@/])*)?$`,
   'i',
 );
 
