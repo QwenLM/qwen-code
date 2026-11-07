@@ -340,6 +340,7 @@ import {
   CHANNEL_TASK_OUTPUT_META_KEY,
   CHANNEL_TASK_RESULT_META_KEY,
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
+  CHANNEL_TURN_NOTICE_META_KEY,
 } from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
@@ -19987,6 +19988,18 @@ export class Session implements SessionContext {
 
     switch (result.type) {
       case 'submit_prompt': {
+        // Stacked-skill overflow is a warning, not a failure: the prompt still
+        // runs, so the client gets a notice and the turn continues. Channel
+        // bridges deliver only the turn's text, so tag the notice and let them
+        // carry it with the reply instead of the shadowed slash-command slot.
+        if (result.stackedSkillOverflow) {
+          await this.messageEmitter.emitSlashCommandOutput(
+            result.stackedSkillOverflow,
+            undefined,
+            undefined,
+            { [CHANNEL_TURN_NOTICE_META_KEY]: true },
+          );
+        }
         const expandedPrompt = normalizePartList(result.content);
         const attachmentBlocks =
           result.resolvedCommand?.kind === CommandKind.BUILT_IN
