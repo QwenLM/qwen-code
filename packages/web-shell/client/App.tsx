@@ -14237,6 +14237,21 @@ export function App({
     workspaceSettings.find(
       (setting) => setting.key === 'ui.accessibility.enableLoadingPhrases',
     )?.values.effective !== false;
+  // Only the automatic recap is gated; the manual /recap path is not.
+  const showSessionRecap =
+    workspaceSettings.find(
+      (setting) => setting.key === 'general.showSessionRecap',
+    )?.values.effective === true;
+  const recapAwayThresholdMinutes = (() => {
+    const raw = workspaceSettings.find(
+      (setting) => setting.key === 'general.sessionRecapAwayThresholdMinutes',
+    )?.values.effective;
+    // Coerce the way the terminal's `awayThresholdMinutes > 0` does: settings
+    // are not type-validated on load, so a hand-edited "10" must mean 10 here
+    // too rather than silently falling back to the 5-minute default.
+    const value = typeof raw === 'number' ? raw : Number(raw);
+    return Number.isFinite(value) && value > 0 ? value : 5;
+  })();
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -15621,7 +15636,13 @@ export function App({
   const liveGoalSnapshot =
     goalSnapshot?.goal?.status === 'complete' ? null : goalSnapshot;
 
-  // Auto-recap: fire when the user returns after being away ≥ 3 minutes
+  // Auto-recap: fire when the user returns having been away for at least
+  // `general.sessionRecapAwayThresholdMinutes`, but only when
+  // `general.showSessionRecap` opted in. The away window is the span the
+  // document spent `hidden`, so unlike the terminal CLI this handler does not
+  // defer a return that lands mid-turn: it clears `hiddenAtRef` before the
+  // streaming check, so a return while a turn is running is dropped rather
+  // than re-fired once the turn settles.
   const hiddenAtRef = useRef<number | null>(null);
   const lastRecapBlockCountRef = useRef(0);
   const autoRecapVersionRef = useRef(0);
@@ -15630,7 +15651,7 @@ export function App({
     autoRecapVersionRef.current += 1;
   }, [logicalSessionKey]);
   useEffect(() => {
-    const AWAY_THRESHOLD_MS = 3 * 60 * 1000;
+    const AWAY_THRESHOLD_MS = recapAwayThresholdMinutes * 60 * 1000;
     const MIN_NEW_BLOCKS = 4;
     function onVisibilityChange() {
       if (document.hidden) {
@@ -15640,6 +15661,7 @@ export function App({
       const hiddenAt = hiddenAtRef.current;
       hiddenAtRef.current = null;
       if (hiddenAt === null) return;
+      if (!showSessionRecap) return;
       if (Date.now() - hiddenAt < AWAY_THRESHOLD_MS) return;
       if (sessionWriteBlocked) return;
       if (streamingStateRef.current !== 'idle') return;
@@ -15701,10 +15723,12 @@ export function App({
       document.removeEventListener('visibilitychange', onVisibilityChange);
   }, [
     connection.sessionId,
+    recapAwayThresholdMinutes,
     sessionActions,
     sessionOwnerGuard,
     sessionWriteBlocked,
     showRecapMessage,
+    showSessionRecap,
     store,
     t,
   ]);

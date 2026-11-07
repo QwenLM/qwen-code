@@ -597,7 +597,7 @@ const SETTINGS_SCHEMA = {
         // Manual `/recap` works regardless.
         default: false,
         description:
-          'Auto-show a one-line "where you left off" recap when returning to the terminal after being away. Off by default. Use /recap to trigger manually regardless of this setting.',
+          'Auto-show a one-line "where you left off" recap when returning after being away: the terminal losing focus, or a Web Shell tab going to the background. Off by default. Use /recap to trigger manually regardless of this setting.',
         showInDialog: true,
       },
       sessionRecapAwayThresholdMinutes: {
@@ -608,7 +608,7 @@ const SETTINGS_SCHEMA = {
         default: 5,
         minimum: 1,
         description:
-          "How many minutes the terminal must be blurred before an auto-recap fires on the next focus-in. Matches Claude Code's default of 5 minutes; raise if you briefly alt-tab and do not want recaps to pile up.",
+          "How many minutes the session must be away before an auto-recap fires on return: the terminal blurred, or a Web Shell tab backgrounded. Matches Claude Code's default of 5 minutes; raise if you briefly alt-tab and do not want recaps to pile up.",
         showInDialog: true,
       },
       cleanupPeriodDays: {
