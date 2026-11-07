@@ -97,12 +97,15 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
 import {
   RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+  MEASURED_WORKSPACE_CAPABILITY_DIGEST,
   WORKSPACE_CAPABILITY_DIGEST,
 } from './managed-workspace-activation.js';
 
 const broker = vi.hoisted(() => ({
   capabilityDigest:
     'sha256:7df3981fa14b397fe09f6ba84ed0c096c71902394da667bf47f3b315866e7f91',
+  toolMeasurements: vi.fn(),
+  releaseToolMeasurements: vi.fn(),
   fileHistory: vi.fn(),
   authorizeLifecycle: vi.fn(),
   workspaceContext: vi.fn(),
@@ -140,6 +143,8 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     // request leaves, so a lost reply still names it.
     private claim?: string;
     mountClaim = () => this.claim;
+    toolMeasurements = broker.toolMeasurements;
+    releaseToolMeasurements = broker.releaseToolMeasurements;
     fileHistory = broker.fileHistory;
     authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;
@@ -545,6 +550,61 @@ it.each([
     expect(session.authority.lastEventOfKind('tool.receipt')).toBeUndefined();
   },
 );
+
+it('persists frozen executor measurements before model result delivery fails', async () => {
+  await enableManagedExecutionDiagnostics(session);
+  broker.capabilityDigest = MEASURED_WORKSPACE_CAPABILITY_DIGEST;
+  broker.toolMeasurements.mockReturnValue({
+    resultDigest: 'a'.repeat(64),
+    measurements: {
+      protocol: 'managed-tool-measurements/1',
+      executionDurationMs: 0,
+      executionOutcome: 'success',
+      file: {
+        operation: 'read',
+        status: 'measured',
+        modelLinesAdded: null,
+        modelLinesRemoved: null,
+        appliedLinesAdded: null,
+        appliedLinesRemoved: null,
+      },
+    },
+  });
+  const original = commit;
+  commit = async (...args) => {
+    if (args[0] === 'tool_result') throw new Error('delivery unavailable');
+    return original(...args);
+  };
+  turn = createTurn();
+  await expect(
+    turn.execute([calls[0]], [parts[0]], 'model', new AbortController().signal),
+  ).rejects.toThrow();
+  const event = session.authority.lastEventOfKind('tool.measured')!;
+  expect(event).toBeDefined();
+  const packet = JSON.parse(
+    (
+      await session.resources.read(
+        assertManagedSessionDurableRef(
+          event.payload['measurementsRef'],
+          'measurement',
+        ),
+      )
+    ).toString(),
+  );
+  expect(packet.measurements).toMatchObject({
+    executionDurationMs: 0,
+    executionOutcome: 'success',
+    file: { operation: 'read' },
+  });
+  expect(broker.releaseToolMeasurements).toHaveBeenCalledWith(
+    event.payload['executionCallId'],
+  );
+  expect(
+    session.authority.committedReceipt(
+      String(event.payload['executionCallId']),
+    ),
+  ).toBeUndefined();
+});
 
 it('refuses a mixed Skill and Workspace batch before approval Hooks or tool dispatch', async () => {
   const fire = vi.fn<HostedHookSession['fire']>().mockResolvedValue(undefined);

@@ -534,7 +534,10 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
         body.put("contextDigest", binding.getContextDigest());
         body.put("contextConfigRef", binding.getContextConfigRef());
         body.put("profile", ResidentWorkspaceProfile.selects(request)
-                ? ResidentWorkspaceProfile.PROFILE : WorkspaceExecutionProfile.PROFILE);
+                ? ResidentWorkspaceProfile.PROFILE : WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(
+                                        session.getScope().getCapabilityDigest())
+                                ? WorkspaceExecutionProfile.MEASURED_PROFILE
+                                : WorkspaceExecutionProfile.PROFILE);
         Map<String, Object> expected = new LinkedHashMap<>(body);
         expected.put("runtimeInstanceId", seed.getProvisionalRuntimeId());
         expected.put("runtimeIncarnation", seed.getGatewayIncarnation());
@@ -810,6 +813,207 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                 encodeToolRequest(body, BODY_LIMIT_BYTES),
                 TOOL_RESULT_LIMIT_BYTES)
                 .thenApply(bytes -> parseV3Response(bytes, "acknowledge"));
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> executeV4(
+            RuntimeLease lease,
+            RuntimeSession session,
+            Map<String, Object> reference,
+            Map<String, Object> payload,
+            Map<String, Object> capture) {
+        com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.requireProfile(session);
+        Map<String, Object> merged = new LinkedHashMap<>(reference);
+        if (payload != null) {
+            merged.putAll(payload);
+        }
+        Map<String, Object> body = v4Body(reference);
+        body.put("toolName", referenceToolName(merged));
+        Object input = referenceInput(merged);
+        ManagedExtensionProtocol.requireBoundInput(session, input);
+        body.put("input", input);
+        if (capture != null) {
+            body.put("capture", capture);
+        }
+        return post(
+                        lease,
+                        "/internal/managed-runtime/v4/execute",
+                        encodeToolRequest(body, TOOL_REQUEST_LIMIT_BYTES),
+                        TOOL_RESULT_LIMIT_BYTES + 4096)
+                .thenApply(
+                        bytes ->
+                                parseV4Response(
+                                        bytes,
+                                        "execute",
+                                        com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements
+                                                .executionProtocol(reference)));
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> statusV4(
+            RuntimeLease lease,
+            RuntimeSession session,
+            Map<String, Object> reference,
+            long afterSequence) {
+        com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.requireProfile(session);
+        if (afterSequence < 0) {
+            throw new IllegalArgumentException("Invalid sequence.");
+        }
+        Map<String, Object> body = v4Body(reference);
+        body.put("afterSequence", afterSequence);
+        return post(
+                        lease,
+                        "/internal/managed-runtime/v4/status",
+                        encodeToolRequest(body, BODY_LIMIT_BYTES),
+                        TOOL_RESULT_LIMIT_BYTES + 4096)
+                .thenApply(
+                        bytes ->
+                                parseV4Response(
+                                        bytes,
+                                        "status",
+                                        com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements
+                                                .executionProtocol(reference)));
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> cancelV4(
+            RuntimeLease lease, RuntimeSession session, Map<String, Object> reference) {
+        com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.requireProfile(session);
+        return post(
+                        lease,
+                        "/internal/managed-runtime/v4/cancel",
+                        encodeToolRequest(v4Body(reference), BODY_LIMIT_BYTES),
+                        TOOL_RESULT_LIMIT_BYTES + 4096)
+                .thenApply(
+                        bytes ->
+                                parseV4Response(
+                                        bytes,
+                                        "cancel",
+                                        com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements
+                                                .executionProtocol(reference)));
+    }
+
+    @Override
+    public CompletionStage<Void> acknowledgeV4(
+            RuntimeLease lease,
+            RuntimeSession session,
+            Map<String, Object> reference,
+            Map<String, Object> result,
+            Map<String, Object> receipt) {
+        com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.requireProfile(session);
+        Map<String, Object> body = v4Body(reference);
+        body.put(
+                "resultDigest",
+                com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.metadata(result)
+                        .get("resultDigest"));
+        if (com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.executionProtocol(reference)
+                == 3) {
+            body.put("receipt", receipt);
+        }
+        return post(
+                        lease,
+                        "/internal/managed-runtime/v4/acknowledge",
+                        encodeToolRequest(body, BODY_LIMIT_BYTES),
+                        TOOL_RESULT_LIMIT_BYTES + 4096)
+                .thenAccept(
+                        bytes -> {
+                            Map<String, Object> answer =
+                                    parseV4Response(
+                                            bytes,
+                                            "acknowledge",
+                                            com.alibaba.qwen.code.runtimebroker
+                                                    .RuntimeToolMeasurements.executionProtocol(
+                                                    reference));
+                            if (!Set.of("acknowledged", "settled", "unknown")
+                                    .contains(answer.get("state"))) {
+                                throw protocol(
+                                        "Runtime did not acknowledge its original measured"
+                                            + " result.");
+                            }
+                        });
+    }
+
+    private static Map<String, Object> v4Body(Map<String, Object> reference) {
+        if (!com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.selected(reference)) {
+            throw new IllegalArgumentException(
+                    "Measured protocol must be reserved before dispatch.");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 4);
+        body.put(
+                "executionProtocol",
+                com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.executionProtocol(
+                        reference));
+        Map<String, Object> legacy = new LinkedHashMap<>(reference);
+        legacy.remove("resultProtocol");
+        legacy.remove("runtimeProtocol");
+        legacy.remove("inputDigest");
+        legacy.remove("executionCallId");
+        body.put("reference", referenceIdentity(legacy));
+        return body;
+    }
+
+    private static Map<String, Object> parseV4Response(
+            byte[] bytes, String operation, int executionProtocol) {
+        Map<String, Object> fields = ManagedContextProtocol.parse(bytes);
+        if (!Set.of(
+                                "protocolVersion",
+                                "executionProtocol",
+                                "state",
+                                "lastSequence",
+                                "result",
+                                "measurements",
+                                "resultDigest")
+                        .containsAll(fields.keySet())
+                || !Integer.valueOf(4).equals(fields.get("protocolVersion"))
+                || !Integer.valueOf(executionProtocol).equals(fields.get("executionProtocol"))
+                || !(fields.get("state") instanceof String state)
+                || !TOOL_STATES.contains(state)) {
+            throw protocol("Invalid measured Runtime response.");
+        }
+        Map<String, Object> legacy = new LinkedHashMap<>(fields);
+        if ("acknowledged".equals(state)) {
+            if (fields.containsKey("result")
+                    || fields.containsKey("measurements")
+                    || fields.containsKey("resultDigest")) {
+                throw protocol("Acknowledged result still contains payload.");
+            }
+            return Map.of("state", state);
+        }
+        legacy.keySet().removeAll(Set.of("executionProtocol", "measurements", "resultDigest"));
+        legacy.put("protocolVersion", executionProtocol);
+        if (!"status".equals(operation)) {
+            legacy.remove("lastSequence");
+        }
+        if (executionProtocol == 3) {
+            legacy.put("toolResult", "managed-tool-result/1");
+            parseV3Response(JsonCodec.encode(legacy), operation);
+        } else {
+            parseToolResponse(JsonCodec.encode(legacy), operation);
+        }
+        if (!"settled".equals(state)) {
+            if (fields.containsKey("measurements") || fields.containsKey("resultDigest")) {
+                throw protocol("Unsettled response contains a measurement.");
+            }
+            return fields.containsKey("lastSequence")
+                    ? Map.of("state", state, "lastSequence", fields.get("lastSequence"))
+                    : Map.of("state", state);
+        }
+        if (!(fields.get("result") instanceof Map<?, ?> raw)
+                || !fields.containsKey("measurements")) {
+            throw protocol("Settled measured result is incomplete.");
+        }
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result = (Map<String, Object>) raw;
+        return Map.of(
+                "state",
+                state,
+                "result",
+                com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements.attach(
+                        executionProtocol,
+                        result,
+                        fields.get("measurements"),
+                        fields.get("resultDigest")));
     }
 
     private static void requireV3Context(RuntimeLease lease,
@@ -1528,6 +1732,10 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
 
     private static RuntimeBrokerException contextFailure(
             HttpResponse<BoundedBody> response, BoundedBody body, String path) {
+        if (response.statusCode() == 501 && path.startsWith("/internal/managed-runtime/v4/")) {
+            return error(501, "runtime_tool_v4_unsupported",
+                    "Managed Runtime does not support Tool v4.", false);
+        }
         if (response.statusCode() == 501
                 && (V3_EXECUTE_PATH.equals(path) || V3_STATUS_PATH.equals(path))) {
             return error(501, "runtime_tool_v3_unsupported",

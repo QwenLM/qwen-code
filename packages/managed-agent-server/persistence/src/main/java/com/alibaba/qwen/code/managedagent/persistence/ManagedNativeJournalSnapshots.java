@@ -413,6 +413,7 @@ public class ManagedNativeJournalSnapshots {
             case "hosted.batch.planned" -> List.of("planRef");
             case "hosted.cleanup" -> List.of("descriptorRef");
             case "action.changed" -> List.of("optionsRef", "decisionRef");
+            case "tool.measured" -> List.of("toolOutcomeRef", "measurementsRef");
             case "tool.receipt" -> List.of("toolOutcomeRef", "resultRef", "resources");
             case "checkpoint.committed" -> List.of("stateRef");
             case "context.compacted" -> List.of("summaryRef", "tokenCountsRef");
@@ -462,6 +463,11 @@ public class ManagedNativeJournalSnapshots {
                 require(resource.schemaVersion() == 1, "managed_session_snapshot_corrupt");
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.requireBody(
                         resource.kind(), decode(resource.bytes(), JsonNode.class));
+            }
+            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements.KIND.equals(resource.kind())) {
+                require(resource.schemaVersion() == 1 && resource.byteLength() <= com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements.MAX_BYTES,
+                        "managed_session_snapshot_corrupt");
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements.requireEvidence(decode(resource.bytes(), JsonNode.class));
             }
             if (seen.add(id) && structured(resource.kind())) {
                 JsonNode body = decode(resource.bytes(), JsonNode.class);

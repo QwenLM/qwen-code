@@ -19032,6 +19032,9 @@
                 "minimum": 0
               }
             }
+          },
+          "measurements": {
+            "$ref": "#/components/schemas/ManagedActivityMeasurementTotals"
           }
         }
       },
@@ -19240,6 +19243,9 @@
           },
           "taskRuntimeState": {
             "type": ["string", "null"]
+          },
+          "measurements": {
+            "$ref": "#/components/schemas/ManagedActivityMeasurement"
           }
         }
       },
@@ -19367,6 +19373,11 @@
                 "$ref": "#/components/schemas/ManagedActivityMetrics"
               }
             }
+          },
+          "measurementStartSequence": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
           }
         }
       },
@@ -19801,6 +19812,9 @@
                 },
                 "taskRuntimeState": {
                   "type": ["string", "null"]
+                },
+                "measurements": {
+                  "$ref": "#/components/schemas/ManagedActivityMeasurement"
                 }
               }
             }
@@ -20055,6 +20069,9 @@
                 },
                 "taskRuntimeState": {
                   "type": ["string", "null"]
+                },
+                "measurements": {
+                  "$ref": "#/components/schemas/ManagedActivityMeasurement"
                 }
               }
             }
@@ -20111,6 +20128,201 @@
             "$ref": "#/components/schemas/ManagedActivitySkillsPage"
           }
         ]
+      },
+      "ManagedActivityMeasurement": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sourceSequence",
+          "availability",
+          "executionDurationMs",
+          "file"
+        ],
+        "properties": {
+          "sourceSequence": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "availability": {
+            "type": "string",
+            "enum": ["available", "partial", "unsupported"]
+          },
+          "executionDurationMs": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)$",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "file": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "operation",
+                  "status",
+                  "modelLinesAdded",
+                  "modelLinesRemoved",
+                  "appliedLinesAdded",
+                  "appliedLinesRemoved"
+                ],
+                "properties": {
+                  "operation": {
+                    "type": "string",
+                    "enum": ["read", "write", "edit"]
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": ["measured", "unchanged", "unmeasured"]
+                  },
+                  "modelLinesAdded": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$",
+                        "maxLength": 128
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "modelLinesRemoved": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$",
+                        "maxLength": 128
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "appliedLinesAdded": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$",
+                        "maxLength": 128
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "appliedLinesRemoved": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$",
+                        "maxLength": 128
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ManagedActivityMeasurementTotals": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "availability",
+          "recorded",
+          "unsupported",
+          "executionDurationMs",
+          "executionDurationSamples",
+          "fileSamples",
+          "modelDiffSamples",
+          "appliedDiffSamples",
+          "modelLinesAdded",
+          "modelLinesRemoved",
+          "appliedLinesAdded",
+          "appliedLinesRemoved",
+          "partial"
+        ],
+        "properties": {
+          "availability": {
+            "type": "string",
+            "enum": ["available", "partial", "not_recorded", "unsupported"]
+          },
+          "recorded": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "unsupported": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "executionDurationMs": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "executionDurationSamples": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "fileSamples": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "modelDiffSamples": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "appliedDiffSamples": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "modelLinesAdded": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "modelLinesRemoved": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "appliedLinesAdded": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "appliedLinesRemoved": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          },
+          "partial": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "maxLength": 128
+          }
+        }
       }
     }
   }

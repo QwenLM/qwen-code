@@ -2023,7 +2023,7 @@ describe('HTTP Managed Session store', () => {
         expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
         expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
         expect(headers.get('X-Qwen-Managed-Max-Readable-Storage-Version')).toBe(
-          '4',
+          '5',
         );
         expect(init?.method).toBe('POST');
         expect(JSON.parse(String(init?.body))).toEqual(request);
