@@ -26,6 +26,11 @@ import {
 import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
 import { refreshMemoryInstruction } from './refresh.js';
 import {
+  isStableExtractionWindowEnabled,
+  resolveExtractWindow,
+  type ResolvedExtractWindow,
+} from './extract-window.js';
+import {
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
   type AutoMemoryType,
@@ -100,6 +105,94 @@ async function writeExtractCursor(
   );
 }
 
+/**
+ * Cursor fields of the opt-in stable extraction window (#15493). They stay
+ * absent before the experiment's first run, so a flag-OFF run writes exactly
+ * the cursor main writes today and a pre-experiment cursor stays readable.
+ */
+function windowCursorFields(cursor: AutoMemoryExtractCursor): {
+  epoch?: number;
+  windowStartCurated?: number;
+  coveredCurated?: number;
+  windowHeadHash?: string;
+  windowEpochId?: string;
+} {
+  return {
+    epoch: cursor.epoch,
+    windowStartCurated: cursor.windowStartCurated,
+    coveredCurated: cursor.coveredCurated,
+    windowHeadHash: cursor.windowHeadHash,
+    windowEpochId: cursor.windowEpochId,
+  };
+}
+
+interface RunAutoMemoryExtractParams {
+  projectRoot: string;
+  sessionId: string;
+  history: Content[];
+  now?: Date;
+  config?: Config;
+  skippedHistory?: Content[];
+  // Only the close-time cadence flush (#13004) sets this: an abandoned flush
+  // run aborts here instead of keeping a fork alive past its boundary.
+  abortSignal?: AbortSignal;
+  // Only the close-time cadence flush (#13004) sets this: the replayed
+  // snapshot's history can be shorter than the cursor a later run already
+  // persisted, so this run's write must not move that cursor backwards.
+  flushReplay?: boolean;
+  /**
+   * Opt-in stable extraction window (#15493): returns the parent's CURATED
+   * history. Stored as a closure and called once here, at extraction execution
+   * time, only while the experiment flag is on — the per-turn schedule path
+   * never materializes it.
+   */
+  getCuratedHistory?: () => Content[];
+  /**
+   * Opt-in stable extraction window (#15493): process + history-generation
+   * identity for the window epoch. Supplied by the manager, so a restarted
+   * process or a boundary that rewrote the curated history in place rebases
+   * instead of reusing a prefix the live history no longer has.
+   */
+  extractWindowEpochId?: string;
+}
+
+interface StableExtractWindow {
+  curatedHistory: Content[];
+  resolved: ResolvedExtractWindow;
+}
+
+/**
+ * Resolve the opt-in stable window for this run, or `undefined` to keep the
+ * legacy last-40 capture path. The curated snapshot is materialized here, at
+ * extraction execution time and only when the flag is on.
+ */
+function resolveStableExtractWindow(
+  params: RunAutoMemoryExtractParams,
+  currentCursor: AutoMemoryExtractCursor,
+): StableExtractWindow | undefined {
+  if (!isStableExtractionWindowEnabled()) return undefined;
+  const getCuratedHistory = params.getCuratedHistory;
+  if (!getCuratedHistory) return undefined;
+  let curatedHistory: Content[];
+  try {
+    curatedHistory = getCuratedHistory();
+  } catch (error) {
+    debugLogger.warn(
+      `Stable extraction window unavailable; falling back to the captured tail: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return undefined;
+  }
+  return {
+    curatedHistory,
+    resolved: resolveExtractWindow({
+      curatedHistory,
+      sessionId: params.sessionId,
+      previous: currentCursor,
+      epochId: params.extractWindowEpochId,
+    }),
+  };
+}
+
 async function bumpMetadata(
   projectRoot: string,
   now: Date,
@@ -128,21 +221,9 @@ async function bumpMetadata(
   }
 }
 
-export async function runAutoMemoryExtract(params: {
-  projectRoot: string;
-  sessionId: string;
-  history: Content[];
-  now?: Date;
-  config?: Config;
-  skippedHistory?: Content[];
-  // Only the close-time cadence flush (#13004) sets this: an abandoned flush
-  // run aborts here instead of keeping a fork alive past its boundary.
-  abortSignal?: AbortSignal;
-  // Only the close-time cadence flush (#13004) sets this: the replayed
-  // snapshot's history can be shorter than the cursor a later run already
-  // persisted, so this run's write must not move that cursor backwards.
-  flushReplay?: boolean;
-}): Promise<AutoMemoryExtractResult> {
+export async function runAutoMemoryExtract(
+  params: RunAutoMemoryExtractParams,
+): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
   if (!params.config) {
     throw new Error(
@@ -204,6 +285,10 @@ export async function runAutoMemoryExtract(params: {
       sessionId: params.sessionId,
       processedOffset: params.history.length,
       updatedAt: now.toISOString(),
+      // A no-fork run leaves the pinned window untouched; dropping it would
+      // slide the next run's start for no reason.
+      ...(isStableExtractionWindowEnabled() &&
+        windowCursorFields(currentCursor)),
     };
     await writeExtractCursor(params.projectRoot, cursor);
     return { touchedTopics: [], cursor };
@@ -216,12 +301,43 @@ export async function runAutoMemoryExtract(params: {
   );
   if (lateMismatch) return lateMismatch;
 
-  const agentResult = await runAutoMemoryExtractionByAgent(
-    params.config,
-    params.projectRoot,
-    params.skippedHistory,
-    params.abortSignal,
-  );
+  const stableWindow = resolveStableExtractWindow(params, currentCursor);
+  if (stableWindow) {
+    // Persist the pinned start before the fork. A failed or aborted run must
+    // not slide the window on the next attempt, and the covered index only
+    // advances after a completed run.
+    await writeExtractCursor(params.projectRoot, {
+      sessionId: params.sessionId,
+      processedOffset:
+        currentCursor.sessionId === params.sessionId
+          ? currentCursor.processedOffset
+          : undefined,
+      updatedAt: now.toISOString(),
+      epoch: stableWindow.resolved.epoch,
+      windowStartCurated: stableWindow.resolved.windowStartCurated,
+      coveredCurated: stableWindow.resolved.coveredCurated,
+      windowHeadHash: stableWindow.resolved.windowHeadHash,
+      windowEpochId: params.extractWindowEpochId,
+    });
+  }
+
+  const agentResult = stableWindow
+    ? await runAutoMemoryExtractionByAgent(
+        params.config,
+        params.projectRoot,
+        params.skippedHistory,
+        params.abortSignal,
+        {
+          curatedHistory: stableWindow.curatedHistory,
+          windowStart: stableWindow.resolved.windowStartCurated,
+        },
+      )
+    : await runAutoMemoryExtractionByAgent(
+        params.config,
+        params.projectRoot,
+        params.skippedHistory,
+        params.abortSignal,
+      );
 
   if (agentResult.touchedTopics.length > 0) {
     await bumpMetadata(
@@ -276,6 +392,20 @@ export async function runAutoMemoryExtract(params: {
       madeGenuineProgress ? params.history.length : startOffset,
     ),
     updatedAt: now.toISOString(),
+    ...(stableWindow
+      ? {
+          epoch: stableWindow.resolved.epoch,
+          windowStartCurated: stableWindow.resolved.windowStartCurated,
+          // Only a run that actually covered its input may move this forward;
+          // a no-op or failed extraction leaves the previous coverage intact
+          // and the window is re-sent next time (at-least-once).
+          coveredCurated: madeGenuineProgress
+            ? stableWindow.curatedHistory.length
+            : stableWindow.resolved.coveredCurated,
+          windowHeadHash: stableWindow.resolved.windowHeadHash,
+          windowEpochId: params.extractWindowEpochId,
+        }
+      : isStableExtractionWindowEnabled() && windowCursorFields(currentCursor)),
   };
   await writeExtractCursor(params.projectRoot, cursor);
 
