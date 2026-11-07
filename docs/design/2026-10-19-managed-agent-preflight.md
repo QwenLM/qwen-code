@@ -96,15 +96,25 @@ spelling itself: it records each file Spring's own resolver looks a
 configuration file up at, there or not, so a scheme in another case, a
 `resource:` prefix, an extension hint, a bare name with a colon, an empty
 `spring.config.location` or `spring.config.name`, and each variant of a profile
-Spring activates come out as Spring reads them. Spring opens a config tree and
+Spring activates come out as Spring reads them. With each file it records the
+property source loader that opens it, YAML's or .properties', which reads a name
+ending in `.xml` as XML: the format the file is read in for a secret, so
+`file:app.yml[.properties]` is read as .properties. Spring opens a config tree and
 lists a wildcard's directories without such a lookup, so those two come from the
 location values, read with Spring's location rules: a wildcard's directories,
 but none whose name starts with `..`, as Spring skips those, and in each, the
-files of a directory location or the one name of a file's wildcard. A directory
-there that this process cannot list or enter is named as one it cannot look in.
+files of a directory location or the one name of a file's wildcard, each in the
+format of the loader Spring picks for its name, unless Spring read the file
+through a lookup, in a format that then stands. A relative import in a file
+Spring read through a wildcard is one more wildcard, as Spring reads it beside the wildcard and
+so in each of its directories: `config/*/extra.yml` for one in
+`config/*/application.yml`. A wildcard's file name that is only an extension, as
+`*/properties`, leaves Spring a location it refuses, which the row reports. A
+directory there that this process cannot list or enter is named as one it cannot
+look in.
 When the preparation throws, the row names what Spring refused: the file, read
 as missing or unreadable, or the YAML error's file and line, found among the
-files Spring looked for before it refused, since Spring's error names neither: each file whose own error is Spring's, the same
+files Spring looked for before it refused, since Spring's error names neither: each file Spring reads as YAML, read as Spring's loader reads it but within the limits on aliases and recursive keys Spring lifts, whose own error is Spring's, the same
 problem at the same place, unless a profile the arguments or the environment
 activate tells which one Spring read; a file this process cannot read names the
 service account when that cannot read it either, and otherwise says to run the
@@ -112,6 +122,11 @@ check as that account. The other rows then read the arguments, the process
 environment and the packaged defaults. Where the preparation succeeds but a
 setting a row reads does not resolve, such as a placeholder with no value and
 no default, that row fails with Spring's reason and the others still print.
+Where the preparation succeeds but the check cannot tell which files Spring
+read, as for an import whose placeholders refer to each other, the files the
+property sources name and those a loader was seen to read keep their rows, a
+file a wildcard found judged in either format its hint may name; one more
+`config` row warns with the reason, and the other rows still print.
 
 Spring skips an optional file it cannot see, so where this process cannot enter
 a directory the server looks in for a configuration file or a config tree, or
@@ -126,18 +141,57 @@ lets it.
 
 A file holds a secret by one rule, the configuration reference's: a key named as
 a password, token, key or secret, or a map of keys, in any spelling Spring
-binds, and not an ID or the path to a file that holds one. The rule judges every
-key a file holds: those of each document, including one no profile activates,
-those in a comment, a commented-out line or, in a file that may be YAML, the
-comment after a value, the property a config tree value file holds, and a
-parameter of a value, such as a JDBC URL's `?password=`, or the password of a
-URL's user information. A UTF-8 byte order mark, which YAML drops, does not hide
-a commented-out key on the first line. A path can be a configuration file and a
-config tree value file at once, as `config/application.yml` is under a config
-tree imported over `config/`, and so is a file whose extension a location hints,
-as `file:app.conf[.properties]` does, under one imported over its directory; it
-is then judged both ways. A value file Spring reads as no configuration file
-holds its value alone, whatever its name. `Binder` produces
+binds, and not an ID or the path to a file that holds one; or a value that holds
+one, as a JDBC URL's `?password=` parameter or the password of a URL's user
+information does. A configuration file is read as Spring reads it, in the format
+of the loader that reads it, and the rule judges what that reading declares, in
+each document, including one no profile activates, as Spring binds it: a key is
+judged by its string, or by whatever a collection Spring writes into the name
+holds, wherever a map holds it, a merge's source and a set's members and pairs'
+keys among them, which Spring may bind as values or not at all, so the names
+judged are a superset of Spring's; and only where its value may bind a
+property, so `previous-credential-keys: {}` declares none; a value that holds a
+secret
+anywhere in the file's text, its comments included; and each comment as the
+setting it would be uncommented. A comment is read in the file's format, where a
+YAML key with white space in it is prose, as `# Database password: set it in the
+environment` is, and no setting; in XML, also entry by entry, as a comment need
+be no document; and in YAML and .properties, also as the `key: value` or
+`key=value` line both write, quoted or after a list marker, as
+`# spring.datasource.password=x` is in YAML. .properties takes white space as a
+separator, so `# spring.datasource.password hunter2` counts there; a key that
+white space ends counts only with a dot in it, as a property's name has, and a
+one-word value, so prose such as `# Password rotation happens yearly` or
+`# spring.datasource.password is supplied by the unit environment` does not. A
+comment is what the format makes one: in
+YAML, from a `#` at the start of a line or after white space to the next such
+`#`, however many markers start it, which may also lie in a quoted or block
+scalar and only adds text to judge; in .properties, a line that starts with `#`
+or `!` after white space, or with one escaped, as `\#` or `\u0023`, which Spring
+reads as one too,
+but not one a value continues onto, through an odd run
+of backslashes at the end of the line before, though a backslash alone where a
+key would start continues nothing; the line after a comment that ends in a
+backslash, which Spring may read into that comment, is judged as one too; in
+XML, what lies between `<!--` and `-->`. YAML, a comment's included, is read
+with SnakeYAML set up as Spring's loader sets it up, its nodes composed rather
+than built and walked with a stack, each node once. Which nodes lead to a
+secret's name is found once for the document, and a node found to bind nothing
+is kept, so an alias, which nodes share, is never expanded, and neither a long
+chain of them, nor one that holds itself, nor many keys or values that share
+one, costs more than a few passes over the nodes. A file a hint names another loader for is
+judged as its name says too, comments included, as what Spring does not bind
+stays in the file. YAML is decoded as
+Spring decodes it, as UTF-8 or as its byte order mark says, so a mark does not
+hide a commented-out key on the first line; so is .properties, as ISO-8859-1,
+though its comments are found as an editor wrote them: past a UTF-8 mark, which
+Spring reads into the first key, and in UTF-16 after its mark, which Spring
+reads as ISO-8859-1 throughout. A value file is decoded as UTF-16 after its
+mark too. The property a config tree value file holds is judged too. A path can be a
+configuration file and a config tree value file at once, as
+`config/application.yml` is under a config tree imported over `config/`; it is
+then judged both ways. A value file Spring reads as no configuration file holds
+its value alone, whatever its name. `Binder` produces
 `ManagedAgentProperties`, the Harness probe uses the JDK HTTP client, and the
 database probe uses JDBC with a five-second connect and socket timeout.
 

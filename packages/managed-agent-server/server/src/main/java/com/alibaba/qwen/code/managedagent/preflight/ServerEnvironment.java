@@ -16,6 +16,8 @@ import org.springframework.boot.convert.ApplicationConversionService;
 import org.springframework.boot.env.ConfigTreePropertySource;
 import org.springframework.boot.env.EnvironmentPostProcessorApplicationListener;
 import org.springframework.boot.env.OriginTrackedMapPropertySource;
+import org.springframework.boot.env.PropertiesPropertySourceLoader;
+import org.springframework.boot.env.PropertySourceLoader;
 import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.boot.origin.Origin;
 import org.springframework.boot.origin.OriginLookup;
@@ -27,16 +29,26 @@ import org.springframework.core.env.PropertySource;
 import org.springframework.core.env.SimpleCommandLinePropertySource;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.DefaultResourceLoader;
-import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.FileUrlResource;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.util.ResourceUtils;
 import org.springframework.util.StringUtils;
+import org.yaml.snakeyaml.DumperOptions;
+import org.yaml.snakeyaml.LoaderOptions;
+import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.constructor.SafeConstructor;
 import org.yaml.snakeyaml.error.Mark;
 import org.yaml.snakeyaml.error.MarkedYAMLException;
+import org.yaml.snakeyaml.nodes.Tag;
+import org.yaml.snakeyaml.reader.UnicodeReader;
+import org.yaml.snakeyaml.representer.Representer;
+import org.yaml.snakeyaml.resolver.Resolver;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.Reader;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.FileSystemException;
@@ -48,6 +60,9 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -89,6 +104,43 @@ final class ServerEnvironment {
     }
 
     /**
+     * How Spring reads a configuration file: by the property source loader
+     * its location names, by the file's extension or the one the location
+     * hints, as YAML or as .properties, whose loader reads a file whose name
+     * ends in .xml as XML.
+     */
+    enum Format {
+        YAML, PROPERTIES, XML;
+
+        static Format read(boolean yaml, String fileName) {
+            return yaml ? YAML : fileName.endsWith(".xml") ? XML : PROPERTIES;
+        }
+
+        /** The format of a file by the loader that reads it, or null for another loader. */
+        static Format read(Class<?> loader, String fileName) {
+            boolean yaml = YamlPropertySourceLoader.class.isAssignableFrom(loader);
+            return yaml || PropertiesPropertySourceLoader.class.isAssignableFrom(loader)
+                    ? read(yaml, fileName) : null;
+        }
+
+        /**
+         * The formats Spring reads a file of this name in at a location that
+         * hints no extension: the one its extension names, in any case, or
+         * either for a name with none, which a hint must have named.
+         */
+        static Set<Format> named(String fileName) {
+            String lower = fileName.toLowerCase(Locale.ROOT);
+            if (lower.endsWith(".yml") || lower.endsWith(".yaml")) {
+                return EnumSet.of(YAML);
+            }
+            if (lower.endsWith(".properties") || lower.endsWith(".xml")) {
+                return EnumSet.of(read(false, fileName));
+            }
+            return EnumSet.of(YAML, PROPERTIES);
+        }
+    }
+
+    /**
      * Prepares {@code environment}, whose process variables and system
      * properties a test may replace. Throws what Spring would throw at start:
      * for a named location that does not exist, or a file it cannot read.
@@ -120,12 +172,14 @@ final class ServerEnvironment {
      * an environment, whether one was there or not, as its own resolver
      * named them from a location's spelling: with the extension a location
      * hints, the variant of each profile it activated, and relative to the
-     * working directory where the location is. It holds no property; it
-     * keeps them with the environment for {@link #files} and the rest.
+     * working directory where the location is; each with the format of the
+     * loader that read it, which the location names, none where Spring read
+     * nothing there. It holds no property; it keeps them with the
+     * environment for {@link #files} and the rest.
      */
-    private static final class LookedUp extends EnumerablePropertySource<Set<Path>> {
+    private static final class LookedUp extends EnumerablePropertySource<Map<Path, Set<Format>>> {
         LookedUp() {
-            super(LOOKED_UP, new LinkedHashSet<>());
+            super(LOOKED_UP, new LinkedHashMap<>());
         }
 
         // Enumerable and empty, so a binder skips it for every name.
@@ -146,26 +200,53 @@ final class ServerEnvironment {
                     Resource resource = super.getResource(location);
                     // A directory is one Spring lists for a wildcard, or
                     // checks is there when it found no file in it.
-                    if (!location.endsWith("/")) {
-                        Path file = path(resource);
-                        if (file != null) {
-                            getSource().add(file);
-                        }
+                    Path file = location.endsWith("/") ? null : path(resource);
+                    if (file == null) {
+                        return resource;
                     }
-                    return resource;
+                    Set<Format> formats = getSource().computeIfAbsent(file,
+                            looked -> EnumSet.noneOf(Format.class));
+                    if (!(resource instanceof FileUrlResource url)) {
+                        return resource;
+                    }
+                    // The loader that reads it is the one opening it.
+                    return new FileUrlResource(url.getURL()) {
+                        @Override
+                        public InputStream getInputStream() throws IOException {
+                            Format format = reader(file);
+                            if (format != null) {
+                                formats.add(format);
+                            }
+                            return super.getInputStream();
+                        }
+                    };
                 }
             };
         }
     }
 
-    /** The files Spring looked up for this environment, in the working directory. */
-    private static Set<Path> lookedUp(ConfigurableEnvironment environment,
+    /** The format of the property source loader on the stack, or null for none. */
+    private static Format reader(Path file) {
+        String name = String.valueOf(file.getFileName());
+        return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).walk(
+                frames -> frames.map(StackWalker.StackFrame::getDeclaringClass)
+                        .filter(PropertySourceLoader.class::isAssignableFrom)
+                        .findFirst()
+                        .map(loader -> Format.read(loader, name))
+                        .orElse(null));
+    }
+
+    /**
+     * The files Spring looked up for this environment, in the working
+     * directory, each with the formats it read it in.
+     */
+    private static Map<Path, Set<Format>> lookedUp(ConfigurableEnvironment environment,
             Path workingDirectory) {
-        Set<Path> files = new LinkedHashSet<>();
+        Map<Path, Set<Format>> files = new LinkedHashMap<>();
         if (environment.getPropertySources().get(LOOKED_UP) instanceof LookedUp lookedUp) {
-            for (Path file : lookedUp.getSource()) {
-                files.add(workingDirectory.resolve(file).normalize());
-            }
+            lookedUp.getSource().forEach((file, formats) -> files.computeIfAbsent(
+                    workingDirectory.resolve(file).normalize(),
+                    looked -> EnumSet.noneOf(Format.class)).addAll(formats));
         }
         return files;
     }
@@ -202,22 +283,45 @@ final class ServerEnvironment {
 
     /**
      * The files among {@link #files} that Spring reads as configuration
-     * files, by their extension or the one a location hints: all but a
-     * config tree's value files, though a path can be both, as
-     * application.yml is under a config tree imported over config/.
+     * files: all but a config tree's value files, though a path can be both,
+     * as application.yml is under a config tree imported over config/. Each
+     * has the formats Spring reads it in, by the loader that read it, which
+     * its location names; by its extension where no loader was seen to.
      */
-    static Set<Path> configurationFiles(ConfigurableEnvironment environment) {
+    static Map<Path, Set<Format>> configurationFiles(ConfigurableEnvironment environment) {
         return configurationFiles(environment, Path.of(""));
     }
 
     /** As above, with the working directory the default locations are in. */
-    static Set<Path> configurationFiles(ConfigurableEnvironment environment,
+    static Map<Path, Set<Format>> configurationFiles(ConfigurableEnvironment environment,
             Path workingDirectory) {
-        return new LinkedHashSet<>(files(environment, workingDirectory, false));
+        Map<Path, Set<Format>> read = new LinkedHashMap<>();
+        locationFiles(environment, workingDirectory, profiles(environment), new LinkedHashSet<>())
+                .forEach((file, found) -> read.computeIfAbsent(file.toAbsolutePath().normalize(),
+                        each -> EnumSet.noneOf(Format.class)).addAll(found.formats()));
+        Map<Path, Set<Format>> files = new LinkedHashMap<>();
+        for (Path file : files(environment, workingDirectory, false)) {
+            Set<Format> formats = read.getOrDefault(file, Set.of());
+            files.put(file, formats.isEmpty()
+                    ? Format.named(String.valueOf(file.getFileName())) : formats);
+        }
+        return files;
     }
 
     private static List<Path> files(ConfigurableEnvironment environment, Path workingDirectory,
             boolean values) {
+        Set<Path> files = sources(environment, values);
+        for (Path file : locationFiles(environment, workingDirectory, profiles(environment),
+                new LinkedHashSet<>()).keySet()) {
+            if (Files.isRegularFile(file)) {
+                files.add(file.toAbsolutePath().normalize());
+            }
+        }
+        return new ArrayList<>(files);
+    }
+
+    /** The files the property sources came from, each value file among them or not. */
+    private static Set<Path> sources(ConfigurableEnvironment environment, boolean values) {
         Set<Path> files = new LinkedHashSet<>();
         for (PropertySource<?> source : environment.getPropertySources()) {
             if (!(source instanceof EnumerablePropertySource<?> enumerable)
@@ -231,13 +335,76 @@ final class ServerEnvironment {
                 }
             }
         }
-        for (Path file : locationFiles(environment, workingDirectory, profiles(environment),
-                new LinkedHashSet<>()).keySet()) {
-            if (Files.isRegularFile(file)) {
-                files.add(file.toAbsolutePath().normalize());
-            }
-        }
+        return files;
+    }
+
+    /**
+     * Those of {@link #files} this can tell without reading a location, as
+     * where one cannot be read: the files the property sources came from,
+     * each value file of a config tree among them, and those a loader was
+     * seen to read.
+     */
+    static List<Path> sourceFiles(ConfigurableEnvironment environment) {
+        Set<Path> files = sources(environment, true);
+        files.addAll(read(environment).keySet());
         return new ArrayList<>(files);
+    }
+
+    /**
+     * As {@link #configurationFiles}, of {@link #sourceFiles}; where no loader
+     * was seen to read a file, in each format it may be read in, as a
+     * wildcard's hint may name either.
+     */
+    static Map<Path, Set<Format>> sourceConfigurations(ConfigurableEnvironment environment) {
+        Map<Path, Set<Format>> read = read(environment);
+        Set<Path> configurations = sources(environment, false);
+        configurations.addAll(read.keySet());
+        Map<Path, Set<Format>> files = new LinkedHashMap<>();
+        for (Path file : configurations) {
+            Set<Format> formats = EnumSet.of(Format.YAML, Format.PROPERTIES);
+            formats.addAll(Format.named(String.valueOf(file.getFileName())));
+            files.put(file, read.getOrDefault(file, formats));
+        }
+        return files;
+    }
+
+    /** The files a loader was seen to read, absolute, with its formats. */
+    private static Map<Path, Set<Format>> read(ConfigurableEnvironment environment) {
+        Map<Path, Set<Format>> read = new LinkedHashMap<>();
+        lookedUp(environment, Path.of("")).forEach((file, formats) -> {
+            if (!formats.isEmpty()) {
+                read.put(file.toAbsolutePath().normalize(), formats);
+            }
+        });
+        return read;
+    }
+
+    /**
+     * SnakeYAML as Spring's YAML loader sets it up: its safe constructor, no
+     * timestamps, no duplicate keys and no limit on code points. Where
+     * bounded, as for building what Spring did not, it keeps the limits on
+     * aliases and recursive keys that Spring lifts; otherwise it lifts the
+     * one on aliases too, for composing nodes, which share an alias rather
+     * than expand it.
+     */
+    static Yaml yaml(boolean bounded) {
+        LoaderOptions options = new LoaderOptions();
+        options.setAllowDuplicateKeys(false);
+        options.setCodePointLimit(Integer.MAX_VALUE);
+        if (!bounded) {
+            options.setMaxAliasesForCollections(Integer.MAX_VALUE);
+        }
+        DumperOptions dumper = new DumperOptions();
+        return new Yaml(new SafeConstructor(options), new Representer(dumper), dumper, options,
+                new Resolver() {
+                    @Override
+                    public void addImplicitResolver(Tag tag, Pattern regexp, String first,
+                            int limit) {
+                        if (tag != Tag.TIMESTAMP) {
+                            super.addImplicitResolver(tag, regexp, first, limit);
+                        }
+                    }
+                });
     }
 
     private static List<String> profiles(ConfigurableEnvironment environment) {
@@ -408,7 +575,17 @@ final class ServerEnvironment {
             }
         }
         // Spring honours an import a file declares, and no other location a
-        // file sets; it reads a bare relative one beside that file.
+        // file sets; it reads a bare relative one beside that file's
+        // location: the file's directory where Spring read the file through a
+        // lookup, and the wildcard where it read it through one, as config/*/
+        // for config/*/application.yml, which makes the import a wildcard too.
+        // Another location may look a file up that a wildcard read first.
+        Set<Path> looked = new HashSet<>();
+        lookedUp(environment, Path.of("")).forEach((file, formats) -> {
+            if (!formats.isEmpty()) {
+                looked.add(file.toAbsolutePath().normalize());
+            }
+        });
         for (PropertySource<?> source : environment.getPropertySources()) {
             if (!(source instanceof OriginTrackedMapPropertySource tracked)) {
                 continue;
@@ -420,10 +597,14 @@ final class ServerEnvironment {
                 }
                 Path declaring = file(resource(tracked.getOrigin(key)));
                 if (declaring != null) {
+                    Path directory = declaring.getParent();
+                    String base = looked.contains(declaring) || directory.getParent() == null
+                            ? directory.toUri().toString()
+                            : directory.getParent().toUri() + "*/";
                     // Spring resolves a placeholder in it as in any value.
                     for (String value : environment.resolvePlaceholders(
                             String.valueOf(entry.getValue())).split(",")) {
-                        locations(value, workingDirectory, declaring.getParent(), named);
+                        locations(value, workingDirectory, base, named);
                     }
                 }
             }
@@ -436,9 +617,9 @@ final class ServerEnvironment {
      * Spring splits at semicolons, read with Spring's own rules: a
      * configtree: location, in the working directory when relative; and one
      * whose last directory is named *, opened as Spring opens a location,
-     * beside the importing file in base when Spring reads it there.
+     * after base, the importing file's location, when Spring reads it there.
      */
-    private static void locations(String value, Path workingDirectory, Path base,
+    private static void locations(String value, Path workingDirectory, String base,
             List<Location> named) {
         for (String each : value.split(";")) {
             ConfigDataLocation location = ConfigDataLocation.of(each.strip());
@@ -453,16 +634,15 @@ final class ServerEnvironment {
             // Spring takes a wildcard as the last directory, of a directory
             // location or of a file's.
             String resource = location.getNonPrefixedValue("resource:");
+            if (base != null && !resource.startsWith("/") && !FIXED.matcher(resource).lookingAt()) {
+                resource = (base.endsWith("/") ? base : base + "/") + resource;
+            }
             int slash = resource.lastIndexOf('/');
             if (!resource.substring(0, slash + 1).endsWith("*/")) {
                 continue;
             }
             String file = resource.substring(slash + 1);
             String parent = resource.substring(0, slash + 1 - "*/".length());
-            if (base != null && !parent.startsWith("/") && !FIXED.matcher(parent).lookingAt()) {
-                String directory = base.toUri().toString();
-                parent = (directory.endsWith("/") ? directory : directory + "/") + parent;
-            }
             Path directory = path(open(parent));
             if (directory != null) {
                 named.add(new Location(workingDirectory.resolve(directory).resolve("*"), false,
@@ -512,12 +692,17 @@ final class ServerEnvironment {
      * each with its profile. Adds to unlisted each directory a wildcard
      * names whose directories this process may not list.
      */
-    private static Map<Path, String> locationFiles(ConfigurableEnvironment environment,
+    private static Map<Path, Found> locationFiles(ConfigurableEnvironment environment,
             Path workingDirectory, List<String> profiles, Set<Path> unlisted) {
-        Map<Path, String> located = new LinkedHashMap<>();
-        for (Path file : lookedUp(environment, workingDirectory)) {
-            located.put(file, null);
-        }
+        Map<Path, Found> located = new LinkedHashMap<>();
+        lookedUp(environment, workingDirectory).forEach((file, formats) ->
+                located.put(file, new Found(null, formats)));
+        Set<Path> read = new HashSet<>();
+        located.forEach((file, found) -> {
+            if (!found.formats().isEmpty()) {
+                read.add(file.toAbsolutePath().normalize());
+            }
+        });
         List<Location> wildcards = new ArrayList<>();
         for (Location named : named(environment, workingDirectory)) {
             if (!named.tree()) {
@@ -537,33 +722,59 @@ final class ServerEnvironment {
                 if (wildcard.file() == null) {
                     for (String name : names) {
                         for (String extension : EXTENSIONS) {
-                            files.add(new Named(directory, name, "." + extension));
+                            files.add(new Named(directory, name, "." + extension,
+                                    extension.startsWith("y")));
                         }
                     }
                     continue;
                 }
                 // As Spring names it: by the first loader whose extension it
                 // ends in, in any case, with that loader's extension, or with
-                // none where a location hints it; with none, Spring reads nothing.
+                // none where a location hints it; with none, Spring reads
+                // nothing. A name that is only an extension leaves Spring a
+                // location that is no wildcard, which it refuses.
                 Matcher hint = HINT.matcher(wildcard.file());
                 String name = hint.matches() ? hint.group(1) + hint.group(2) : wildcard.file();
                 for (String extension : EXTENSIONS) {
-                    if (name.toLowerCase(Locale.ROOT).endsWith(extension)) {
+                    if (name.length() > extension.length()
+                            && name.toLowerCase(Locale.ROOT).endsWith(extension)) {
                         files.add(new Named(directory,
                                 name.substring(0, name.length() - extension.length() - 1),
-                                hint.matches() ? "" : "." + extension));
+                                hint.matches() ? "" : "." + extension, extension.startsWith("y")));
                         break;
                     }
                 }
             }
         }
         for (Named file : files) {
-            located.putIfAbsent(file.directory().resolve(file.root() + file.extension()), null);
+            Path path = file.directory().resolve(file.root() + file.extension());
+            if (!read.contains(path.toAbsolutePath().normalize())) {
+                located.merge(path, new Found(null, file.formats(path)), Found::and);
+            }
         }
         for (Named file : files) {
-            variants(file, profiles).forEach(located::putIfAbsent);
+            variants(file, profiles).forEach((path, profile) -> {
+                if (!read.contains(path.toAbsolutePath().normalize())) {
+                    located.merge(path, new Found(profile, file.formats(path)), Found::and);
+                }
+            });
         }
         return located;
+    }
+
+    /**
+     * A file Spring looks for: the profile it is the variant of, or null for
+     * none, and the formats it reads it in, none where Spring read nothing.
+     * What a loader was seen to read it in stands; otherwise each wildcard
+     * that names the file adds the format Spring would read it in.
+     */
+    private record Found(String profile, Set<Format> formats) {
+        Found and(Found other) {
+            Set<Format> both = EnumSet.noneOf(Format.class);
+            both.addAll(formats);
+            both.addAll(other.formats());
+            return new Found(profile, both);
+        }
     }
 
     /**
@@ -611,10 +822,13 @@ final class ServerEnvironment {
 
     /**
      * A file as Spring names it: its directory, its name without the
-     * extension, which a variant's profile follows, and the extension, empty
-     * where a location hints it.
+     * extension, which a variant's profile follows, the extension, empty
+     * where a location hints it, and whether the YAML loader reads it.
      */
-    private record Named(Path directory, String root, String extension) {
+    private record Named(Path directory, String root, String extension, boolean yaml) {
+        Set<Format> formats(Path file) {
+            return EnumSet.of(Format.read(yaml, String.valueOf(file.getFileName())));
+        }
     }
 
     /**
@@ -719,8 +933,18 @@ final class ServerEnvironment {
             return new Failure((file == null ? notFound.getReferenceDescription() : file)
                     + " does not exist", "create it, or correct the location that names it");
         }
-        Map<Path, String> located = locationFiles(environment, workingDirectory, null,
-                new LinkedHashSet<>());
+        Map<Path, Found> located;
+        try {
+            located = locationFiles(environment, workingDirectory, null, new LinkedHashSet<>());
+        } catch (RuntimeException unlisted) {
+            // Spring's own error stands, and the files it looked up; a
+            // second throw would end the check.
+            located = new LinkedHashMap<>();
+            for (Map.Entry<Path, Set<Format>> looked
+                    : lookedUp(environment, workingDirectory).entrySet()) {
+                located.put(looked.getKey(), new Found(null, looked.getValue()));
+            }
+        }
         Set<Path> candidates = located.keySet();
         IOException io = cause(error, IOException.class);
         if (io != null) {
@@ -747,12 +971,14 @@ final class ServerEnvironment {
             active.addAll(topLevel(environment, "spring.profiles.include"));
             Set<String> matches = new LinkedHashSet<>();
             Set<String> read = new LinkedHashSet<>();
-            for (Map.Entry<Path, String> candidate : located.entrySet()) {
+            for (Map.Entry<Path, Found> candidate : located.entrySet()) {
                 Path file = candidate.getKey();
-                if (Files.isRegularFile(file) && sameProblem(yamlError(file), marked)) {
+                if (Files.isRegularFile(file)
+                        && sameProblem(yamlError(file, candidate.getValue().formats()), marked)) {
                     String name = file.toAbsolutePath().normalize().toString();
                     matches.add(name);
-                    if (candidate.getValue() == null || active.contains(candidate.getValue())) {
+                    String profile = candidate.getValue().profile();
+                    if (profile == null || active.contains(profile)) {
                         read.add(name);
                     }
                 }
@@ -829,18 +1055,29 @@ final class ServerEnvironment {
         return text == null ? "" : text.strip().replaceAll("\\s+", " ");
     }
 
-    /** The YAML error a file holds, or null for a file that parses or is no YAML. */
-    private static MarkedYAMLException yamlError(Path file) {
+    /**
+     * The YAML error a file holds, or null for a file that parses or that
+     * Spring reads as no YAML: by the loader seen to read it, else by its name.
+     */
+    private static MarkedYAMLException yamlError(Path file, Set<Format> formats) {
         String name = file.getFileName().toString();
-        if (!name.endsWith(".yml") && !name.endsWith(".yaml")) {
+        if (formats.isEmpty() ? !name.endsWith(".yml") && !name.endsWith(".yaml")
+                : !formats.contains(Format.YAML)) {
             return null;
         }
-        try {
-            new YamlPropertySourceLoader().load("candidate", new FileSystemResource(file));
+        // Read within bounds: a file Spring did not get to may hold an alias
+        // that Spring's own loader would follow without end.
+        try (Reader reader = new UnicodeReader(Files.newInputStream(file))) {
+            // Each document is built as it is reached.
+            Iterator<Object> documents = yaml(true).loadAll(reader).iterator();
+            while (documents.hasNext()) {
+                documents.next();
+            }
             return null;
         } catch (RuntimeException error) {
             return cause(error, MarkedYAMLException.class);
-        } catch (IOException error) {
+        } catch (IOException | StackOverflowError error) {
+            // A key that holds a deep chain of aliases overflows as it is hashed.
             return null;
         }
     }

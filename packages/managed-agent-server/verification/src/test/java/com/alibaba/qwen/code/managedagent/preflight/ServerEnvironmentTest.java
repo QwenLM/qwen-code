@@ -18,17 +18,23 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -267,6 +273,81 @@ class ServerEnvironmentTest {
         assertEquals(broken + ", line 2, column 1: expected the node"
                 + " content, but found '<stream end>'",
                 refused(named("file:" + importer)).detail());
+        // And in one a location tells Spring is YAML, whatever its name.
+        Path hinted = write("broken.conf", "server: [\n");
+        assertEquals(hinted + ", line 2, column 1: expected the node content,"
+                + " but found '<stream end>'",
+                refused(named("file:" + hinted + "[.yml]")).detail());
+        // Spring stopped at the first, so a candidate it never read may hold
+        // an alias its YAML loader would follow without end; that is no
+        // culprit, and the row still names the file.
+        Path endless = write("f/w/a/app.conf", "a: &x [*x]\n");
+        assertEquals(broken + ", line 2, column 1: expected the node content,"
+                + " but found '<stream end>'", refused(named("optional:file:"
+                        + endless.getParent().getParent() + "/*/app.conf[.yml],file:" + broken))
+                        .detail());
+        // A wildcard's variant of a profile no one activated is a candidate
+        // Spring never read: nor is one whose key holds a collection that
+        // holds itself, which overflows as it is hashed.
+        Path unparsed = write("chain/sub/application.yml", "server: [\n");
+        write("chain/sub/application-edge.yml", "? [&a [*a]]\n: 1\n");
+        assertEquals(unparsed + ", line 2, column 1: expected the node content, but found"
+                + " '<stream end>'", refused(named("optional:file:" + directory.resolve("chain")
+                        + "/*/")).detail());
+        // Nor one that would expand an alias of aliases without end.
+        StringBuilder laughs = new StringBuilder("{a0: &a0 [x]");
+        for (int level = 1; level < 9; level++) {
+            laughs.append(", a").append(level).append(": &a").append(level).append(" [")
+                    .append(String.join(", ", Collections.nCopies(10, "*a" + (level - 1))))
+                    .append("]");
+        }
+        // Nor one whose key is such an alias, which hashing would expand.
+        StringBuilder keyed = new StringBuilder("a0: &a0 [x]\n");
+        for (int level = 1; level < 11; level++) {
+            keyed.append('a').append(level).append(": &a").append(level).append(" [")
+                    .append(String.join(", ", Collections.nCopies(10, "*a" + (level - 1))))
+                    .append("]\n");
+        }
+        Path unread = write("bomb/sub/application.yml", "server: [\n");
+        write("bomb/sub/application-edge.yml", laughs + "}\n");
+        write("bomb/sub/application-keyed.yml", keyed + "? *a10\n: 1\n");
+        StringBuilder doubled = new StringBuilder("a0: &a0 [x, x]\n");
+        for (int level = 1; level <= 20; level++) {
+            doubled.append('a').append(level).append(": &a").append(level).append(" [*a")
+                    .append(level - 1).append(", *a").append(level - 1).append("]\n");
+        }
+        write("bomb/sub/application-recursive.yml", doubled + "? &k [*a20, *k]\n: 1\n");
+        assertTimeoutPreemptively(Duration.ofSeconds(10), () -> assertEquals(unread
+                + ", line 2, column 1: expected the node content, but found '<stream end>'",
+                refused(named("optional:file:" + directory.resolve("bomb") + "/*/")).detail()));
+        // It reads each candidate as Spring's loader would otherwise: a tag
+        // it has no constructor for is the same error, and so is a key twice,
+        // and a file of any size is read.
+        Path tagged = write("tag/application.yml", "a: !vault abc\n");
+        assertTrue(refused(named("optional:file:" + tagged.getParent() + "/")).detail()
+                .startsWith(tagged + ", line 1, column 4: could not determine a constructor"));
+        // Within bounds, though: a recursive key, which Spring allows, ends
+        // the reading before Spring's error, which the row still gives.
+        Path recursive = write("rk/application.yml", "&m {*m: 1}\n---\nb: [\n");
+        assertEquals("a configuration file, line 4, column 1: expected the node content, but"
+                + " found '<stream end>'", refused(named("optional:file:" + recursive.getParent()
+                        + "/")).detail());
+        Path dated = write("date/application.yml", "2001-01-01: a\n2001-01-01: b\n");
+        assertTrue(refused(named("optional:file:" + dated.getParent() + "/")).detail()
+                .startsWith(dated + ", line 2, column 1: found duplicate key 2001-01-01"));
+        Path twice = write("dup/application.yml", "a: 1\na: 2\n");
+        assertTrue(refused(named("optional:file:" + twice.getParent() + "/")).detail()
+                .startsWith(twice + ", line 2, column 1: found duplicate key a"));
+        Path large = write("large/application.yml",
+                "# padding\n".repeat(400_000) + "server: [\n");
+        assertTrue(refused(named("optional:file:" + large.getParent() + "/")).detail()
+                .startsWith(large + ", line 400002, column 1: expected the node content"));
+        // Where the check cannot make a path of a name Spring looks for,
+        // Spring's error still makes the row, of the files it looked up.
+        Files.createDirectories(directory.resolve("nulw/a"));
+        assertEquals(broken + ", line 2, column 1: expected the node content,"
+                + " but found '<stream end>'", refused(named("optional:file:"
+                        + directory.resolve("nulw") + "/*/x\u0000.yml,file:" + broken)).detail());
     }
 
     @Test
@@ -781,6 +862,564 @@ class ServerEnvironmentTest {
     }
 
     @Test
+    void leavesAWildcardFileNamedOnlyByAnExtensionToSpring() throws IOException {
+        // */properties leaves Spring a location whose last directory is no
+        // wildcard, which it refuses, optional or not; the row says so.
+        Files.createDirectories(directory.resolve("conf/a"));
+        for (String name : List.of("properties", "YML")) {
+            List<ManagedAgentPreflight.Check> checks = new ArrayList<>();
+            ManagedAgentPreflight.Prepared prepared = prepare(environment(Map.of()), checks,
+                    "--spring.config.location=optional:file:" + directory.resolve("conf")
+                            + "/*/" + name);
+            assertEquals(List.of(), prepared.files());
+            assertNotNull(prepared.failure(), name);
+            assertTrue(prepared.failure().detail().endsWith("must end with '*/'"),
+                    prepared.failure().toString());
+        }
+        // Spring cuts the character before the extension, whatever it is, so
+        // */xproperties looks for .properties in each directory.
+        Path dotted = write("conf/a/.properties", "qwen.preflight.probe=dotted\n");
+        ManagedAgentPreflight.Prepared cut = prepare(environment(Map.of()), new ArrayList<>(),
+                "--spring.config.location=optional:file:" + directory.resolve("conf")
+                        + "/*/xproperties");
+        assertNull(cut.failure());
+        assertEquals("dotted", cut.environment().getProperty("qwen.preflight.probe"));
+        assertEquals(List.of(dotted), cut.files());
+        Files.delete(dotted);
+        // */[.yml] names no file, though a profile's variant, -edge, is one.
+        Path variant = write("conf/a/-edge", "qwen.preflight.probe: dash\n");
+        ManagedAgentPreflight.Prepared prepared = prepare(environment(Map.of()),
+                new ArrayList<>(), "--spring.config.location=optional:file:"
+                        + directory.resolve("conf") + "/*/[.yml]", "--spring.profiles.active=edge");
+        assertNull(prepared.failure());
+        assertEquals("dash", prepared.environment().getProperty("qwen.preflight.probe"));
+        assertEquals(List.of(variant), prepared.files());
+        assertEquals(Map.of(variant, Set.of(ServerEnvironment.Format.YAML)),
+                prepared.configurations());
+    }
+
+    @Test
+    void readsAFileForASecretAsTheLoaderSpringReadsItWith() throws IOException {
+        // The loader is the one a location names, which a hint may name
+        // against the file's own extension; the .properties one reads a name
+        // that ends in .xml as XML, whatever the hint.
+        Path yml = write("etc/a.yml", "qwen.preflight.a=properties\n");
+        Path conf = write("etc/b.conf", "qwen.preflight.b: yaml\n");
+        Path xml = write("etc/c.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                + "<!DOCTYPE properties SYSTEM \"http://java.sun.com/dtd/properties.dtd\">\n"
+                + "<properties><entry key=\"qwen.preflight.c\">xml</entry></properties>\n");
+        Path hintedXml = write("etc/d.conf", "qwen.preflight.d=properties\n");
+        Path wild = write("wild/a/e.yml", "qwen.preflight.e=properties\n");
+        ManagedAgentPreflight.Prepared prepared = prepare(named("file:" + yml + "[.properties],"
+                + "file:" + conf + "[.yaml],file:" + xml + "[.properties],file:" + hintedXml
+                + "[.xml],file:" + directory.resolve("wild") + "/*/e.yml[.properties]"),
+                new ArrayList<>());
+        assertNull(prepared.failure());
+        for (String each : List.of("a=properties", "b=yaml", "c=xml", "d=properties",
+                "e=properties")) {
+            String[] expected = each.split("=");
+            assertEquals(expected[1], prepared.environment().getProperty(
+                    "qwen.preflight." + expected[0]), each);
+        }
+        assertEquals(Map.of(yml, Set.of(ServerEnvironment.Format.PROPERTIES),
+                conf, Set.of(ServerEnvironment.Format.YAML),
+                xml, Set.of(ServerEnvironment.Format.XML),
+                hintedXml, Set.of(ServerEnvironment.Format.PROPERTIES),
+                wild, Set.of(ServerEnvironment.Format.PROPERTIES)), prepared.configurations());
+        // So a password YAML would not see is one; and in its own file
+        // beside a wildcard.
+        Path password = write("etc/app.yml", "spring.datasource.password=s3cret\n");
+        Path listed = write("wild/b/app.yml", "spring.datasource.password=s3cret\n");
+        for (Path file : List.of(password, listed)) {
+            Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
+        }
+        prepared = prepare(named("file:" + password + "[.properties],optional:file:"
+                + directory.resolve("wild") + "/*/app.yml[.properties]"), new ArrayList<>());
+        assertEquals("s3cret", prepared.environment().getProperty("spring.datasource.password"));
+        List<ManagedAgentPreflight.Check> rows = rows(prepared);
+        assertEquals(2, rows.size(), rows.toString());
+        for (ManagedAgentPreflight.Check row : rows) {
+            assertEquals(ManagedAgentPreflight.Status.WARN, row.status(), rows.toString());
+            assertTrue(row.fix().equals("chmod 600 " + password)
+                    || row.fix().equals("chmod 600 " + listed), rows.toString());
+        }
+        // Spring reads a relative import in a file a wildcard found beside
+        // the wildcard, so in every directory of it, as the hint says.
+        Path importer = write("found/sub/application.yml",
+                "spring.config.import: extra.yml[.properties]\n");
+        Path extra = write("found/sub/extra.yml", "spring.datasource.password=s3cret\n");
+        Path sibling = write("found/z/extra.yml", "# spring.datasource.password=hunter2\n");
+        for (Path file : List.of(extra, sibling)) {
+            Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
+        }
+        prepared = prepare(named("optional:file:" + directory.resolve("found") + "/*/"),
+                new ArrayList<>());
+        assertEquals("s3cret", prepared.environment().getProperty("spring.datasource.password"));
+        assertEquals(Map.of(importer, Set.of(ServerEnvironment.Format.YAML),
+                extra, Set.of(ServerEnvironment.Format.PROPERTIES),
+                sibling, Set.of(ServerEnvironment.Format.PROPERTIES)), prepared.configurations());
+        for (ManagedAgentPreflight.Check row : rows(prepared)) {
+            assertEquals(row.detail().startsWith(importer.toString())
+                    ? ManagedAgentPreflight.Status.PASS : ManagedAgentPreflight.Status.WARN,
+                    row.status(), row.toString());
+        }
+        // The same where another location looks the importing file up, which
+        // Spring read through the wildcard first, as it reads the last first.
+        Path overlap = write("both/a/application.yml",
+                "spring.config.import: extra.yml[.properties]\n");
+        Path near = write("both/a/extra.yml", "spring.datasource.password=s3cret\n");
+        Path far = write("both/b/extra.yml", "qwen.preflight.probe=far\n");
+        Files.setPosixFilePermissions(near, PosixFilePermissions.fromString("rw-r--r--"));
+        prepared = prepare(environment(Map.of()), new ArrayList<>(),
+                "--spring.config.location=file:" + overlap + ",optional:file:"
+                        + directory.resolve("both") + "/*/");
+        assertEquals("s3cret", prepared.environment().getProperty("spring.datasource.password"));
+        assertEquals("far", prepared.environment().getProperty("qwen.preflight.probe"));
+        assertEquals(Map.of(overlap, Set.of(ServerEnvironment.Format.YAML),
+                near, Set.of(ServerEnvironment.Format.PROPERTIES),
+                far, Set.of(ServerEnvironment.Format.PROPERTIES)), prepared.configurations());
+        assertEquals("chmod 600 " + near, rows(prepared).stream()
+                .filter(row -> row.detail().startsWith(near.toString())).findFirst()
+                .orElseThrow().fix());
+        // A hint that names a loader the file is not written for leaves what
+        // Spring does not bind in the file; it is judged as its name says too.
+        Path misnamed = write("n/app.properties", "spring.datasource.password=s3cret\n");
+        Path flow = write("n/app.conf", "spring: {datasource: {password: s3cret}}\n");
+        for (Path file : List.of(misnamed, flow)) {
+            Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
+        }
+        prepared = prepare(environment(Map.of()), new ArrayList<>(),
+                "--spring.config.location=file:" + misnamed + "[.yml],file:" + flow
+                        + "[.properties]");
+        assertNull(prepared.environment().getProperty("spring.datasource.password"));
+        assertEquals(Map.of(misnamed, Set.of(ServerEnvironment.Format.YAML),
+                flow, Set.of(ServerEnvironment.Format.PROPERTIES)), prepared.configurations());
+        for (ManagedAgentPreflight.Check row : rows(prepared)) {
+            assertEquals(ManagedAgentPreflight.Status.WARN, row.status(), row.toString());
+        }
+        // Comments too, and a YAML key with white space in it, which is no
+        // prose outside a comment.
+        Path inline = write("n2/app.yml", "server:\n  port: 8080 # spring.datasource.password: x\n");
+        Path bang = write("n2/app.properties", "! spring.datasource.password=s3cret\n");
+        Path spaced = write("n2/b.yml", "db password: s3cret\n");
+        for (Path file : List.of(inline, bang, spaced)) {
+            Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
+        }
+        prepared = prepare(environment(Map.of()), new ArrayList<>(),
+                "--spring.config.location=file:" + inline + "[.properties],file:" + bang
+                        + "[.yml],file:" + spaced + "[.properties]");
+        assertNull(prepared.failure());
+        List<ManagedAgentPreflight.Check> misread = rows(prepared);
+        assertEquals(3, misread.size(), misread.toString());
+        for (ManagedAgentPreflight.Check row : misread) {
+            assertEquals(ManagedAgentPreflight.Status.WARN, row.status(), row.toString());
+        }
+        // A file Spring read through a lookup is judged in that format alone,
+        // though a wildcard names it too: not as YAML, which this would
+        // recurse in without end.
+        // So is the variant of a profile the wildcard names.
+        Path endless = write("m/a/app.yml", "a: &x [*x]\n");
+        Path variant = write("m/a/app-edge.yml", "b: &y [*y]\n");
+        prepared = prepare(environment(Map.of()), new ArrayList<>(),
+                "--spring.config.location=optional:file:" + directory.resolve("m")
+                        + "/*/app.yml,file:" + endless + "[.properties],file:" + variant
+                        + "[.properties]", "--spring.profiles.active=edge");
+        assertEquals("&x [*x]", prepared.environment().getProperty("a"));
+        assertEquals("&y [*y]", prepared.environment().getProperty("b"));
+        assertEquals(Map.of(endless, Set.of(ServerEnvironment.Format.PROPERTIES),
+                variant, Set.of(ServerEnvironment.Format.PROPERTIES)), prepared.configurations());
+        for (ManagedAgentPreflight.Check row : rows(prepared)) {
+            assertEquals(ManagedAgentPreflight.Status.PASS, row.status(), row.toString());
+        }
+        // Spring reads the last location first, here the wildcard, and does
+        // not read again a file it then looks up by name: the format is still
+        // the one it read it in.
+        Path twice = write("twice/a/app.yml", "spring.datasource.password=s3cret\n");
+        Files.setPosixFilePermissions(twice, PosixFilePermissions.fromString("rw-r--r--"));
+        prepared = prepare(named("file:" + twice + "[.properties],optional:file:"
+                + directory.resolve("twice") + "/*/app.yml[.properties]"), new ArrayList<>());
+        assertEquals("s3cret", prepared.environment().getProperty("spring.datasource.password"));
+        assertEquals(Map.of(twice, Set.of(ServerEnvironment.Format.PROPERTIES)),
+                prepared.configurations());
+        assertEquals(ManagedAgentPreflight.Status.WARN, rows(prepared).get(0).status());
+    }
+
+    @Test
+    void readsACommentAsTheSettingItWouldBeUncommented() throws IOException {
+        // .properties reads white space as a separator, so this is the
+        // password key; a value a backslash continues holds the second line,
+        // which is then no comment, unless the backslash is escaped.
+        Path spaced = write("config/application.properties",
+                "# spring.datasource.password hunter2\n");
+        Path continued = write("conf/continued.properties",
+                "motd=a\\\n# spring.datasource.password hunter2\n");
+        Path escaped = write("conf/escaped.properties",
+                "motd=a\\\\\n# spring.datasource.password hunter2\n");
+        // However many markers start it, after any indent; and a value is
+        // read with its escapes.
+        Path marked = write("conf/marked.properties", "#!spring.datasource.password hunter2\n");
+        Path indented = write("conf/indented.properties",
+                " \t\f# spring.datasource.password hunter2\n");
+        Path unicode = write("conf/unicode.properties",
+                "spring.datasource.url=jdbc:mysql://db/qwen?pass\\u0077ord=s3cret\n");
+        // In YAML, a comment is one however many markers start it, and one
+        // YAML cannot read is still read as a line of .properties would be,
+        // as is a .properties line in YAML; prose that does not start with a
+        // secret's name is none.
+        Path doubled = write("conf/doubled.yml", "## spring.datasource.password: x\n");
+        Path unreadable = write("conf/unreadable.yml", "# spring.datasource.password: a: b\n");
+        Path pasted = write("conf/pasted.yml", "# spring.datasource.password=hunter2\n");
+        Path prose = write("conf/prose.yml", "# Set the password in the environment.\n");
+        // A list item YAML reads; a # with no white space before it is none.
+        Path item = write("conf/item.yml", "# - password: x\n");
+        Path fragment = write("conf/fragment.yml", "motd: x#spring.datasource.password: s3cret\n");
+        // A value holds one in a comment too, wherever a line would split it.
+        Path url = write("conf/url.yml", "# contact jdbc:mysql://app:s3cret@db/qwen\n");
+        Path bare = write("conf/bare.properties", "#//app:s3cret@db/qwen\n");
+        Path xml = write("conf/prose.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                + "<!DOCTYPE properties SYSTEM \"http://java.sun.com/dtd/properties.dtd\">\n"
+                + "<properties><!-- old: <entry key=\"spring.datasource.password\">x</entry>"
+                + " --></properties>\n");
+        // XML in UTF-16, which its parser reads by the byte order mark.
+        Path wide = directory.resolve("conf/wide.xml");
+        Files.write(wide, ("<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n"
+                + "<!DOCTYPE properties SYSTEM \"http://java.sun.com/dtd/properties.dtd\">\n"
+                + "<properties><!-- <entry key=\"spring.datasource.password\">x</entry> -->"
+                + "</properties>\n").getBytes(StandardCharsets.UTF_16));
+        Map<Path, ManagedAgentPreflight.Status> verdicts = new HashMap<>();
+        for (Path file : List.of(spaced, continued, escaped, marked, indented, unicode, doubled,
+                unreadable, pasted, prose, item, fragment, url, bare, xml, wide)) {
+            Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
+            verdicts.put(file, ManagedAgentPreflight.configFileCheck(file, null).status());
+        }
+        assertEquals(Map.ofEntries(
+                Map.entry(spaced, ManagedAgentPreflight.Status.WARN),
+                Map.entry(continued, ManagedAgentPreflight.Status.PASS),
+                Map.entry(escaped, ManagedAgentPreflight.Status.WARN),
+                Map.entry(marked, ManagedAgentPreflight.Status.WARN),
+                Map.entry(indented, ManagedAgentPreflight.Status.WARN),
+                Map.entry(unicode, ManagedAgentPreflight.Status.WARN),
+                Map.entry(doubled, ManagedAgentPreflight.Status.WARN),
+                Map.entry(unreadable, ManagedAgentPreflight.Status.WARN),
+                Map.entry(pasted, ManagedAgentPreflight.Status.WARN),
+                Map.entry(prose, ManagedAgentPreflight.Status.PASS),
+                Map.entry(item, ManagedAgentPreflight.Status.WARN),
+                Map.entry(fragment, ManagedAgentPreflight.Status.PASS),
+                Map.entry(url, ManagedAgentPreflight.Status.WARN),
+                Map.entry(bare, ManagedAgentPreflight.Status.WARN),
+                Map.entry(xml, ManagedAgentPreflight.Status.WARN),
+                Map.entry(wide, ManagedAgentPreflight.Status.WARN)), verdicts);
+        // Spring reads the first at its default location.
+        ManagedAgentPreflight.Prepared prepared = prepare(named("optional:file:"
+                + spaced.getParent() + "/"), new ArrayList<>());
+        List<ManagedAgentPreflight.Check> rows = rows(prepared);
+        assertEquals(List.of(spaced), prepared.files());
+        assertEquals("chmod 600 " + spaced, rows.get(0).fix(), rows.toString());
+        // A file that is a config tree's value file too is judged by its
+        // value as well: here a URL with a password, in a YAML comment.
+        Path both = write("both/application.yml", "# contact jdbc:mysql://app:s3cret@db/qwen\n");
+        Files.setPosixFilePermissions(both, PosixFilePermissions.fromString("rw-r--r--"));
+        prepared = prepare(named("optional:file:" + both), new ArrayList<>(),
+                "--spring.config.import=optional:configtree:" + both.getParent() + "/");
+        assertEquals("application.yml", prepared.values().get(both));
+        assertEquals(Map.of(both, Set.of(ServerEnvironment.Format.YAML)),
+                prepared.configurations());
+        rows = rows(prepared);
+        assertEquals(1, rows.size(), rows.toString());
+        assertEquals(ManagedAgentPreflight.Status.WARN, rows.get(0).status(), rows.toString());
+        assertEquals("chmod 600 " + both, rows.get(0).fix());
+    }
+
+    @Test
+    void judgesWhatACommentHoldsHoweverItIsWritten() throws IOException {
+        Map<Path, ManagedAgentPreflight.Status> expected = new HashMap<>();
+        // A backslash alone where a key would start joins the next line on,
+        // so Spring reads that line afresh, here as a comment; and a comment
+        // that ends in one may take the next line in, which is judged too.
+        expected.put(write("p/alone.properties", "\\\n# spring.datasource.password=hunter2\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("p/indented.properties", "   \\\n# spring.datasource.password=x\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("p/swallowed.properties", "#x\\\nspring.datasource.password=x\n"),
+                ManagedAgentPreflight.Status.WARN);
+        // Spring reads an escaped marker as a marker too.
+        expected.put(write("p/escaped.properties", "\\# spring.datasource.password=hunter2\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("p/bang.properties", "\\!spring.datasource.password hunter2\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("p/note.properties", "\\# note \\\nspring.datasource.password=x\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("p/unicode.properties", "\\u0023 spring.datasource.password=x\n"),
+                ManagedAgentPreflight.Status.WARN);
+        // A key Spring writes a collection into names what the collection
+        // holds; a key with nothing to bind, as {}, names nothing, and
+        // neither does one that is no string. A set's members and pairs'
+        // keys, which Spring binds as values, are judged as keys too.
+        expected.put(write("k/complex.yml", "? [password]\n: hunter2\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("k/nested.yml", "spring:\n  datasource:\n    ? [password]\n    : x\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("k/empty.yml", "qwen:\n  managed-agent:\n    runtime-broker:\n"
+                + "      previous-credential-keys: {}\nserver:\n  port: 8080\n"),
+                ManagedAgentPreflight.Status.PASS);
+        expected.put(write("k/null.yml", "!!null password: x\n"), ManagedAgentPreflight.Status.PASS);
+        expected.put(write("k/set.yml", "x: !!set {password}\n"), ManagedAgentPreflight.Status.WARN);
+        expected.put(write("k/blank.yml", "password:\n"), ManagedAgentPreflight.Status.WARN);
+        expected.put(write("k/mapkey.yml", "? {a: [password]}\n: x\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("k/emptyset.yml", "password: !!set {}\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("k/emptylist.yml", "password: []\n"), ManagedAgentPreflight.Status.WARN);
+        expected.put(write("k/listofempty.yml", "password: [{}]\n"),
+                ManagedAgentPreflight.Status.PASS);
+        // A merged set's members are keys, and so are the keys of a merge
+        // through sets or pairs; pairs bind; a merge of nothing binds nothing.
+        expected.put(write("k/mergeset.yml", "<<: !!set {password}\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("k/mergealias.yml", "s: &s !!set {spring.datasource.password}\n"
+                + "other:\n  <<: *s\n"), ManagedAgentPreflight.Status.WARN);
+        expected.put(write("k/pairs.yml", "password: !!pairs [a: {}]\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("k/pairkeys.yml", "x: !!pairs [password: hunter2]\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("k/mergethrough.yml", "spring:\n  datasource:\n"
+                + "    url: jdbc:postgresql://db/app\n"
+                + "    <<: !!set {<<: !!pairs [{password: hunter2}]}\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("k/mergesets.yml", "c: {<<: !!set {<<: !!set {password}}}\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("k/mergenothing.yml", "password: {<<: []}\n"),
+                ManagedAgentPreflight.Status.PASS);
+        expected.put(write("k/mergenested.yml", "s: &s {<<: !!set {password}}\nother:\n  <<: *s\n"),
+                ManagedAgentPreflight.Status.WARN);
+        // A map that is also a pair is a map where it is one.
+        expected.put(write("k/pairalias.yml", "spring:\n  datasource: &m\n    password: hunter2\n"
+                + "z: !!pairs [*m]\n"), ManagedAgentPreflight.Status.WARN);
+        expected.put(write("k/setmerge.yml", "x: !!set {<<: !!set {password}}\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("k/mergelist.yml", "a: &a {x: 1}\nb: &b !!set {password}\n"
+                + "c:\n  <<: [*a, *b]\n"), ManagedAgentPreflight.Status.WARN);
+        // A file Spring reads with many aliases, as it lifts SnakeYAML's limit.
+        expected.put(write("a/aliases.yml", "base: &b [x]\n" + IntStream.rangeClosed(1, 60)
+                .mapToObj(each -> "k" + each + ": *b\n").collect(Collectors.joining())
+                + "spring.datasource.password: s3cret\n"), ManagedAgentPreflight.Status.WARN);
+        // A key with no value holds no secret.
+        expected.put(write("p/bare.properties", "# spring.datasource.password\n"),
+                ManagedAgentPreflight.Status.PASS);
+        // A value is read with its escapes whatever its key.
+        expected.put(write("p/url.properties", "# url jdbc:mysql://db/q?pass\\u0077ord=x\n"),
+                ManagedAgentPreflight.Status.WARN);
+        // A key and value written as both formats write one, quoted or after
+        // a list marker; and a mark or white space an editor put first.
+        expected.put(write("p/quoted.yml", "# \"spring.datasource.password\":s3cret\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("p/argument.yml", "# - --spring.datasource.password=s3cret\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("p/quoted.properties", "# \"spring.datasource.password\": s3cret\n"),
+                ManagedAgentPreflight.Status.WARN);
+        expected.put(write("p/tab.properties", "\u000b# spring.datasource.password=x\n"),
+                ManagedAgentPreflight.Status.WARN);
+        Path marked = directory.resolve("p/marked.properties");
+        Files.write(marked, "\ufeff# spring.datasource.password=hunter2\n"
+                .getBytes(StandardCharsets.UTF_8));
+        expected.put(marked, ManagedAgentPreflight.Status.WARN);
+        Path wide = directory.resolve("p/wide.properties");
+        Files.write(wide, "# spring.datasource.password=hunter2\n"
+                .getBytes(StandardCharsets.UTF_16));
+        expected.put(wide, ManagedAgentPreflight.Status.WARN);
+        // XML comments that are no document of their own, entry by entry.
+        String head = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE properties SYSTEM"
+                + " \"http://java.sun.com/dtd/properties.dtd\">\n<properties>\n";
+        String entry = "<entry key=\"spring.datasource.password\">s3cret";
+        for (String comment : List.of(
+                "<entry key=\"spring.datasource.url\">jdbc:mysql://db/q?a=1&b=2</entry>\n"
+                        + entry + "</entry>",
+                entry, entry + "</entry> replace with <your-password>",
+                "dev & test: " + entry + "</entry>")) {
+            expected.put(write("x/" + expected.size() + ".xml", head + "<!-- " + comment
+                    + " -->\n<entry key=\"server.port\">8080</entry>\n</properties>\n"),
+                    ManagedAgentPreflight.Status.WARN);
+        }
+        // And as a document of its own, which reads a character reference.
+        expected.put(write("x/reference.xml", head + "<!-- <entry key=\"spring.datasource.pass"
+                + "&#119;ord\">x</entry> -->\n</properties>\n"), ManagedAgentPreflight.Status.WARN);
+        // Prose is no setting, though it names one before a colon.
+        expected.put(write("q/database.yml",
+                "# Database password: set SPRING_DATASOURCE_PASSWORD in the unit environment\n"),
+                ManagedAgentPreflight.Status.PASS);
+        expected.put(write("q/admin.yml", "server:\n  port: 8080 # the admin token: see the vault\n"),
+                ManagedAgentPreflight.Status.PASS);
+        expected.put(write("q/signing.yml", "# Note on the signing key: rotate it yearly\n"),
+                ManagedAgentPreflight.Status.PASS);
+        // In .properties, a key white space ends is a setting's only where it
+        // has a dot, as a property's name has, and prose's first word none.
+        for (String prose : List.of("# Password rotation happens yearly",
+                "# Key ring for the credential keys, see the configuration reference",
+                "# Secret values live in Vault", "# Token refresh is automatic",
+                "# password is set in server.env", "! Password policy: see the wiki",
+                "# Hockey team settings",
+                "# spring.datasource.password is supplied by the unit environment",
+                "# qwen.managed-agent.runtime.credential-key must be a base64 32-byte key")) {
+            expected.put(write("q/" + expected.size() + ".properties",
+                    "server.port=8080\n" + prose + "\n"), ManagedAgentPreflight.Status.PASS);
+        }
+        expected.put(write("q/pairs.xml", head + "<!-- key=value pairs below -->\n"
+                + "<entry key=\"server.port\">8080</entry>\n</properties>\n"),
+                ManagedAgentPreflight.Status.PASS);
+        Map<Path, ManagedAgentPreflight.Status> verdicts = new HashMap<>();
+        for (Path file : expected.keySet()) {
+            Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
+            verdicts.put(file, ManagedAgentPreflight.configFileCheck(file, null).status());
+        }
+        assertEquals(expected, verdicts);
+    }
+
+    @Test
+    void keepsTheRowsWhereItCannotTellTheFilesSpringRead() throws IOException {
+        // Spring prepares these, but the check cannot resolve the import's
+        // placeholder, or make a path of it; it says so and the other rows
+        // still print.
+        Path b = write("u/b.properties", "p=${q}\nq=${p}\n");
+        Path a = write("u/a.properties", "spring.config.import=optional:file:${p}\n");
+        Path nul = write("u/nul.properties", "spring.config.import=optional:file:"
+                + directory.resolve("u") + "/*/x\u0000.yml\n");
+        Files.createDirectories(directory.resolve("u/d"));
+        // So do those a wildcard found, in either format its hint may name,
+        // and those a loader read that hold no setting.
+        Path found = write("u/w/x/app.yml", "spring.datasource.password=s3cret\n");
+        Path endless = write("u/r/x/app.yml", "motd: &y [*y]\n");
+        Path quiet = write("u/c.yml", "# spring.datasource.password: s3cret\n");
+        for (Path file : List.of(found, endless, quiet)) {
+            Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
+        }
+        ManagedAgentPreflight.Prepared listed = prepare(environment(Map.of()), new ArrayList<>(),
+                "--spring.config.location=optional:file:" + directory.resolve("u/w")
+                        + "/*/app.yml[.properties],optional:file:" + directory.resolve("u/r")
+                        + "/*/app.yml[.properties],file:" + quiet + ",file:" + b + ",file:" + a);
+        assertNotNull(listed.unlisted());
+        assertEquals("s3cret", listed.environment().getProperty("spring.datasource.password"));
+        Map<String, ManagedAgentPreflight.Status> statuses = new HashMap<>();
+        for (ManagedAgentPreflight.Check row : rows(listed)) {
+            statuses.put(row.detail().split(" ")[0], row.status());
+        }
+        assertEquals(ManagedAgentPreflight.Status.WARN, statuses.get(found.toString()));
+        assertEquals(ManagedAgentPreflight.Status.PASS, statuses.get(endless.toString()));
+        assertEquals(ManagedAgentPreflight.Status.WARN, statuses.get(quiet.toString()));
+        // The files the property sources name keep their rows, as one the
+        // service account cannot read would fail.
+        Map<String, List<Path>> named = Map.of("file:" + b + ",file:" + a, List.of(a, b),
+                "file:" + nul, List.of(nul));
+        for (Map.Entry<String, List<Path>> location : named.entrySet()) {
+            List<ManagedAgentPreflight.Check> checks = new ArrayList<>();
+            ManagedAgentPreflight.Prepared prepared = prepare(environment(Map.of()), checks,
+                    "--spring.config.location=" + location.getKey());
+            assertNull(prepared.failure(), location.getKey());
+            assertNotNull(prepared.unlisted(), location.getKey());
+            assertEquals(Set.copyOf(location.getValue()), Set.copyOf(prepared.files()));
+            List<ManagedAgentPreflight.Check> rows = rows(prepared);
+            assertEquals(location.getValue().size() + 1, rows.size(), rows.toString());
+            ManagedAgentPreflight.Check last = rows.get(rows.size() - 1);
+            assertEquals(ManagedAgentPreflight.Status.WARN, last.status());
+            assertTrue(last.detail().startsWith("cannot tell which other files the server reads: "),
+                    rows.toString());
+        }
+    }
+
+    @Test
+    void boundsWhatACommentCanCost() throws IOException {
+        // Spring's YAML loader follows an alias that holds itself, and
+        // expands one alias of another without end; a comment never runs
+        // either, and a long line of comments takes no time to judge.
+        StringBuilder laughs = new StringBuilder("# {a0: &a0 [x]");
+        for (int level = 1; level < 9; level++) {
+            laughs.append(", a").append(level).append(": &a").append(level).append(" [");
+            laughs.append(String.join(", ", Collections.nCopies(10, "*a" + (level - 1))));
+            laughs.append("]");
+        }
+        laughs.append("}");
+        StringBuilder chain = new StringBuilder("# {a0: &a0 [x]");
+        StringBuilder values = new StringBuilder("# {a0: &a0 {}");
+        for (int level = 1; level <= 5000; level++) {
+            chain.append(", a").append(level).append(": &a").append(level).append(" [*a")
+                    .append(level - 1).append(']');
+            values.append(", a").append(level).append(": &a").append(level).append(" {x: *a")
+                    .append(level - 1).append('}');
+        }
+        StringBuilder shared = new StringBuilder("# {k: &k [" + "x, ".repeat(9999) + "x]");
+        StringBuilder sharedNamed = new StringBuilder(shared);
+        for (int each = 0; each < 10_000; each++) {
+            shared.append(", ? [*k, ").append(each).append("] : 1");
+            sharedNamed.append(", ? [password, *k, ").append(each).append("] : {}");
+        }
+        // Many secret keys over values that hold one large map binding
+        // nothing: the same value, and others that hold it.
+        StringBuilder empties = new StringBuilder("{a0: {}");
+        for (int each = 1; each < 20_000; each++) {
+            empties.append(", a").append(each).append(": {}");
+        }
+        empties.append('}');
+        StringBuilder empty = new StringBuilder("# {e: &e " + empties);
+        StringBuilder holding = new StringBuilder("# {e: &e " + empties);
+        for (int each = 0; each < 20_000; each++) {
+            empty.append(", p").append(each).append("password: *e");
+            holding.append(", p").append(each).append("password: {x: *e}");
+        }
+        StringBuilder merging = new StringBuilder("# {b: &b {k0: 1");
+        for (int each = 1; each < 10_000; each++) {
+            merging.append(", k").append(each).append(": 1");
+        }
+        merging.append('}');
+        for (int each = 0; each < 10_000; each++) {
+            merging.append(", m").append(each).append(": {<<: *b}");
+        }
+        // Many pairs, merges or keys sharing one map, list or key.
+        StringBuilder wide = new StringBuilder("# {m: &m {k0: 1");
+        StringBuilder list = new StringBuilder("# {s: &s [{k0: 1}");
+        StringBuilder key = new StringBuilder("# {k: &k [password, x0");
+        for (int each = 1; each < 8_000; each++) {
+            wide.append(", k").append(each).append(": 1");
+            list.append(", {k").append(each).append(": 1}");
+            key.append(", x").append(each);
+        }
+        wide.append("}, y: !!pairs [*m").append(", *m".repeat(7_999)).append("]}");
+        list.append(']');
+        key.append(']');
+        for (int each = 0; each < 8_000; each++) {
+            list.append(", m").append(each).append(": {<<: *s}");
+            key.append(", ? *k : {}");
+        }
+        List<Path> files = List.of(
+                write("c/recursive.yml", "server:\n  port: 8080\n# &a [*a]\n"),
+                write("c/pairs.yml", wide + "\n"),
+                write("c/list.yml", list + "}\n"),
+                write("c/key.yml", key + "}\n"),
+                write("c/merging.yml", merging + "}\n"),
+                write("c/unbound.yml", empty + "}\n"),
+                write("c/holding.yml", holding + "}\n"),
+                write("c/chain.yml", "server:\n  port: 8080\n" + chain + ", ? *a5000 : 1}\n"),
+                write("c/values.yml", values + ", password: *a5000}\n"),
+                write("c/shared.yml", shared + "}\n"),
+                write("c/shared-named.yml", "server:\n  port: 8080\n" + sharedNamed + "}\n"),
+                write("c/laughs.yml", "server:\n  port: 8080\n" + laughs + "\n"),
+                write("c/long.yml", "motd: x" + " #a".repeat(40_000) + "\n"),
+                write("c/colons.yml", "# //" + "h:1,".repeat(40_000) + "\n"));
+        // Nor does a file a hint names .properties for, read as its name says.
+        Path hinted = write("c/hinted.yml", laughs.substring(2) + "\n");
+        assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+            for (Path file : files) {
+                Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
+                assertEquals(ManagedAgentPreflight.Status.PASS,
+                        ManagedAgentPreflight.configFileCheck(file, null).status(), file.toString());
+            }
+            ManagedAgentPreflight.Prepared prepared = prepare(environment(Map.of()),
+                    new ArrayList<>(), "--spring.config.location=file:" + hinted + "[.properties]");
+            assertEquals(Map.of(hinted, Set.of(ServerEnvironment.Format.PROPERTIES)),
+                    prepared.configurations());
+            assertEquals(ManagedAgentPreflight.Status.PASS, rows(prepared).get(0).status());
+        });
+    }
+
+    @Test
     void listsEachFileOfAConfigTree() throws IOException {
         // Kubernetes mounts a Secret as one file for each property.
         Path password = write("secrets/spring.datasource.password", "hunter2");
@@ -997,6 +1636,12 @@ class ServerEnvironmentTest {
                 url, null, "spring.datasource.url").status());
         assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight.configFileCheck(
                 port, null, "server.port").status());
+        // In UTF-16 too, after its byte order mark.
+        Path wide = directory.resolve("tree/spring.datasource.jdbc-url");
+        Files.write(wide, "jdbc:mysql://app:s3cret@db/qwen".getBytes(StandardCharsets.UTF_16));
+        Files.setPosixFilePermissions(wide, PosixFilePermissions.fromString("rw-r--r--"));
+        assertEquals(ManagedAgentPreflight.Status.WARN, ManagedAgentPreflight.configFileCheck(
+                wide, null, "spring.datasource.jdbc-url").status());
         // A file whose extension Spring is told, as file:app.conf[.properties].
         Path hinted = write("etc/app.conf", "spring.datasource.password=s3cret\n");
         Files.setPosixFilePermissions(hinted, PosixFilePermissions.fromString("rw-r--r--"));
@@ -1024,7 +1669,7 @@ class ServerEnvironmentTest {
         prepared = prepare(named("file:" + hinted + "[.properties]"), new ArrayList<>(),
                 "--spring.config.import=optional:configtree:" + hinted.getParent() + "/");
         assertEquals("app.conf", prepared.values().get(hinted));
-        assertEquals(Set.of(hinted), prepared.configurations());
+        assertEquals(Set.of(hinted), prepared.configurations().keySet());
         rows = rows(prepared);
         assertEquals(1, rows.size(), rows.toString());
         assertEquals(ManagedAgentPreflight.Status.WARN, rows.get(0).status(), rows.toString());
@@ -1036,7 +1681,7 @@ class ServerEnvironmentTest {
         prepared = prepare(environment(Map.of()), new ArrayList<>(),
                 "--spring.config.import=optional:configtree:" + label.getParent() + "/");
         assertEquals("qwen.managed-agent.label", prepared.values().get(label));
-        assertEquals(Set.of(), prepared.configurations());
+        assertEquals(Set.of(), prepared.configurations().keySet());
         rows = rows(prepared);
         assertEquals(ManagedAgentPreflight.Status.PASS,
                 rows.stream().filter(row -> row.detail().startsWith(label.toString()))

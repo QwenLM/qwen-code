@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessCapacityFailu
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessTransportFailure;
+import com.alibaba.qwen.code.managedagent.preflight.ServerEnvironment.Format;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
@@ -30,12 +31,23 @@ import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.EnumerablePropertySource;
 import org.springframework.core.env.PropertySource;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.ClassPathResource;
-import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
+import org.yaml.snakeyaml.nodes.MappingNode;
+import org.yaml.snakeyaml.nodes.Node;
+import org.yaml.snakeyaml.nodes.NodeTuple;
+import org.yaml.snakeyaml.nodes.ScalarNode;
+import org.yaml.snakeyaml.nodes.SequenceNode;
+import org.yaml.snakeyaml.nodes.Tag;
+import org.yaml.snakeyaml.reader.UnicodeReader;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.Reader;
+import java.io.StringReader;
+import java.io.StringWriter;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
@@ -62,9 +74,13 @@ import java.sql.SQLException;
 import java.sql.SQLTimeoutException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.HashSet;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -74,6 +90,7 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.function.BiPredicate;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -108,20 +125,28 @@ public final class ManagedAgentPreflight {
     // files that hold one end otherwise.
     private static final List<String> SECRET_SUFFIXES =
             List.of("password", "token", "key", "keys", "secret");
-    // A key and its value on a commented-out line of YAML or .properties,
-    // such as "# credential-key: <key>" or "#spring.datasource.password=".
-    private static final Pattern COMMENTED_KEY = Pattern.compile(
-            "\\s*[#!]+\\s*(?:-\\s+)?[\"']?([^\\s:=\"'#!]+)[\"']?\\s*[:=](.*)");
-    // An entry of an XML properties file that a comment holds.
-    // Where a YAML comment after a value may start, which whitespace sets apart.
-    private static final Pattern INLINE_COMMENT = Pattern.compile("\\s#");
+    // An XML comment, which cannot nest or hold "--".
     private static final Pattern XML_COMMENT = Pattern.compile("<!--(.*?)-->", Pattern.DOTALL);
+    // The markers and white space that start a comment, as "# " or "#!".
+    private static final Pattern COMMENT_START = Pattern.compile("^[#!\\s]+");
+    // A comment marker .properties reads though it is escaped, with a
+    // backslash or as a Unicode escape.
+    private static final Pattern ESCAPED_MARKER = Pattern.compile("^\\\\(?:[#!]|u00(?:23|21))");
+    // White space at the start of a line, which .properties skips.
+    private static final Pattern INDENT = Pattern.compile("^\\s+");
+    // A setting as YAML and .properties both write one: an optional list
+    // marker, a key, quoted or not, then ':' or '=' and the value.
+    private static final Pattern WRITTEN_SETTING = Pattern.compile(
+            "(?:-\\s+)?[\"']?([^\\s:=\"'#!]+)[\"']?\\s*[:=](.*)");
+    // An entry of an XML properties file, which a comment may hold unclosed.
     private static final Pattern XML_ENTRY = Pattern.compile(
             "<entry\\s+key\\s*=\\s*[\"']([^\"']*)[\"']\\s*>([^<]*)");
+    private static final String XML_PROPERTIES = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            + "<!DOCTYPE properties SYSTEM \"http://java.sun.com/dtd/properties.dtd\">";
     // A parameter of a value, such as a JDBC URL's ?password=, and the
     // password of a URL's user information, as in https://user:secret@host.
     private static final Pattern VALUE_PARAMETER = Pattern.compile("[?&;]([^=?&;#\\s]+)=");
-    private static final Pattern URL_PASSWORD = Pattern.compile("//[^/?#@\\s]*:[^/?#@\\s]+@");
+    private static final Pattern URL_PASSWORD = Pattern.compile("//[^/?#@\\s:]*:[^/?#@\\s]++@");
 
     private ManagedAgentPreflight() {
     }
@@ -237,8 +262,14 @@ public final class ManagedAgentPreflight {
      * would refuse to start.
      */
     record Prepared(ConfigurableEnvironment environment, List<Path> files,
-            Map<Path, String> values, Set<Path> configurations,
-            List<ServerEnvironment.Hidden> hidden, ServerEnvironment.Failure failure) {
+            Map<Path, String> values, Map<Path, Set<Format>> configurations,
+            List<ServerEnvironment.Hidden> hidden, ServerEnvironment.Failure failure,
+            String unlisted) {
+        Prepared(ConfigurableEnvironment environment, List<Path> files,
+                Map<Path, String> values, Map<Path, Set<Format>> configurations,
+                List<ServerEnvironment.Hidden> hidden, ServerEnvironment.Failure failure) {
+            this(environment, files, values, configurations, hidden, failure, null);
+        }
     }
 
     /**
@@ -246,23 +277,34 @@ public final class ManagedAgentPreflight {
      * start, as for a named location that does not exist or a file it cannot
      * read, the failure is kept for the config row, which names an account
      * once the service-user row has found it, and the other rows read the
-     * arguments, the process environment and the packaged defaults.
+     * arguments, the process environment and the packaged defaults. Where
+     * Spring prepared it but the files it read cannot be told apart, as for
+     * a location value this check cannot resolve, why is kept instead.
      */
     static Prepared prepare(String[] args, ConfigurableEnvironment base,
             List<Check> checks) {
+        ConfigurableEnvironment environment;
         try {
-            ConfigurableEnvironment environment =
-                    ServerEnvironment.prepare(args, base);
-            return new Prepared(environment, ServerEnvironment.files(environment),
-                    ServerEnvironment.valueFiles(environment),
-                    ServerEnvironment.configurationFiles(environment),
-                    ServerEnvironment.hidden(environment), null);
+            environment = ServerEnvironment.prepare(args, base);
         } catch (RuntimeException error) {
             ServerEnvironment.Failure failure = ServerEnvironment.failure(error, base);
             // Spring adds the files' sources once it has read them all, so
             // base holds what the arguments and the process environment set.
             loadDefaults(base, checks);
-            return new Prepared(base, List.of(), Map.of(), Set.of(), List.of(), failure);
+            return new Prepared(base, List.of(), Map.of(), Map.of(), List.of(), failure);
+        }
+        try {
+            return new Prepared(environment, ServerEnvironment.files(environment),
+                    ServerEnvironment.valueFiles(environment),
+                    ServerEnvironment.configurationFiles(environment),
+                    ServerEnvironment.hidden(environment), null);
+        } catch (RuntimeException unlisted) {
+            // The server would start; only this check's account of its files
+            // failed, so it keeps the files the property sources name.
+            return new Prepared(environment, ServerEnvironment.sourceFiles(environment),
+                    ServerEnvironment.valueFiles(environment),
+                    ServerEnvironment.sourceConfigurations(environment), List.of(), null,
+                    rootMessage(unlisted));
         }
     }
 
@@ -275,6 +317,18 @@ public final class ManagedAgentPreflight {
             String runner) {
         if (prepared.failure() != null) {
             return List.of(configFailureCheck(prepared.failure(), account, runner));
+        }
+        if (prepared.unlisted() != null) {
+            List<Check> checks = new ArrayList<>();
+            if (!prepared.files().isEmpty()) {
+                checks.addAll(configFileChecks(prepared.files(), account, prepared.values(),
+                        prepared.configurations()));
+            }
+            checks.add(new Check("config", Status.WARN,
+                    "cannot tell which other files the server reads: " + prepared.unlisted(),
+                    "check the configuration files by hand, and the location values"
+                            + " that name them"));
+            return checks;
         }
         List<Check> hidden = new ArrayList<>();
         for (ServerEnvironment.Hidden directory : prepared.hidden()) {
@@ -475,15 +529,20 @@ public final class ManagedAgentPreflight {
      */
     static List<Check> configFileChecks(List<Path> files,
             ServiceAccount account) {
-        return configFileChecks(files, account, Map.of(), new HashSet<>(files));
+        Map<Path, Set<Format>> configurations = new HashMap<>();
+        for (Path file : files) {
+            configurations.put(file, Format.named(String.valueOf(file.getFileName())));
+        }
+        return configFileChecks(files, account, Map.of(), configurations);
     }
 
     /**
      * As above, with the property each config tree value file holds, and the
-     * files Spring reads as configuration files, which a value file may be.
+     * files Spring reads as configuration files, which a value file may be,
+     * each with the formats Spring reads it in.
      */
     static List<Check> configFileChecks(List<Path> files, ServiceAccount account,
-            Map<Path, String> values, Set<Path> configurations) {
+            Map<Path, String> values, Map<Path, Set<Format>> configurations) {
         if (files.isEmpty()) {
             return List.of(new Check("config", Status.WARN,
                     "no configuration file; packaged defaults and the"
@@ -494,29 +553,31 @@ public final class ManagedAgentPreflight {
         List<Check> checks = new ArrayList<>();
         for (Path file : files) {
             checks.add(configFileCheck(file, account, values.get(file),
-                    configurations.contains(file)));
+                    configurations.getOrDefault(file, Set.of())));
         }
         return checks;
     }
 
     static Check configFileCheck(Path file, ServiceAccount account) {
-        return configFileCheck(file, account, null, true);
+        return configFileCheck(file, account, null);
     }
 
     /** As above, for a config tree value file that holds this property's value. */
     static Check configFileCheck(Path file, ServiceAccount account, String property) {
-        return configFileCheck(file, account, property, property == null);
+        return configFileCheck(file, account, property, property != null ? Set.of()
+                : Format.named(String.valueOf(file.getFileName())));
     }
 
     /**
      * As above, for a config tree value file that holds this property's
-     * value, or null for none, and whether Spring reads the file as a
-     * configuration file. One path can be both, as application.yml is under a
-     * config tree imported over config/, and app.conf is where a location
-     * hints its extension, as file:app.conf[.properties] does.
+     * value, or null for none, and the formats Spring reads the file in as a
+     * configuration file, none where it reads it as none. One path can be
+     * both, as application.yml is under a config tree imported over config/;
+     * and the format is the one a location names, as
+     * file:app.yml[.properties] names .properties.
      */
     static Check configFileCheck(Path file, ServiceAccount account, String property,
-            boolean configuration) {
+            Set<Format> formats) {
         String path = file.toString();
         if (!readable(file, account)) {
             return account == null
@@ -532,7 +593,8 @@ public final class ManagedAgentPreflight {
             secrets = true;
         } else {
             try {
-                secrets = holdsSecret(file, configuration, text(Files.readAllBytes(file)));
+                secrets = holdsSecret(Files.readAllBytes(file), formats,
+                        String.valueOf(file.getFileName()));
             } catch (IOException error) {
                 return new Check("config", Status.WARN,
                         path + ": cannot inspect permissions", null);
@@ -543,76 +605,357 @@ public final class ManagedAgentPreflight {
     }
 
     /**
-     * Whether a file holds a secret, by secretProperty's one rule: a key it
-     * declares names a secret, in any of its documents, which a profile may
-     * leave inactive, or in a comment, or a value holds one, as a JDBC URL's
-     * ?password= does. A config tree value file Spring reads as no
-     * configuration file holds a value alone, whatever its name.
+     * Whether a file holds a secret, by secretProperty's one rule, as Spring
+     * reads it in each of these formats: a value holds one anywhere in it,
+     * as a JDBC URL's ?password= or a URL's user information does; a key it
+     * declares names one, or a value it declares holds one, in any of its
+     * documents, which a profile may leave inactive; or a comment would,
+     * uncommented. Read as its name says too, where a hint named another
+     * loader: what Spring does not bind is still in the file. A config tree
+     * value file Spring reads as no configuration file holds a value alone,
+     * whatever its name.
      */
-    private static boolean holdsSecret(Path file, boolean configuration, String content) {
-        if (!configuration) {
-            return valueSecret(content);
+    private static boolean holdsSecret(byte[] bytes, Set<Format> formats, String name) {
+        if (formats.isEmpty()) {
+            return valueSecret(new String(bytes, utf16(bytes) ? StandardCharsets.UTF_16
+                    : StandardCharsets.ISO_8859_1));
         }
-        String name = file.getFileName().toString().toLowerCase(Locale.ROOT);
-        boolean yaml = name.endsWith(".yml") || name.endsWith(".yaml");
-        boolean xml = name.endsWith(".xml");
-        boolean properties = name.endsWith(".properties") || xml;
-        // An extension hint, such as file:app.conf[.yml], names either loader.
-        List<PropertySourceLoader> loaders = yaml ? List.of(new YamlPropertySourceLoader())
-                : properties ? List.of(new PropertiesPropertySourceLoader())
-                : List.of(new YamlPropertySourceLoader(), new PropertiesPropertySourceLoader());
-        for (PropertySourceLoader loader : loaders) {
-            try {
-                for (PropertySource<?> source : loader.load(name, new FileSystemResource(file))) {
-                    if (source instanceof EnumerablePropertySource<?> declared) {
-                        for (String key : declared.getPropertyNames()) {
-                            Object held = declared.getProperty(key);
-                            if (secretProperty(key)
-                                    || held != null && valueSecret(held.toString())) {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            } catch (IOException | RuntimeException error) {
-                // What does not parse declares no key; its comments still tell.
+        for (Format format : formats) {
+            if (holdsSecret(bytes, format)) {
+                return true;
             }
         }
-        return commentedSecret(content, xml, !properties);
+        for (Format named : Format.named(name)) {
+            if (!formats.contains(named) && holdsSecret(bytes, named)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** As above, in one format. */
+    private static boolean holdsSecret(byte[] bytes, Format format) {
+        String content = text(bytes, format);
+        if (valueSecret(content) || (format == Format.YAML ? yamlSecret(content, false)
+                : declaresSecret(format, bytes))) {
+            return true;
+        }
+        for (String comment : comments(content, format)) {
+            if (commentSecret(format, comment)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
-     * Whether a comment holds a secret, as it would uncommented: a
-     * commented-out line, or in YAML, which a hint may name, the comment
-     * after a value.
+     * Whether text, read as Spring reads a file in this format, declares a
+     * key that names a secret or a value that holds one, in any document:
+     * .properties or XML, as YAML is by yamlSecret.
      */
-    private static boolean commentedSecret(String content, boolean xml, boolean yaml) {
-        if (xml) {
-            Matcher comment = XML_COMMENT.matcher(content);
-            while (comment.find()) {
-                Matcher entry = XML_ENTRY.matcher(comment.group(1));
-                while (entry.find()) {
-                    if (secretProperty(entry.group(1)) || valueSecret(entry.group(2))) {
+    private static boolean declaresSecret(Format format, byte[] bytes) {
+        return declaresSecret(format, bytes, (key, value) -> true);
+    }
+
+    /** As above, of the keys this admits with their values. */
+    private static boolean declaresSecret(Format format, byte[] bytes,
+            BiPredicate<String, String> admitted) {
+        PropertySourceLoader loader = new PropertiesPropertySourceLoader();
+        // That loader reads a resource whose name ends in .xml as XML.
+        Resource resource = new ByteArrayResource(bytes) {
+            @Override
+            public String getFilename() {
+                return format == Format.XML ? "read.xml" : null;
+            }
+        };
+        try {
+            for (PropertySource<?> source : loader.load("read", resource)) {
+                if (source instanceof EnumerablePropertySource<?> declared) {
+                    for (String key : declared.getPropertyNames()) {
+                        Object held = declared.getProperty(key);
+                        if (admitted.test(key, String.valueOf(held)) && secretProperty(key)
+                                || held != null && valueSecret(held.toString())) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        } catch (IOException | RuntimeException error) {
+            // What does not parse declares no key; its comments still tell.
+        }
+        return false;
+    }
+
+    /**
+     * Whether a comment would set a secret uncommented: read in the file's
+     * format, its entries one by one in XML, where a comment need be no
+     * document; or, in YAML and .properties, as the key and value line both
+     * write, as "# spring.datasource.password=x" is in YAML. Prose is no
+     * setting: a key with white space in it in YAML, as "Database password:"
+     * is, and in .properties, which takes white space as a separator, a key
+     * white space ends but for one with a dot in it and a one-word value,
+     * as "# spring.datasource.password hunter2" has and
+     * "# Password rotation is yearly" has not.
+     */
+    private static boolean commentSecret(Format format, String comment) {
+        if (format == Format.XML) {
+            if (declaresSecret(format, (XML_PROPERTIES + "<properties>" + comment
+                    + "</properties>").getBytes(StandardCharsets.UTF_8))) {
+                return true;
+            }
+            Matcher entry = XML_ENTRY.matcher(comment);
+            while (entry.find()) {
+                if (secretProperty(entry.group(1)) || valueSecret(entry.group(2))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (format == Format.YAML ? yamlSecret(comment, true)
+                : declaresSecret(format, comment.getBytes(StandardCharsets.ISO_8859_1),
+                        (key, value) -> key.contains(".") && !value.isBlank()
+                                && value.strip().chars().noneMatch(Character::isWhitespace))) {
+            return true;
+        }
+        Matcher setting = WRITTEN_SETTING.matcher(comment);
+        return setting.matches()
+                && (secretProperty(setting.group(1)) || valueSecret(setting.group(2)));
+    }
+
+    /**
+     * Whether YAML names a secret, by its keys and values, in any document;
+     * in prose, but a key with white space in it. It is read as Spring's
+     * loader reads it, its nodes composed and walked rather than built.
+     */
+    private static boolean yamlSecret(String text, boolean prose) {
+        try {
+            for (Node node : ServerEnvironment.yaml(false).composeAll(new StringReader(text))) {
+                if (new YamlWalk(prose).secret(node)) {
+                    return true;
+                }
+            }
+        } catch (RuntimeException unreadable) {
+            // YAML that does not parse declares nothing.
+        }
+        return false;
+    }
+
+    /**
+     * One walk over a document's nodes, which aliases share. A key is judged
+     * wherever a map holds it, a set's members and pairs' keys among them,
+     * which Spring binds as values, and the keys a merge adds where the map
+     * they come from is: a superset of the names Spring binds. Each node is
+     * walked once, with a stack rather than by recursion. Which nodes lead to
+     * a secret's name is found once for the document, and a node found to
+     * bind nothing is kept, while a value found to bind ends the walk, as its
+     * key named a secret; so neither a chain of aliases nor one that holds
+     * itself, nor many keys or values sharing one, costs more than its nodes
+     * a few times.
+     */
+    private static final class YamlWalk {
+        private final boolean prose;
+        private final Set<Node> seen = identities();
+        private final Set<Node> unbound = identities();
+        private Node root;
+        private Set<Node> naming;
+
+        YamlWalk(boolean prose) {
+            this.prose = prose;
+        }
+
+        boolean secret(Node root) {
+            this.root = root;
+            Deque<Node> pending = new ArrayDeque<>();
+            pending.push(root);
+            while (!pending.isEmpty()) {
+                Node node = pending.pop();
+                if (!seen.add(node)) {
+                    continue;
+                }
+                if (node instanceof ScalarNode scalar) {
+                    if (valueSecret(scalar.getValue())) {
                         return true;
+                    }
+                } else if (node instanceof SequenceNode sequence) {
+                    sequence.getValue().forEach(pending::push);
+                } else if (node instanceof MappingNode mapping) {
+                    for (NodeTuple tuple : mapping.getValue()) {
+                        pending.push(tuple.getKeyNode());
+                        pending.push(tuple.getValueNode());
+                        if (names(tuple.getKeyNode()) && binds(tuple.getValueNode())) {
+                            return true;
+                        }
                     }
                 }
             }
             return false;
         }
-        for (String line : content.split("\\R")) {
-            Matcher inline = INLINE_COMMENT.matcher(line);
-            while (yaml && inline.find()) {
-                // A quoted value may hold the first one.
-                if (commentedSecret(line.substring(inline.start() + 1), false, false)) {
+
+        /**
+         * Whether a key names a secret: a string, or anything in a collection
+         * Spring writes into the property's name; in prose, not one with
+         * white space in it. A merge key names nothing, being no string.
+         */
+        private boolean names(Node key) {
+            if (key instanceof ScalarNode scalar) {
+                return name(scalar);
+            }
+            if (naming == null) {
+                naming = naming();
+            }
+            return naming.contains(key);
+        }
+
+        /**
+         * The document's nodes a secret's name can be reached from: the
+         * names, then each node that holds one, as a parent of one found.
+         */
+        private Set<Node> naming() {
+            Map<Node, List<Node>> parents = new IdentityHashMap<>();
+            Set<Node> found = identities();
+            Set<Node> visited = identities();
+            Deque<Node> pending = new ArrayDeque<>();
+            pending.push(root);
+            while (!pending.isEmpty()) {
+                Node node = pending.pop();
+                if (!visited.add(node)) {
+                    continue;
+                }
+                List<Node> children = new ArrayList<>();
+                if (node instanceof ScalarNode scalar) {
+                    if (name(scalar)) {
+                        found.add(scalar);
+                    }
+                } else if (node instanceof SequenceNode sequence) {
+                    children.addAll(sequence.getValue());
+                } else if (node instanceof MappingNode mapping) {
+                    for (NodeTuple tuple : mapping.getValue()) {
+                        children.add(tuple.getKeyNode());
+                        children.add(tuple.getValueNode());
+                    }
+                }
+                for (Node child : children) {
+                    parents.computeIfAbsent(child, each -> new ArrayList<>()).add(node);
+                    pending.push(child);
+                }
+            }
+            Deque<Node> spread = new ArrayDeque<>(found);
+            while (!spread.isEmpty()) {
+                for (Node parent : parents.getOrDefault(spread.pop(), List.of())) {
+                    if (found.add(parent)) {
+                        spread.push(parent);
+                    }
+                }
+            }
+            return found;
+        }
+
+        private boolean name(ScalarNode scalar) {
+            return Tag.STR.equals(scalar.getTag())
+                    && !(prose && scalar.getValue().chars().anyMatch(Character::isWhitespace))
+                    && secretProperty(scalar.getValue());
+        }
+
+        /**
+         * Whether a value binds a property, as Spring flattens it: a scalar,
+         * an empty list, a set or pairs do; a map or list does where something
+         * in it does, so {} and [{}] bind nothing, nor does a merge of nothing.
+         */
+        private boolean binds(Node value) {
+            Set<Node> visited = identities();
+            Deque<Node> pending = new ArrayDeque<>();
+            pending.push(value);
+            while (!pending.isEmpty()) {
+                Node node = pending.pop();
+                if (unbound.contains(node) || !visited.add(node)) {
+                    continue;
+                }
+                if (node instanceof MappingNode mapping && !Tag.SET.equals(mapping.getTag())) {
+                    for (NodeTuple tuple : mapping.getValue()) {
+                        // A merge adds the entries of what it names, not a value of its own.
+                        if (Tag.MERGE.equals(tuple.getKeyNode().getTag())
+                                && tuple.getValueNode() instanceof SequenceNode sources) {
+                            sources.getValue().forEach(pending::push);
+                        } else {
+                            pending.push(tuple.getValueNode());
+                        }
+                    }
+                } else if (node instanceof SequenceNode sequence && !sequence.getValue().isEmpty()
+                        && !Tag.PAIRS.equals(sequence.getTag())) {
+                    sequence.getValue().forEach(pending::push);
+                } else {
                     return true;
                 }
             }
-            Matcher key = COMMENTED_KEY.matcher(line);
-            if (key.matches() && (secretProperty(key.group(1)) || valueSecret(key.group(2)))) {
-                return true;
-            }
+            unbound.addAll(visited);
+            return false;
         }
-        return false;
+    }
+
+    private static Set<Node> identities() {
+        return Collections.newSetFromMap(new IdentityHashMap<>());
+    }
+
+    /**
+     * The comments of a text as its format reads them, each without its
+     * markers: in YAML, from a # at a line's start or after white space to
+     * the next, which a quoted or block scalar may also hold, which only adds
+     * text to judge; in .properties, a line that starts with # or !, or with
+     * one escaped, which Spring reads as one too, but one that a value
+     * continues onto;
+     * and the line after one that ends in a backslash, which Spring may read
+     * into it; in XML, what lies between <!-- and -->.
+     */
+    private static List<String> comments(String text, Format format) {
+        List<String> comments = new ArrayList<>();
+        if (format == Format.XML) {
+            Matcher comment = XML_COMMENT.matcher(text);
+            while (comment.find()) {
+                comments.add(comment.group(1));
+            }
+            return comments;
+        }
+        if (format == Format.YAML) {
+            for (String line : text.split("\\R")) {
+                int from = -1;
+                for (int at = line.indexOf('#'); at >= 0; at = line.indexOf('#', at + 1)) {
+                    if (at == 0 || Character.isWhitespace(line.charAt(at - 1))) {
+                        if (from >= 0) {
+                            comments.add(COMMENT_START.matcher(line.substring(from, at))
+                                    .replaceFirst(""));
+                        }
+                        from = at;
+                    }
+                }
+                if (from >= 0) {
+                    comments.add(COMMENT_START.matcher(line.substring(from)).replaceFirst(""));
+                }
+            }
+            return comments;
+        }
+        boolean continued = false;
+        boolean swallowed = false;
+        for (String line : text.split("\r\n|\r|\n", -1)) {
+            String start = INDENT.matcher(line).replaceFirst("");
+            start = ESCAPED_MARKER.matcher(start).replaceFirst("#");
+            // An odd run of backslashes at the end escapes the line break.
+            int backslashes = 0;
+            while (backslashes < line.length()
+                    && line.charAt(line.length() - 1 - backslashes) == '\\') {
+                backslashes++;
+            }
+            boolean odd = backslashes % 2 == 1;
+            if (swallowed || !continued && (start.startsWith("#") || start.startsWith("!"))) {
+                comments.add(COMMENT_START.matcher(start).replaceFirst(""));
+                swallowed = odd;
+                continued = false;
+                continue;
+            }
+            // A backslash alone where a key would start escapes the break
+            // before any value, so the next line starts afresh.
+            continued = odd && (continued || !start.equals("\\"));
+        }
+        return comments;
     }
 
     /**
@@ -651,19 +994,34 @@ public final class ManagedAgentPreflight {
         return false;
     }
 
-    // Spring reads YAML as UTF-8, or UTF-16 after a byte order mark, and
-    // .properties as ISO-8859-1. A comment's key is ASCII, which ISO-8859-1,
-    // decoding any byte, reads in all but UTF-16. YAML drops a UTF-8 byte
-    // order mark, as an editor may write one, so its first line is read
-    // without it.
-    private static String text(byte[] bytes) {
-        boolean utf16 = bytes.length >= 2
-                && ((bytes[0] & 0xff) == 0xfe && (bytes[1] & 0xff) == 0xff
-                        || (bytes[0] & 0xff) == 0xff && (bytes[1] & 0xff) == 0xfe);
-        int start = !utf16 && bytes.length >= 3 && (bytes[0] & 0xff) == 0xef
-                && (bytes[1] & 0xff) == 0xbb && (bytes[2] & 0xff) == 0xbf ? 3 : 0;
+    // As Spring decodes a file: YAML as UTF-8, or as its byte order mark
+    // says, with SnakeYAML's own reader; .properties as ISO-8859-1; XML as
+    // its declaration says, whose comment markers are ASCII in all but
+    // UTF-16. Bytes YAML cannot decode Spring would not read, nor start on.
+    // A .properties file an editor marked, Spring reads as ISO-8859-1
+    // anyway: a UTF-8 mark into its first key, UTF-16 throughout. Its
+    // comments are found as the editor wrote them.
+    private static String text(byte[] bytes, Format format) {
+        if (format == Format.YAML) {
+            StringWriter text = new StringWriter();
+            try (Reader reader = new UnicodeReader(new ByteArrayInputStream(bytes))) {
+                reader.transferTo(text);
+                return text.toString();
+            } catch (IOException | RuntimeException undecodable) {
+                return new String(bytes, StandardCharsets.ISO_8859_1);
+            }
+        }
+        boolean utf16 = utf16(bytes);
+        int start = format == Format.PROPERTIES && !utf16 && bytes.length >= 3
+                && (bytes[0] & 0xff) == 0xef && (bytes[1] & 0xff) == 0xbb
+                && (bytes[2] & 0xff) == 0xbf ? 3 : 0;
         return new String(bytes, start, bytes.length - start,
                 utf16 ? StandardCharsets.UTF_16 : StandardCharsets.ISO_8859_1);
+    }
+
+    private static boolean utf16(byte[] bytes) {
+        return bytes.length >= 2 && ((bytes[0] & 0xff) == 0xfe && (bytes[1] & 0xff) == 0xff
+                || (bytes[0] & 0xff) == 0xff && (bytes[1] & 0xff) == 0xfe);
     }
 
     static String unreadableFix(String account, String path) {
