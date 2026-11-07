@@ -15,7 +15,7 @@
 
 | 输出            | 接纳对象                                                                                    | 读取方                                                    |
 | --------------- | ------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| `ubuntu_runner` | 同仓库 head、`OWNER` / `MEMBER` / `COLLABORATOR` 作者、`merge_group`、`push`，其余走 hosted | `test`、`integration_cli`、`web_shell_e2e_smoke`          |
+| `ubuntu_runner` | 同仓库 head、`OWNER` / `MEMBER` / `COLLABORATOR` 作者、`merge_group`、`push`，其余走 hosted | `integration_cli`、`web_shell_e2e_smoke`（`test` 已改读 `pr_test_runner`；本文被 [2026-11-07-ephemeral-container-runners](2026-11-07-ephemeral-container-runners.zh-CN.md) 取代） |
 | `lint_runner`   | 每一个 `pull_request`，未受信 fork 也算；其余情况与 `ubuntu_runner` 相同                    | `lint_and_static`、`integration_no_ak`（2026-11-02 加入） |
 
 `classify_pr` 自身的 runner 对其接纳的所有事件一律走 ECS（kill-switch 除外）。

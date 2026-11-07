@@ -144,7 +144,7 @@ jobs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
       ubuntu_runner: '${{ steps.pick_runner.outputs.ubuntu_runner }}'
       pr_test_runner: '${{ steps.pick_runner.outputs.pr_test_runner }}'
-      # Untrusted forks use hosted runners unless the disposable pool is enabled.
+      # Untrusted forks route to the disposable ARM64 pool; see pick_runner.
       lint_runner: '${{ steps.pick_runner.outputs.lint_runner }}'
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     steps:
@@ -415,7 +415,7 @@ jobs:
   # also starts from the newest cached build and rebuilds only the
   # workspaces whose inputs changed (scripts/ci-build-cache.mjs).
   test_build:
-    name: 'Build unit-test tree (ubuntu-latest, Node 22.x)'
+    name: 'Build unit-test tree (Linux, Node 22.x)'
     needs: 'classify_pr'
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.pr_test_runner || ''["ubuntu-latest"]'') }}'
@@ -1554,7 +1554,7 @@ jobs:
     # same release-sync convention: stay running on skip_ci PRs so a required
     # context still reports, with the per-step guards making it a no-op pass.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
-    # Shares the external-PR hosted/disposable switch with test and integration_no_ak.
+    # Shares the external-PR disposable-pool routing with test and integration_no_ak.
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'') }}'
     # Pool-scoped like test's, not a bare constant: this lane was beheaded twice
     # running honestly on cold-cache hk3-pool runners — at 30 minutes flat

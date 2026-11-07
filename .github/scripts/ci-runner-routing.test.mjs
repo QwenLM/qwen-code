@@ -480,6 +480,25 @@ describe('ci.yml disposable runner routing', () => {
       existsSync(join(workflowsDir, 'ci-runner-routing.yml')),
       false,
     );
+    const example = JSON.parse(
+      readFileSync(
+        join(
+          dirname(fileURLToPath(import.meta.url)),
+          '..',
+          '..',
+          'scripts',
+          'ci',
+          'ephemeral-runner',
+          'config.example.json',
+        ),
+        'utf8',
+      ),
+    );
+    assert.deepEqual(
+      example.labels,
+      JSON.parse(arm),
+      'the example runner registration must match the fork routing selector',
+    );
   });
   it('routes only untrusted fork jobs to the disposable pool', () => {
     const ephemeral = '["self-hosted", "ecs-qwen-ephemeral"]';
