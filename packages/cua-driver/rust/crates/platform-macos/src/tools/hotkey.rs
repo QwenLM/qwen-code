@@ -474,7 +474,21 @@ impl Tool for HotkeyTool {
                             if let Some(wid) = window_id {
                                 crate::input::skylight::prepare_background_keyboard(pid, wid)?;
                             }
-                            crate::input::keyboard::hotkey(pid, &key, &m)
+                            let recipient =
+                                if crate::input::keyboard::uses_application_keyboard_target(
+                                    false, &m,
+                                ) {
+                                    pid
+                                } else {
+                                    unsafe {
+                                        crate::ax::exact_target::keyboard_recipient_pid(
+                                            pid,
+                                            window_id,
+                                            element_ptr,
+                                        )
+                                    }?
+                                };
+                            crate::input::keyboard::hotkey(recipient, &key, &m)
                         }
                         _ => crate::input::keyboard::hotkey(pid, &key, &m),
                     }

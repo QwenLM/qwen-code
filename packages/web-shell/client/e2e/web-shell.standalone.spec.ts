@@ -19,6 +19,189 @@ const standaloneFeatures = [
 
 const WORKSPACE_CWD = '/tmp/qwen-web-shell-e2e';
 
+for (const target of ['draft', 'session'] as const) {
+  test(`desktop activates subscription in a no-workspace ${target}`, async ({
+    page,
+  }, testInfo) => {
+    const sessionId = 'standalone-subscription';
+    const modelId = 'qwen3.8-max(qwen-subscription)';
+    const scenario = createWebShellDaemonScenario({
+      capabilities: {
+        features: [...standaloneFeatures, 'standalone_session_options_v1'],
+      },
+      standaloneSessions: [standaloneSummary(sessionId, 'No-workspace chat')],
+    });
+    const daemon = await installScenario(page, scenario, testInfo);
+    await page.addInitScript(() => {
+      Object.assign(window, {
+        __TAURI__: { core: { invoke: async () => undefined } },
+      });
+    });
+    await page.route('**/workspace/auth/providers', (route) =>
+      route.fulfill({
+        json: {
+          v: 1,
+          workspaceCwd: scenario.workspaceCwd,
+          providers: [],
+          groups: [],
+        },
+      }),
+    );
+    await page.route('**/standalone/session-options', (route) =>
+      route.fulfill({
+        json: {
+          v: 1,
+          initialized: true,
+          current: { authType: 'openai', modelId: scenario.currentModel },
+          approvalMode: 'default',
+          providers: [
+            {
+              kind: 'model_provider',
+              status: 'ok',
+              authType: 'openai',
+              current: true,
+              models: [
+                {
+                  modelId: scenario.currentModel,
+                  baseModelId: scenario.currentModel,
+                  name: 'Previous standalone model',
+                  isCurrent: true,
+                  isRuntime: false,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    await page.route(/\/auth\/subscription(?:\?.*)?$/, (route) =>
+      route.fulfill({
+        json: { enabled: true, plansUrl: 'https://plans.example' },
+      }),
+    );
+    await page.route(/\/auth\/subscription\/flows(?:\?.*)?$/, (route) =>
+      route.fulfill({
+        json: {
+          id: 'signed-in',
+          status: 'ready',
+          userInfo: {
+            sub: 'test',
+            email: 'user@example.test',
+            member_type: 'pro',
+          },
+        },
+      }),
+    );
+    await page.route('**/auth/subscription/flows/signed-in', (route) =>
+      route.fulfill({ status: 204 }),
+    );
+    const workspaceActivations: string[] = [];
+    let accountModelRequests = 0;
+    await page.route('**/workspaces/*/auth/subscription', async (route) => {
+      workspaceActivations.push(new URL(route.request().url()).pathname);
+      await route.fulfill({ status: 403 });
+    });
+    await page.route('**/auth/subscription/model', async (route) => {
+      accountModelRequests++;
+      scenario.state.models = {
+        currentModelId: scenario.currentModel,
+        availableModels: [{ modelId, name: 'Qwen Max' }],
+      };
+      await route.fulfill({
+        json: { modelId: 'qwen3.8-max' },
+      });
+    });
+
+    if (target === 'draft') {
+      await gotoNewStandaloneChat(page);
+      await expect(
+        page.locator('[data-web-shell-model-button]'),
+      ).toHaveAttribute('aria-label', /Previous standalone model/);
+    } else {
+      await page.goto(`/session/${sessionId}?context=standalone`);
+      await daemon.sse.waitForConnection(sessionId);
+      await daemon.sendEvent(replayCompleteEvent({ sessionId }));
+    }
+    await fillComposer(page, '/auth');
+    await page.locator('[data-web-shell-composer-submit]').click();
+    await page
+      .getByRole('button', {
+        name: 'Qwen Account with Subscription',
+        exact: true,
+      })
+      .click();
+
+    const success = page.locator('[data-subscription-success]');
+    const retry = page.getByRole('button', { name: 'Try again', exact: true });
+    const outcome = success.or(retry).first();
+    await expect(outcome).toBeVisible();
+    expect(await outcome.textContent()).toContain('Qwen Pro');
+    expect(workspaceActivations).toEqual([]);
+    expect(accountModelRequests).toBe(1);
+    if (target === 'session') {
+      expect(daemon.modelRequests()).toEqual([
+        expect.objectContaining({
+          method: 'POST',
+          path: `/session/${sessionId}/model`,
+          body: { modelId },
+        }),
+      ]);
+      expect(scenario.currentModel).toBe(modelId);
+    } else {
+      await page
+        .getByRole('dialog')
+        .getByRole('button', { name: 'close' })
+        .click();
+      await expect(
+        page.locator('[data-web-shell-model-button]'),
+      ).toHaveAttribute('aria-label', /qwen3\.8-max|Qwen Max/i);
+      await fillComposer(page, 'Test the newly selected subscription model');
+      await page.locator('[data-web-shell-composer-submit]').click();
+      const created = await waitForRequest(
+        daemon,
+        (request) =>
+          request.method === 'POST' && request.path === '/standalone/sessions',
+      );
+      expect(requestBody(created)['modelServiceId']).toBe(modelId);
+      const createdSessionId = requestBody(created)['sessionId'];
+      await waitForRequest(
+        daemon,
+        (request) =>
+          request.method === 'POST' &&
+          request.path === `/session/${createdSessionId}/prompt`,
+      );
+    }
+  });
+}
+
+test('hides the empty no-workspace group while keeping New session available @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: { features: standaloneFeatures },
+    standaloneSessions: [],
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto('/');
+  await waitForRequest(
+    daemon,
+    (request) =>
+      request.method === 'GET' && request.path === '/standalone/sessions',
+  );
+
+  await expect(page.getByTestId('standalone-active-group')).toHaveCount(0);
+  await clickNewTask(page);
+  await expect(page.locator('[data-web-shell-composer-submit]')).toBeVisible();
+  await selectNoWorkspaceTarget(page);
+  await fillComposer(page, 'Start the first standalone conversation');
+  await page.locator('[data-web-shell-composer-submit]').click();
+  await waitForRequest(
+    daemon,
+    (request) =>
+      request.method === 'POST' && request.path === '/standalone/sessions',
+  );
+});
+
 /** Standalone creation calls, ignoring the Recents list reads. */
 function standaloneCreates(
   daemon: MockDaemonController,
@@ -110,12 +293,10 @@ test('keeps workspace navigation reachable inside a standalone chat @smoke', asy
 
   // Row actions are hidden until the row is hovered.
   await workspaceRow.hover();
-  const newTaskButtons = sidebar.getByRole('button', {
-    name: 'New session',
-    exact: true,
-  });
-  await expect(newTaskButtons).toHaveCount(2);
-  await newTaskButtons.last().click();
+  await workspaceRow
+    .locator('..')
+    .getByRole('button', { name: 'New session', exact: true })
+    .click();
 
   await fillComposer(page, 'Back to the workspace');
   await page.locator('[data-web-shell-composer-submit]').click();
@@ -267,6 +448,86 @@ test('no-workspace sessions remain visible beside collapsed Workspaces and persi
   );
 });
 
+test('no-workspace category matches peer header geometry and expansion affordances @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: [
+        ...standaloneFeatures,
+        'workspace_qualified_rest_core',
+        'session_organization',
+      ],
+    },
+    standaloneSessions: [standaloneSummary('standalone-header', 'Standalone')],
+  });
+  scenario.sessions[0].isPinned = true;
+  await installScenario(page, scenario, testInfo);
+  await page.goto('/');
+
+  const sidebar = page.getByRole('complementary');
+  const names = ['Pinned', 'Workspaces', 'No-workspace sessions', 'Recent'];
+  const toggles = names.map((name) =>
+    sidebar.getByRole('button', { name, exact: true }).first(),
+  );
+  for (const toggle of toggles) {
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  }
+
+  const geometry = await Promise.all(
+    toggles.map((toggle) =>
+      toggle.evaluate((button) => {
+        const header = button.parentElement!;
+        const label = button.querySelector('span')!;
+        const style = getComputedStyle(button);
+        return {
+          height: header.getBoundingClientRect().height,
+          labelLeft: label.getBoundingClientRect().left,
+          labelTop:
+            label.getBoundingClientRect().top -
+            header.getBoundingClientRect().top,
+          color: style.color,
+          marginBottom: getComputedStyle(header.parentElement!).marginBottom,
+        };
+      }),
+    ),
+  );
+  for (const header of geometry) {
+    expect(header.height).toBe(32);
+    expect(header.labelLeft).toBe(geometry[1].labelLeft);
+    expect(header.labelTop).toBe(geometry[1].labelTop);
+    expect(header.color).toBe(geometry[1].color);
+  }
+  expect(geometry[2].marginBottom).toBe('0px');
+
+  const toggle = toggles[2];
+  const chevron = toggle.locator('svg');
+  await expect(chevron).toHaveCount(1);
+  await expect(chevron).toHaveAttribute('aria-hidden', 'true');
+  const labelBox = await toggle.locator('span').boundingBox();
+  const iconBox = await chevron.boundingBox();
+  expect(iconBox!.x).toBeGreaterThanOrEqual(labelBox!.x + labelBox!.width);
+  await page.mouse.move(1000, 700);
+  await expect(chevron).toHaveCSS('opacity', '0');
+  await toggle.hover();
+  await expect(chevron).toHaveCSS('opacity', '1');
+  await page.mouse.move(1000, 700);
+  await page.keyboard.press('Tab');
+  await toggle.focus();
+  await expect(chevron).toHaveCSS('opacity', '1');
+  const collapsedPath = await chevron.locator('path').getAttribute('d');
+  await page.keyboard.press('Enter');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(chevron.locator('path')).not.toHaveAttribute(
+    'd',
+    collapsedPath!,
+  );
+  await page.keyboard.press('Space');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+});
+
 test('standalone Recents keeps lifecycle actions on exact standalone routes @smoke', async ({
   page,
 }, testInfo) => {
@@ -331,7 +592,16 @@ test('standalone Recents keeps lifecycle actions on exact standalone routes @smo
     page.getByText('Renamed conversation', { exact: true }),
   ).toBeVisible();
 
-  await openSessionAction(page, 'Renamed conversation', 'Restore');
+  const archivedRow = page
+    .locator(
+      '[data-web-shell-archived-sessions] [data-web-shell-session-title]',
+      { hasText: 'Renamed conversation' },
+    )
+    .locator('..');
+  await archivedRow.hover();
+  await archivedRow
+    .getByRole('button', { name: 'Restore', exact: true })
+    .click();
   await expect(
     page.locator('[data-web-shell-archived-sessions]'),
   ).not.toContainText('Renamed conversation');

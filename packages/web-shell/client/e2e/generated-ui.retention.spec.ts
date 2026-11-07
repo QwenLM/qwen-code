@@ -499,10 +499,32 @@ async function reviewSnapshot(page: Page, app: FrameLocator) {
     text = body.prompt[0].text;
     await route.fulfill({ status: 409, json: { error: 'captured by test' } });
   };
+  // A restored card finishes its first paint asynchronously, and a click that
+  // lands before the host accepts continuations is swallowed with no request
+  // and no error: the nightly run failed on the missing dispatch, not on the
+  // copy below. Wait for the button the app gates continuations on, then give
+  // dispatch a CI-sized budget so a loaded host is not read as a broken card.
+  await expect(app.locator('#continue-analysis')).toBeEnabled();
   await page.route('**/session/*/prompt', capture);
   try {
     await app.locator('#continue-analysis').click();
-    await expect.poll(() => text).toBeDefined();
+    const deadline = Date.now() + (process.env['CI'] ? 20_000 : 5_000);
+    while (!text && Date.now() < deadline) {
+      await page.waitForTimeout(100);
+    }
+    if (!text) {
+      const cardState = await app
+        .locator('#status')
+        .getAttribute('data-state')
+        .catch(() => null);
+      const status = await app
+        .locator('#continuation-status')
+        .textContent()
+        .catch(() => null);
+      throw new Error(
+        `continue never dispatched a prompt request (card=${cardState}, status=${status})`,
+      );
+    }
     await expect(app.locator('#continuation-status')).toContainText(
       'Not sent.',
     );
@@ -601,7 +623,11 @@ test('retains the actual App and Worker across virtual row unmounts @smoke', asy
   await view.getByRole('button', { name: 'Apply', exact: true }).click();
   await expect(view.locator('#answer')).toHaveText('1:7');
   await view.getByRole('button', { name: 'Insert controls' }).click();
-  await view.locator('#two').check();
+  // Nested iframe layout can move during pointer dispatch; this case tests
+  // retained input state, so select through the radio's keyboard interaction.
+  await view.locator('#two').focus();
+  await view.locator('#two').press('Space');
+  await expect(view.locator('#two')).toBeChecked();
   await view.locator('#choice').selectOption('b');
   await view.locator('#rate').fill('9');
   await expect(app().locator('#status')).toHaveAttribute('data-state', 'dirty');

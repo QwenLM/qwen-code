@@ -210,7 +210,7 @@ export function createJavaManagedAgentProvider(
     },
     exportSnapshot: (sessionId, request) =>
       client.exportSnapshot(
-        { sessionId, cursor: request.cursor, limit: 100, view: 'messages' },
+        { sessionId, cursor: request.cursor, limit: 100 },
         request.signal,
       ),
     exportConsistency: 'live',
@@ -654,7 +654,10 @@ export function createJavaManagedAgentProvider(
           ).values(),
         ];
       },
-      async respond(action, optionId, command) {
+      async respond(action, response, command) {
+        if ((action.kind === 'question') !== (typeof response !== 'string')) {
+          throw new Error('Action response kind does not match the request');
+        }
         const accepted = await client.respondAction(
           {
             requestId: managedRequestId(),
@@ -662,10 +665,11 @@ export function createJavaManagedAgentProvider(
             sessionId: action.sessionId,
             actionId: action.actionId,
             response: {
-              kind: 'permission',
               inputRevision: action.inputRevision,
               policyRevision: action.policyRevision,
-              optionId,
+              ...(typeof response === 'string'
+                ? { kind: 'permission' as const, optionId: response }
+                : response),
             },
           },
           command.signal,
@@ -877,7 +881,6 @@ export function createJavaManagedAgentProvider(
           sessionId,
           cursor: request.before,
           limit: request.limit,
-          view: 'messages',
         },
         request.signal,
       );
@@ -1179,7 +1182,7 @@ function requireContextCompressionOperation(
 }
 
 function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
-  if (action.kind !== 'permission' || action.state !== 'requested') return [];
+  if (action.state !== 'requested') return [];
   return [
     {
       actionId: action.actionId,
@@ -1189,9 +1192,16 @@ function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
       toolName: action.toolName,
       inputRevision: action.inputRevision,
       policyRevision: action.policyRevision,
+      createdAt: action.createdAt,
       expiresAt: action.expiresAt,
-      options: action.options.map(({ id, label }) => ({ id, label })),
-      ...(action.inputPreview ? { inputPreview: action.inputPreview } : {}),
+      ...(action.kind === 'question'
+        ? { kind: 'question' as const, questions: action.questions }
+        : {
+            options: action.options.map(({ id, label }) => ({ id, label })),
+            ...(action.inputPreview
+              ? { inputPreview: action.inputPreview }
+              : {}),
+          }),
     },
   ];
 }

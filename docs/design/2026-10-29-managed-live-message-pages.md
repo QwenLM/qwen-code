@@ -2,6 +2,8 @@
 
 [English](2026-10-29-managed-live-message-pages.md) | [简体中文](2026-10-29-managed-live-message-pages.zh-CN.md)
 
+The follow-up [snapshot removal](2026-10-29-managed-message-snapshot-removal.md) supersedes this change's optional read selector and retained snapshot defaults. Direct message reads become the default and the public snapshot table is removed there; the implementation and validation status of that follow-up are recorded separately.
+
 ## Problem and scope
 
 The merged bounded query API reads published snapshots. It can lag message projection and the Java WebShell Provider still bootstraps through the full-snapshot transcript path. The requested behavior is direct SQL reads for the latest 100 Items, older pages on scroll, and live updates through the existing event stream. Export reads live message pages and does not promise frozen bodies. Only public Managed H2/MySQL WebShell reads change; daemon Legacy, execution recovery, private CSI, canonical journals and schema remain unchanged. Existing snapshot APIs and their authenticated cursors retain their default semantics; removing their other dependencies is separate work.

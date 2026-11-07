@@ -2,6 +2,8 @@
 
 [English](2026-10-29-managed-live-message-pages.md) | [简体中文](2026-10-29-managed-live-message-pages.zh-CN.md)
 
+后续[快照删除](2026-10-29-managed-message-snapshot-removal.zh-CN.md)替代本变更的可选读取选择项及保留快照默认路径。在该后续变更中，直接消息读取成为默认，并移除公开快照表；其实现及验证状态单独记录。
+
 ## 问题与范围
 
 已合并的有界查询API读取已发布快照，可能落后于消息投影，Java WebShell Provider启动时仍使用完整快照transcript路径。目标是直接SQL读取最近100个Item、滚动加载更早页，并通过既有事件流实时更新。导出读取实时消息页，不承诺冻结正文。只调整公开Managed H2/MySQL WebShell读取；daemon Legacy、执行恢复、私有CSI、canonical journal和schema保持不变。既有快照API及认证游标保留默认语义，清理它们的其他依赖另行处理。

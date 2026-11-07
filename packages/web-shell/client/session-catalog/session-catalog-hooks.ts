@@ -652,6 +652,10 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
     sessions: result.sessions,
     loading: result.loading,
     error: result.error,
+    // A retained page after a failed refresh (or a hidden-tab deferral) is
+    // not a fresh answer from the daemon — readers that prune on absence must
+    // treat it as "not in this page" rather than "gone".
+    stale: result.stale,
     reload,
     nextCursor: page?.nextCursor,
     liveMergeFailed: page?.liveMergeFailed === true,
