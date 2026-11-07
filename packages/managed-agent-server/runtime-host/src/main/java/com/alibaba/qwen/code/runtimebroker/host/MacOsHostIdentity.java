@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker.host;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
@@ -43,7 +44,7 @@ public final class MacOsHostIdentity {
                 throw new IOException("macOS storage birth time is unavailable");
             }
             return birth.toString();
-        } catch (NumberFormatException | java.time.DateTimeException error) {
+        } catch (NumberFormatException | DateTimeException error) {
             throw new IOException("macOS storage birth time is invalid", error);
         }
     }

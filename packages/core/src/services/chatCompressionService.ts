@@ -23,6 +23,7 @@ import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
 import { withoutAutoMemorySnapshots } from '../memory/request-context.js';
 import { runSideQuery } from '../utils/sideQuery.js';
+import { movePromptContextAheadOfUserText } from '../core/prompt-context-order.js';
 import { buildModelIdContext, resolveModelId } from '../utils/modelId.js';
 import { supportsOpenAIPrefixCaching } from '../core/openaiContentGenerator/prefix-caching.js';
 import { logChatCompression } from '../telemetry/loggers.js';
@@ -1122,7 +1123,11 @@ export class ChatCompressionService {
         const authType = config.getContentGeneratorConfig().authType;
         const sharedResult = await config.getBaseLlmClient().generateText({
           contents: [
-            ...sideQueryHistory,
+            // A copy, reordered the same way the main request reorders its
+            // entries: the shared payload exists to reuse the prefix the main
+            // request just warmed. The cold path and the post-compact image
+            // restore keep reading the stored order of `sideQueryHistory`.
+            ...movePromptContextAheadOfUserText(sideQueryHistory),
             {
               role: 'user',
               parts: [
