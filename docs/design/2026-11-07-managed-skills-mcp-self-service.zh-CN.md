@@ -192,11 +192,17 @@ Workspace 端点使用 `/v1/agents/workspaces/{workspaceId}/extensions`：`POST 
 
 安装冻结作用域、输入摘要、目标平台、编译器版本、所选 pins 和操作身份。按 actor 隔离的 pending-command 存储只保存公开 pins、阶段、预期 revision 和键。响应丢失后查询原回执；输入/目标变化需要新命令。发布成功而 settings/apply 失败显示已保存、未应用，不引入延迟自动 apply。包 Skills 与静态 Skills 分别标注。
 
+确定的 apply 失败（`mode: apply`）以及精确的提交前 `extension_config_revision_conflict` 或 `extension_selection_upgrade_required` 响应允许用户显式重新审阅。普通冲突、传输错误、已提交请求的回执缺失、`pending`、`recovery_required` 和补偿失败继续保留原操作屏障。重新审阅先检查原键，再读取已稳定的最新 Session 快照，随后只轮换 apply 键；发布/settings 键、已发布包的 pin 和 Runtime 快照字节保持不变。OAuth 绑定在获得上述证明后清除 pending 请求，并保留刚读取的快照供用户下一次显式选择。没有提交标记的旧 OAuth 日志按已提交、结果未知处理。
+
+个人 OAuth 元数据 query、status 和撤销沿用现有 inspection 的 Workspace operator 与部署发布权限边界，OAuth 关闭时也保持相同要求。普通 Workspace 阅读权限继续覆盖 Session 历史和执行结果，query 响应不扩大包配置可见性。Java SDK 在 query 的 `extensions` 或 start 的 `pin` 参数为 null 时省略对应可选字段，保留服务端使用当前 pin 的回退；显式空列表仍表示空选择。
+
+浏览器捕获每次 OAuth 授权的发起 flow，在等待 status/complete/start 响应后重新验证 flow 身份。完成的绑定使用该捕获 flow 的 server 身份。替换 flow 或离开其作用域后，迟到结果在影响新 flow 前被丢弃，不依赖稍后发生的 abort 清理。
+
 切换输入类型时清除所选更新目标。只有精确安装结果确认 active 后，成功的编辑才返回创建模式；预览、发布和恢复 pending 都不算编辑完成。选择操作只继承包 revision、digest 和 settings revision 均未变化的个人绑定。安装器仅在验证替换 pin 的当前 OAuth 声明及本人凭据引用后才能保留绑定，并将过滤后实际提交的绑定写入恢复日志。
 
-Session 快照从同一个 active bundle 投影生效 pins 和个人绑定。更新失败时，requested pins 仍仅供诊断；即使 active 基线没有个人绑定，也保留版本 2 标记以便显式修复。扩展命令校验接受协商的 bundle 版本 1 和 2，并验证版本 2 的绑定与执行主体关系。启用个人授权时，队列的两个准入入口都在分发前阻塞其他 actor 的命令并暂停队列。
+Session 快照从同一个 active bundle 投影生效 pins 和个人绑定。更新失败时，requested pins 仍仅供诊断；即使 active 基线没有个人绑定，也保留版本 2 标记以便显式修复。恢复时将经过校验的 bundle 内容与最近 active 基线比较，因为 Hosted 会以新资源 ID 重新发布相同内容；successor 契约仍要求精确恢复失败操作的 previous 引用。扩展命令校验接受协商的 bundle 版本 1 和 2，并验证版本 2 的绑定与执行主体关系。启用个人授权时，队列的两个准入入口都在分发前阻塞其他 actor 的命令并暂停队列。
 
-即使另一位 operator 提交的移除失败，恢复也保留最近已提交 active 基线的执行 actor；持久化命令仍记录该 operator 供审计。准入沿已提交配置链验证精确的恢复 bundle 引用，并保留全部凭据和 owner 校验，不给普通 apply 命令跨 actor 的例外。只有空的初始 revision 0 可以在没有 active 基线时恢复。HTTP token 请求使用扩展 bundle revision；MCP 连接独立的配置计数器不能当作授权 revision。
+即使另一位 operator 提交的移除失败，恢复也保留最近已提交 active 基线的执行 actor；持久化命令仍记录该 operator 供审计。准入沿已提交配置链验证恢复 bundle 内容与个人执行身份，并保留全部凭据和 owner 校验，不给普通 apply 命令跨 actor 的例外。只有空的初始 revision 0 可以在没有 active 基线时恢复。HTTP token 请求使用扩展 bundle revision；MCP 连接独立的配置计数器不能当作授权 revision。
 
 Runtime 导入只扫描项目 `.qwen/skills` 和 `.agents/skills`，保留优先级并显示重复项。候选与快照请求属于 Session owner 作用域，携带观察到的 generation 和摘要。使用 Broker 文件边界；owner 过期/未 ready 时失败，不 provisioning、不回退。在服务端生成的非执行包元数据中记录源相对路径。快照变化返回 `source_changed`。
 

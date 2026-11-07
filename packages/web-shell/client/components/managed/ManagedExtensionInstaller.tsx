@@ -19,10 +19,7 @@ import type {
   ManagedExtensionInspection,
   ManagedExtensionSnapshot,
 } from './managed-extension-types';
-import {
-  getManagedClientId,
-  managedRequestId,
-} from './managed-session-storage';
+import { getManagedClientId } from './managed-session-storage';
 import {
   continueManagedExtensionInstall,
   createManagedExtensionInstall,
@@ -31,6 +28,8 @@ import {
   ManagedExtensionInstallAuthorizationRequired,
   parseManagedExtensionInstall,
   isManagedExtensionInstallActive,
+  isManagedExtensionConfigurationPending,
+  reviewManagedExtensionInstall,
   type ManagedExtensionInstallCommand,
 } from './managed-extension-install';
 import type {
@@ -38,7 +37,6 @@ import type {
   ManagedMcpOAuthSnapshot,
 } from './managed-mcp-oauth-types';
 import { ManagedMcpOAuthPanel } from './ManagedMcpOAuthPanel';
-import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 
 export interface ManagedExtensionInstallerProps {
   provider: ManagedAgentProvider;
@@ -318,9 +316,7 @@ export function ManagedExtensionInstaller(
     catalog.selfService.canPublish &&
     snapshot.selfService?.supported === true &&
     snapshot.selfService.canApply;
-  const blocked =
-    !!snapshot.operation &&
-    !['active', 'failed'].includes(snapshot.operation.state);
+  const blocked = isManagedExtensionConfigurationPending(snapshot);
   const identity = JSON.stringify([
     kind,
     name,
@@ -918,83 +914,20 @@ export function ManagedExtensionInstaller(
                 request.current?.abort();
                 request.current = controller;
                 setBusy(true);
-                void (async () => {
-                  try {
-                    const original = await management.lookupApplyOperation!(
-                      sessionId,
-                      pending.applyKey,
-                      { clientId, signal: controller.signal },
-                    );
-                    controller.signal.throwIfAborted();
-                    if (isManagedExtensionInstallActive(pending, original)) {
+                void reviewManagedExtensionInstall(management, pending, {
+                  clientId,
+                  signal: controller.signal,
+                })
+                  .then((reviewed) => {
+                    if (controller.signal.aborted || !mounted.current) return;
+                    if (!reviewed) {
                       save(undefined);
                       setStatus('managed.install.complete');
                       onChanged();
                       props.onInstalled?.();
-                      return undefined;
-                    }
-                    if (
-                      original.operation &&
-                      !['active', 'failed'].includes(original.operation.state)
-                    )
-                      throw new Error(
-                        'The original operation still requires recovery.',
-                      );
-                  } catch (cause) {
-                    if (
-                      !(
-                        cause instanceof JavaManagedAgentHttpError &&
-                        cause.status === 404
-                      )
-                    )
-                      throw cause;
-                  }
-                  return management.query(sessionId, {
-                    clientId,
-                    signal: controller.signal,
-                  });
-                })()
-                  .then((current) => {
-                    if (
-                      !current ||
-                      controller.signal.aborted ||
-                      !mounted.current
-                    )
                       return;
-                    if (
-                      current.operation &&
-                      !['active', 'failed'].includes(current.operation.state)
-                    )
-                      throw new Error('Configuration is pending.');
-                    save({
-                      ...pending,
-                      expectedConfigRevision: current.revision,
-                      extensions: current.extensions,
-                      applyKey: `${managedRequestId()}:apply`,
-                      applySubmitted: false,
-                      ...(current.selectionVersion === 2 ||
-                      pending.selectionVersion === 2
-                        ? {
-                            selectionVersion: 2,
-                            mcpAuthBindings: [
-                              ...(current.mcpAuthBindings ?? []).filter(
-                                (binding) =>
-                                  !pending.pin ||
-                                  !binding.serverId.startsWith(
-                                    `${pending.pin.extensionId}:`,
-                                  ),
-                              ),
-                              ...(pending.mcpAuthBindings ?? []).filter(
-                                (binding) =>
-                                  pending.pin &&
-                                  binding.serverId.startsWith(
-                                    `${pending.pin.extensionId}:`,
-                                  ),
-                              ),
-                            ],
-                          }
-                        : {}),
-                    });
+                    }
+                    save(reviewed);
                     setStatus('managed.install.reviewed');
                     setFailed(false);
                     onChanged();

@@ -86,6 +86,7 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.s
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sshNoStartReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unavailable;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unwrap;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.workerRefusedRelease;
 
 /** Repository-backed orchestration for the private Managed Runtime contract. */
 public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerOperations {
@@ -655,13 +656,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     .thenAccept(receipt -> renewal.persistDrainReceipt(receipt, authority))
                     .thenCompose(ignored -> drainSessions(binding, renewal, authority, null));
         });
-    }
-
-    private static boolean workerRefusedRelease(Throwable error) {
-        Throwable cause = unwrap(error);
-        return cause instanceof RuntimeBrokerException failure
-                && ("managed_runtime_owner_hold_pending".equals(failure.getCode())
-                        || "managed_runtime_release_timeout".equals(failure.getCode()));
     }
 
     /**

@@ -236,7 +236,7 @@ class ManagedExtensionConfigurationAdmissionTest {
     }
 
     @Test
-    void revokedCommittedGrantCanRecordRecoveryAndRestoreEmptyWithoutAdmittingANewRevokedBinding() throws Exception {
+    void republishedBaselineCanRecoverAfterRevocationWithoutAdmittingANewRevokedBinding() throws Exception {
         String workspace = registerWorkspace();
         String id = UUID.randomUUID().toString();
         var journal = publicJournal(id, workspace);
@@ -261,12 +261,15 @@ class ManagedExtensionConfigurationAdmissionTest {
         var auth = bindings.get("values");
         var empty = json.createArrayNode();
         CommitResource baseline = bundle("baseline-empty", 1, empty);
+        CommitResource baselineSnapshot = bundle("baseline-empty-snapshot", 1, empty);
+        assertThat(baselineSnapshot.resourceId()).isNotEqualTo(baseline.resourceId());
+        assertThat(baselineSnapshot.bytesBase64()).isEqualTo(baseline.bytesBase64());
         CommitResource personal = bundle("personal", 2, auth);
         CommitResource altered = bundle("altered-personal", 2, auth);
         CommitResource restored = bundle("restored-empty", 3, empty);
         CommitResource rejected = bundle("new-revoked-binding", 4, auth);
         List<CommitResource> closure = new ArrayList<>(resources());
-        closure.addAll(List.of(baseline, personal, altered, restored, rejected));
+        closure.addAll(List.of(baseline, baselineSnapshot, personal, altered, restored, rejected));
         ObjectNode initialCommand = command(0, empty);
         ObjectNode current = null;
         for (String phase : List.of("preparing", "prepared", "committed", "active")) {
@@ -275,18 +278,18 @@ class ManagedExtensionConfigurationAdmissionTest {
         }
         ObjectNode personalCommand = command(1, auth);
         for (String phase : List.of("preparing", "prepared", "committed")) {
-            current = configurationPhase(phase, current, personalCommand, 2, baseline, null, personal);
+            current = configurationPhase(phase, current, personalCommand, 2, baselineSnapshot, null, personal);
             commit(journal, id, workspace, current, "committed".equals(phase), false, closure);
         }
         grants.revoke(scope, grant.id(), grant.generation());
         assertThat(grants.credential(scope, grant.id()).state()).isEqualTo("revoked");
         ObjectNode committed = current;
-        ObjectNode active = configurationPhase("active", committed, personalCommand, 2, baseline, null, personal);
+        ObjectNode active = configurationPhase("active", committed, personalCommand, 2, baselineSnapshot, null, personal);
         assertThatCode(() -> transaction(() -> {
             sessions.requireConfigurationCommit("tenant", workspace, id, active);
             return null;
         })).doesNotThrowAnyException();
-        ObjectNode recovery = configurationPhase("recovery_required", committed, personalCommand, 2, baseline, null, personal);
+        ObjectNode recovery = configurationPhase("recovery_required", committed, personalCommand, 2, baselineSnapshot, null, personal);
         ObjectNode changedBundle = recovery.deepCopy();
         changedBundle.set("bundleRef", reference(altered));
         assertThatThrownBy(() -> commit(journal, id, workspace, changedBundle, false, false, closure))
@@ -311,7 +314,7 @@ class ManagedExtensionConfigurationAdmissionTest {
                 .isInstanceOf(ManagedAgentException.class);
         current = recovery;
         for (String phase : List.of("preparing", "prepared", "committed", "active")) {
-            current = configurationPhase(phase, current, personalCommand, 3, personal, baseline, restored);
+            current = configurationPhase(phase, current, personalCommand, 3, personal, baselineSnapshot, restored);
             commit(journal, id, workspace, current, "committed".equals(phase), false, closure);
         }
         assertThat(ManagedMcpSettings.find(jdbc, "tenant", id).path("configRevision").asLong()).isEqualTo(3);
@@ -355,12 +358,15 @@ class ManagedExtensionConfigurationAdmissionTest {
                 .put("credentialGeneration", grant.generation());
         var empty = json.createArrayNode();
         CommitResource personal = bundle("owner-active", 1, auth);
+        CommitResource personalSnapshot = bundle("owner-active-snapshot", 1, auth);
+        assertThat(personalSnapshot.resourceId()).isNotEqualTo(personal.resourceId());
+        assertThat(personalSnapshot.bytesBase64()).isEqualTo(personal.bytesBase64());
         CommitResource removal = bundle("owner-removed", 2, empty);
         CommitResource restored = bundle("owner-restored", 3, auth);
         CommitResource borrowed = bundle("owner-borrow-attempt", 2, auth);
         CommitResource forged = bundle("owner-forged-restore", 4, auth);
         List<CommitResource> closure = new ArrayList<>(resources());
-        closure.addAll(List.of(personal, removal, restored, borrowed, forged));
+        closure.addAll(List.of(personal, personalSnapshot, removal, restored, borrowed, forged));
         ObjectNode current = null;
         ObjectNode initial = command(0, auth);
         for (String phase : List.of("preparing", "prepared", "committed", "active")) {
@@ -368,17 +374,17 @@ class ManagedExtensionConfigurationAdmissionTest {
             commit(journal, id, workspace, current, "committed".equals(phase), false, closure);
         }
         ObjectNode remove = command(1, empty).put("actorKey", DigestUtils.sha256Hex("other-operator"));
-        ObjectNode borrowing = configurationPhase("committed", current, remove, 2, personal, null, borrowed);
+        ObjectNode borrowing = configurationPhase("committed", current, remove, 2, personalSnapshot, null, borrowed);
         assertThatThrownBy(() -> transaction(() -> {
             ManagedMcpOAuthAdmission.commit(jdbc, "tenant", id, borrowing);
             return null;
         })).isInstanceOf(ManagedAgentException.class);
         for (String phase : List.of("preparing", "prepared", "committed", "recovery_required")) {
-            current = configurationPhase(phase, current, remove, 2, personal, null, removal);
+            current = configurationPhase(phase, current, remove, 2, personalSnapshot, null, removal);
             commit(journal, id, workspace, current, "committed".equals(phase), false, closure);
         }
         for (String phase : List.of("preparing", "prepared", "committed", "active")) {
-            current = configurationPhase(phase, current, remove, 3, removal, personal, restored);
+            current = configurationPhase(phase, current, remove, 3, removal, personalSnapshot, restored);
             commit(journal, id, workspace, current, "committed".equals(phase), false, closure);
         }
         JsonNode active = ManagedMcpSettings.find(jdbc, "tenant", id);

@@ -166,7 +166,7 @@ public final class ManagedMcpOAuthAdmission {
             ManagedConfigInstall.require(current);
             if ("active".equals(current.path("phase").asText())) {
                 if (!ManagedExtensionRecords.same(
-                        current.path("bundleRef"), body.path("restoresBundleRef"))) {
+                        readBundle(jdbc, tenant, session, current.path("bundleRef")), restored)) {
                     throw invalid();
                 }
                 foundActive = true;

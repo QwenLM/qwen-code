@@ -106,7 +106,8 @@ class ManagedMcpOAuthServiceTest {
         when(packages.canPublish("tenant", "actor", "workspace")).thenReturn(false);
         doThrow(new ManagedAgentException(403, "forbidden", "Forbidden"))
                 .when(packages).requireExecutionAccess("tenant", "actor", "workspace");
-        assertThat(service.query("tenant", "actor", "session", null).path("servers").isEmpty()).isTrue();
+        assertThatThrownBy(() -> service.query("tenant", "actor", "session", null))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getStatus()).isEqualTo(403));
         assertThatThrownBy(() -> service.status("tenant", "actor", "session", attemptId)).isInstanceOf(ManagedAgentException.class);
         assertThatThrownBy(() -> service.revoke("tenant", "actor", "session", credentialId, 1)).isInstanceOf(ManagedAgentException.class);
         verify(repository, never()).credentials(any());
@@ -146,23 +147,7 @@ class ManagedMcpOAuthServiceTest {
 
     @Test
     void reauthorizationReadsTheExactStableCredentialInsteadOfTheBoundedCredentialList() throws Exception {
-        settings.setEnabled(true);
-        settings.setCallbackUri("https://agent.example/oauth/mcp/callback");
-        settings.setRuntimeTokenProxyBaseUrl("https://broker.example");
-        settings.setIsolatedToolProfiles(List.of("hosted-workspace-mcp/1"));
-        var provider = new ManagedMcpOAuthProperties.OAuthProvider();
-        provider.setIssuer("https://issuer.example");
-        provider.setResourceUri("https://mcp.example/mcp");
-        provider.setClientId("client");
-        provider.setAuthorizationEndpoint("https://issuer.example/authorize");
-        provider.setScopes(List.of("read"));
-        settings.setProviders(Map.of("provider", provider));
-        when(stateStore.supportsPersonalMcpExecution()).thenReturn(true);
-        var harness = mock(HarnessConnector.class);
-        when(harness.supportsPersonalMcpOAuth()).thenReturn(true);
-        var beans = new DefaultListableBeanFactory();
-        beans.registerSingleton("harness", harness);
-        ReflectionTestUtils.setField(service, "harness", beans.getBeanProvider(HarnessConnector.class));
+        var provider = enableOAuth();
         when(client.providerDigest(provider)).thenReturn("b".repeat(64));
         ObjectNode recipe = json.createObjectNode().put("httpUrl", provider.getResourceUri());
         recipe.putObject("auth").put("type", "oauth").put("providerId", "provider")
@@ -182,6 +167,50 @@ class ManagedMcpOAuthServiceTest {
         verify(repository).createAttempt(captured.capture());
         assertThat(captured.getValue().binding().path("credentialEpoch").asLong()).isEqualTo(513);
         verify(repository, never()).credentials(any());
+    }
+
+    @Test
+    void supportedQueryRejectsReadersBeforeInspectionAndAllowsPublishers() {
+        enableOAuth();
+        var session = sessions.requireReadableSession("tenant", "actor", "session");
+        when(sessions.requireReadableSession("tenant", "reader", "session")).thenReturn(session);
+        doThrow(new ManagedAgentException(403, "extension_management_forbidden", "Forbidden"))
+                .when(packages).requireExecutionAccess("tenant", "reader", "workspace");
+        assertThatThrownBy(() -> service.query("tenant", "reader", "session", List.of(pin)))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getStatus()).isEqualTo(403));
+        verify(packages, never()).inspection(eq("tenant"), eq("reader"), eq("workspace"), any(Pin.class));
+        verify(repository, never()).credentials(any());
+
+        when(repository.credentials(scope)).thenReturn(List.of());
+        ObjectNode inspection = json.createObjectNode();
+        inspection.putArray("mcpServers");
+        when(packages.inspection("tenant", "actor", "workspace", pin)).thenReturn(inspection);
+        var result = service.query("tenant", "actor", "session", List.of(pin));
+        assertThat(result.path("supported").asBoolean()).isTrue();
+        assertThat(result.path("canAuthorize").asBoolean()).isTrue();
+        assertThat(result.path("servers").isEmpty()).isTrue();
+        verify(packages).requireExecutionAccess("tenant", "actor", "workspace");
+    }
+
+    private ManagedMcpOAuthProperties.OAuthProvider enableOAuth() {
+        settings.setEnabled(true);
+        settings.setCallbackUri("https://agent.example/oauth/mcp/callback");
+        settings.setRuntimeTokenProxyBaseUrl("https://broker.example");
+        settings.setIsolatedToolProfiles(List.of("hosted-workspace-mcp/1"));
+        var provider = new ManagedMcpOAuthProperties.OAuthProvider();
+        provider.setIssuer("https://issuer.example");
+        provider.setResourceUri("https://mcp.example/mcp");
+        provider.setClientId("client");
+        provider.setAuthorizationEndpoint("https://issuer.example/authorize");
+        provider.setScopes(List.of("read"));
+        settings.setProviders(Map.of("provider", provider));
+        when(stateStore.supportsPersonalMcpExecution()).thenReturn(true);
+        var harness = mock(HarnessConnector.class);
+        when(harness.supportsPersonalMcpOAuth()).thenReturn(true);
+        var beans = new DefaultListableBeanFactory();
+        beans.registerSingleton("harness", harness);
+        ReflectionTestUtils.setField(service, "harness", beans.getBeanProvider(HarnessConnector.class));
+        return provider;
     }
 
     private ObjectNode binding() {

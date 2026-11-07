@@ -8496,7 +8496,7 @@
         "tags": ["Public Resources"],
         "operationId": "McpOAuthQuery",
         "x-qwen-implementation-status": "implemented",
-        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "description": "Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions.",
         "requestBody": {
           "required": true,
           "content": {
@@ -8546,7 +8546,7 @@
         "tags": ["WebShell"],
         "operationId": "webShellMcpOAuthQuery",
         "x-qwen-implementation-status": "implemented",
-        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "description": "Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions.",
         "requestBody": {
           "required": true,
           "content": {
@@ -8591,7 +8591,7 @@
         "tags": ["Public Resources"],
         "operationId": "McpOAuthStart",
         "x-qwen-implementation-status": "implemented",
-        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "description": "Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions.",
         "requestBody": {
           "required": true,
           "content": {
@@ -8641,7 +8641,7 @@
         "tags": ["WebShell"],
         "operationId": "webShellMcpOAuthStart",
         "x-qwen-implementation-status": "implemented",
-        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "description": "Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions.",
         "requestBody": {
           "required": true,
           "content": {
@@ -8686,7 +8686,7 @@
         "tags": ["Public Resources"],
         "operationId": "McpOAuthStatus",
         "x-qwen-implementation-status": "implemented",
-        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "description": "Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions.",
         "requestBody": {
           "required": true,
           "content": {
@@ -8736,7 +8736,7 @@
         "tags": ["WebShell"],
         "operationId": "webShellMcpOAuthStatus",
         "x-qwen-implementation-status": "implemented",
-        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "description": "Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions.",
         "requestBody": {
           "required": true,
           "content": {
@@ -8781,7 +8781,7 @@
         "tags": ["Public Resources"],
         "operationId": "McpOAuthComplete",
         "x-qwen-implementation-status": "implemented",
-        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "description": "Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions.",
         "requestBody": {
           "required": true,
           "content": {
@@ -8831,7 +8831,7 @@
         "tags": ["WebShell"],
         "operationId": "webShellMcpOAuthComplete",
         "x-qwen-implementation-status": "implemented",
-        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "description": "Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions.",
         "requestBody": {
           "required": true,
           "content": {
@@ -8876,7 +8876,7 @@
         "tags": ["Public Resources"],
         "operationId": "McpOAuthRevoke",
         "x-qwen-implementation-status": "implemented",
-        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "description": "Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions.",
         "requestBody": {
           "required": true,
           "content": {
@@ -8926,7 +8926,7 @@
         "tags": ["WebShell"],
         "operationId": "webShellMcpOAuthRevoke",
         "x-qwen-implementation-status": "implemented",
-        "description": "Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions.",
+        "description": "Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions.",
         "requestBody": {
           "required": true,
           "content": {

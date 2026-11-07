@@ -262,6 +262,95 @@ async function lookup<T>(request: () => Promise<T>): Promise<T | undefined> {
   }
 }
 
+export function isManagedExtensionConfigurationPending(
+  snapshot: ManagedExtensionSnapshot,
+) {
+  const operation = snapshot.operation;
+  return (
+    !!operation &&
+    operation.state !== 'active' &&
+    !(operation.state === 'failed' && operation.mode === 'apply')
+  );
+}
+
+export function isManagedExtensionApplyRejected(cause: unknown) {
+  return (
+    cause instanceof JavaManagedAgentHttpError &&
+    cause.status === 409 &&
+    [
+      'extension_config_revision_conflict',
+      'extension_selection_upgrade_required',
+    ].includes(cause.code)
+  );
+}
+
+export async function queryManagedExtensionApplyReview(
+  management: Management,
+  sessionId: string,
+  key: string,
+  submitted: boolean,
+  options: ManagedAgentRequestOptions,
+) {
+  const original = await lookup(() =>
+    management.lookupApplyOperation!(sessionId, key, options),
+  );
+  options.signal?.throwIfAborted();
+  if (
+    (!original?.operation && submitted) ||
+    (original && isManagedExtensionConfigurationPending(original))
+  )
+    throw new Error(
+      'The original configuration outcome still requires recovery.',
+    );
+  const current = await management.query(sessionId, options);
+  options.signal?.throwIfAborted();
+  if (
+    current.sessionId !== sessionId ||
+    isManagedExtensionConfigurationPending(current)
+  )
+    throw new Error('Configuration is pending.');
+  return current;
+}
+
+export async function reviewManagedExtensionInstall(
+  management: Management,
+  command: ManagedExtensionInstallCommand,
+  options: ManagedAgentRequestOptions,
+) {
+  const current = await queryManagedExtensionApplyReview(
+    management,
+    command.sessionId,
+    command.applyKey,
+    command.applySubmitted === true,
+    options,
+  );
+  if (isManagedExtensionInstallActive(command, current)) return;
+  return {
+    ...command,
+    expectedConfigRevision: current.revision,
+    extensions: current.extensions,
+    applyKey: `${managedRequestId()}:apply`,
+    applySubmitted: false,
+    ...(current.selectionVersion === 2 || command.selectionVersion === 2
+      ? {
+          selectionVersion: 2 as const,
+          mcpAuthBindings: [
+            ...(current.mcpAuthBindings ?? []).filter(
+              (binding) =>
+                !command.pin ||
+                !binding.serverId.startsWith(`${command.pin.extensionId}:`),
+            ),
+            ...(command.mcpAuthBindings ?? []).filter(
+              (binding) =>
+                command.pin &&
+                binding.serverId.startsWith(`${command.pin.extensionId}:`),
+            ),
+          ],
+        }
+      : {}),
+  };
+}
+
 function packagePin(operation: ManagedExtensionPackageOperation) {
   const pin = {
     extensionId: operation.extensionId,
@@ -438,14 +527,17 @@ export async function continueManagedExtensionInstall(
   );
   options.signal?.throwIfAborted();
   if (existing?.operation) {
-    if (['active', 'failed'].includes(existing.operation.state))
-      return existing;
-    return management.resume(
-      command.sessionId,
-      existing.operation.operationId,
-      false,
-      options,
-    );
+    const result = ['active', 'failed'].includes(existing.operation.state)
+      ? existing
+      : await management.resume(
+          command.sessionId,
+          existing.operation.operationId,
+          false,
+          options,
+        );
+    if (result.operation && !isManagedExtensionConfigurationPending(result))
+      save({ applySubmitted: false });
+    return result;
   }
   if (authorize) {
     command = await authorize(command);
@@ -473,8 +565,16 @@ export async function continueManagedExtensionInstall(
       ? { mcpAuthBindings: selection.mcpAuthBindings }
       : {}),
   });
-  return management.apply(command.sessionId, selection, {
-    ...options,
-    idempotencyKey: command.applyKey,
-  });
+  try {
+    const result = await management.apply(command.sessionId, selection, {
+      ...options,
+      idempotencyKey: command.applyKey,
+    });
+    if (result.operation && !isManagedExtensionConfigurationPending(result))
+      save({ applySubmitted: false });
+    return result;
+  } catch (cause) {
+    if (isManagedExtensionApplyRejected(cause)) save({ applySubmitted: false });
+    throw cause;
+  }
 }

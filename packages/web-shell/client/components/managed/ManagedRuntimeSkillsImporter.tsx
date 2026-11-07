@@ -23,6 +23,8 @@ import {
   createManagedExtensionInstall,
   parseManagedExtensionInstall,
   isManagedExtensionInstallActive,
+  isManagedExtensionConfigurationPending,
+  reviewManagedExtensionInstall,
   type ManagedExtensionInstallCommand,
 } from './managed-extension-install';
 import { getManagedClientId } from './managed-session-storage';
@@ -126,9 +128,7 @@ export function ManagedRuntimeSkillsImporter({
     !snapshot.selfService.runtimeSkillImportSupported
   )
     return null;
-  const blocked =
-    !!snapshot.operation &&
-    !['active', 'failed'].includes(snapshot.operation.state);
+  const blocked = isManagedExtensionConfigurationPending(snapshot);
   return (
     <Card data-managed-runtime-skills>
       <CardHeader>
@@ -373,6 +373,32 @@ export function ManagedRuntimeSkillsImporter({
         >
           {t(pending ? 'managed.extensions.retry' : 'managed.install.install')}
         </Button>
+        {pending && (
+          <Button
+            variant="outline"
+            disabled={busy}
+            onClick={() =>
+              void run(async (signal) => {
+                const reviewed = await reviewManagedExtensionInstall(
+                  api,
+                  pending,
+                  { clientId, signal },
+                );
+                signal.throwIfAborted();
+                save(reviewed);
+                setStatus(
+                  reviewed
+                    ? 'managed.install.reviewed'
+                    : 'managed.install.complete',
+                );
+                if (!reviewed) setPreview(undefined);
+                onChanged();
+              })
+            }
+          >
+            {t('managed.install.reviewAgain')}
+          </Button>
+        )}
         {pending && !pending.applySubmitted && (
           <Button
             variant="outline"

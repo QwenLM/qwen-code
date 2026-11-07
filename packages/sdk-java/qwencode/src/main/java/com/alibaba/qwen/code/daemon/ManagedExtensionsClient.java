@@ -173,13 +173,17 @@ public final class ManagedExtensionsClient {
     }
 
     public Map<String, Object> queryMcpOAuth(String sessionId, List<Map<String, Object>> pins) {
-        return oauth(sessionId, "query", Map.of("extensions", pins));
+        return oauth(sessionId, "query", pins == null ? Map.of() : Map.of("extensions", pins));
     }
 
     public Map<String, Object> startMcpOAuth(String sessionId, String serverId, Map<String, Object> pin,
             String browserNonce, String idempotencyKey) {
-        return oauth(sessionId, "start", Map.of("serverId", serverId, "pin", pin, "browserNonce", browserNonce,
+        Map<String, Object> body = new java.util.LinkedHashMap<>(Map.of("serverId", serverId, "browserNonce", browserNonce,
                 "idempotencyKey", header(idempotencyKey)));
+        if (pin != null) {
+            body.put("pin", pin);
+        }
+        return oauth(sessionId, "start", body);
     }
 
     public Map<String, Object> mcpOAuthStatus(String sessionId, String attemptId) {

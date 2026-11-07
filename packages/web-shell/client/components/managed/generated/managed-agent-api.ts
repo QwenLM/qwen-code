@@ -1292,7 +1292,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions. */
+        /** @description Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions. */
         post: operations["webShellMcpOAuthQuery"];
         delete?: never;
         options?: never;
@@ -1309,7 +1309,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions. */
+        /** @description Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions. */
         post: operations["webShellMcpOAuthStart"];
         delete?: never;
         options?: never;
@@ -1326,7 +1326,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions. */
+        /** @description Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions. */
         post: operations["webShellMcpOAuthStatus"];
         delete?: never;
         options?: never;
@@ -1343,7 +1343,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions. */
+        /** @description Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions. */
         post: operations["webShellMcpOAuthComplete"];
         delete?: never;
         options?: never;
@@ -1360,7 +1360,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Personal HTTP MCP authorization requires the authenticated actor, Workspace publishing permission and an isolated supported profile. Results retain Workspace read permissions. */
+        /** @description Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions. */
         post: operations["webShellMcpOAuthRevoke"];
         delete?: never;
         options?: never;
