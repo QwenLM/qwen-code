@@ -990,11 +990,19 @@ describe('ci failure patrol workflow', () => {
       for (const step of patSteps) {
         expect(step.env.GH_BIN).toBe('${{ steps.guard.outputs.gh }}');
         expect(step.env.MKTEMP_BIN).toBe('${{ steps.guard.outputs.mktemp }}');
+        // Strip comments first, as the stage assertion above does: a
+        // commented-out pin still contains the substring, so asserting against
+        // the raw body would let someone disable the reroute channel and keep
+        // this gate green.
+        const code = step.run
+          .split('\n')
+          .filter((l) => !l.trim().startsWith('#'))
+          .join('\n');
         // gh's own reroute channel, independent of PATH.
-        expect(step.run).toContain('export GH_HOST=github.com');
-        expect(step.run).toContain('unset GH_ENTERPRISE_TOKEN GH_TOKEN');
-        expect(step.run).toContain('patrol-gh-config.XXXXXX');
-        expect(step.run).toContain('export GH_CONFIG_DIR');
+        expect(code).toContain('export GH_HOST=github.com');
+        expect(code).toContain('unset GH_ENTERPRISE_TOKEN GH_TOKEN');
+        expect(code).toContain('patrol-gh-config.XXXXXX');
+        expect(code).toContain('export GH_CONFIG_DIR');
       }
       // Every node invocation in the job goes through the verified path.
       for (const step of job.steps) {
