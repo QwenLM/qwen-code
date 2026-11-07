@@ -33544,6 +33544,50 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('closes the session when a conditional close finds no active work', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? { closed: true, holds: [] }
+            : {},
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const drain = (async () => {
+        for await (const ev of bridge.subscribeEvents(session.sessionId))
+          events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      await bridge.closeSession(session.sessionId, undefined, {
+        closeIfUnheld: true,
+        reason: 'scheduled_task_deleted',
+      });
+      await drain;
+
+      expect(bridge.sessionCount).toBe(0);
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+            call.params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
+        ),
+      ).toHaveLength(1);
+      // Pinned as a literal rather than read back from the caller's options:
+      // the nested close re-emits `closeOpts.reason ?? 'client_close'`, so a
+      // read-back would let a lost hand-off pass unnoticed.
+      const closedEvent = events.find((e) => e.type === 'session_closed');
+      expect(closedEvent).toBeDefined();
+      expect((closedEvent?.data as { reason: string }).reason).toBe(
+        'scheduled_task_deleted',
+      );
+
+      await bridge.shutdown();
+    });
+
     it('keeps the session when a conditional close finds active work', async () => {
       const handle = makeChannel({
         initializeImpl: () => activeWorkInitializeResponse(),
