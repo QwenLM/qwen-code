@@ -402,6 +402,31 @@ describe('isDestructiveCommand — git commit --amend', () => {
     expectAllowed([command], 'write a report');
   });
 
+  // `xargs -L N` takes its value as a detached word (GNU declares `L:`), so
+  // the program after the value is `rm`, not `5`. Reading `-L` as an
+  // optional-value letter left the program position unclassifiable and denied
+  // every plain `xargs -L N` file pipeline — the false positive reported on
+  // #16075. The value-flag rows below stay denied so the narrowing cannot be
+  // mistaken for skipping the program word.
+  it.each([
+    'find . -name "*.log" | xargs -L 5 rm',
+    'ls | xargs -L 2 echo',
+    'echo x | xargs -L 5 rm',
+    'find . -name "*.log" | xargs -L5 rm',
+    'find . -name "*.log" | xargs -n 1 rm',
+    'ls | xargs --max-lines 5 rm',
+  ])('allows an xargs value flag that keeps its program: %s', (command) => {
+    expectAllowed([command], 'clean up old logs');
+  });
+
+  it.each([
+    'ls | xargs -L 5 git commit --amend',
+    "ls | xargs -L 5 sh -c 'git commit --amend'",
+    'ls | xargs --max-lines 5 git commit -m x --amend',
+  ])('still blocks an amend behind an xargs value flag: %s', (command) => {
+    expectBlocked(command, 'amend the commit', 'amend');
+  });
+
   it('allows git commit (without --amend)', () => {
     expectAllowed(['git commit -m "fix"'], 'commit changes');
   });

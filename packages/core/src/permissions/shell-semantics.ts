@@ -2635,11 +2635,14 @@ const AMEND_REDIRECT_TOKEN = /^\d*(?:>>?|>\||<<?|<>|<<<|>&|<&|&>|&>>)/;
 const AMEND_EXPANSION_WORD = /\$[A-Za-z0-9_{(@*#?$!-]|`|\{[^{}]*,/;
 
 /** xargs short letters whose value is required: attached to the cluster, or
- * the next word when the cluster ends there. */
-const XARGS_VALUE_LETTERS = 'IJnPsEadR';
+ * the next word when the cluster ends there. `-L` is one of them — GNU xargs
+ * declares `L:`, so `xargs -L 5 rm` runs `rm`. Treating it as optional made
+ * every `xargs -L N <program>` pipeline unclassifiable and the recogniser
+ * answered "amend" (a false denial on plain file pipelines). */
+const XARGS_VALUE_LETTERS = 'IJnLPsEadR';
 /** xargs short letters with an OPTIONAL attached value: a detached value
  * cannot be told from the program word, so the position fails closed. */
-const XARGS_OPTIONAL_LETTERS = 'elL';
+const XARGS_OPTIONAL_LETTERS = 'el';
 const XARGS_NO_VALUE_LETTERS = '0prtxo';
 const XARGS_LONG_REQUIRED = new Set([
   '--max-args',
@@ -2648,8 +2651,9 @@ const XARGS_LONG_REQUIRED = new Set([
   '--delimiter',
   '--arg-file',
   '--process-slot-var',
+  '--max-lines',
 ]);
-const XARGS_LONG_OPTIONAL = new Set(['--replace', '--eof', '--max-lines']);
+const XARGS_LONG_OPTIONAL = new Set(['--replace', '--eof']);
 const XARGS_LONG_NO_VALUE = new Set([
   '--null',
   '--no-run-if-empty',

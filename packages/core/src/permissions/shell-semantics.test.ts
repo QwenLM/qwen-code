@@ -973,6 +973,42 @@ describe('commandContainsGitAmend wrapper payload attribution (#16075 R1-1)', ()
   });
 });
 
+// R12-1 follow-up: `xargs -L N` carries its value as a detached word (GNU
+// `L:`), so the program is the word after it. The optional-value table used to
+// hold `-L`, which left the position unclassifiable and failed closed: every
+// `xargs -L N <program>` pipeline answered "amend" (#16075).
+describe('commandContainsGitAmend xargs value-flag attribution', () => {
+  it.each([
+    'find . -name "*.log" | xargs -L 5 rm',
+    'ls | xargs -L 2 echo',
+    'echo x | xargs -L 5 rm',
+    'find . -name "*.log" | xargs -L5 rm',
+    'find . -name "*.log" | xargs -n 1 rm',
+    'ls | xargs --max-lines 5 rm',
+  ])('reads the program after the value: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(false);
+  });
+
+  it.each([
+    'ls | xargs -L 5 git commit --amend',
+    "ls | xargs -L 5 sh -c 'git commit --amend'",
+    'ls | xargs -L5 git commit --amend',
+    'ls | xargs --max-lines 5 git commit -m x --amend',
+  ])('still sees an amend behind the value: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+
+  // `-e`/`-l` keep an OPTIONAL attached value, so a detached word there cannot
+  // be told from the program: that position stays fail-closed on purpose.
+  it.each([
+    'ls | xargs -e END rm',
+    'ls | xargs -l rm',
+    'ls | xargs -e END git commit --amend',
+  ])('still fails closed on a detached optional value: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+});
+
 // R8-2 / R10-1: a trailing `\c` in an ANSI-C word stays literal. Consuming
 // the closing quote as its operand left the quote state open and swallowed
 // the rest of the line, hiding both the amend and the file operations.
