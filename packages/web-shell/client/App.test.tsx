@@ -13068,9 +13068,32 @@ describe('App subscription logout command', () => {
     mockWorkspaceActions.getSubscriptionConfig.mockResolvedValue({
       enabled: true,
       signedIn: true,
-      plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
+      plansUrl:
+        'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=desktop',
     });
     testState.prompt = '/logout';
+  });
+
+  it('waits for a session to connect before checking account command availability', async () => {
+    mockConnection.status = 'connecting';
+    const { rerender } = renderApp();
+    await flush();
+
+    expect(mockSessionActions.getContext).not.toHaveBeenCalled();
+
+    mockConnection.status = 'connected';
+    rerender();
+    await flush();
+
+    expect(mockSessionActions.getContext).toHaveBeenCalledWith({
+      silent: true,
+    });
+    expect(testState.latestChatEditorProps?.commands).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'logout' }),
+        expect.objectContaining({ name: 'upgrade' }),
+      ]),
+    );
   });
 
   it.each(['/logout', '/upgrade'])(
@@ -13112,7 +13135,7 @@ describe('App subscription logout command', () => {
       await clickSubmit(container);
       await flush();
       expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
-        url: 'https://chat.qwen.ai/?memberPlan=qwen_code',
+        url: 'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=desktop',
       });
       expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     } finally {
@@ -24104,6 +24127,32 @@ describe('App session callbacks', () => {
       composerScopeKey: 'standalone',
       workspaceFeaturesEnabled: false,
     });
+  });
+
+  it('uses the effective workspace model without saving it again on the first prompt', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.sessionContext = { kind: 'workspace', cwd: '/workspace' };
+    mockConnection.currentModel = 'fixture-openai(openai)';
+    mockConnection.providers = {
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: true,
+      current: { authType: 'openai', modelId: 'fixture-openai(openai)' },
+      providers: [],
+    };
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit(
+        'First prompt with the workspace model',
+      );
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
+    });
+    expect(mockSessionActions.setModel).not.toHaveBeenCalled();
   });
 
   it('creates the first prompt in a newly selected secondary workspace', async () => {

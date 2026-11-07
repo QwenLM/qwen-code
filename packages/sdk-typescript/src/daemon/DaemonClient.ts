@@ -429,6 +429,8 @@ export interface DaemonClientOptions {
   baseUrl: string;
   /** Bearer token; required for non-loopback daemon binds. */
   token?: string;
+  /** Attribution for Qwen subscription browser links. Defaults to desktop on the daemon. */
+  subscriptionPaywallScene?: 'cli' | 'desktop' | 'plugin';
   /**
    * Override the global `fetch` for tests. Defaults to `globalThis.fetch`.
    * Note: AbortController/AbortSignal must be Node-native for the default
@@ -943,6 +945,7 @@ export class DaemonClient {
     Promise<DaemonWorkspaceProvidersStatus>
   >();
   private readonly promptLimit: number;
+  private readonly subscriptionPaywallQuery: string;
   private readonly promptCounts: Record<string, number> = Object.create(null);
   /**
    * Pluggable transport layer. Defaults to `RestSseTransport` when
@@ -968,6 +971,9 @@ export class DaemonClient {
 
   constructor(opts: DaemonClientOptions) {
     this.baseUrl = stripTrailingSlashes(opts.baseUrl);
+    this.subscriptionPaywallQuery = opts.subscriptionPaywallScene
+      ? `?paywallScene=${encodeURIComponent(opts.subscriptionPaywallScene)}`
+      : '';
     // When no explicit token is passed, fall back to
     // QWEN_SERVER_TOKEN env var so clients with
     // `export QWEN_SERVER_TOKEN=...` in their shell don't have to
@@ -7374,7 +7380,7 @@ export class DaemonClient {
     opts: { signal?: AbortSignal } = {},
   ): Promise<DaemonSubscriptionConfig> {
     return this.fetchWithTimeout(
-      `${this.baseUrl}/auth/subscription`,
+      `${this.baseUrl}/auth/subscription${this.subscriptionPaywallQuery}`,
       { headers: this.headers({}), signal: opts.signal },
       async (res) => {
         if (!res.ok)
@@ -7386,7 +7392,7 @@ export class DaemonClient {
 
   async startSubscriptionLogin(): Promise<DaemonSubscriptionFlow> {
     return this.fetchWithTimeout(
-      `${this.baseUrl}/auth/subscription/flows`,
+      `${this.baseUrl}/auth/subscription/flows${this.subscriptionPaywallQuery}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),
@@ -7444,6 +7450,25 @@ export class DaemonClient {
         if (!res.ok)
           throw await this.failOnError(res, 'POST /auth/subscription/userinfo');
         return (await res.json()) as DaemonSubscriptionUserInfo | null;
+      },
+    );
+  }
+
+  async getSubscriptionDefaultModel(
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<{ modelId: string }> {
+    const route = '/auth/subscription/model';
+    return this.fetchWithTimeout(
+      `${this.baseUrl}${route}`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: '{}',
+        signal: opts.signal,
+      },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, `POST ${route}`);
+        return (await res.json()) as { modelId: string };
       },
     );
   }

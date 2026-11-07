@@ -93,7 +93,7 @@ const subscription = vi.hoisted(() => ({
   email: 'real@example.com',
   deviceAuth: {
     verification_uri_complete:
-      'https://chat.qwen.ai/authorize?user_code=REAL-CODE&client=qwen-code',
+      'https://chat.qwen.ai/authorize?user_code=REAL-CODE&client=cli&entry=qwen_code&paywallScene=cli',
   },
   checking: false,
   connecting: false,
@@ -1689,7 +1689,7 @@ describe('real subscription entry', () => {
     await press('return');
     expect(screen.getByText('Waiting for sign-in…')).toBeTruthy();
     expect(document.body.textContent).toContain(
-      'user_code=REAL-CODE&client=qwen-code',
+      'user_code=REAL-CODE&client=cli',
     );
     expect(document.body.textContent).not.toContain('Local Mock');
     expect(config.refreshAuth).not.toHaveBeenCalled();
@@ -1806,12 +1806,12 @@ describe('real subscription entry', () => {
 
   it('offers activation Retry only after failure and preserves cancellation', async () => {
     subscription.state = { status: 'ready', plan: 'Pro' };
-    subscription.connectionError =
-      'Could not connect Qwen Subscription. Please try again.';
+    subscription.connectionError = '';
     renderDialog();
     await press('return');
     expect(screen.getByText('Retry')).toBeTruthy();
     expect(screen.queryByText('Connect')).toBeNull();
+    expect(screen.queryByText('Loading models from provider…')).toBeNull();
     await press('return');
     expect(subscription.connect).toHaveBeenCalledOnce();
     await pressEsc();

@@ -85,6 +85,7 @@ export interface HostedApprovalContinuation {
     readonly bindingId: string;
     readonly generation: string;
     readonly workspaceGeneration: string;
+    readonly provisionerKind?: 'local-process';
   };
   readonly batchId: string;
   readonly assistantRef: ManagedSessionDurableRef;
@@ -125,6 +126,7 @@ export async function readHostedApprovalContinuation(
   );
   const plan = raw as unknown as HostedApprovalContinuation;
   const header = session.authority.sessionHeader;
+  const providerPinned = Object.hasOwn(plan.runtime ?? {}, 'provisionerKind');
   if (
     Object.keys(raw).length !==
       15 + (plan.publicChildModel ? 1 : 0) + (plan.commandStep ? 1 : 0) ||
@@ -140,7 +142,15 @@ export async function readHostedApprovalContinuation(
     plan.approvalOrdinal < 0 ||
     plan.approvalOrdinal >= plan.calls.length ||
     !plan.runtime ||
-    Object.keys(plan.runtime).length !== 4 ||
+    Object.keys(plan.runtime).sort().join(',') !==
+      (providerPinned
+        ? 'bindingId,generation,provisionerKind,runtimeSessionId,workspaceGeneration'
+        : 'bindingId,generation,runtimeSessionId,workspaceGeneration') ||
+    (providerPinned &&
+      (plan.runtime.provisionerKind !== 'local-process' ||
+        plan.commandStep !== undefined ||
+        plan.calls.length !== 1 ||
+        plan.calls[0]?.call?.name !== 'ask_user_question')) ||
     (!plan.commandStep &&
       plan.runtime.runtimeSessionId !== hostedRuntimeSessionId(promptId)) ||
     !/^[1-9][0-9]{0,18}$/u.test(plan.runtime.generation) ||
