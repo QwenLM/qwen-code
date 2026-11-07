@@ -387,6 +387,30 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.listSessions).not.toHaveBeenCalled();
   });
 
+  it('measures the pane once the host supplies a session ID', async () => {
+    const observed = vi.fn();
+    vi.stubGlobal(
+      'ResizeObserver',
+      class MockResizeObserver {
+        observe = observed;
+        unobserve = vi.fn();
+        disconnect = vi.fn();
+      },
+    );
+    try {
+      const host = { hostSessionOnly: true };
+      await render(undefined, 'en', provider, undefined, true, host);
+      expect(
+        container.querySelector('[data-managed-host-waiting]'),
+      ).not.toBeNull();
+      expect(observed).not.toHaveBeenCalled();
+      await render('s1', 'en', provider, undefined, true, host);
+      expect(observed).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('tears down the old host scope and ignores its late transcript', async () => {
     let resolveOld!: (value: ManagedAgentSessionTranscript) => void;
     mocks.client.getTranscript.mockImplementationOnce(
@@ -1942,6 +1966,135 @@ describe('ManagedSessionsPage', () => {
       expect(provider.approvalChange.submit).not.toHaveBeenCalled();
     },
   );
+
+  it('keeps one host session pending request out of another session', async () => {
+    const host = { hostSessionOnly: true };
+    const clientId = getManagedClientId(provider.storageKey);
+    const key = `qwen-managed-pending:${provider.storageKey}:${clientId}:host:s1`;
+    sessionStorage.setItem(
+      key,
+      JSON.stringify({
+        idempotencyKey: 'host-pending',
+        text: 'queued in s1',
+        sessionId: 's1',
+      }),
+    );
+    await render('s2', 'en', provider, undefined, true, host);
+    // s2 must not adopt s1's unconfirmed request: without the `:host:<id>`
+    // key suffix it would surface here as a foreign pending banner.
+    expect(container.textContent).not.toContain(
+      'Another conversation has an unconfirmed request',
+    );
+    expect(container.textContent).not.toContain(
+      'was not confirmed as submitted',
+    );
+    await render('s1', 'en', provider, undefined, true, host);
+    expect(container.textContent).toContain('was not confirmed as submitted');
+  });
+
+  it('opens the pending owner with its workspace through the shared navigation path', async () => {
+    const owner = summary('s2', {
+      workspace: { workspaceId: 'ws-2', cwdRelative: '.' },
+    });
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [summary(), owner],
+    });
+    const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+    sessionStorage.setItem(
+      key,
+      JSON.stringify({
+        idempotencyKey: 'pending-owner',
+        text: 'queued elsewhere',
+        sessionId: 's2',
+      }),
+    );
+    await render('s1');
+    const open = [...container.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Open the original conversation',
+    );
+    expect(open).toBeTruthy();
+    await act(async () => {
+      open!.click();
+      await flush();
+    });
+    // Without the workspace id the host-side handler clears the managed
+    // workspace selection the owner session belongs to.
+    expect(onSelect).toHaveBeenCalledWith('s2', 'ws-2');
+  });
+
+  it('opens a pending owner that the served session page does not contain', async () => {
+    // Filtered, paginated and host-only pages can all omit the owner, so the
+    // workspace has to come from the request captured at submit time.
+    mocks.client.listSessions.mockResolvedValue({ sessions: [summary()] });
+    const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+    sessionStorage.setItem(
+      key,
+      JSON.stringify({
+        idempotencyKey: 'pending-owner-absent',
+        text: 'queued elsewhere',
+        sessionId: 's2',
+        workspaceId: 'ws-2',
+      }),
+    );
+    await render('s1');
+    const open = [...container.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Open the original conversation',
+    );
+    expect(open).toBeTruthy();
+    await act(async () => {
+      open!.click();
+      await flush();
+    });
+    expect(onSelect).toHaveBeenCalledWith('s2', 'ws-2');
+  });
+
+  it('ignores a pending record whose workspaceId is not a string', async () => {
+    // Rejecting the tampered record means the page behaves as if nothing was
+    // queued. Restoring it would hand the host a number where `workspaceId?:
+    // string` is contracted and clear the wrong selection.
+    mocks.client.listSessions.mockResolvedValue({ sessions: [summary()] });
+    const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+    sessionStorage.setItem(
+      key,
+      JSON.stringify({
+        idempotencyKey: 'pending-owner-tampered',
+        text: 'queued elsewhere',
+        sessionId: 's2',
+        workspaceId: 7,
+      }),
+    );
+    await render('s1');
+    expect(
+      [...container.querySelectorAll('button')].find(
+        (item) => item.textContent === 'Open the original conversation',
+      ),
+    ).toBeUndefined();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('persists the submitted workspace on the pending record', async () => {
+    // The read side alone is not enough: a filtered, paginated or host-only
+    // page only recovers the workspace from what was written here.
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        activeTurnId: undefined,
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+        capabilities: { canSend: true, canCancel: false, workspaceTurns: true },
+      }),
+    );
+    mocks.client.submitPrompt.mockResolvedValue({
+      sessionId: 'bound',
+      turnId: 'p2',
+    });
+    const saved = vi.spyOn(pendingStorage, 'saveManagedPending');
+    await render('bound');
+    await input('Run it again');
+    await click('Send');
+    const record = saved.mock.calls
+      .map(([, value]) => value)
+      .find((value) => value?.sessionId === 'bound');
+    expect(record).toMatchObject({ sessionId: 'bound', workspaceId: 'ws-a' });
+  });
 
   it.each([
     JSON.stringify({ storage: 'indexeddb', pendingId: 'missing' }),
@@ -4260,6 +4413,7 @@ describe('ManagedSessionsPage', () => {
         .querySelector('[data-managed-home]')
         ?.getAttribute('data-managed-empty'),
     ).toBe('true');
+    expect(container.querySelector('[data-welcome-header]')).not.toBeNull();
 
     await act(async () => root.unmount());
     container.remove();
@@ -4267,7 +4421,12 @@ describe('ManagedSessionsPage', () => {
     document.body.appendChild(container);
     root = createRoot(container);
     mocks.client.getSession.mockImplementation(async (id: string) =>
-      id === 's1' ? { ...summary(id), failure: 'runtime lost' } : summary(id),
+      id === 's1'
+        ? {
+            ...summary(id),
+            failure: { code: 'runtime_lost', message: 'runtime lost' },
+          }
+        : summary(id),
     );
     await render('s1', 'en', provider, undefined, true, {
       hostSessionOnly: true,
@@ -4277,6 +4436,11 @@ describe('ManagedSessionsPage', () => {
         .querySelector('[data-managed-home]')
         ?.getAttribute('data-managed-empty'),
     ).toBeNull();
+    // The banner explains the state, so the welcome block must not stack on it.
+    expect(container.querySelector('[data-welcome-header]')).toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'runtime lost',
+    );
   });
 
   it('renders Chinese Managed labels and states without English fallback overriding them', async () => {
@@ -4518,6 +4682,26 @@ describe('ManagedSessionsPage', () => {
       expect(onSelect).toHaveBeenLastCalledWith('s1');
     },
   );
+
+  it('drops a foreign error banner when the host switches sessions', async () => {
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [summary('s1'), summary('s2')],
+    });
+    mocks.client.submitPrompt.mockRejectedValueOnce(
+      new Error('Submit exploded'),
+    );
+    const host = { hostSessionOnly: true };
+    await render('s1', 'en', provider, undefined, true, host);
+    await input('For session A');
+    await click('Send');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      'Submit exploded',
+    );
+    // The notice describes the conversation it came from; session B must not
+    // inherit it.
+    await render('s2', 'en', provider, undefined, true, host);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
 
   it('clears accepted input after the owning editor remounts during an uncertain retry', async () => {
     mocks.client.listSessions.mockResolvedValue({

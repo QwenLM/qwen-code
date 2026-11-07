@@ -7,6 +7,7 @@ import {
   languageSettingToWebShellLanguage,
   normalizeLanguage,
 } from './i18n';
+import type { WebShellLanguage } from './i18n';
 
 // getTranslator returns the raw key when EN has no entry. SettingsMessage
 // translateSettingText then substitutes the settingsSchema.ts description,
@@ -169,6 +170,49 @@ describe('web-shell i18n catalog', () => {
     );
   });
 
+  it('keeps the waiting minigame copy available in both locales', () => {
+    for (const language of ['en', 'zh-CN'] as const) {
+      const t = getTranslator(language);
+      for (const key of [
+        'waitingGame.title',
+        'waitingGame.openActivity',
+        'waitingGame.activityTitle',
+        'waitingGame.usageTitle',
+        'waitingGame.startGame',
+        'waitingGame.backToHeatmap',
+        'waitingGame.heatmap',
+        'waitingGame.tokens',
+        'waitingGame.jumpToMessage',
+        'waitingGame.tokenTotal',
+        'waitingGame.tokenInput',
+        'waitingGame.tokenOutput',
+        'waitingGame.tokenCached',
+        'waitingGame.tokenContext',
+        'waitingGame.tokenEmpty',
+        'waitingGame.snakeControls',
+        'waitingGame.collapse',
+        'waitingGame.region',
+        'waitingGame.controls',
+        'waitingGame.paused',
+        'waitingGame.pausedHint',
+        'waitingGame.gameOver',
+        'waitingGame.restart',
+        'waitingGame.mute',
+        'waitingGame.unmute',
+      ]) {
+        expect(t(key)).not.toBe(key);
+      }
+    }
+    const zh = getTranslator('zh-CN');
+    expect(zh('waitingGame.heatmap')).toBe('热力图');
+    expect(zh('waitingGame.activityTitle')).toBe('问答热度');
+    expect(zh('waitingGame.openActivity')).toBe('打开任务热度');
+    expect(zh('waitingGame.score', { score: 100 })).toBe('得分 100');
+    expect(zh('waitingGame.cleared', { count: 2, score: 100 })).toBe(
+      '消除 2 列 · +100',
+    );
+  });
+
   it('keeps task cancellation and elapsed-time copy available in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
@@ -237,6 +281,17 @@ describe('web-shell i18n catalog', () => {
         t('settings.liveSetup.modelCustom'),
       );
     }
+  });
+
+  // A locale outside the shipped union (the provider is typed, but the
+  // runtime value is not checked) must resolve from the EN table: content
+  // assertions, so a mutation of the EN entry itself is caught.
+  it('falls back to EN for a language outside the shipped union', () => {
+    const t = getTranslator('fr' as unknown as WebShellLanguage);
+    expect(t('managed.tasks.title')).toBe('Session tasks');
+    expect(t('trajectory.filter.search')).toBe('Search loaded records…');
+    expect(t('messageDelete.selected', { count: 2 })).toBe('2 groups selected');
+    expect(t('welcome.prompt')).not.toBe('welcome.prompt');
   });
 });
 
