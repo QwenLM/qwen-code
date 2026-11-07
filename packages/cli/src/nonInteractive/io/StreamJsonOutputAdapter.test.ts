@@ -816,6 +816,440 @@ describe('StreamJsonOutputAdapter', () => {
       expect(parsed.error?.message).toBe('Test error');
     });
 
+    it('should report a session token-limit refusal instead of replaying the previous answer', () => {
+      const refusal = {
+        currentTokens: 120,
+        limit: 100,
+        message: 'Session token limit exceeded: 120 tokens > 100 limit.',
+      };
+      // A shared adapter (stream-json input mode) served the previous prompt,
+      // which ended with its own result. Its answer stays in
+      // `lastAssistantMessage` and must not be replayed for this refusal.
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.SessionTokenLimitExceeded,
+        value: refusal,
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.type).toBe('result');
+      expect(parsed.is_error).toBe(true);
+      expect(parsed.subtype).toBe('error_during_execution');
+      expect(parsed.error?.message).toBe(refusal.message);
+      expect(parsed).not.toHaveProperty('result');
+    });
+
+    it('should report a blocked prompt as an error instead of replaying the previous answer', () => {
+      // Previous prompt's turn, ended by its own result — see the token-limit
+      // case above.
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.type).toBe('result');
+      expect(parsed.is_error).toBe(true);
+      expect(parsed.subtype).toBe('error_during_execution');
+      expect(parsed.error?.message).toBe(
+        'Blocked by a UserPromptSubmit hook: policy',
+      );
+      expect(parsed).not.toHaveProperty('result');
+    });
+
+    it('should strip terminal control sequences from a blocked-hook reason', () => {
+      // Previous prompt's turn, ended by its own result — see the token-limit
+      // case above.
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: {
+          reason: 'policy\x1b[2J\nFATAL: forged line\x07',
+          originalPrompt: 'run it',
+        },
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.error?.message).toContain('policy');
+      expect(parsed.error?.message).not.toContain('\u001b');
+      expect(parsed.error?.message).not.toContain('\u0007');
+      // The reason lands on a single stderr line in text mode, so a newline
+      // in it must not survive as a forged second line.
+      expect(parsed.error?.message).not.toContain('\n');
+      expect(parsed.error?.message).not.toContain('\u000a');
+    });
+
+    it('should keep the text a turn produced before a mid-turn refusal', () => {
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'First answer',
+      });
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.is_error).toBe(false);
+      expect(parsed.result).toBe('First answer');
+    });
+
+    it('should keep the text a turn produced before a refusal in a later round', () => {
+      // The CLI starts a new assistant message at the head of every model
+      // round, so a refusal that latches on round 2's send has to leave the
+      // text round 1 already streamed as the turn's answer.
+      adapter = new StreamJsonOutputAdapter(mockConfig, false);
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'First answer',
+      });
+      adapter.finalizeAssistantMessage();
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.is_error).toBe(false);
+      expect(parsed.result).toBe('First answer');
+    });
+
+    it('should report the refusal over a caller error it did not cause', () => {
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: true,
+        subtype: 'error_max_turns',
+        errorMessage: 'Model produced plain text instead of structured output.',
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.is_error).toBe(true);
+      expect(parsed.subtype).toBe('error_max_turns');
+      expect(parsed.error?.message).toBe(
+        'Blocked by a UserPromptSubmit hook: policy',
+      );
+    });
+
+    it('should keep the refusal when the next round starts before the result', () => {
+      adapter = new StreamJsonOutputAdapter(mockConfig, false);
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.SessionTokenLimitExceeded,
+        value: {
+          currentTokens: 120,
+          limit: 100,
+          message: 'Session token limit exceeded: 120 tokens > 100 limit.',
+        },
+      });
+      // The CLI starts the next round even after a refused turn; that
+      // round boundary must not clear the latch.
+      adapter.startAssistantMessage();
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.is_error).toBe(true);
+      expect(parsed.subtype).toBe('error_during_execution');
+      expect(parsed).not.toHaveProperty('result');
+    });
+
+    it('should not resurrect a refused prompt from a later turn text', () => {
+      adapter = new StreamJsonOutputAdapter(mockConfig, false);
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.SessionTokenLimitExceeded,
+        value: {
+          currentTokens: 120,
+          limit: 100,
+          message: 'Session token limit exceeded: 120 tokens > 100 limit.',
+        },
+      });
+      // A drain turn (queued cron / background item) starts after the refused
+      // turn and streams its own answer; the refused prompt must still be
+      // reported as the refusal.
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'Second answer',
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.is_error).toBe(true);
+      expect(parsed).not.toHaveProperty('result');
+    });
+
+    it('should keep the refusal latch across a retry of the refused turn', () => {
+      // Previous prompt's turn, ended by its own result — see the token-limit
+      // case above.
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      adapter.restartAttempt(false, []);
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.is_error).toBe(true);
+      expect(parsed.error?.message).toBe(
+        'Blocked by a UserPromptSubmit hook: policy',
+      );
+    });
+
+    it('should report a refusal after a retry in a turn that produced no text', () => {
+      // A refusal fires at the head of a send, before that send streams, so the
+      // only real sequence is: this turn produced nothing yet, an attempt is
+      // retried, then the next send is refused.
+      adapter.restartAttempt(false, []);
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.is_error).toBe(true);
+      expect(parsed).not.toHaveProperty('result');
+    });
+
+    it('should keep a later round refusal on the success envelope after a retry in a later round', () => {
+      // A later round of the same turn re-baselines, is retried by the provider
+      // before its replacement streams, then that send is refused. Clearing the
+      // turn tally there would erase the answer already delivered and report an
+      // answered turn as `error_during_execution`.
+      adapter.startAssistantMessage();
+      adapter.restartAttempt(false, []);
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 3,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.is_error).toBe(false);
+      expect(parsed.result).toBe('Response text');
+    });
+
+    it('should not treat a synthesized reply as the turn text', () => {
+      // `emitNonInteractiveAssistantText` renders a slash command's reply as a
+      // Content event. That reply is not a prompt's answer, so a refusal on the
+      // next send must keep the error envelope instead of inheriting it.
+      // End the shared setup's turn first so the tally starts clear.
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+      adapter.startAssistantMessage();
+      const tallyBefore = adapter.getTurnProducedText();
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'Review queued.',
+      });
+      adapter.setTurnProducedText(tallyBefore);
+      adapter.finalizeAssistantMessage();
+
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+
+      const parsed = JSON.parse(stdoutWriteSpy.mock.calls[0][0] as string);
+      expect(parsed.is_error).toBe(true);
+      expect(parsed).not.toHaveProperty('result');
+    });
+
+    it('should stop reporting the refusal once the next turn answers', () => {
+      // Previous prompt's turn, ended by its own result — see the token-limit
+      // case above.
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+      const refused = JSON.parse(stdoutWriteSpy.mock.calls[0][0] as string);
+      expect(refused.is_error).toBe(true);
+
+      // The latch belongs to the turn it was set in; the result that ends that
+      // turn clears it, so the next prompt's genuine answer is not reported as
+      // a refusal.
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'Second answer',
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      const parsed = JSON.parse(stdoutWriteSpy.mock.calls[0][0] as string);
+      expect(parsed.is_error).toBe(false);
+      expect(parsed.subtype).toBe('success');
+      expect(parsed.result).toBe('Second answer');
+    });
+
     it('should use provided summary over extracted text', () => {
       stdoutWriteSpy.mockClear();
       adapter.emitResult({

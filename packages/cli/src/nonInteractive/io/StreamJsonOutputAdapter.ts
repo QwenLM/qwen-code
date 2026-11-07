@@ -17,6 +17,7 @@ import type {
   CLIAssistantMessage,
   CLIMessage,
   CLIPartialAssistantMessage,
+  CLIResultMessage,
   ControlMessage,
   StreamEvent,
   TextBlock,
@@ -134,12 +135,13 @@ export class StreamJsonOutputAdapter
     return message;
   }
 
-  emitResult(options: ResultOptions): void {
+  emitResult(options: ResultOptions): CLIResultMessage {
     const resultMessage = this.buildResultMessage(
       options,
       this.lastAssistantMessage,
     );
     this.emitMessageImpl(resultMessage);
+    return resultMessage;
   }
 
   emitMessage(message: CLIMessage | ControlMessage): void {
