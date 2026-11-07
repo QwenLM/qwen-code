@@ -23,6 +23,7 @@ import {
   getMCPServerStatus,
   getPlanModeSystemReminder,
   isShellProgressData,
+  isTodoWriteToolAvailable,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type {
@@ -117,7 +118,13 @@ export function buildInitialSystemReminders(config: Config): Part[] {
   const reminders: Part[] = [];
 
   if (config.getApprovalMode() === ApprovalMode.PLAN) {
-    reminders.push({ text: getPlanModeSystemReminder(config.getSdkMode?.()) });
+    reminders.push({
+      text: getPlanModeSystemReminder(
+        config.getSdkMode?.(),
+        config.isSessionWorkflowTodoContextActive?.() === true,
+        isTodoWriteToolAvailable(config),
+      ),
+    });
   }
 
   const arenaManager = config.getArenaManager?.();

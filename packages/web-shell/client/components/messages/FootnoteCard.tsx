@@ -1,5 +1,6 @@
 import {
   createElement,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -19,7 +20,7 @@ import type {
   WebShellFootnotePreviewMount,
 } from '../../customization';
 import { FootnotePreviewContent } from './FootnotePreviewContent';
-import { isSafeImageSrc } from './Markdown';
+import { MarkdownInertContext, isSafeImageSrc } from './Markdown';
 
 export function FootnoteSup({
   node,
@@ -91,6 +92,12 @@ function FootnoteCard({
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pinned = useRef(false);
   const restoredFocus = useRef(false);
+  // The card is rendered inside the plan's inert provider subtree, so the
+  // popover content (portaled out of the markdown tree) must opt out of the
+  // approval shortcut handler the same way the explain popover does: the
+  // plan container keeps `data-plan-interactive`, the portaled card gets
+  // `data-approval-shortcuts-ignore`.
+  const inert = useContext(MarkdownInertContext);
   const customIcon = useMemo(() => {
     try {
       const icon = iconResolver?.(
@@ -190,6 +197,7 @@ function FootnoteCard({
       <PopoverContent
         ref={content}
         data-web-shell-footnote-card=""
+        data-approval-shortcuts-ignore={inert ? '' : undefined}
         className="w-[360px] max-w-[calc(100vw-24px)] gap-3 rounded-2xl p-4 shadow-lg"
         side="top"
         align="start"

@@ -61,6 +61,13 @@ interface MarkdownProps {
    */
   isStreaming?: boolean;
   tableMode?: MarkdownTableMode;
+  /**
+   * Renders the document inert: links become non-interactive labels and
+   * images are dropped in favour of their alt text. Use for model-supplied
+   * Markdown on render-only surfaces (approval dialogs) where a link or
+   * image must not fire navigation or a network request.
+   */
+  inert?: boolean;
 }
 
 // Keep the cost of repeatedly parsing a growing stream bounded. Short streams
@@ -595,6 +602,7 @@ function CodeBlock({
   const { t } = useI18n();
   const appTheme = useTheme();
   const documentMode = useTranscriptRenderMode() === 'document';
+  const inert = useContext(MarkdownInertContext);
   const [html, setHtml] = useState<string | null>(null);
   const [copied, flashCopied] = useCopiedFlash();
 
@@ -674,8 +682,11 @@ function CodeBlock({
   // In document mode a mermaid fence falls through to the plain <pre> below,
   // holding its own source: the same degradation this component already applies
   // to syntax highlighting there, and what lets the export bundle drop mermaid
-  // and its graph dependencies (#11091).
-  if (lang === 'mermaid' && !isStreaming && !documentMode) {
+  // and its graph dependencies (#11091). Inert (approval) renders degrade the
+  // same way: mermaid's image shape assigns img.src from the diagram source
+  // before any sanitization, so the diagram must not mount from a
+  // model-supplied fence — the source stays visible as the text being approved.
+  if (lang === 'mermaid' && !isStreaming && !documentMode && !inert) {
     return <MermaidBlock code={code} />;
   }
 
@@ -732,6 +743,12 @@ const MarkdownSourceContext = createContext<MarkdownContentSource | undefined>(
   undefined,
 );
 const MarkdownDocumentContext = createContext<string | undefined>(undefined);
+// Inert rendering (approval dialogs): links render as labels, images as alt
+// text, so model-supplied Markdown cannot trigger navigation or requests.
+// Exported for the footnote card: its preview portaled out of the markdown
+// tree must degrade the same way, or a footnote's source link and image stay
+// live inside the approval dialog.
+export const MarkdownInertContext = createContext(false);
 
 interface PositionedCodeNode {
   readonly position?: {
@@ -892,6 +909,10 @@ function MarkdownLink({
 }: ComponentProps<'a'> & ExtraProps) {
   const renderMode = useTranscriptRenderMode();
   const openExternalLink = useExternalLinkOpener();
+  const inert = useContext(MarkdownInertContext);
+  if (inert) {
+    return <span className={styles.link}>{children}</span>;
+  }
   const footnote =
     node?.properties.dataFootnoteRef !== undefined ||
     node?.properties.dataFootnoteBackref !== undefined;
@@ -964,6 +985,10 @@ function MarkdownLink({
 
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   const renderMode = useTranscriptRenderMode();
+  const inert = useContext(MarkdownInertContext);
+  if (inert) {
+    return alt ? <span>{alt}</span> : null;
+  }
   const safeSrc = isSafeImageSrc(src, renderMode === 'document')
     ? src
     : undefined;
@@ -1109,6 +1134,7 @@ export const Markdown = memo(function Markdown({
   source,
   isStreaming,
   tableMode,
+  inert,
 }: MarkdownProps) {
   const { markdown, markdownTableMode } = useWebShellCustomization();
   const theme = useTheme();
@@ -1301,13 +1327,15 @@ export const Markdown = memo(function Markdown({
       className={source !== 'thinking' ? styles.content : undefined}
       data-markdown-source={source}
     >
-      <IsStreamingContext.Provider value={!!isStreaming}>
-        <MarkdownSourceContext.Provider value={source}>
-          <MarkdownDocumentContext.Provider value={renderedContent}>
-            {chartAwareMarkdown}
-          </MarkdownDocumentContext.Provider>
-        </MarkdownSourceContext.Provider>
-      </IsStreamingContext.Provider>
+      <MarkdownInertContext.Provider value={!!inert}>
+        <IsStreamingContext.Provider value={!!isStreaming}>
+          <MarkdownSourceContext.Provider value={source}>
+            <MarkdownDocumentContext.Provider value={renderedContent}>
+              {chartAwareMarkdown}
+            </MarkdownDocumentContext.Provider>
+          </MarkdownSourceContext.Provider>
+        </IsStreamingContext.Provider>
+      </MarkdownInertContext.Provider>
     </div>
   );
 });

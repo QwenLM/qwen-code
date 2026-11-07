@@ -24,6 +24,7 @@ import {
   ThinkingTranslateButton,
   type SessionContentGenerator,
 } from './AssistantMessage';
+import { Markdown } from './Markdown';
 import styles from './ToolApproval.module.css';
 import { buildUnifiedDiff } from '../../utils/unifiedDiff';
 import { DiffView } from './tools/DiffView';
@@ -734,15 +735,36 @@ export function ToolApproval({
           )}
         </>
       ) : showsContent ? (
-        <pre
-          className={`${styles.content}${
-            isExitPlanApproval ? ` ${styles.planContent}` : ''
-          }`}
-          id={commandId}
-          title={contentDisplay}
-        >
-          {contentDisplay}
-        </pre>
+        isExitPlanApproval ? (
+          // The plan is model-written markdown (the exit_plan_mode schema
+          // promises "Supports markdown"), so render it with the same
+          // Markdown primitive the assistant transcript uses instead of a
+          // raw <pre>. Model-supplied text, so it is control-char sanitized
+          // like every other approval render site; the sanitized text is
+          // the tooltip and the plain text behind the aria-describedby.
+          // The dialog is a render-only surface, so the plan renders inert
+          // (links as plain labels, images as alt text): a link or image in
+          // the model's plan must not fire navigation or a network request.
+          // `data-plan-interactive` (the same opt-out the diff rows below
+          // use) keeps digits and arrows from moving the approval selection
+          // when focus is on a focusable widget inside the plan (the
+          // footnote trigger, a copy button), while Escape still rejects.
+          // The portaled footnote popover renders outside this attribute,
+          // so the card marks itself `data-approval-shortcuts-ignore`
+          // instead (see FootnoteCard).
+          <div
+            className={`${styles.content} ${styles.planContent}`}
+            id={commandId}
+            title={contentDisplay}
+            data-plan-interactive
+          >
+            <Markdown content={contentDisplay} inert />
+          </div>
+        ) : (
+          <pre className={styles.content} id={commandId} title={contentDisplay}>
+            {contentDisplay}
+          </pre>
+        )
       ) : null}
 
       {diffs.length > 0 && (
