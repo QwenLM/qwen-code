@@ -1548,3 +1548,89 @@ describe('R9 review round: continuation and substitution word boundaries', () =>
     },
   );
 });
+
+describe('R10 review round: preserve provenance and fail closed on cd execution', () => {
+  it.each([
+    ["cd ''~; echo x > secrets/credentials", '/repo/secrets/credentials'],
+    ['enable -n cd ; cd /tmp ; echo x > .qwen/settings.json', REPO_SETTINGS],
+  ])('escalates a cd whose execution is not modeled: %s', (command, path) => {
+    expect(across(command)).toEqual([uncertainWrite(path)]);
+  });
+
+  it('does not strip a quoted environment assignment name before cd', () => {
+    expect(across("'A=b' cd /tmp; echo hi > settings.json")).toEqual([
+      write('/repo/settings.json'),
+    ]);
+  });
+
+  it.each([
+    "printf hi >'(a)'",
+    'echo {} > "(x)/../.qwen/settings.json"',
+    'echo {} > \\(x\\)/../.qwen/settings.json',
+  ])('keeps a quoted parenthesized redirect target literal: %s', (command) => {
+    const expected = command.includes('(a)')
+      ? write('/repo/(a)')
+      : write(REPO_SETTINGS);
+    expect(across(command)).toEqual([expected]);
+  });
+
+  it('keeps an empty quoted operand before a cd redirect', () => {
+    expect(across("cd ''>/tmp/log ; echo {} > .qwen/settings.json")).toEqual([
+      write('/tmp/log'),
+      uncertainWrite(REPO_SETTINGS),
+    ]);
+  });
+
+  it('keeps a quoted fd-shaped cp source as an operand', () => {
+    expect(sorted(across('cp "2">x .qwen/settings.json'))).toEqual(
+      sorted([read('/repo/2'), write('/repo/x'), write(REPO_SETTINGS)]),
+    );
+    expect(sorted(across('mv "2">x .qwen/settings.json'))).toEqual(
+      sorted([edit('/repo/2'), write('/repo/x'), write(REPO_SETTINGS)]),
+    );
+  });
+
+  it('preserves token provenance through transparent prefixes', () => {
+    expect(across("sudo cp '2>b' .qwen/settings.json")).toEqual([
+      read('/repo/2>b'),
+      write(REPO_SETTINGS),
+    ]);
+    for (const prefix of ['sudo', 'timeout 5', 'nohup']) {
+      expect(across(`${prefix} echo '2>b'`)).toEqual([]);
+    }
+  });
+
+  it.each([
+    ["cat <<'<'EOF", []],
+    ["cat <<'-'EOF", []],
+    ["echo hi >'>'out", [write('/repo/>out')]],
+    ["echo x &>'>'y", [write('/repo/>y')]],
+    ["echo hi >'|'out", [write('/repo/|out')]],
+  ])(
+    'retries shorter redirect operators after quoted syntax: %s',
+    (command, expected) => {
+      expect(across(command)).toEqual(expected);
+    },
+  );
+
+  it('propagates only exported cd functions into shell wrappers', () => {
+    expect(
+      across(
+        "cd() { :; }; export -f cd; bash -lc 'cd sub; echo {} > .qwen/settings.json'",
+      ),
+    ).toEqual([uncertainWrite(REPO_SETTINGS)]);
+  });
+
+  it('clears a removed cd function before resolving later writes', () => {
+    expect(
+      across('cd() { :; }; unset -f cd; cd .qwen && echo {} > settings.json'),
+    ).toEqual([write(REPO_SETTINGS)]);
+  });
+
+  it('neutralizes comment quotes even when earlier text has a backslash', () => {
+    expect(
+      across(String.raw`printf 'a\tb' # it's fine
+echo {} > .qwen/settings.json`),
+    ).toEqual([write(REPO_SETTINGS)]);
+  });
+});

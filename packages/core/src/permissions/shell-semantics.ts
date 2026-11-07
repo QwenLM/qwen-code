@@ -104,6 +104,10 @@ interface ShellToken extends TokenProvenance {
   text: string;
   bare: boolean;
   bareChars: boolean[];
+  /** Output positions where quoting or escaping produced no character. */
+  quotedOffsets: number[];
+  /** Quote or escape syntax appeared before the first output character. */
+  leadingQuotedContent: boolean;
   trailingSyntax: boolean;
 }
 
@@ -119,6 +123,7 @@ function tokenizeDetailed(command: string): ShellToken[] {
   let current = '';
   let bare = true;
   let bareChars: boolean[] = [];
+  let quotedOffsets: number[] = [];
   let trailingSyntax = false;
   let sawQuotedContent = false;
   let inSingle = false;
@@ -150,12 +155,14 @@ function tokenizeDetailed(command: string): ShellToken[] {
     if (ch === '\\' && !inSingle) {
       escaped = true;
       bare = false;
+      quotedOffsets.push(current.length);
       trailingSyntax = true;
       continue;
     }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
       bare = false;
+      quotedOffsets.push(current.length);
       sawQuotedContent = true;
       trailingSyntax = true;
       continue;
@@ -163,6 +170,7 @@ function tokenizeDetailed(command: string): ShellToken[] {
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
       bare = false;
+      quotedOffsets.push(current.length);
       sawQuotedContent = true;
       trailingSyntax = true;
       continue;
@@ -173,6 +181,7 @@ function tokenizeDetailed(command: string): ShellToken[] {
         current,
         bare,
         bareChars,
+        quotedOffsets,
         trailingSyntax,
         sawQuotedContent,
         {
@@ -184,6 +193,7 @@ function tokenizeDetailed(command: string): ShellToken[] {
       current = '';
       bare = true;
       bareChars = [];
+      quotedOffsets = [];
       trailingSyntax = false;
       sawQuotedContent = false;
       unquotedGlob = false;
@@ -200,6 +210,7 @@ function tokenizeDetailed(command: string): ShellToken[] {
     current,
     bare,
     bareChars,
+    quotedOffsets,
     trailingSyntax,
     sawQuotedContent,
     {
@@ -216,6 +227,7 @@ function pushToken(
   token: string,
   bare: boolean,
   bareChars: boolean[],
+  quotedOffsets: number[],
   trailingSyntax: boolean,
   sawQuotedContent: boolean,
   provenance: TokenProvenance,
@@ -242,6 +254,12 @@ function pushToken(
       leadTrim,
       leadTrim + normalized.length,
     );
+    const normalizedQuotedOffsets = quotedOffsets
+      .filter(
+        (offset) =>
+          offset >= leadTrim && offset <= leadTrim + normalized.length,
+      )
+      .map((offset) => offset - leadTrim);
     // Empty quotes still form an operand (`cd ''` fails without moving), but a
     // trailing backslash that consumed no character does not. Tracking actual
     // quoted/escaped word syntax separately from `bare` keeps those states apart.
@@ -251,6 +269,8 @@ function pushToken(
           text: normalized,
           bare,
           bareChars: normalizedBareChars,
+          quotedOffsets: normalizedQuotedOffsets,
+          leadingQuotedContent: normalizedQuotedOffsets[0] === 0,
           trailingSyntax,
           ...provenance,
         });
@@ -276,6 +296,9 @@ function pushToken(
     }
     token = normalized.slice(op!.length + 1);
     bareChars = normalizedBareChars.slice(op!.length + 1);
+    quotedOffsets = normalizedQuotedOffsets
+      .filter((offset) => offset >= op!.length + 1)
+      .map((offset) => offset - op!.length - 1);
     trailingSyntax = false;
     sawQuotedContent = false;
   }
@@ -456,9 +479,8 @@ function cutShellCommentsAndProcessSubstitutions(command: string): string {
 
 /**
  * Normalize comment text before compound-command splitting. Drop the last
- * backslash of an odd run at the end of a `#` comment line. On commands with
- * no backslashes, blank quote characters elsewhere in the comment without
- * changing their positions.
+ * backslash of an odd run at the end of a `#` comment line and, when selected,
+ * blank quote characters elsewhere in the comment without changing positions.
  * bash ends a comment at the newline regardless of a preceding backslash, but
  * the segment splitter suppresses every `\<newline>` pair as a continuation,
  * so without this the comment and the following line arrive glued into one
@@ -468,15 +490,15 @@ function cutShellCommentsAndProcessSubstitutions(command: string): string {
  * characters in ordinary comment prose must not open a quoted blob that hides
  * the newline and the following command's cwd.
  */
-function normalizeShellCommentsForSplit(command: string): string {
+function normalizeShellCommentsForSplit(
+  command: string,
+  neutralizeCommentQuotes = !command.includes('\\'),
+): string {
   let out = '';
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
   let wordStart = true;
-  // Backslash-bearing commands already use the conservative dual-reading merge.
-  // Keep that envelope unchanged; this repair is for the single no-backslash scan.
-  const neutralizeCommentQuotes = !command.includes('\\');
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -590,8 +612,13 @@ function isShellAbsolutePath(p: string): boolean {
   return p.startsWith('/') || /^[A-Za-z]:\//.test(p.replace(/\\/g, '/'));
 }
 
-function isEnvAssignmentToken(token: string): boolean {
-  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
+function isEnvAssignmentToken(token: string, bareChars?: boolean[]): boolean {
+  const match = /^[A-Za-z_][A-Za-z0-9_]*=/.exec(token);
+  if (!match) return false;
+  return (
+    bareChars === undefined ||
+    bareChars.slice(0, match[0].length).every(Boolean)
+  );
 }
 
 /**
@@ -620,6 +647,8 @@ function looksLikePath(s: string): boolean {
 interface RedirectResult {
   readFiles: string[];
   writeFiles: string[];
+  /** Operand prefixes recovered from redirect-shaped words. */
+  restoredPrefixes?: Set<string>;
 }
 
 /**
@@ -647,10 +676,12 @@ function isNetworkPseudoDevice(target: string): boolean {
  * bash expands the whole substitution to one fd path, so the fragment is not a
  * file this analyzer can name and must not be reported as one.
  */
-function isProcessSubstitutionFragment(target: string): boolean {
-  return (
-    target.startsWith('>(') || target.startsWith('<(') || target.startsWith('(')
-  );
+function isProcessSubstitutionFragment(
+  target: string,
+  bareChars: boolean[],
+): boolean {
+  const lead = target.startsWith('>(') || target.startsWith('<(') ? 1 : 0;
+  return target.startsWith('(', lead) && bareChars[lead] === true;
 }
 
 const REDIRECT_OPERATORS = [
@@ -679,28 +710,31 @@ interface RedirectTokenMatch {
 function parseRedirectToken(token: ShellToken): RedirectTokenMatch | null {
   for (let start = 0; start < token.text.length; start++) {
     const prefix = token.text.slice(0, start);
-    const operator = REDIRECT_OPERATORS.find((candidate) =>
-      token.text.startsWith(candidate, start),
-    );
-    if (!operator) continue;
-    if (!token.bareChars.slice(start, start + operator.length).every(Boolean)) {
-      continue;
+    for (const operator of REDIRECT_OPERATORS) {
+      if (!token.text.startsWith(operator, start)) continue;
+      if (
+        !token.bareChars.slice(start, start + operator.length).every(Boolean)
+      ) {
+        continue;
+      }
+      const target = token.text.slice(start + operator.length);
+      const prefixHasQuotedContent = token.leadingQuotedContent;
+      return {
+        operator,
+        target,
+        targetInToken: target !== '' || token.trailingSyntax,
+        targetBareChars: token.bareChars.slice(start + operator.length),
+        prefix,
+        // A prefix is an operand to keep, not an fd specifier to drop, unless it
+        // is the bare `2` / `{fd}` spelling. Quoting an fd-ish prefix turns it
+        // back into a word, which is why the bare-chars test disqualifies it.
+        // Zero-width quoting before the operator also forms an empty operand.
+        prefixIsOperand:
+          (start > 0 || prefixHasQuotedContent) &&
+          (!/^(?:\d+|\{\w+\})$/.test(prefix) ||
+            !token.bareChars.slice(0, start).every(Boolean)),
+      };
     }
-    const target = token.text.slice(start + operator.length);
-    return {
-      operator,
-      target,
-      targetInToken: target !== '' || token.trailingSyntax,
-      targetBareChars: token.bareChars.slice(start + operator.length),
-      prefix,
-      // A prefix is an operand to keep, not an fd specifier to drop, unless it
-      // is the bare `2` / `{fd}` spelling. Quoting an fd-ish prefix turns it
-      // back into a word, which is why the bare-chars test disqualifies it.
-      prefixIsOperand:
-        start > 0 &&
-        (!/^(?:\d+|\{\w+\})$/.test(prefix) ||
-          !token.bareChars.slice(0, start).every(Boolean)),
-    };
   }
   return null;
 }
@@ -752,7 +786,7 @@ function redirectTargetFile(
   if (target === '/dev/null') return undefined;
   if (
     !looksLikePath(target) ||
-    isProcessSubstitutionFragment(target) ||
+    isProcessSubstitutionFragment(target, match.targetBareChars) ||
     isNetworkPseudoDevice(target)
   ) {
     return undefined;
@@ -840,10 +874,31 @@ function extractRedirects(
     const prefix = remainingPrefixes.get(index);
     return prefix === undefined ? [token] : [prefix];
   });
+  const filteredDetailed = detailed.flatMap((token, index) => {
+    if (toRemove.has(index)) return [];
+    const prefix = remainingPrefixes.get(index);
+    if (prefix === undefined) return [token];
+    return [
+      {
+        ...token,
+        text: prefix,
+        bareChars: token.bareChars.slice(0, prefix.length),
+        quotedOffsets: token.quotedOffsets.filter(
+          (offset) => offset <= prefix.length,
+        ),
+      },
+    ];
+  });
   tokens.length = 0;
   tokens.push(...filtered);
+  detailed.length = 0;
+  detailed.push(...filteredDetailed);
 
-  return { readFiles, writeFiles };
+  return {
+    readFiles,
+    writeFiles,
+    restoredPrefixes: new Set(remainingPrefixes.values()),
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -975,7 +1030,11 @@ function isAttachedShortFlagValue(arg: string, flag: string): boolean {
 // Command handler helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-type CommandHandler = (args: string[], cwd: string) => ShellOperation[];
+type CommandHandler = (
+  args: string[],
+  cwd: string,
+  restoredPrefixes?: ReadonlySet<string>,
+) => ShellOperation[];
 
 /** Build read_file operations from positional path arguments. */
 function readOps(
@@ -1727,7 +1786,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
         filePath: resolvePath(p, cwd),
       })),
 
-  cp: (args, cwd) => {
+  cp: (args, cwd, restoredPrefixes) => {
     const targetDir = targetDirectoryPath(args, cwd);
     const flagsWithValue = new Set([
       '-S',
@@ -1743,7 +1802,9 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       '--copy-contents',
     ]);
     const positional = getPositionalArgs(args, flagsWithValue).filter(
-      looksLikePath,
+      (p) =>
+        looksLikePath(p) ||
+        (/^\d+$/.test(p) && restoredPrefixes?.has(p) === true),
     );
     if (positional.length === 0) return [];
     if (targetDir) {
@@ -1774,7 +1835,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     ];
   },
 
-  mv: (args, cwd) => {
+  mv: (args, cwd, restoredPrefixes) => {
     const targetDir = targetDirectoryPath(args, cwd);
     const flagsWithValue = new Set([
       '-S',
@@ -1786,7 +1847,9 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       '--context',
     ]);
     const positional = getPositionalArgs(args, flagsWithValue).filter(
-      looksLikePath,
+      (p) =>
+        looksLikePath(p) ||
+        (/^\d+$/.test(p) && restoredPrefixes?.has(p) === true),
     );
     if (targetDir && positional.length > 0) {
       return [
@@ -2444,21 +2507,30 @@ export function extractShellOperations(
   cwd: string,
 ): ShellOperation[] {
   if (!simpleCommand.trim()) return [];
-
   const detailed = tokenizeDetailed(simpleCommand).filter(
     (token) => token.text !== '' && !isBareBrace(token),
   );
+  return extractShellOperationsFromTokens(detailed, cwd);
+}
+
+function extractShellOperationsFromTokens(
+  detailed: ShellToken[],
+  cwd: string,
+): ShellOperation[] {
   const tokens = detailed.map((t) => t.text);
   if (tokens.length === 0) return [];
 
-  // Extract I/O redirections before dispatching to the command handler.
-  // This mutates `tokens` in-place by removing redirect tokens while keeping
-  // a quoted fd-shaped prefix as an operand.
-  const { readFiles: redirectReads, writeFiles: redirectWrites } =
-    extractRedirects(tokens, detailed, cwd);
+  // Extract I/O redirections before dispatching to the command handler. Both
+  // arrays are filtered together so prefix recursion can retain provenance.
+  const {
+    readFiles: redirectReads,
+    writeFiles: redirectWrites,
+    restoredPrefixes,
+  } = extractRedirects(tokens, detailed, cwd);
 
-  while (tokens[0] && isEnvAssignmentToken(tokens[0])) {
+  while (tokens[0] && isEnvAssignmentToken(tokens[0], detailed[0]?.bareChars)) {
     tokens.shift();
+    detailed.shift();
   }
 
   const cmdName = tokens[0];
@@ -2467,6 +2539,7 @@ export function extractShellOperations(
     return toRedirectOperations({
       readFiles: redirectReads,
       writeFiles: redirectWrites,
+      restoredPrefixes,
     });
   }
 
@@ -2492,7 +2565,7 @@ export function extractShellOperations(
         ) {
           startIdx++;
         }
-      } else if (isEnvAssignmentToken(t)) {
+      } else if (isEnvAssignmentToken(t, detailed[startIdx]?.bareChars)) {
         // Environment variable assignment: skip
         startIdx++;
       } else {
@@ -2509,16 +2582,16 @@ export function extractShellOperations(
       startIdx++;
     }
     if (startIdx < tokens.length) {
-      // Reconstruct the inner command and recurse
-      const innerCommand = tokens.slice(startIdx).join(' ');
-      ops.push(...extractShellOperations(innerCommand, cwd));
+      ops.push(
+        ...extractShellOperationsFromTokens(detailed.slice(startIdx), cwd),
+      );
     }
   } else {
     // ── Dispatch to the known-command handler ─────────────────────────────
     const handler = COMMANDS[cmdName];
     if (handler) {
       const args = tokens.slice(1);
-      ops.push(...handler(args, cwd));
+      ops.push(...handler(args, cwd, restoredPrefixes));
     }
     // Unknown commands: return no ops (safe — we don't guess what we don't know)
   }
@@ -2528,6 +2601,7 @@ export function extractShellOperations(
     ...toRedirectOperations({
       readFiles: redirectReads,
       writeFiles: redirectWrites,
+      restoredPrefixes,
     }),
   );
 
@@ -2608,6 +2682,9 @@ function stripRedirectsForOperandCount(tokens: ShellToken[]): {
         ...tok,
         text: match.prefix,
         bareChars: tok.bareChars.slice(0, match.prefix.length),
+        quotedOffsets: tok.quotedOffsets.filter(
+          (offset) => offset <= match.prefix.length,
+        ),
       });
     }
     const redirectTarget = match.targetInToken
@@ -2638,7 +2715,7 @@ function resolveCdTargetCwd(
   }
 
   let cdEnvironmentUnknown = false;
-  while (words[0] && isEnvAssignmentToken(words[0].text)) {
+  while (words[0] && isEnvAssignmentToken(words[0].text, words[0].bareChars)) {
     cdEnvironmentUnknown ||= /^(?:HOME|CDPATH)=/.test(words[0].text);
     words.shift();
   }
@@ -2744,7 +2821,9 @@ function resolveCdTargetCwd(
     /[)&]$/.test(target.text) ||
     target.text === '{' ||
     target.text === '}' ||
-    // A quoted tilde is a literal directory name, not home expansion.
+    // A quoted tilde, including one behind an empty quoted span, is a literal
+    // directory name rather than home expansion.
+    (target.text.startsWith('~') && target.leadingQuotedContent) ||
     target.quotedTilde ||
     // `~` and `~/…` expand via resolvePath below; the other tilde spellings
     // (`~-`, `~+`, `~user`) expand to a directory bash picks at runtime
@@ -2854,6 +2933,7 @@ function walkWithBackslashGate(
   cwd: string,
   depth: number,
   initialCwdUnknown: boolean,
+  initialCdFunctionUnknown = false,
 ): ShellOperation[] {
   // The walks split stripHeredocBodies(command), so a backslash that only
   // exists inside a heredoc body can never make the two readings diverge;
@@ -2866,6 +2946,7 @@ function walkWithBackslashGate(
       depth,
       initialCwdUnknown,
       undefined,
+      initialCdFunctionUnknown,
     );
   }
   // The two quote readings can disagree on where the operators are when a
@@ -2899,6 +2980,7 @@ function walkWithBackslashGate(
     depth,
     initialCwdUnknown,
     'bash',
+    initialCdFunctionUnknown,
   );
   if (bashOps.length > 0) {
     // A comment apostrophe can re-close the quote the bash scan is stuck in,
@@ -2922,10 +3004,31 @@ function walkWithBackslashGate(
       depth,
       initialCwdUnknown,
       undefined,
+      initialCdFunctionUnknown,
     );
     return mergeShellOperations(bashOps, extraOps);
   }
-  return walkCompoundCommand(command, cwd, depth, initialCwdUnknown, undefined);
+  const unionOps = walkCompoundCommand(
+    command,
+    cwd,
+    depth,
+    initialCwdUnknown,
+    undefined,
+    initialCdFunctionUnknown,
+  );
+  if (unionOps.length > 0) return unionOps;
+  // A comment quote can hide every operation from both original readings. Only
+  // that empty result gets a neutralized retry, preserving the uncertainty
+  // flags and artifact evidence from non-empty conservative walks (#12280 R8-4).
+  return walkCompoundCommand(
+    command,
+    cwd,
+    depth,
+    initialCwdUnknown,
+    undefined,
+    initialCdFunctionUnknown,
+    true,
+  );
 }
 
 /**
@@ -3154,8 +3257,13 @@ function walkCompoundCommand(
   depth: number,
   initialCwdUnknown: boolean,
   reading?: BackslashReading,
+  initialCdFunctionUnknown = false,
+  neutralizeCommentQuotes?: boolean,
 ): ShellOperation[] {
-  const stripped = normalizeShellCommentsForSplit(stripHeredocBodies(command));
+  const stripped = normalizeShellCommentsForSplit(
+    stripHeredocBodies(command),
+    neutralizeCommentQuotes,
+  );
   const subCommands = reading
     ? splitCompoundCommandSegmentsForReading(stripped, reading)
     : splitCompoundCommandSegments(stripped);
@@ -3168,7 +3276,9 @@ function walkCompoundCommand(
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;
   let cwdUnknown = initialCwdUnknown;
-  let cdFunctionUnknown = false;
+  let cdFunctionUnknown = initialCdFunctionUnknown;
+  let cdFunctionExportedUnknown = initialCdFunctionUnknown;
+  let cdBuiltinUnknown = false;
 
   for (const [index, { command: sub, terminator }] of subCommands.entries()) {
     // `cd x & …` runs the `cd` in a background subshell, so it does not move
@@ -3180,12 +3290,22 @@ function walkCompoundCommand(
 
     cdFunctionUnknown ||=
       /\b(?:function\s+(?:cd|pushd)\b|(?:cd|pushd)\s*\(\s*\))/.test(sub);
+    if (/\bexport\s+-f\s+(?:cd|pushd)\b/.test(sub)) {
+      cdFunctionExportedUnknown ||= cdFunctionUnknown;
+    }
+    if (/\bunset\s+-f\s+(?:cd|pushd)\b/.test(sub)) {
+      cdFunctionUnknown = false;
+      cdFunctionExportedUnknown = false;
+    }
+    if (/\benable\s+-n\s+(?:cd|pushd)\b/.test(sub)) {
+      cdBuiltinUnknown = true;
+    }
     const cdTarget = resolveCdTargetCwd(
       sub,
       effectiveCwd,
       cwdUnknown,
       artifactSegment[index] ?? false,
-      cdFunctionUnknown,
+      cdFunctionUnknown || cdBuiltinUnknown,
     );
     if (cdTarget.kind !== 'not-cd') {
       const redirectOps = toRedirectOperations(cdTarget.redirects);
@@ -3218,6 +3338,7 @@ function walkCompoundCommand(
             effectiveCwd,
             depth + 1,
             cwdUnknown,
+            cdFunctionExportedUnknown,
           ),
         );
         continue;
