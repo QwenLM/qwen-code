@@ -32,6 +32,7 @@ import {
 } from '../../deepseek-reasoning.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
+import { withEmptyToolParameters } from './utils.js';
 
 const debugLogger = createDebugLogger('DefaultOpenAICompatibleProvider');
 
@@ -249,7 +250,25 @@ export class DefaultOpenAICompatibleProvider
       ...(extraBody ? extraBody : {}),
     };
     this.flattenGptReasoningEffort(result);
-    return this.flattenDeepSeekReasoningEffort(result);
+    return this.emitMandatoryToolParameters(
+      this.flattenDeepSeekReasoningEffort(result),
+    );
+  }
+
+  /**
+   * Fill `parameters` for a tool that declares none, only when the user opts in
+   * with `generationConfig.toolParametersMandatory`. That stays a per-route
+   * choice rather than a converter-wide shape:
+   * docs/design/2026-09-17-parameterless-tool-parameters.md. Subclasses that
+   * chain `super.buildRequest` inherit this; DashScope builds its request from
+   * scratch and calls it from its own merge step.
+   */
+  protected emitMandatoryToolParameters(
+    request: OpenAI.Chat.ChatCompletionCreateParams,
+  ): OpenAI.Chat.ChatCompletionCreateParams {
+    return this.contentGeneratorConfig.toolParametersMandatory === true
+      ? withEmptyToolParameters(request)
+      : request;
   }
 
   protected flattenDeepSeekReasoningEffort<T extends object>(body: T): T {

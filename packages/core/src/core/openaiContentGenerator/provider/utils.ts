@@ -61,3 +61,42 @@ export function stripReasoningContent(
   }
   return [next as unknown as OpenAI.Chat.ChatCompletionMessageParam];
 }
+
+// A parameterless tool omits `parameters` by default; servers that type
+// `tools[].function.parameters` as a required field reject that omission, so
+// callers here decide per route with generationConfig.toolParametersMandatory.
+// Rationale and its measurement bounds:
+// docs/design/2026-09-17-parameterless-tool-parameters.md. Running at the
+// outbound boundary is also what lets an empty `properties` reach the wire at
+// all: `relaxSchemaForFunctionCalling` strips it during conversion.
+//
+// The checks below are runtime guards rather than narrowings: openai's types
+// admit only function tools, but `generationConfig.extra_body` is a user knob
+// merged into the request ahead of this repair, so a grammar or custom tool can
+// reach the map and has no `function` to dereference — and a hand-written entry
+// in the flat Responses shape claims `type: 'function'` while still carrying a
+// missing or null `function`. A nullish entry is left exactly as written: this
+// repair rewrites tool schemas, it does not vet a user's own list.
+export function withEmptyToolParameters(
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+): OpenAI.Chat.ChatCompletionCreateParams {
+  if (!request.tools) return request;
+
+  return {
+    ...request,
+    tools: request.tools.map((tool) =>
+      tool != null &&
+      tool.type === 'function' &&
+      tool.function != null &&
+      tool.function.parameters === undefined
+        ? {
+            ...tool,
+            function: {
+              ...tool.function,
+              parameters: { type: 'object', properties: {} },
+            },
+          }
+        : tool,
+    ),
+  };
+}
