@@ -13,16 +13,28 @@
 `classify_pr` 的 `pick_runner` 现在发布两套路由，而不是一套，且两者都从同一份
 解析好的 fleet 标签赋值：
 
-| 输出            | 接纳对象                                                                                    | 读取方                                                                |
-| --------------- | ------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `ubuntu_runner` | 同仓库 head、`OWNER` / `MEMBER` / `COLLABORATOR` 作者、`merge_group`、`push`，其余走 hosted | `test`、`integration_no_ak`、`integration_cli`、`web_shell_e2e_smoke` |
-| `lint_runner`   | 每一个 `pull_request`，未受信 fork 也算；其余情况与 `ubuntu_runner` 相同                    | `lint_and_static`                                                     |
+| 输出            | 接纳对象                                                                                    | 读取方                                                    |
+| --------------- | ------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `ubuntu_runner` | 同仓库 head、`OWNER` / `MEMBER` / `COLLABORATOR` 作者、`merge_group`、`push`，其余走 hosted | `test`、`integration_cli`、`web_shell_e2e_smoke`          |
+| `lint_runner`   | 每一个 `pull_request`，未受信 fork 也算；其余情况与 `ubuntu_runner` 相同                    | `lint_and_static`、`integration_no_ak`（2026-11-02 加入） |
 
 `classify_pr` 自身的 runner 对其接纳的所有事件一律走 ECS（kill-switch 除外）。
 门禁 job 只执行可信 base-SHA 的代码、拿只读 token——暴露面严格小于 lint
 车道；而把它对不可信 fork 留在 hosted，会让整条 fork CI 链（classify 是所有
 Linux 车道的 `needs` 前置）排在稀缺的 hosted 池后面。association 门禁保留在
-它真正约束重 PR 代码执行的地方：`ubuntu_runner`（test 与集成车道读取）。
+它真正约束重 PR 代码执行的地方：`ubuntu_runner`（test 车道与仅 merge-queue
+的 CLI 集成车道读取）。
+
+2026-11-02：`integration_no_ak` 加入 `lint_runner`。与 lint 同信任类——该车
+道从 checkout 与 install 步骤起就执行 fork 代码（生命周期脚本加
+scripts/prepare.js）——但按构造零密钥：集成门禁清空所有模型 key，job 唯一
+的 token 是只读检出授权。评审第 2 轮抓到"HOME 只钉在 gate 步骤"是错误形状
+（fork 代码在约 14 个步骤之前就开始执行），因此该车道现在完全镜像 lint：
+首步通过 GITHUB_ENV 发布 run 唯一的 HOME 并把 COREPACK_HOME 放在其内
+（corepack 缓存命中不重验条目——共享 home 是跨 job 投毒通道），XDG_CACHE_HOME
+留在共享的可校验 tool cache 上，末尾 always() 清理步骤回收该 HOME。路由电池
+钉住车道集合、首步隔离、清理步骤，以及按值强制（非按名）的零密钥 env 契约
+（非路径 key 必须为空——包括 `ANTHROPIC_AUTH_TOKEN`（Anthropic SDK 的鉴权解析器会从 env 回填它）、gate 不得引用任何 secrets.\*）。
 
 回退优先级：`MAINTAINER_ECS_RUNNER_DISABLED=true` 覆盖一切，包括手动调度。
 `LINUX_RUNNER_FLEET=hosted` 把 pull request、merge group 和 push 强制到 hosted，
@@ -90,7 +102,8 @@ ownership" 步骤正是因为容器化 job 在这些主机上留下 root 属主�
 - **association 门禁是吞吐策略，不是可强制的信任边界。** `pull_request` 运行
   执行的是 PR 自己的 workflow 文件，任何 fork 都能在开 PR 的同一个 diff 里把
   任何车道（包括 `test`）放到池上（ci.yml 的 `test_windows` 注释记录了同一
-  事实）。GitHub 的首次贡献者 workflow 审批是外层门。本决定的单车道范围描述
+  事实）。GitHub 的首次贡献者 workflow 审批是外层门。本决定的车道范围（Lint &
+  Static 与 no-AK 集成）描述
   的是默认路由，不是一道围栏。
 - **云 metadata。** 若池实例绑定了 RAM 角色，任何 job 进程都可访问 metadata
   端点。建议 fleet 侧开启加固模式，与本 workflow 变更独立。
@@ -111,13 +124,18 @@ smoke 60、no-AK 集成 30。
 每个 full-profile PR）钉住：门禁 job 在全 association 矩阵下无条件走 ECS
 （kill-switch 可退回、association 子句不得回潮）、生产者绑定
 （`classify_pr.outputs.lint_runner` ← `pick_runner`）、真实选择器 shell 在全
-association/事件矩阵下的行为、`lint_runner` 的单车道范围（超集必须更新本记录）、
+association/事件矩阵下的行为、`lint_runner` 的两车道范围（超集必须更新本记录）、
 首步发布的 run 唯一 HOME（先清后建、共享可校验缓存）、清理步骤先于收集器、
 以及两个输出在未建模的 fleet 值下仍走同一份标签。
 `scripts/tests/ci-platform-lanes.test.js` 钉住
 `runs-on` 字面量（lint 读 `lint_runner`、test 读 `ubuntu_runner`），并按各车道
-自己的路由输出求值 timeout；注意该套件在 merge queue 之后才跑，所以承重的
-HOME 守卫放在路由电池里。
+自己的路由输出求值 timeout；注意该套件在 test job 的旁路 lane 上对每个
+full-profile PR 运行。路由电池在 lint_and_static 的依赖安装之后运行（它
+import `yaml` 包，进不了免依赖快车道），且对 `github_ci_only` PR 在其自身
+的 run 里根本不跑——被剥掉的隔离要等下一个 full-profile PR 或 main push
+才会被抓到，晚一个 run。HOME 守卫仍放在那里，是因为电池驱动真实的
+`pick_runner` shell 并门禁每个 full-profile PR，覆盖面严格大于 vitest 旁路
+lane。
 
 ## 决策记录与开放问题
 
@@ -129,7 +147,7 @@ HOME 守卫放在路由电池里。
   stage-3 正是因此暂缓）；这是人的决定，不是代码变更。
 - PR 自身 CI 在池上验证路由管道（作者是 collaborator，该运行中两个输出一致）；
   fork 分歧由路由回归矩阵证明，其首个线上端到端见证是下一个不可信 fork PR。
-- 另行拥有的后续：per-run HOME 下恢复热共享 pnpm store（如通过 `XDG_DATA_HOME`
+- 另行拥有的后续：per-run HOME 下恢复热共享 pnpm store（no-AK 车道现在与 lint 同付已接受的冷装成本）（如通过 `XDG_DATA_HOME`
   指向内容可校验的共享路径），找回约 900 s 的冷装成本；磁盘下限门覆盖 `/tmp`
   inode；fleet metadata 加固；`test` 车道固定 `qwen-ci-home` 的持久化问题；
   若重新审视已接受的残余暴露面，则建隔离 fleet。

@@ -2,7 +2,7 @@
 
 [English](2026-11-05-managed-dispatch-tenant-guards.md) | [简体中文](2026-11-05-managed-dispatch-tenant-guards.zh-CN.md)
 
-状态：(a) 已实现；(b) 为方案。
+状态：(a) 和 (b) 均已实现。(b) 的设计见 [2026-11-05-managed-admission-placement](2026-11-05-managed-admission-placement.zh-CN.md)。
 
 ## 问题
 
@@ -48,9 +48,9 @@ placement 持有者以两种相反的顺序锁 binding 行和 Session root：
 
 没有任何路径在不持有 guard 的情况下先锁 slot/binding、再锁 Session root。只锁 slot 和 binding、不锁 root 的路径（普通请求的 `findOrCreate`、`recoverLost`、Runtime retention）从不等待 root。binding 控制和 `requireProvisionPin` 仍持有两把 guard，除顺序外行为不变。
 
-## (b) 准入中的 placement（方案）
+## (b) 准入中的 placement
 
-`admitExecution` 仍然先获取 placement。它让准入与 harness drain fence 互斥：`requestHarnessDrain` 在 placement 下插入 drain 行，准入（`requireHarnessAdmission`）则不加锁地读取这一行。要去掉 placement，需要一个行级握手。一个可选方案是：准入先物化 harness head 行并加共享锁，drain 对其加排他锁。这是协议层面的改动，需要单独的设计和测试，不包含在 (a) 中。
+`admitExecution` 仍然先获取 placement。它让准入与 harness drain fence 互斥：`requestHarnessDrain` 在 placement 下插入 drain 行，准入（`requireHarnessAdmission`）则不加锁地读取这一行。要去掉 placement，需要一个行级握手。head 行同时承载 journal writer 的状态，所以 (b) 改为让 drain 获取准入本来就持有的 Session root，见 [2026-11-05-managed-admission-placement](2026-11-05-managed-admission-placement.zh-CN.md)。
 
 ## 验证
 
