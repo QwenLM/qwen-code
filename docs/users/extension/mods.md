@@ -621,7 +621,10 @@ before it writes its result.
 `usage` counts only the turn's own model requests; requests made by subagents,
 side queries and compaction are left out. It is absent when no response
 finished. `cache_creation_input_tokens` is 0 unless the provider reports cache
-writes separately, as Anthropic's does. `reason` is never `refusal`.
+writes separately. Anthropic's `cache_creation_input_tokens` is summed into the
+prompt total, while OpenAI Chat's `prompt_tokens_details.cache_write_tokens` is
+already inside `prompt_tokens`. In either case, `input_tokens` excludes the
+reported cache reads and writes. `reason` is never `refusal`.
 
 `$.turn.abort({ turnId })` ends the running turn and its running tools as Esc
 does, but leaves no "Request cancelled." notice and does not put the prompt
