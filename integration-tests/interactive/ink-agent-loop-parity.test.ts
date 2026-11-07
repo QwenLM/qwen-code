@@ -314,8 +314,6 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       memory: E2E_MEMORY_SETTINGS_DEFAULTS,
       experimental: { mods: false },
     });
-    for (const file of ['system.json', 'defaults.json'])
-      json(join(scratch, file), { $version: 4 });
 
     let streamingIndex = 0;
     server = await startFakeOpenAIServer(({ body }) =>
@@ -337,8 +335,6 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
         HOME: scratch,
         QWEN_HOME: home,
         QWEN_RUNTIME_DIR: runtimeDir,
-        QWEN_CODE_SYSTEM_SETTINGS_PATH: join(scratch, 'system.json'),
-        QWEN_CODE_SYSTEM_DEFAULTS_PATH: join(scratch, 'defaults.json'),
         TERM: 'xterm-256color',
         LANG: 'en_US.UTF-8',
         QWEN_CODE_LANG: 'en',

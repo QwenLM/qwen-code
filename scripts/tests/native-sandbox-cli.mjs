@@ -89,10 +89,8 @@ async function fixture(name, policy) {
     }),
   );
   // The system scopes stay at the platform default: the trust gate
-  // (#13513) rejects a user-owned temp fixture and fails loud when the
-  // platform default is absent (exit 52), so the unprivileged runner
-  // leaves QWEN_CODE_SYSTEM_*_PATH unset. The sandbox policy under test
-  // lives in the user scope above.
+  // (#13513) rejects a user-owned temp fixture, and the sandbox policy
+  // under test lives in the user scope above.
   return {
     name,
     ...dirs,
