@@ -1724,11 +1724,32 @@ describe('post-merge push lane', () => {
 
   it('scopes the concurrency group and keeps main uncancellable', () => {
     expect(String(ci.concurrency.group).trim()).toBe(
-      "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || github.head_ref || github.ref }}",
+      "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || github.head_ref || github.ref }}${{ github.event.inputs.linux_unit_container == 'true' && '-linux-unit-poc' || '' }}",
     );
     expect(String(ci.concurrency['cancel-in-progress']).trim()).toBe(
       "${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') }}",
     );
+  });
+
+  it('keeps the isolated PoC out of the ordinary dispatch concurrency group', () => {
+    const groupFor = (enabled) =>
+      ci.concurrency.group.trim().replace(/\$\{\{(.*?)\}\}/g, (_, expression) =>
+        new Function('github', `return (${expression});`)({
+          workflow: ci.name,
+          repository: 'QwenLM/qwen-code',
+          event_name: 'workflow_dispatch',
+          event: {
+            pull_request: { head: { repo: { full_name: '' } } },
+            inputs: { linux_unit_container: enabled },
+          },
+          ref: 'refs/heads/feat/ci-linux-container-poc',
+          head_ref: '',
+        }),
+      );
+    const ordinary = `${ci.name}-workflow_dispatch-${'QwenLM/qwen-code'}-refs/heads/feat/ci-linux-container-poc`;
+    expect(groupFor(undefined)).toBe(ordinary);
+    expect(groupFor('false')).toBe(ordinary);
+    expect(groupFor('true')).toBe(`${ordinary}-linux-unit-poc`);
   });
 
   it.each([
@@ -1761,6 +1782,7 @@ describe('post-merge push lane', () => {
                 event_name: event,
                 event: {
                   pull_request: { head: { repo: { full_name: sourceRepo } } },
+                  inputs: {},
                 },
                 ref,
                 ref_name: ref.replace('refs/heads/', ''),

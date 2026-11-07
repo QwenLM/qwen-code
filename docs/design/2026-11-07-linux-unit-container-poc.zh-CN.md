@@ -83,7 +83,7 @@ dispatch 版本在被测 checkout 存在前确定 workflow 定义。被测仓库
 
 ## 验证与验收
 
-静态检查须证明普通事件保持既有路径、新增 job 只在手动 opt-in 运行、没有任何 job `container:`，且原始容器创建不开放 Docker socket 或提权通道。
+静态检查须证明普通事件保持既有路径、新增 job 只在手动 opt-in 运行、没有任何 job `container:`，且原始容器创建不开放 Docker socket 或提权通道。PoC dispatch 为 workflow 并发组追加 `-linux-unit-poc`，允许在旧实验收尾时直接开始修订版验证；普通 PR 与 dispatch 分组不变。
 
 真实 dispatch 必须将 workflow head 与独立公开源码 SHA 锚定到同一 run，并证明：
 

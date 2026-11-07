@@ -83,7 +83,7 @@ Production rollout therefore still requires a trusted PR-independent admission p
 
 ## Validation and acceptance
 
-Static checks must prove that ordinary events retain their existing paths, the new job runs only for the opt-in dispatch, no job `container:` is used, and raw container creation cannot grant Docker socket or privilege-escalation access.
+Static checks must prove that ordinary events retain their existing paths, the new job runs only for the opt-in dispatch, no job `container:` is used, and raw container creation cannot grant Docker socket or privilege-escalation access. The PoC dispatch appends `-linux-unit-poc` to the workflow concurrency group, so earlier experiment fragments need not complete before a revised proof starts; ordinary PR and dispatch groups are unchanged.
 
 A real dispatched run must bind its workflow head and independently tested public SHA to the same run and demonstrate:
 
