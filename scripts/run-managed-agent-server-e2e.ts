@@ -2766,7 +2766,7 @@ try {
         ),
       );
       if (
-        privateHead[0] !== '3' ||
+        privateHead[0] !== '4' ||
         checkpoint.continuation?.phase !== 'await_action' ||
         checkpoint.approval?.requestId !== originalApprovalId
       ) {

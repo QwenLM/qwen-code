@@ -310,6 +310,40 @@ describe('managed-agent-server e2e runner', () => {
     expect(commitCarriesTurnSettled(Buffer.from('not json'))).toBe(false);
   });
 
+  it('requires the promoted storage version before an approval crash', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    const barrier = source.indexOf(
+      "'Approval snapshot was not committed before the crash barrier'",
+    );
+    expect(barrier).toBeGreaterThan(-1);
+    const condition = source.slice(
+      source.lastIndexOf('if (', barrier) + 4,
+      source.lastIndexOf(') {', barrier),
+    );
+    const rejects = new Function(
+      'privateHead',
+      'checkpoint',
+      'originalApprovalId',
+      `return (${condition});`,
+    );
+    const checkpoint = {
+      continuation: { phase: 'await_action' },
+      approval: { requestId: 'approval' },
+    };
+    expect(rejects(['4'], checkpoint, 'approval')).toBe(false);
+    for (const version of ['1', '2', '3', '5']) {
+      expect(rejects([version], checkpoint, 'approval')).toBe(true);
+    }
+    expect(
+      rejects(
+        ['4'],
+        { ...checkpoint, continuation: { phase: 'done' } },
+        'approval',
+      ),
+    ).toBe(true);
+    expect(rejects(['4'], checkpoint, 'other-approval')).toBe(true);
+  });
+
   it('pins the #14481 approval fault arms to durable barriers', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     const workflow = read('.github/workflows/sdk-java.yml');
