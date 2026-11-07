@@ -824,3 +824,21 @@ describe('models.dev catalog', () => {
     expect(hasExplicitOutputLimit('unknown-model')).toBe(false);
   });
 });
+
+describe('quantized builds', () => {
+  it('resolve to the same limits as their base model', () => {
+    for (const [quantized, base] of [
+      ['Qwen/Qwen2.5-72B-Instruct-AWQ', 'Qwen/Qwen2.5-72B-Instruct'],
+      ['Qwen/Qwen2.5-72B-Instruct-GPTQ-Int4', 'Qwen/Qwen2.5-72B-Instruct'],
+      [
+        'Qwen/Qwen2.5-Coder-32B-Instruct-AWQ',
+        'Qwen/Qwen2.5-Coder-32B-Instruct',
+      ],
+      ['zai-org/GLM-4.5-Air-FP8', 'zai-org/GLM-4.5-Air'],
+    ] as Array<[string, string]>) {
+      expect(normalize(quantized)).toBe(normalize(base));
+      expect(tokenLimit(quantized)).toBe(tokenLimit(base));
+      expect(tokenLimit(quantized, 'output')).toBe(tokenLimit(base, 'output'));
+    }
+  });
+});
