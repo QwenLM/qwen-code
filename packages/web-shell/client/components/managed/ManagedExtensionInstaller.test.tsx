@@ -11,6 +11,7 @@ import type {
   ManagedExtensionSelection,
 } from './managed-extension-types';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
+import { createManagedExtensionInstall } from './managed-extension-install';
 import {
   ManagedExtensionInstaller,
   buildManagedMcpInput,
@@ -109,7 +110,11 @@ function api() {
       revision: 2,
     })),
     apply: vi.fn(
-      async (_session: string, selection: ManagedExtensionSelection) => ({
+      async (
+        _session: string,
+        selection: ManagedExtensionSelection,
+        _options?: { idempotencyKey?: string },
+      ) => ({
         ...snapshot,
         extensions: selection.extensions,
         requestedExtensions: selection.extensions,
@@ -129,6 +134,10 @@ async function render(
   key = 'initial',
   kind: 'skill' | 'mcp' = 'mcp',
   onInstalled = vi.fn(),
+  editor: {
+    editing?: { extensionId: string; inspection: ManagedExtensionInspection };
+    onExitEdit?: () => void;
+  } = {},
 ) {
   await act(async () =>
     root.render(
@@ -148,6 +157,7 @@ async function render(
           initialKind={kind}
           onChanged={vi.fn()}
           onInstalled={onInstalled}
+          {...editor}
         />
       </I18nProvider>,
     ),
@@ -287,6 +297,59 @@ it('restores a publication receipt after reload without repeating the upload or 
   expect(client.importPackage).toHaveBeenCalledOnce();
   expect(client.apply).toHaveBeenCalledOnce();
   expect(container.textContent).toContain('Installed in the selected session');
+});
+
+it('preserves an original journal behind an explicit exit from editing', async () => {
+  const client = api();
+  const original = {
+    ...createManagedExtensionInstall(
+      {
+        workspaceId: 'workspace',
+        sessionId: 'session',
+        metadata: {
+          sourceKind: 'mcp',
+          target: { platform: 'linux', arch: 'x64' },
+          sourceDigest: 'b'.repeat(64),
+          compilerVersion: 1,
+        },
+        expectedSettingsRevision: 0,
+        settingsKeys: [],
+      },
+      snapshot,
+    ),
+    stage: 'apply',
+    pin,
+    applySubmitted: true,
+  };
+  const key = 'managed-extension-install:scope:workspace:session';
+  const stored = JSON.stringify(original);
+  sessionStorage.setItem(key, stored);
+  const onInstalled = vi.fn();
+  const onExitEdit = vi.fn();
+  await render(client, 'editor', 'mcp', onInstalled, {
+    editing: { extensionId: 'ext_other', inspection },
+    onExitEdit,
+  });
+  expect(container.textContent).toContain(
+    'An earlier installation requires recovery',
+  );
+  expect(container.querySelector('input')).toBeNull();
+  expect(client.lookupApplyOperation).not.toHaveBeenCalled();
+  expect(client.apply).not.toHaveBeenCalled();
+  expect(onInstalled).not.toHaveBeenCalled();
+  expect(sessionStorage.getItem(key)).toBe(stored);
+  await act(async () => button('cancel').click());
+  expect(onExitEdit).toHaveBeenCalledOnce();
+  expect(sessionStorage.getItem(key)).toBe(stored);
+
+  await render(client, 'original', 'mcp', onInstalled);
+  await act(async () => button('Retry original request').click());
+  expect(client.apply).toHaveBeenCalledOnce();
+  expect(client.apply.mock.calls[0]?.[2]?.idempotencyKey).toBe(
+    original.applyKey,
+  );
+  expect(onInstalled).toHaveBeenCalledOnce();
+  expect(sessionStorage.getItem(key)).toBeNull();
 });
 
 it('invalidates review when the configuration changes', async () => {

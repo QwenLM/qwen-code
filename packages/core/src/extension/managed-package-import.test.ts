@@ -332,6 +332,32 @@ describe('Managed package import', () => {
 });
 
 describe('Managed MCP recipe validation', () => {
+  it.each([
+    'https://mcp.example.com',
+    'HTTPS://MCP.EXAMPLE.COM',
+    'https://mcp.example.com:443',
+    'https://mcp.example.com/a/../mcp',
+  ])('compares normalized OAuth resource URLs for %s', (url) => {
+    for (const field of ['url', 'httpUrl']) {
+      const recipe = {
+        [field]: url,
+        auth: {
+          type: 'oauth',
+          providerId: 'fixture',
+          resourceUri: url,
+          scopes: ['read'],
+        },
+      };
+      expect(parseManagedMcpRecipe(recipe)).toEqual(recipe);
+      expect(() =>
+        parseManagedMcpRecipe({
+          ...recipe,
+          auth: { ...recipe.auth, resourceUri: 'https://other.example.com' },
+        }),
+      ).toThrow('Invalid Managed MCP recipe');
+    }
+  });
+
   it('accepts placeholders only before Runtime hydration', () => {
     expect(
       parseManagedMcpRecipe({ url: '${URL}' }, { allowPlaceholders: true }),

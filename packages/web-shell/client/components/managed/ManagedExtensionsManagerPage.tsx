@@ -24,7 +24,7 @@ import {
 } from '../ui/dialog';
 import type { ManagedAgentProvider } from './managed-agent-provider';
 import type { ManagedSessionSkills } from './managed-agent-provider';
-import { JavaManagedAgentHttpError } from './java-managed-agent-client';
+import { isManagedExtensionApplyRejected } from './managed-extension-install';
 import type {
   ManagedExtensionCatalog,
   ManagedExtensionPin,
@@ -254,9 +254,7 @@ export function ManagedExtensionsManagerPage({
         if (
           !signal.aborted &&
           current === generation.current &&
-          cause instanceof JavaManagedAgentHttpError &&
-          cause.status === 409 &&
-          cause.code === 'extension_config_revision_conflict'
+          isManagedExtensionApplyRejected(cause)
         ) {
           clearPending();
           await load(signal, current);
@@ -353,6 +351,7 @@ export function ManagedExtensionsManagerPage({
               skillsOnly={view === 'skills'}
               onChanged={() => void run(async () => {})}
               onInstalled={() => setEditing(undefined)}
+              onExitEdit={() => setEditing(undefined)}
             />
           )}
           {catalog && snapshot && (

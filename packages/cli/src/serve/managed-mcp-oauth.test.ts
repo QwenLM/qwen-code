@@ -69,13 +69,17 @@ describe('Managed MCP per-request OAuth', () => {
       token,
       wire,
     );
-    await expect(request('https://other.example.test/mcp')).rejects.toThrow(
-      'authorization_unavailable',
-    );
+    await expect(
+      request('https://other.example.test/mcp'),
+    ).rejects.toMatchObject({
+      code: 'managed_mcp_authorization_unavailable',
+      requestSent: false,
+    });
     expect(token).not.toHaveBeenCalled();
-    await expect(request(context.oauth.resourceUri)).rejects.toThrow(
-      'authentication_required',
-    );
+    await expect(request(context.oauth.resourceUri)).rejects.toMatchObject({
+      code: 'managed_mcp_authentication_required',
+      requestSent: true,
+    });
     expect(wire).toHaveBeenCalledTimes(1);
     await expect(
       request(context.oauth.resourceUri, {

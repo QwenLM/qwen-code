@@ -49,6 +49,7 @@ export interface ManagedExtensionInstallerProps {
   editing?: { extensionId: string; inspection: ManagedExtensionInspection };
   onChanged: () => void;
   onInstalled?: () => void;
+  onExitEdit?: () => void;
 }
 
 function stringRecord(text: string): Record<string, string> {
@@ -181,6 +182,7 @@ export function ManagedExtensionInstaller(
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [keepSettings, setKeepSettings] = useState(true);
   const [pending, setPending] = useState<ManagedExtensionInstallCommand>();
+  const [restoredInEditor, setRestoredInEditor] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
   const [failed, setFailed] = useState(false);
@@ -219,6 +221,7 @@ export function ManagedExtensionInstaller(
   useEffect(() => {
     mounted.current = true;
     setPending(undefined);
+    setRestoredInEditor(false);
     setPreview(undefined);
     setAuthorizationPins(undefined);
     setSecrets({});
@@ -233,6 +236,7 @@ export function ManagedExtensionInstaller(
           raw && parseManagedExtensionInstall(raw, workspaceId, sessionId);
         if (saved) {
           setPending(saved);
+          setRestoredInEditor(editing?.extensionId !== undefined);
           setKind(saved.metadata.sourceKind);
           setTarget(
             `${saved.metadata.target.platform}:${saved.metadata.target.arch}`,
@@ -249,7 +253,7 @@ export function ManagedExtensionInstaller(
       request.current?.abort();
       source.current = undefined;
     };
-  }, [storageKey, workspaceId, sessionId, provider]);
+  }, [storageKey, workspaceId, sessionId, provider, editing?.extensionId]);
 
   useEffect(() => {
     if (!editing) return;
@@ -569,6 +573,21 @@ export function ManagedExtensionInstaller(
   };
 
   if (!allowed) return null;
+  if (editing && restoredInEditor)
+    return (
+      <Card data-managed-extension-installer>
+        <CardContent className="grid gap-3 p-6">
+          <Alert>
+            <AlertDescription role="status">
+              {t('managed.install.recoverBeforeEdit')}
+            </AlertDescription>
+          </Alert>
+          <Button variant="outline" onClick={props.onExitEdit}>
+            {t('common.cancel')}
+          </Button>
+        </CardContent>
+      </Card>
+    );
   return (
     <Card data-managed-extension-installer>
       <CardHeader>

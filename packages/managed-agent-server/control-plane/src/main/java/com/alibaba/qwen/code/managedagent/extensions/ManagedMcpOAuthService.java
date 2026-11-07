@@ -108,11 +108,11 @@ public class ManagedMcpOAuthService {
                     .put("resourceUri", entry.getValue().getResourceUri())
                     .set("scopes", json.valueToTree(entry.getValue().getScopes()));
         }
-        List<Pin> pins =
-                requested == null ? currentPins(tenant, sessionId) : List.copyOf(requested);
-        if (pins.size() > 32) {
+        List<Pin> pins = requested == null ? currentPins(tenant, sessionId) : requested;
+        if (pins.size() > 32 || pins.stream().anyMatch(pin -> pin == null || pin.extensionId() == null)) {
             throw invalid();
         }
+        pins = List.copyOf(pins);
         List<Credential> grants = repository.credentials(scope(session, actor));
         for (Pin pin : pins) {
             JsonNode inspection = inspect(tenant, actor, session.workspace().getWorkspaceId(), pin);
@@ -166,6 +166,9 @@ public class ManagedMcpOAuthService {
                             .filter(value -> serverId.startsWith(value.extensionId() + ":"))
                             .findFirst()
                             .orElseThrow(ManagedMcpOAuthService::invalid);
+        }
+        if (pin.extensionId() == null) {
+            throw invalid();
         }
         String serverName =
                 serverId.substring(Math.min(serverId.length(), pin.extensionId().length() + 1));

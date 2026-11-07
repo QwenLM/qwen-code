@@ -153,6 +153,33 @@ describe('Managed installation receipts', () => {
   );
 
   it.each([
+    [new JavaManagedAgentHttpError(400, 'invalid_request', 'Invalid'), true],
+    [
+      new JavaManagedAgentHttpError(
+        400,
+        'invalid_mcp_oauth_request',
+        'Invalid',
+      ),
+      true,
+    ],
+    [
+      new JavaManagedAgentHttpError(
+        409,
+        'oauth_authorization_unavailable',
+        'Revoked',
+      ),
+      true,
+    ],
+    [
+      new JavaManagedAgentHttpError(
+        400,
+        'invalid_extension_command',
+        'Invalid',
+      ),
+      false,
+    ],
+    [new JavaManagedAgentHttpError(403, 'forbidden', 'Forbidden'), false],
+    [new JavaManagedAgentHttpError(404, 'session_not_found', 'Missing'), false],
     [
       new JavaManagedAgentHttpError(
         409,

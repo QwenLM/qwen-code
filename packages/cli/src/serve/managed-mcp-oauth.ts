@@ -32,7 +32,10 @@ export type ManagedMcpAccessTokenProvider = (
 ) => Promise<string>;
 
 export class ManagedMcpOAuthError extends Error {
-  constructor(readonly code = 'managed_mcp_authorization_unavailable') {
+  constructor(
+    readonly code = 'managed_mcp_authorization_unavailable',
+    readonly requestSent = false,
+  ) {
     super(code);
   }
 }
@@ -225,6 +228,7 @@ export function createManagedMcpAuthorizedFetch(
         response.status === 401
           ? 'managed_mcp_authentication_required'
           : 'managed_mcp_authorization_unavailable',
+        true,
       );
     }
     return response;

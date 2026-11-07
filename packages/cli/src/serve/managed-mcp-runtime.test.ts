@@ -25,6 +25,7 @@ import {
   type ManagedMcpDefinition,
   type ManagedMcpManifest,
 } from './managed-mcp-runtime.js';
+import { ManagedMcpOAuthError } from './managed-mcp-oauth.js';
 import {
   ManagedToolExecutor,
   type ManagedToolSet,
@@ -1752,6 +1753,7 @@ describe('Managed MCP Runtime', () => {
       const accepts: string[] = [];
       const bearerTokens: string[] = [];
       let issued = 0;
+      let denyToken = false;
       const server = createServer(async (request, response) => {
         if (personal) {
           expect(request.headers['authorization']).toMatch(
@@ -1863,6 +1865,7 @@ describe('Managed MCP Runtime', () => {
         ],
         personal
           ? async (context) => {
+              if (denyToken) throw new ManagedMcpOAuthError();
               expect(context.configRevision).toBe(2);
               return `current-access-${++issued}`;
             }
@@ -1924,6 +1927,23 @@ describe('Managed MCP Runtime', () => {
       expect(
         methods.filter((method) => method === 'resources/read'),
       ).toHaveLength(1);
+      if (personal) {
+        denyToken = true;
+        const refused = await settled(
+          instance,
+          invoke(recovered.catalog!, 'refused-http', {
+            kind: 'resource_read',
+            uri: 'data://binary',
+          }),
+        );
+        expect(refused).toMatchObject({
+          state: 'settled',
+          error: { code: 'managed_mcp_authorization_unavailable' },
+        });
+        expect(
+          methods.filter((method) => method === 'resources/read'),
+        ).toHaveLength(1);
+      }
       expect(
         (
           await settled(instance, {

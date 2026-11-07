@@ -772,22 +772,37 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     @Override
     public PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
-        HostedHarnessClient owner = client();
-        Map<String, Object> descriptor = owner.prepareManagedPackage(metadata, source);
-        Map<String, Object> scope = new LinkedHashMap<>(metadata);
-        scope.remove("input");
-        return new PreparedPackage(descriptor,
-                owner.managedPackageArchive((String) descriptor.get("preparationId"), scope));
+        try {
+            HostedHarnessClient owner = client();
+            Map<String, Object> descriptor = owner.prepareManagedPackage(metadata, source);
+            Map<String, Object> scope = new LinkedHashMap<>(metadata);
+            scope.remove("input");
+            return new PreparedPackage(descriptor,
+                    owner.managedPackageArchive((String) descriptor.get("preparationId"), scope));
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
     }
 
     @Override
     public Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
-        return client().inspectManagedPackage(metadata, source);
+        try {
+            return client().inspectManagedPackage(metadata, source);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
     }
 
     @Override
     public Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
-        return client().previewManagedPackage(metadata, source);
+        try {
+            return client().previewManagedPackage(metadata, source);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
     }
 
     @Override
@@ -810,24 +825,39 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
 
     @Override
     public Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
-        requireReadyForNewWork(tenant, session, false);
-        return client().runtimeSkillCandidates(extensionAttachment(tenant, session, false));
+        try {
+            requireReadyForNewWork(tenant, session, false);
+            return client().runtimeSkillCandidates(extensionAttachment(tenant, session, false));
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
     }
 
     @Override
     public Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
-        requireReadyForNewWork(tenant, session, false);
-        return client().runtimeSkillSnapshot(extensionAttachment(tenant, session, false), request);
+        try {
+            requireReadyForNewWork(tenant, session, false);
+            return client().runtimeSkillSnapshot(extensionAttachment(tenant, session, false), request);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
     }
 
     @Override
     @SuppressWarnings("unchecked")
     public Map<String, Object> runtimeSkillArchive(String tenant, String session, Map<String, Object> request) {
-        requireReadyForNewWork(tenant, session, false);
-        Map<String, Object> owner = (Map<String, Object>) request.get("owner");
-        return client().runtimeSkillArchive(extensionAttachment(tenant, session, false), (String) request.get("operationId"),
-                (String) request.get("preparationId"), (String) owner.get("bindingId"), (String) owner.get("generation"),
-                ((Number) request.get("offset")).longValue());
+        try {
+            requireReadyForNewWork(tenant, session, false);
+            Map<String, Object> owner = (Map<String, Object>) request.get("owner");
+            return client().runtimeSkillArchive(extensionAttachment(tenant, session, false), (String) request.get("operationId"),
+                    (String) request.get("preparationId"), (String) owner.get("bindingId"), (String) owner.get("generation"),
+                    ((Number) request.get("offset")).longValue());
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
     }
 
     @Override

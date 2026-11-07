@@ -67,6 +67,8 @@ export const MANAGED_EXTENSION_MESSAGES_EN = {
   'managed.install.complete': 'Installed in the selected session.',
   'managed.install.savedNotApplied':
     'Installation is not confirmed. A saved package may be available; check or retry the original request before starting another installation.',
+  'managed.install.recoverBeforeEdit':
+    'An earlier installation requires recovery. Cancel editing to return to the original installation before changing this connection.',
   'managed.install.required.source':
     'Select or recreate the original input to continue. Its digest must match the saved request.',
   'managed.install.required.settings':
@@ -209,6 +211,8 @@ export const MANAGED_EXTENSION_MESSAGES_ZH: Record<
   'managed.install.complete': '已安装到所选会话。',
   'managed.install.savedNotApplied':
     '安装结果尚未确认。包可能已保存；开始其他安装前，请检查或重试原请求。',
+  'managed.install.recoverBeforeEdit':
+    '先前的安装仍需恢复。请取消编辑并返回原安装流程，确认其结果后再修改此连接。',
   'managed.install.required.source':
     '请选择或重新填写原始输入以继续；其摘要必须与保存的请求一致。',
   'managed.install.required.settings':

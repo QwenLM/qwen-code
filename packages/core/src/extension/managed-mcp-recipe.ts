@@ -155,7 +155,8 @@ export function parseManagedMcpRecipe(
         resource.username ||
         resource.password ||
         resource.hash ||
-        resource.href !== (recipe['httpUrl'] ?? recipe['url'])
+        resource.href !==
+          new URL((recipe['httpUrl'] ?? recipe['url']) as string).href
       )
         invalid();
     } catch {

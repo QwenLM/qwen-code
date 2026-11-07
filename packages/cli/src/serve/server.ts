@@ -4429,12 +4429,13 @@ export function createServeApp(
     ]);
   };
   serveAppLifecycle.addAppDrain(disposeSkillsConfigStatus);
+  if (stopHostedPackagePreparation)
+    serveAppLifecycle.addAppDrain(stopHostedPackagePreparation);
   if (!deps.serveAppLifecycle)
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
       const pendingDrains = [
         stopHostedCsiSessions?.() ?? Promise.resolve(),
-        stopHostedPackagePreparation?.() ?? Promise.resolve(),
         (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
         workspaceManagementHandle.sealAndWait(),
         (

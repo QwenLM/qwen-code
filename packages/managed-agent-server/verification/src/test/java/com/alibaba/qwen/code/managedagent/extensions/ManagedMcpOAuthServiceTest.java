@@ -192,6 +192,27 @@ class ManagedMcpOAuthServiceTest {
         verify(packages).requireExecutionAccess("tenant", "actor", "workspace");
     }
 
+    @Test
+    void malformedPinsAreRejectedBeforeInspectionOrAuthorization() throws Exception {
+        enableOAuth();
+        var malformed = new Pin(null, 1, "a".repeat(64), null);
+        assertThatThrownBy(() -> service.start("tenant", "actor", "session", "ext_fixture:server",
+                malformed, "n".repeat(43), "start"))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(400);
+                    assertThat(error.getCode()).isEqualTo("invalid_mcp_oauth_request");
+                });
+        for (Pin value : java.util.Arrays.asList(null, malformed)) {
+            assertThatThrownBy(() -> service.query("tenant", "actor", "session", java.util.Collections.singletonList(value)))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                        assertThat(error.getStatus()).isEqualTo(400);
+                        assertThat(error.getCode()).isEqualTo("invalid_mcp_oauth_request");
+                    });
+        }
+        verify(packages, never()).inspection(anyString(), anyString(), anyString(), any());
+        verify(client, never()).verifyMetadata(any());
+    }
+
     private ManagedMcpOAuthProperties.OAuthProvider enableOAuth() {
         settings.setEnabled(true);
         settings.setCallbackUri("https://agent.example/oauth/mcp/callback");

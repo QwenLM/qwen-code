@@ -353,6 +353,7 @@ function ManagedMcpManagerContent({
                 snapshot={packages.snapshot}
                 initialKind="mcp"
                 editing={packageEditor}
+                onExitEdit={() => setPackageEditor(undefined)}
                 onChanged={() => {
                   void loadPackages().catch(() => setPackageError(true));
                   void management.refresh();

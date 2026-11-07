@@ -1335,7 +1335,11 @@ export class ManagedMcpRuntime {
           : { name: request.name, arguments: request.arguments };
       void connection.transport
         .send({ jsonrpc: '2.0', id: control.operationId, method, params })
-        .catch(() => this.unknown(operation, 'managed_mcp_send_unknown'));
+        .catch((error: unknown) => {
+          if (error instanceof ManagedMcpOAuthError && !error.requestSent)
+            this.settled(operation, { error: { code: error.code } });
+          else this.unknown(operation, 'managed_mcp_send_unknown');
+        });
     } catch (error) {
       this.settled(operation, {
         error: {

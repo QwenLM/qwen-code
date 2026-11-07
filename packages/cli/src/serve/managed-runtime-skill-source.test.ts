@@ -86,6 +86,30 @@ async function snapshot(
 }
 
 describe('Runtime project Skill snapshots', () => {
+  it.each([
+    ['name', 'x'.repeat(300)],
+    ['description', 'x'.repeat(5000)],
+    ['description', 'before\0after'],
+  ])('isolates a candidate with an invalid %s', async (field, value) => {
+    await skill('.qwen', 'valid');
+    await file(
+      '.qwen/skills/invalid/SKILL.md',
+      `---\nname: ${field === 'name' ? value : 'invalid'}\ndescription: ${field === 'description' ? value : 'Inspect files'}\n---\nInspect resources.`,
+    );
+    const found = await candidates();
+    expect(found).toHaveLength(2);
+    expect(found.find((entry) => entry.path.endsWith('/valid'))).toMatchObject({
+      compatible: true,
+    });
+    expect(
+      found.find((entry) => entry.path.endsWith('/invalid')),
+    ).toMatchObject({
+      name: 'invalid',
+      description: '',
+      compatible: false,
+    });
+  });
+
   it('prepares nine consecutive snapshots and preserves downloaded chunk retries', async () => {
     for (let i = 0; i < 9; i++) await skill('.qwen', 'skill' + i);
     const listed = await candidates();

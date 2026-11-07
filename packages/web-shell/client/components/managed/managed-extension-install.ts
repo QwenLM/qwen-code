@@ -276,11 +276,14 @@ export function isManagedExtensionConfigurationPending(
 export function isManagedExtensionApplyRejected(cause: unknown) {
   return (
     cause instanceof JavaManagedAgentHttpError &&
-    cause.status === 409 &&
-    [
-      'extension_config_revision_conflict',
-      'extension_selection_upgrade_required',
-    ].includes(cause.code)
+    ((cause.status === 400 &&
+      ['invalid_request', 'invalid_mcp_oauth_request'].includes(cause.code)) ||
+      (cause.status === 409 &&
+        [
+          'extension_config_revision_conflict',
+          'extension_selection_upgrade_required',
+          'oauth_authorization_unavailable',
+        ].includes(cause.code)))
   );
 }
 

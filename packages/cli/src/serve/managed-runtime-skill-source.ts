@@ -323,6 +323,12 @@ export class ManagedRuntimeSkillSources {
             const manifest = path.join(directory, 'SKILL.md');
             const content = await this.manifest(root, manifest, source);
             const skill = parseManagedSkillContent(content, manifest);
+            if (
+              skill.name.length > 256 ||
+              skill.description.length > 4096 ||
+              skill.description.includes('\0')
+            )
+              failed('invalid_skill_manifest');
             const observed = await this.scan(root, directory, source, budget);
             if (
               observed.files.filter(
