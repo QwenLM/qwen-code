@@ -422,6 +422,20 @@ describe('GenAI response attributes', () => {
     expect(attributes).toEqual({ 'openrouter.provider': 'ok' });
   });
 
+  it('refuses a same-generation handle owned by another controller', () => {
+    // Both exchanges open one attempt, so both handles carry generation 1 and
+    // only the controller identity separates them. Without that check the
+    // write would land on this exchange's span.
+    const first = observed();
+    const second = observed();
+    first.controller.recordResponseAttribute(
+      second.handle,
+      'openrouter.provider',
+      'foreign',
+    );
+    expect(first.attributes).toEqual({});
+  });
+
   it('refuses to write after the exchange is finalized', () => {
     const { attributes, controller, handle } = observed();
     controller.finalize(true);

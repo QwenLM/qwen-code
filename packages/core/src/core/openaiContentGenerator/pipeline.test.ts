@@ -2771,6 +2771,41 @@ describe('ContentGenerationPipeline', () => {
 
       expect(mockSpanAttributes.size).toBe(0);
     });
+
+    it('records nothing when the exchange is disabled for telemetry', async () => {
+      // `reportOpenAiRequest` returns undefined whenever telemetry is off, so
+      // an OpenRouter response still reaches the capture with no controller.
+      mockReportOpenAiRequest.mockReturnValue(undefined);
+      createMock().mockImplementation(() =>
+        Object.assign(
+          Promise.resolve({
+            id: 'r',
+            choices: [{ message: { content: 'ok' } }],
+            provider: 'DigitalOcean',
+          }),
+          {
+            withResponse: () =>
+              Promise.resolve({
+                data: {
+                  id: 'r',
+                  choices: [{ message: { content: 'ok' } }],
+                  provider: 'DigitalOcean',
+                },
+                response: httpResponse({ 'x-generation-id': 'gen-abc123' }),
+              }),
+          },
+        ),
+      );
+      pipelineWith({ baseUrl: OPENROUTER_URL });
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+
+      const response = await pipeline.execute(userRequest(), 'test-id');
+
+      expect(response).toBeDefined();
+      expect(mockSpanAttributes.size).toBe(0);
+    });
   });
 
   describe('executeStream', () => {
