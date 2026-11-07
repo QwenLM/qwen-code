@@ -709,6 +709,14 @@ export abstract class BaseJsonOutputAdapter {
         this.appendText(state, errorText, null);
         break;
       }
+      case LlmEventType.MaxSessionTurns:
+        // The turn was refused before any model request, so nothing else in
+        // the stream says why. Without this marker a JSON consumer only sees
+        // the previous answer repeated under a successful result.
+        this.emitSystemMessage('max_session_turns', {
+          maxSessionTurns: this.config.getMaxSessionTurns(),
+        });
+        break;
       case LlmEventType.ModelFallback:
         // Surface model fallback transitions so non-interactive consumers
         // (CI pipelines, SDK clients) can observe capacity-driven model
