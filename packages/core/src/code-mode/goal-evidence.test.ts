@@ -21,6 +21,7 @@ import { ChatRecordingService } from '../services/chatRecordingService.js';
 import { buildApiHistoryFromConversation } from '../services/session-api-history.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { validateTranscriptRecord } from '../utils/transcript-records.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { ExecTool } from '../tools/exec.js';
 import { ReadFileTool } from '../tools/read-file.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
@@ -46,7 +47,7 @@ describe('Code Mode Goal evidence', () => {
         targetDir: workspace,
         cwd: workspace,
         sessionId: randomUUID(),
-        codeModeOnly: true,
+        toolMode: ToolMode.CodeModeOnly,
         chatRecording: false,
         telemetry: { enabled: false },
         deferTelemetryInitialization: true,

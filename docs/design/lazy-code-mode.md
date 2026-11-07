@@ -4,14 +4,14 @@
 
 ## Problem and scope
 
-CodeModeOnly currently puts every callable tool's signature and description in
+Before this change, CodeModeOnly put every callable tool's signature and description in
 the initial `exec` declaration, including deferred tools. This removes the
 prompt-size benefit of deferral. The existing `tool_call` bridge also describes
 target arguments as a generic object; issue #12889 reports repeated empty
 arguments with Responses providers. Code Mode lets the model express these
 arguments as JavaScript, with ordinary runtime validation still enforced.
 
-This change makes the existing experimental `tools.codeModeOnly` mode load
+This change makes the existing experimental `tools.mode: "code_mode_only"` mode load
 deferred descriptions and schemas through `tool_search`. Direct mode keeps its
 current protocol. This extends the original CodeModeOnly MVP's scope.
 

@@ -27,7 +27,7 @@ describe('exec context output budget', () => {
       userMemory: '',
       memoryFileCount: 0,
       approvalMode: ApprovalMode.YOLO,
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       disableAllHooks: true,
       truncateToolOutputThreshold: 200_000,
       toolOutputBatchBudget: 200_000,

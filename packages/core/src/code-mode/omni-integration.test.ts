@@ -12,6 +12,7 @@ import { makeFakeConfig } from '../test-utils/config.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ExecTool } from '../tools/exec.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
+import { ToolMode } from '../tools/code-mode.js';
 import { Kind, type MediaPolicyToolDescriptor } from '../tools/tools.js';
 
 class PolicyTool extends MockTool {
@@ -26,7 +27,7 @@ class PolicyTool extends MockTool {
 
 function setup(omniEnabled = false) {
   const config = makeFakeConfig({
-    codeModeOnly: true,
+    toolMode: ToolMode.CodeModeOnly,
     omniEnabled,
     approvalMode: ApprovalMode.DEFAULT,
     targetDir: '/tmp',

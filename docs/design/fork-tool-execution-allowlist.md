@@ -4,7 +4,9 @@
 
 Add an optional `fork_tools` parameter to the Agent tool's existing
 `subagent_type: "fork"` runtime. The parameter narrows which tools a fork can
-execute without changing the tool declarations sent to the model.
+execute without changing the tool declarations sent to the model under
+`direct` mode; under hybrid `tools.mode: "code_mode"` the same allowlist
+filters those declarations.
 
 This is the first phase of #7625. Named profile files, shell argument patterns,
 overlay filesystems, and `/btw` integration are out of scope. A launch-prompt
@@ -16,8 +18,9 @@ hint tells the fork which visible tools the allowlist permits.
   except for interaction tools that forks must never execute.
 - Treat an empty list as deny-all rather than as the existing `tools: []`
   wildcard behavior.
-- Keep the fork's current model-visible declarations unchanged so adding an
-  execution restriction does not alter its prompt-cache prefix.
+- Keep the fork's current model-visible declarations unchanged in `direct`
+  mode so adding an execution restriction does not alter its prompt-cache
+  prefix.
 - Reject disallowed calls before tool construction, tool hooks, permission
   classification, scheduling, or approval.
 - Preserve the restriction when a background fork is revived from its
@@ -67,14 +70,19 @@ tool, or add declarations.
 
 Every fork receives an in-memory execution allowlist, even when `fork_tools`
 is omitted. The runtime-owned floor removes `ask_user_question` after applying
-the caller-supplied list, so a caller cannot re-enable it. The tool remains in
-the parent-derived declaration list for prompt-cache sharing, but a call is
-rejected before scheduling or approval. A blocked fork reports the missing
-input to its parent instead of trying to interact with the user directly.
+the caller-supplied list, so a caller cannot re-enable it. In `direct` mode the
+tool remains in the parent-derived declaration list for prompt-cache sharing,
+but a call is rejected before scheduling or approval. Under hybrid
+`tools.mode: "code_mode"`, `AgentCore.prepareTools()` also filters the
+declaration list by the execution allowlist, so the fork's declarations, and
+therefore its cached prefix, can differ from the parent's. A blocked fork
+reports the missing input to its parent instead of trying to interact with the
+user directly.
 
 The fork receives a restriction notice in the task prompt after the inherited
 cacheable prefix. This avoids trial-and-error calls without changing the
-parent-derived system instruction, history prefix, or tool declarations.
+parent-derived system instruction or history prefix; in `direct` mode it also
+leaves the tool declarations unchanged.
 
 ## Background Revival
 

@@ -11,6 +11,8 @@ import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
+import { getCurrentCodeModeAllowedNames } from '../../utils/code-mode-allowed-names.js';
+import { getToolExposure, isCodeModeEnabled } from '../code-mode.js';
 import { buildTranscriptMarker } from './transcript-marker.js';
 import {
   buildInheritedForkExecutionToolNames,
@@ -339,7 +341,7 @@ function getExecutionBackendError(
     return 'Container execution is not enabled by this host.';
   }
   if (config.getCodeModeOnly?.()) {
-    return 'Container execution cannot be combined with tools.codeModeOnly.';
+    return 'Container execution cannot be combined with tools.mode = "code_mode_only".';
   }
   if (params.name !== undefined || !isTopLevelSession()) {
     return 'Container execution is available only for top-level regular subagents.';
@@ -933,7 +935,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
             minLength: 1,
           },
           description:
-            'Only valid with subagent_type "fork". Exact tool names and MCP server patterns this fork may execute. Entries cannot have surrounding whitespace; wildcard entries must be "mcp__*" or a trailing MCP tool-prefix pattern such as "mcp__github__read_*". The model-visible tool declarations remain unchanged for prompt-cache sharing, while the task prompt tells the fork about the restriction. Forks can never execute ask_user_question; omit fork_tools to allow every other inherited tool, or use an empty array to reject every tool call.',
+            'Only valid with subagent_type "fork". Exact tool names and MCP server patterns this fork may execute. Entries cannot have surrounding whitespace; wildcard entries must be "mcp__*" or a trailing MCP tool-prefix pattern such as "mcp__github__read_*". `direct` mode keeps declarations unchanged for prompt-cache sharing; hybrid `code_mode` narrows them to the list. Code modes admit `exec` ahead of a non-empty list (and `tool_search` in `code_mode_only`). Forks never execute ask_user_question; omit fork_tools to allow every other inherited tool, or an empty array rejects every tool call.',
         },
         fork_profile: {
           type: 'string',
@@ -1074,7 +1076,7 @@ The Agent tool launches specialized agents (subprocesses) that autonomously hand
 Available agent types and the tools they have access to:
 ${subagentDescriptions}
 
-When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need a regular subagent's result inline before continuing. A fork (\`subagent_type: "fork"\`) inherits the parent conversation context. A background fork's result arrives through a completion notification. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns. Set \`fork_tools\` to restrict which of the still-visible parent tools the fork may execute, or \`fork_profile\` to load the same restriction from a project profile.
+When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need a regular subagent's result inline before continuing. A fork (\`subagent_type: "fork"\`) inherits the parent conversation context. A background fork's result arrives through a completion notification. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns. Set \`fork_tools\` to restrict which of the parent's tools the fork may execute, or \`fork_profile\` to load the same restriction from a project profile.
 
 When NOT to use the Agent tool:
 - If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
@@ -2069,20 +2071,29 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     };
     const buildParentBoundExecutionAllowlist = (
       fallbackTools: readonly string[],
+      forNestedBinding = false,
     ): string[] => {
-      if (parentConfiguredToolAllowlist === undefined) {
+      if (parentConfiguredToolAllowlist === undefined && !forNestedBinding) {
         return buildForkExecutionAllowlist(
           requestedTools,
           fallbackTools,
           parentToolNames,
         ).filter(keepOffParentBlocklist);
       }
+      const requestsExec = requestedTools?.includes(ToolNames.EXEC) === true;
+      const requestsMcp =
+        requestedTools?.some((name) => name.startsWith('mcp__')) === true;
       return fallbackTools.filter(
         (toolName) =>
           toolName !== ToolNames.ASK_USER_QUESTION &&
           !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName) &&
           keepOffParentBlocklist(toolName) &&
           (isRequestedByFork(toolName) ||
+            (forNestedBinding &&
+              isCodeModeEnabled(agentConfig.getToolMode?.()) &&
+              requestsExec &&
+              getToolExposure(toolName) === 'code-mode-callable' &&
+              (!toolName.startsWith('mcp__') || !requestsMcp)) ||
             (requestedTools !== undefined &&
               requestedTools.length > 0 &&
               (toolName === ToolNames.TOOL_SEARCH ||
@@ -2090,8 +2101,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               parentToolNames.includes(toolName))),
       );
     };
+    // Forks launch only from the top-level session, where the enclosing-agent
+    // policy frame is never set. Derive a restricted fork's nested bound from
+    // the ambient code-mode names instead of that frame; an unrestricted fork
+    // carries no bound, so its prompt and execution surface stay unchanged.
+    const nestedExecutionAllowedTools =
+      isCodeModeEnabled(agentConfig.getToolMode?.()) &&
+      (requestedTools !== undefined ||
+        parentConfiguredToolAllowlist !== undefined)
+        ? buildParentBoundExecutionAllowlist(
+            getCurrentCodeModeAllowedNames() ?? defaultExecutionToolNames,
+            true,
+          ).filter(
+            (toolName) => getToolExposure(toolName) === 'code-mode-callable',
+          )
+        : undefined;
     const requestedExecutionAllowedTools =
-      requestedTools === undefined
+      requestedTools === undefined && nestedExecutionAllowedTools === undefined
         ? undefined
         : resolveForkExecutionAllowedTools(
             parentToolNames,
@@ -2151,6 +2177,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           lastMessage,
           requestedExecutionAllowedTools,
           profilePromptHint,
+          nestedExecutionAllowedTools,
+          agentConfig.getToolMode?.(),
         );
         if (forkedMessages.length > 0) {
           // Model had function calls: append tool responses + directive,
@@ -2184,6 +2212,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.params.prompt,
         requestedExecutionAllowedTools,
         profilePromptHint,
+        nestedExecutionAllowedTools,
+        agentConfig.getToolMode?.(),
       );
     }
 
@@ -2213,6 +2243,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           parentToolNames,
           buildParentBoundExecutionAllowlist(defaultExecutionToolNames),
         ),
+        ...(nestedExecutionAllowedTools !== undefined
+          ? { nestedExecutionAllowedTools }
+          : {}),
         ...(parentDisallowedTools?.length
           ? { disallowedTools: [...parentDisallowedTools] }
           : {}),
@@ -2228,6 +2261,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           parentToolNames,
           buildParentBoundExecutionAllowlist(defaultExecutionToolNames),
         ),
+        ...(nestedExecutionAllowedTools !== undefined
+          ? { nestedExecutionAllowedTools }
+          : {}),
         ...(parentDisallowedTools?.length
           ? { disallowedTools: [...parentDisallowedTools] }
           : {}),
@@ -3092,6 +3128,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           }).`,
         );
       }
+      // Only a restricted fork persists its launch-time bounds; a plain fork
+      // re-derives them from the live parent surface when it resumes.
+      const persistsForkPolicy =
+        isFork &&
+        (this.params.fork_tools !== undefined ||
+          this.forkProfile !== undefined ||
+          getCurrentAgentConfiguredToolAllowlist() !== undefined);
       const effectiveSubagentType = requestedType
         ? requestedType
         : DEFAULT_BUILTIN_SUBAGENT_TYPE;
@@ -4075,15 +4118,21 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           ...(backgroundFix
             ? { resumeBlockedReason: BACKGROUND_FIX_CONTINUATION_BLOCKED }
             : {}),
-          ...(isFork &&
-          (this.params.fork_tools !== undefined ||
-            this.forkProfile !== undefined) &&
+          ...(persistsForkPolicy &&
           bgToolConfig?.executionAllowedTools !== undefined
             ? {
                 executionAllowedTools: [...bgToolConfig.executionAllowedTools],
               }
             : {}),
-          // Unlike the allowlist above, the blocklist persists whenever the
+          ...(persistsForkPolicy &&
+          bgToolConfig?.nestedExecutionAllowedTools !== undefined
+            ? {
+                nestedExecutionAllowedTools: [
+                  ...bgToolConfig.nestedExecutionAllowedTools,
+                ],
+              }
+            : {}),
+          // Unlike the allowlists above, the blocklist persists whenever the
           // fork carries one — it also bounds plain forks whose allowlist is
           // rebuilt from the live parent surface on resume.
           ...(isFork && bgToolConfig?.disallowedTools?.length
@@ -5012,15 +5061,21 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             : undefined,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
-          ...(isFork &&
-          (this.params.fork_tools !== undefined ||
-            this.forkProfile !== undefined) &&
+          ...(persistsForkPolicy &&
           toolConfig?.executionAllowedTools !== undefined
             ? {
                 executionAllowedTools: [...toolConfig.executionAllowedTools],
               }
             : {}),
-          // Unlike the allowlist above, the blocklist persists whenever the
+          ...(persistsForkPolicy &&
+          toolConfig?.nestedExecutionAllowedTools !== undefined
+            ? {
+                nestedExecutionAllowedTools: [
+                  ...toolConfig.nestedExecutionAllowedTools,
+                ],
+              }
+            : {}),
+          // Unlike the allowlists above, the blocklist persists whenever the
           // fork carries one — it also bounds plain forks whose allowlist is
           // rebuilt from the live parent surface on resume.
           ...(isFork && toolConfig?.disallowedTools?.length

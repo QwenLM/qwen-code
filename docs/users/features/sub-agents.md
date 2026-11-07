@@ -54,7 +54,7 @@ Tool responses and pure system reminders do not count as user turns. Regular nam
 
 ## Restricting Fork Tool Execution with `fork_tools`
 
-Only `subagent_type: "fork"` accepts `fork_tools`. The array may contain exact canonical tool names, such as `read_file` and `grep_search`, or MCP server patterns such as `mcp__github`. The fork still receives the same model-visible tool declarations as an unrestricted fork, preserving its prompt-cache prefix, but its task prompt identifies the restriction and a call not matched by `fork_tools` is rejected before scheduling or approval.
+Only `subagent_type: "fork"` accepts `fork_tools`. The array may contain exact canonical tool names, such as `read_file` and `grep_search`, or MCP server patterns such as `mcp__github`. In `direct` mode the fork still receives the same model-visible tool declarations as an unrestricted fork, preserving its prompt-cache prefix, while under hybrid `tools.mode: "code_mode"` the fork's top-level declarations are filtered by this allowlist; either way its task prompt identifies the restriction, and a call not matched by `fork_tools` is rejected before scheduling or approval. Two code-mode exceptions: under either code mode a non-empty `fork_tools` list still admits `exec` ahead of the list — an empty array closes the exec route too — and listing `exec` admits every code-mode-callable tool this fork's own surface admits through exec's nested `tools.<name>(...)` calls — see the `exec` note under [Tool Configuration](#tool-configuration).
 
 - Forks never execute `ask_user_question`; when user input is required, they report the blocker to their parent agent.
 - Omitting `fork_tools` allows every other inherited tool.
@@ -100,13 +100,13 @@ Like `fork_tools`, a fork profile is a caller-selected restriction rather than a
 
 ### How Fork Differs from Named Subagents
 
-|               | Named Subagent                                                 | Fork Subagent                                                                                                                                                                                        |
-| ------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Context       | Starts fresh with no parent conversation history               | Inherits all parent history by default; `fork_turns` can select a bounded recent window                                                                                                              |
-| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing)                                                                                                                                                |
-| Tools         | Configured declaration set without interactive question tools  | Keeps the parent-derived declaration set for caching; execution always rejects `ask_user_question`, and `fork_tools` or `fork_profile` can independently narrow it without changing that declaration |
-| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately                                                                                                                                                        |
-| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context                                                                                                                                                         |
+|               | Named Subagent                                                 | Fork Subagent                                                                                                                                                                                                                                                                                                              |
+| ------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Context       | Starts fresh with no parent conversation history               | Inherits all parent history by default; `fork_turns` can select a bounded recent window                                                                                                                                                                                                                                    |
+| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing)                                                                                                                                                                                                                                                                      |
+| Tools         | Configured declaration set without interactive question tools  | In `direct` mode, keeps the parent-derived declaration set for caching; execution always rejects `ask_user_question`, and `fork_tools` or `fork_profile` narrow execution without changing that declaration. In hybrid `tools.mode: "code_mode"` the effective execution allowlist also filters the top-level declarations |
+| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately                                                                                                                                                                                                                                                                              |
+| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context                                                                                                                                                                                                                                                                               |
 
 ### When Fork is Used
 
@@ -118,7 +118,7 @@ The AI automatically uses fork when it needs to:
 
 ### Prompt Cache Sharing
 
-All forks share the parent's exact API request prefix (system prompt, tools, conversation history), enabling DashScope prompt cache hits. When 3 forks run in parallel, the shared prefix is cached once and reused — saving 80%+ token costs compared to independent subagents.
+In `direct` mode, all forks share the parent's exact API request prefix (system prompt, tools, conversation history), enabling DashScope prompt cache hits. When 3 forks run in parallel, the shared prefix is cached once and reused — saving 80%+ token costs compared to independent subagents. Under hybrid `tools.mode: "code_mode"`, `fork_tools`, `fork_profile`, and the inherited execution allowlist filter the fork's tool declarations, so the tools portion of the prefix can differ from the parent's.
 
 ### Recursive Delegation Prevention
 
@@ -133,7 +133,7 @@ Fork children cannot spawn any further sub-agent. This is enforced at runtime �
 - **Task Specialization**: Create agents optimized for specific workflows (testing, documentation, refactoring, etc.)
 - **Context Isolation**: Keep specialized work separate from your main conversation
 - **Context Inheritance**: Fork subagents inherit the full conversation by default and can select a bounded number of recent parent turns
-- **Prompt Cache Sharing**: Fork subagents share the parent's cache prefix, reducing token costs
+- **Prompt Cache Sharing**: In `direct` mode, fork subagents share the parent's cache prefix, reducing token costs
 - **Reusability**: Save and reuse agent configurations across projects and sessions
 - **Controlled Access**: Limit which tools each agent can use for security and focus
 - **Progress Visibility**: Monitor agent execution with real-time progress updates
@@ -381,9 +381,11 @@ Do not modify any files.
 
 Use `tools` and `disallowedTools` to control which tools a subagent can access.
 
-**`tools` (allowlist):** When specified, the subagent can only use the listed tools. When omitted, the subagent inherits all available tools from the parent session.
+**`tools` (allowlist):** When specified, the list bounds direct tool calls and deferred-tool bridge targets. Code mode also supports the nested `exec` path described below. When omitted, the subagent inherits all available tools from the parent session.
 
-The allowlist applies both to directly declared tools and to targets invoked through the `tool_search`/`tool_call` deferred-tool bridge. An explicit list of ordinary tools does not automatically include either bridge tool; name both `tool_search` and `tool_call` if the agent needs discovery and bridge invocation. A listed ordinary deferred target is declared directly, while a target demoted by `tools.eager` remains hidden unless a separate reveal rule applies. A hidden target must still be present in `tools` to be invoked through the bridge. `disallowedTools` and `permissions.deny` remain additional blocklists, and listing a tool does not bypass the subagent control-plane exclusions. Code Mode (`tools.codeModeOnly`) differs: `tool_call` is not available, an agent allowed any tool callable from `exec` gets `tool_search` automatically unless `disallowedTools` names it, and tools demoted by `tools.eager` stay callable through `exec`.
+The allowlist applies both to directly declared tools and to targets invoked through the `tool_search`/`tool_call` deferred-tool bridge. An explicit list of ordinary tools does not automatically include either bridge tool; name both `tool_search` and `tool_call` if the agent needs discovery and bridge invocation. A listed ordinary deferred target is declared directly, while a target demoted by `tools.eager` remains hidden unless a separate reveal rule applies. A hidden target must still be present in `tools` to be invoked through the bridge. `disallowedTools` and `permissions.deny` remain additional blocklists, and listing a tool does not bypass the subagent control-plane exclusions. Code Mode (`tools.mode: "code_mode_only"`) differs: `tool_call` is not available, an agent allowed any tool callable from `exec` gets `tool_search` automatically unless `disallowedTools` names it, and tools demoted by `tools.eager` stay callable through `exec`.
+
+With `tools.mode: "code_mode"` or `"code_mode_only"`, `exec` provides a third path: nested `tools.<name>(...)` calls. Explicitly listing `exec` also grants otherwise-admitted code-mode-callable bindings, including ordinary tools such as `write_file` and `run_shell_command` that are not individually listed. Thus `tools: [read_file, exec]` is not a read-only policy. Omit `exec` from the configured list to keep nested targets bounded by the listed names; the runtime still exposes the `exec` wrapper in code mode. `disallowedTools`, `permissions.deny`, and subagent exclusions continue to restrict access in both modes. Hybrid additionally excludes tools hidden by `tools.eager`. This nested grant does not add direct-call permission in hybrid mode. A fork's explicit `fork_tools: [exec]` grant is not an exec-only policy: in both code modes it admits every code-mode-callable tool the parent could reach through the nested path, bounded by the parent's inherited execution policy and blocklists.
 
 ```
 ---
@@ -412,7 +414,7 @@ disallowedTools:
 
 If both `tools` and `disallowedTools` are set, the allowlist is applied first, then the blocklist removes from that set.
 
-**MCP tools** follow the same rules. If a subagent has no `tools` list, it inherits all MCP tools from the parent session. If a subagent has an explicit `tools` list, it only gets MCP tools that are explicitly named in that list.
+**MCP tools** follow the same rules. Without a `tools` list, the subagent inherits MCP tools from the parent session. An explicit list ordinarily requires matching MCP entries. Granting `exec` also admits otherwise-available MCP bindings through the nested path when the list contains no MCP entries; once the list mentions MCP, nested MCP calls must match those entries. The blocklists and exclusions above still apply.
 
 The `disallowedTools` field supports MCP server-level patterns:
 
