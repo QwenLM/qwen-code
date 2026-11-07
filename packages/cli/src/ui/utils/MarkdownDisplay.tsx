@@ -693,7 +693,12 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           );
           break;
       }
-      if (headerNode) addContentBlock(<Box key={key}>{headerNode}</Box>);
+      if (headerNode)
+        addContentBlock(
+          <Box key={key} width={blockWidth}>
+            {headerNode}
+          </Box>,
+        );
     } else if (ulMatch) {
       const leadingWhitespace = ulMatch[1];
       const marker = ulMatch[2];
