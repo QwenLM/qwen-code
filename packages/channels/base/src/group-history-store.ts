@@ -108,6 +108,40 @@ export class GroupHistoryStore {
     }
   }
 
+  /**
+   * Insert entries ahead of whatever the key holds now. Used to hand a message
+   * that is replayed after its backfill was already consumed the entries it
+   * carried, without disturbing messages recorded since the acceptance.
+   */
+  recordFront(key: string, entries: GroupHistoryEntry[], limit: number): void {
+    const normalizedLimit = normalizeLimit(limit);
+    if (normalizedLimit <= 0 || entries.length === 0) {
+      return;
+    }
+
+    const loaded = this.loadState();
+    const current = loaded.entries.get(key) ?? [];
+    const known = new Set(
+      current
+        .map((entry) => entry.messageId)
+        .filter((id): id is string => id !== undefined),
+    );
+    const restored = entries.filter(
+      (entry) => entry.messageId === undefined || !known.has(entry.messageId),
+    );
+    if (restored.length === 0) {
+      return;
+    }
+    const merged = [...restored, ...current];
+    if (merged.length > normalizedLimit) {
+      merged.splice(0, merged.length - normalizedLimit);
+    }
+    loaded.entries.delete(key);
+    loaded.entries.set(key, merged);
+    loaded.limits.set(key, normalizedLimit);
+    this.compact(loaded.entries, loaded.limits);
+  }
+
   drain(key: string, limit: number): GroupHistoryEntry[] {
     const normalizedLimit = normalizeLimit(limit);
     const loaded = this.loadState();

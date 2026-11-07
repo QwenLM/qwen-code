@@ -397,6 +397,12 @@ type PendingInjectedMessage = {
   envelope: Envelope;
   /** Arrival ordinal shared with the collect buffer, for ordered settlement. */
   sequence: number;
+  /**
+   * The pending group history this message's accepted injection consumed, in
+   * arrival order. A message the child never drains is replayed as its own
+   * turn, and that turn must get the same backfill instead of losing it.
+   */
+  groupHistory: GroupHistoryEntry[];
 };
 type NamedTurnBinding = {
   sessionId: string | null;
@@ -2201,6 +2207,15 @@ export abstract class ChannelBase {
       Math.max(0, pending.length - undrained.length),
     );
     if (replay.length === 0) return;
+    // Each replayed message was accepted mid-turn and consumed its backfill at
+    // acceptance. Hand the consumed entries back before the replay turn runs,
+    // so it composes the same wrapper instead of answering a reference it can
+    // no longer resolve. Restore newest-last: a later injection consumed newer
+    // entries, and each restore prepends, so iterating backwards keeps the
+    // store's arrival order.
+    for (let i = replay.length - 1; i >= 0; i--) {
+      this.restoreInjectedGroupHistory(replay[i]!);
+    }
     let buffer = this.collectBuffers.get(sessionId);
     if (!buffer) {
       buffer = [];
@@ -3151,13 +3166,42 @@ export abstract class ChannelBase {
     sessionId: string,
     text: string,
     envelope: Envelope,
+    groupHistory: GroupHistoryEntry[],
   ): void {
     let pending = this.midTurnInjections.get(sessionId);
     if (!pending) {
       pending = [];
       this.midTurnInjections.set(sessionId, pending);
     }
-    pending.push({ text, envelope, sequence: this.nextInboundOrdinal() });
+    pending.push({
+      text,
+      envelope,
+      sequence: this.nextInboundOrdinal(),
+      groupHistory,
+    });
+  }
+
+  /**
+   * Return the pending group history a replayed injected message consumed when
+   * it was accepted to the store, so the message's own turn composes the same
+   * backfill the running turn saw. Entries are restored ahead of anything
+   * recorded since the acceptance, which is newer by construction.
+   */
+  private restoreInjectedGroupHistory(entry: PendingInjectedMessage): void {
+    if (entry.groupHistory.length === 0) return;
+    const limit = this.groupHistoryLimit(entry.envelope);
+    if (limit <= 0) return;
+    try {
+      this.groupHistory.recordFront(
+        this.groupHistoryKey(entry.envelope),
+        entry.groupHistory,
+        limit,
+      );
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to restore group history for a replayed injected message: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
   }
 
   private notifyPromptInjected(
@@ -7614,10 +7658,11 @@ export abstract class ChannelBase {
                 // only PEEKED here: a rejected injection parks the unwrapped
                 // text so the replay composes a single fresh wrapper, and an
                 // accepted one drains it right after the queue accepts it.
+                const pendingHistory = this.peekPendingGroupHistory(envelope);
                 const injectText = this.prependGroupHistoryContext(
                   envelope,
                   promptText,
-                  this.peekPendingGroupHistory(envelope),
+                  pendingHistory,
                 );
                 const receipt = this.bridge.queueMidTurnMessage(
                   sessionId,
@@ -7625,8 +7670,11 @@ export abstract class ChannelBase {
                 );
                 if (receipt.accepted) {
                   // Consume the history this injection carried. No await
-                  // between the accepted queue call and this drain, so the
-                  // replayed turn cannot also deliver the same backfill.
+                  // between the accepted queue call and this drain, so no other
+                  // turn can deliver the same backfill. The consumed entries
+                  // ride on the ledger entry: acceptance is not delivery, and a
+                  // turn that ends without a drain point replays this message
+                  // as its own turn, which must still compose that backfill.
                   this.drainPendingGroupHistory(envelope);
                   // Record the RAW text, not `injectText`: the wrapper above is
                   // for the running turn only. If the running turn ends before
@@ -7634,7 +7682,12 @@ export abstract class ChannelBase {
                   // own turn, and that replay composes a fresh wrapper of its
                   // own — storing the wrapped text would nest a stale wrapper
                   // and present the previous backfill as the message to answer.
-                  this.recordInjectedMessage(sessionId, promptText, envelope);
+                  this.recordInjectedMessage(
+                    sessionId,
+                    promptText,
+                    envelope,
+                    pendingHistory,
+                  );
                   process.stderr.write(
                     `[${this.name}] inject: delivered mid-turn message from ${envelope.senderId} into session ${sessionId}\n`,
                   );

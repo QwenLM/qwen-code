@@ -24720,6 +24720,160 @@ describe('ChannelBase', () => {
       return resolvers;
     }
 
+    it('keeps the group-history backfill for an injection the turn never drained', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const resolvers = resolvablePrompts();
+      const undrainedMessages = (
+        bridge as unknown as {
+          takeUndrainedMidTurnMessages: ReturnType<typeof vi.fn>;
+        }
+      ).takeUndrainedMidTurnMessages;
+      const ch = createChannel(
+        {
+          dispatchMode: 'inject',
+          groupPolicy: 'open',
+          groupHistoryLimit: 5,
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            text: 'start',
+            messageId: 'm-hist-replay-1',
+          }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: false,
+            text: 'the staging one',
+            messageId: 'm-hist-replay-2',
+          }),
+        );
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            text: 'do the third one',
+            messageId: 'm-hist-replay-3',
+          }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(1);
+        const injected = String(queueMidTurnMessage.mock.calls[0]?.[1]);
+        expect(injected).toContain('the staging one');
+
+        // Recorded after the acceptance: newer context the replay also carries.
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: false,
+            text: 'arrived later',
+            messageId: 'm-hist-replay-4',
+          }),
+        );
+
+        // Tool-free turn: the child ends without draining the accepted message.
+        undrainedMessages.mockReturnValue([injected]);
+
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        const replay = String(bridge.prompt.mock.calls[1]?.[1]);
+        // The replayed turn must compose the backfill the accepted injection
+        // consumed, in arrival order, or it answers "the third one" blind.
+        expect(replay).toContain('the staging one');
+        expect(replay.indexOf('the staging one')).toBeLessThan(
+          replay.indexOf('arrived later'),
+        );
+        expect(replay).toContain('do the third one');
+        resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        stderr.mockRestore();
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
+    it('consumes the injected backfill once the turn actually drains it', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel(
+        {
+          dispatchMode: 'inject',
+          groupPolicy: 'open',
+          groupHistoryLimit: 5,
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            text: 'start',
+            messageId: 'm-hist-drained-1',
+          }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: false,
+            text: 'the staging one',
+            messageId: 'm-hist-drained-2',
+          }),
+        );
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            text: 'do the third one',
+            messageId: 'm-hist-drained-3',
+          }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(1);
+        expect(String(queueMidTurnMessage.mock.calls[0]?.[1])).toContain(
+          'the staging one',
+        );
+
+        // The child drained the injection: nothing is replayed.
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(1));
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+
+        // The backfill already reached the running turn, so the next turn's
+        // prompt must not present it again.
+        const next = ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            text: 'next question',
+            messageId: 'm-hist-drained-4',
+          }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        const nextPrompt = String(bridge.prompt.mock.calls[1]?.[1]);
+        expect(nextPrompt).toContain('next question');
+        expect(nextPrompt).not.toContain('the staging one');
+        resolvers[1]?.('second done');
+        await next;
+      } finally {
+        stderr.mockRestore();
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
     it('hands the text to the running turn instead of cancelling or buffering', async () => {
       const queueMidTurnMessage = enableInjection();
       const resolvers = resolvablePrompts();
