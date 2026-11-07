@@ -1503,6 +1503,9 @@ export async function main() {
 
     if (config.isInteractive()) {
       // Shown in the TUI only: a headless run's stderr is someone's pipeline.
+      if (initializationResult.authNotice) {
+        startupWarnings.push(initializationResult.authNotice);
+      }
       const interruptedWorkflowsNotice =
         await getInterruptedWorkflowRunsNotice(config);
       if (interruptedWorkflowsNotice) {
