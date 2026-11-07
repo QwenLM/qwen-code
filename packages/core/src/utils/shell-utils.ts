@@ -570,20 +570,220 @@ function trimBashEdgeSeparators(command: string): string {
 }
 
 /**
- * The word a token denotes once the shell removes its quoting, so an option
- * terminator written `'--'`, `"--"`, `\--`, `$'--'` or `$"--"` is the same
- * word as `--` (#16075 review, R6-1 / R8-11).
+ * Decode the escapes an ANSI-C word (`$'…'`) applies, so a payload hidden
+ * behind `\n` is analysed as the two commands bash runs.
+ *
+ * Bash decodes the simple escapes in `ANSI_C_SIMPLE`; an escape it does not
+ * know keeps its backslash. Mapping
+ * `\x3b` to `x` produced a word bash never runs (`--amendx3btrue`) while bash
+ * ran `--amend; true`, so the numeric forms are decoded for real.
+ *
+ * Lives here rather than in `shell-semantics.ts` because the wrapper stripper
+ * below needs the same decoder and shell-semantics already imports this module
+ * (#16075 review, R11-2: importing back would create a cycle).
  */
-function shellWordAfterQuoteRemoval(token: string): string {
-  const { value, quote } = stripSymmetricQuotes(token);
-  if (quote !== '') return value;
-  if (value.startsWith("$'") && value.endsWith("'")) {
-    return value.slice(2, -1);
+const ANSI_C_SIMPLE: Record<string, string> = {
+  a: '\x07',
+  b: '\b',
+  e: '\x1b',
+  E: '\x1b',
+  f: '\f',
+  n: '\n',
+  r: '\r',
+  t: '\t',
+  v: '\v',
+  '\\': '\\',
+  "'": "'",
+  '"': '"',
+  '?': '?',
+};
+
+export function decodeAnsiCEscape(
+  body: string,
+  index: number,
+): { text: string; length: number } | null {
+  if (body[index] !== '\\' || index + 1 >= body.length) return null;
+  const next = body[index + 1]!;
+  const simple = ANSI_C_SIMPLE[next];
+  if (simple !== undefined) return { text: simple, length: 2 };
+  if (next === 'x' || next === 'u' || next === 'U') {
+    const max = next === 'x' ? 2 : next === 'u' ? 4 : 8;
+    const digits = new RegExp(`^[0-9a-fA-F]{1,${max}}`).exec(
+      body.slice(index + 2),
+    )?.[0];
+    if (digits) {
+      const code = parseInt(digits, 16);
+      const length = 2 + digits.length;
+      // `String.fromCodePoint` throws above U+10FFFF, and bash rejects such a
+      // word rather than running it, so keep the escape literal. Throwing here
+      // would escape the permission guard instead of answering it.
+      if (next !== 'x' && code > 0x10ffff) {
+        return { text: body.slice(index, index + length), length };
+      }
+      return {
+        text:
+          next === 'x' ? String.fromCharCode(code) : String.fromCodePoint(code),
+        length,
+      };
+    }
   }
-  if (value.startsWith('$"') && value.endsWith('"')) {
-    return value.slice(2, -1);
+  // `\c` needs an operand letter. At the end of the word bash keeps `\c`
+  // literal; when the tokenizer passes the raw command, the next character
+  // is then the CLOSING quote, and consuming it as the operand left the
+  // ANSI-C state open and swallowed the rest of the command line
+  // (#16075 review, R8-2 / R10-1).
+  if (next === 'c' && index + 2 < body.length && body[index + 2] !== "'") {
+    return {
+      text: String.fromCharCode(
+        body[index + 2]!.toUpperCase().charCodeAt(0) & 0x1f,
+      ),
+      length: 3,
+    };
   }
-  return value.replace(/\\(.)/g, '$1');
+  if (next >= '0' && next <= '7') {
+    const digits = /^[0-7]{1,3}/.exec(body.slice(index + 1))![0];
+    return {
+      text: String.fromCharCode(parseInt(digits, 8) & 0xff),
+      length: 1 + digits.length,
+    };
+  }
+  return null;
+}
+
+export function decodeAnsiCWord(body: string): string {
+  let out = '';
+  for (let index = 0; index < body.length; index++) {
+    const escape = decodeAnsiCEscape(body, index);
+    if (!escape) {
+      // Unknown escape: bash keeps the backslash and the letter.
+      out += body[index]!;
+      continue;
+    }
+    out += escape.text;
+    index += escape.length - 1;
+  }
+  return out;
+}
+
+/**
+ * The word a token denotes once the shell removes its quoting, so an option
+ * terminator written `'--'`, `"--"`, `\--`, `$'--'`, `$"--"`, `$'\x2d\x2d'`
+ * or the concatenation `-'-'` is the same word as `--` (#16075 review,
+ * R6-1 / R8-11 / R11-2).
+ *
+ * Returns null when the word carries an expansion that cannot be resolved
+ * statically (`$TERM`, `$(…)`, backticks) or an unterminated quote: the caller
+ * must fail closed rather than hand the token on as a program word.
+ *
+ * Locale quoting `$"…"` does NOT decode ANSI-C escapes: bash translates the
+ * body but keeps `\x2d` from becoming `-` (witnessed: `sh -c $"\x2d\x2d"
+ * 'echo ok'` runs a program named `x2dx2d`, not the payload), so it is
+ * treated like a double-quoted word.
+ */
+function shellWordAfterQuoteRemoval(token: string): string | null {
+  let out = '';
+  let hasExpansion = false;
+  let i = 0;
+  const n = token.length;
+  while (i < n) {
+    const ch = token[i]!;
+    if (ch === "'") {
+      // Single-quoted span: verbatim, no expansion, backslash is literal.
+      const close = token.indexOf("'", i + 1);
+      if (close === -1) return null;
+      out += token.slice(i + 1, close);
+      i = close + 1;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < n) {
+      // Unquoted escape: the next character is literal; a continuation
+      // disappears outright.
+      if (token[i + 1] === '\n') {
+        i += 2;
+        continue;
+      }
+      out += token[i + 1];
+      i += 2;
+      continue;
+    }
+    if (ch === '$' && i + 1 < n && token[i + 1] === "'") {
+      // ANSI-C word: escapes decode; find the first UNESCAPED closing quote.
+      let j = i + 2;
+      let body = '';
+      while (j < n) {
+        if (token[j] === '\\' && j + 1 < n) {
+          body += token.slice(j, j + 2);
+          j += 2;
+          continue;
+        }
+        if (token[j] === "'") break;
+        body += token[j];
+        j++;
+      }
+      if (j >= n) return null; // unterminated
+      out += decodeAnsiCWord(body);
+      i = j + 1;
+      continue;
+    }
+    if (ch === '"') {
+      // Double-quoted (or locale `$"…"`, whose introducer was consumed as an
+      // expansion below) span: backslash is special only before $ ` " \ and
+      // newline; everything else keeps both characters.
+      i++;
+      let closed = false;
+      while (i < n) {
+        const c = token[i]!;
+        if (c === '"') {
+          closed = true;
+          i++;
+          break;
+        }
+        if (c === '\\' && i + 1 < n) {
+          const next = token[i + 1]!;
+          if (next === '$' || next === '`' || next === '"' || next === '\\') {
+            out += next;
+            i += 2;
+            continue;
+          }
+          if (next === '\n') {
+            i += 2;
+            continue;
+          }
+          out += c;
+          i++;
+          continue;
+        }
+        if (c === '$' || c === '`') hasExpansion = true;
+        out += c;
+        i++;
+      }
+      if (!closed) return null;
+      continue;
+    }
+    if (ch === '$') {
+      const next = token[i + 1];
+      if (next === '"') {
+        // Locale quoting: same escape rules as a double-quoted word, no
+        // ANSI-C decoding. Re-enter the loop with the quote handled above.
+        i++;
+        continue;
+      }
+      // Parameter / command / arithmetic expansion: not statically resolvable.
+      hasExpansion = true;
+      out += ch;
+      i++;
+      continue;
+    }
+    if (ch === '`') {
+      hasExpansion = true;
+      out += ch;
+      i++;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return hasExpansion ? null : out;
 }
 
 export function stripShellWrapper(command: string): string {
@@ -614,12 +814,23 @@ export function stripShellWrapper(command: string): string {
     if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
       // `sh -c -- '…'` puts an option terminator before the command string;
       // reading it as the program handed the guard a lone `--`. Every quoting
-      // of the same word (`'--'`, `"--"`, `\--`, `$'--'`) is still the
-      // terminator to the shell (#16075 review, R6-1).
+      // of the same word (`'--'`, `"--"`, `\--`, `$'--'`, `$'\x2d\x2d'`,
+      // `-'-'`) is still the terminator to the shell (#16075 review,
+      // R6-1 / R11-2).
       let markerRest = token.rest;
       const terminator = takeLeadingToken(markerRest);
-      if (terminator && shellWordAfterQuoteRemoval(terminator.token) === '--') {
+      const terminatorWord = terminator
+        ? shellWordAfterQuoteRemoval(terminator.token)
+        : null;
+      if (terminator && terminatorWord === '--') {
         markerRest = terminator.rest;
+      } else if (terminator && terminatorWord === null) {
+        // The word carries an expansion we cannot resolve (`sh -c $X 'cmd'`):
+        // it may be the terminator (then 'cmd' is the payload) or a program
+        // word itself (then 'cmd' is only $0). Neither reading is provable,
+        // so hand back the whole command for the monitor to scan rather than
+        // pick one (#16075 review, R11-2).
+        return trimmed;
       }
       const commandToken = takeLeadingToken(markerRest);
       if (!commandToken) return trimmed;
@@ -1556,7 +1767,27 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
 
     if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
       wrapperTokens.push(token.token);
-      const commandToken = takeLeadingToken(token.rest);
+      // Same option-terminator reading as stripShellWrapper: every spelling
+      // of `--` (quotes, ANSI-C escapes, concatenation) hands `-c` the NEXT
+      // word (#16075 review, R6-1 / R11-2). An unresolvable expansion there
+      // may be the terminator or the program itself; neither reading is
+      // provable, so hand back the whole command rather than pick one.
+      let markerRest = token.rest;
+      const terminator = takeLeadingToken(markerRest);
+      const terminatorWord = terminator
+        ? shellWordAfterQuoteRemoval(terminator.token)
+        : null;
+      if (terminator && terminatorWord === null) {
+        return {
+          innerCommand: trimmed,
+          innerQuote: '',
+        };
+      }
+      if (terminator && terminatorWord === '--') {
+        wrapperTokens.push(terminator.token);
+        markerRest = terminator.rest;
+      }
+      const commandToken = takeLeadingToken(markerRest);
       if (!commandToken) {
         return {
           innerCommand: trimmed,

@@ -679,6 +679,32 @@ describe('stripShellWrapper', () => {
   it('does not append bash -c positional argv to the executable command', async () => {
     expect(stripShellWrapper("bash -c 'echo ok' 'sleep 5'")).toEqual('echo ok');
   });
+
+  // R11-2: an ANSI-C encoded `--` is still the option terminator (witnessed:
+  // `sh -c $'\x2d\x2d' 'echo B_OK'` prints B_OK), so the payload after it is
+  // the command. A locale `$"…"` word does NOT decode ANSI-C escapes
+  // (witnessed: bash runs `x2dx2d`), so it is not a terminator.
+  it('reads the payload after an ANSI-C encoded option terminator', async () => {
+    expect(stripShellWrapper("sh -c $'\\x2d\\x2d' 'ls -l'")).toEqual('ls -l');
+    expect(stripShellWrapper("sh -c $'\\055\\055' 'ls -l'")).toEqual('ls -l');
+    expect(stripShellWrapper("sh -c -'-' 'ls -l'")).toEqual('ls -l');
+  });
+
+  it('does not treat a locale word as an option terminator', async () => {
+    // `$"…"` does not decode ANSI-C escapes: bash runs a program literally
+    // named `x2dx2d` (witnessed), so the locale word IS the payload and the
+    // following word is only $0.
+    expect(stripShellWrapper('sh -c $"\\x2d\\x2d" \'ls -l\'')).toEqual(
+      '$"\\x2d\\x2d"',
+    );
+  });
+
+  it('fails closed on an expansion in the terminator position', async () => {
+    // The expansion may be the terminator or the program itself; neither
+    // reading is provable, so the whole command goes back to the monitor.
+    const command = "sh -c $TERM 'ls -l'";
+    expect(stripShellWrapper(command)).toEqual(command);
+  });
 });
 
 describe('stripTrailingBackgroundAmp', () => {
@@ -719,6 +745,26 @@ describe('detectSelfKillCommand', () => {
       'pkill -f /usr/bin/node',
       'pkill -9f node',
       "bash -lc 'pkill -f qwen'",
+    ]);
+  });
+
+  // R11-2: the option terminator can be spelled with ANSI-C escapes, octal
+  // escapes or quote concatenation; each still ends option parsing, so the
+  // self-kill payload after it is the command (witnessed with sh/bash).
+  it('detects self-kill behind an encoded option terminator', () => {
+    expectEach(detectSelfKillCommand, true, [
+      "sh -c $'\\x2d\\x2d' 'pkill -f qwen'",
+      "sh -c $'\\055\\055' 'pkill -f qwen'",
+      "sh -c -'-' 'pkill -f qwen'",
+      "sh -c -- 'pkill -f qwen'",
+    ]);
+  });
+
+  it('does not read a locale word as an option terminator', () => {
+    // `$"…"` does not decode ANSI-C escapes: bash runs a program literally
+    // named `x2dx2d`, so the payload is positional argv, not the command.
+    expectEach(detectSelfKillCommand, false, [
+      'sh -c $"\\x2d\\x2d" \'pkill -f qwen\'',
     ]);
   });
 

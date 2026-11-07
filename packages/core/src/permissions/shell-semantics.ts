@@ -33,7 +33,11 @@
 
 import nodePath from 'node:path';
 import os from 'node:os';
-import { stripShellWrapper } from '../utils/shell-utils.js';
+import {
+  decodeAnsiCEscape,
+  decodeAnsiCWord,
+  stripShellWrapper,
+} from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { splitCompoundCommandSegments } from './rule-parser.js';
 
@@ -2490,7 +2494,14 @@ function getHeredocDelimiters(line: string): string[] {
     .map((opener) => opener.word);
 }
 
-const AMEND_PREFIX_COMMANDS = new Set([...PREFIX_COMMANDS, 'command', 'exec']);
+const AMEND_PREFIX_COMMANDS = new Set([
+  ...PREFIX_COMMANDS,
+  'command',
+  'exec',
+  // setsid execs its operand transparently (setsid(1)); a heredoc fed to
+  // `setsid bash` is the program bash runs (#16075 review, R1-1).
+  'setsid',
+]);
 
 const AMEND_PREFIX_FLAGS_WITH_VALUE = new Map<string, ReadonlySet<string>>([
   ...PREFIX_COMMAND_FLAGS_WITH_VALUE,
@@ -2576,11 +2587,13 @@ const AMEND_GIT_ALIAS_CONFIG = /^alias\.[^=]+=/i;
 
 const AMEND_FIND_EXEC_MARKERS = new Set(['-exec', '-execdir', '-ok', '-okdir']);
 
-/** A redirection operator as its own word; its target is the next word. */
-const AMEND_REDIRECT_WORD = /^\d*(?:>>?|<<?|<<<|>&|<&|&>|&>>)$/;
+/** A redirection operator as its own word; its target is the next word.
+ * `<>` (read-write) and `>|` (clobber override) are redirections too: bash
+ * runs `git <> /dev/null commit --amend` (#16075 review, R1-1). */
+const AMEND_REDIRECT_WORD = /^\d*(?:>>?|>\||<<?|<>|<<<|>&|<&|&>|&>>)$/;
 
 /** A redirection operator prefix, including glued targets (`>/dev/null`). */
-const AMEND_REDIRECT_TOKEN = /^\d*(?:>>?|<<?|<<<|>&|<&|&>|&>>)/;
+const AMEND_REDIRECT_TOKEN = /^\d*(?:>>?|>\||<<?|<>|<<<|>&|<&|&>|&>>)/;
 
 /**
  * Shell expansion syntax that can word-split into argv entries: variables,
@@ -2592,6 +2605,85 @@ const AMEND_REDIRECT_TOKEN = /^\d*(?:>>?|<<?|<<<|>&|<&|&>|&>>)/;
  */
 const AMEND_EXPANSION_WORD = /\$[A-Za-z0-9_{(@*#?$!-]|`|\{[^{}]*,/;
 
+/** xargs short letters whose value is required: attached to the cluster, or
+ * the next word when the cluster ends there. */
+const XARGS_VALUE_LETTERS = 'IJnPsEadR';
+/** xargs short letters with an OPTIONAL attached value: a detached value
+ * cannot be told from the program word, so the position fails closed. */
+const XARGS_OPTIONAL_LETTERS = 'elL';
+const XARGS_NO_VALUE_LETTERS = '0prtxo';
+const XARGS_LONG_REQUIRED = new Set([
+  '--max-args',
+  '--max-procs',
+  '--max-chars',
+  '--delimiter',
+  '--arg-file',
+  '--process-slot-var',
+]);
+const XARGS_LONG_OPTIONAL = new Set(['--replace', '--eof', '--max-lines']);
+const XARGS_LONG_NO_VALUE = new Set([
+  '--null',
+  '--no-run-if-empty',
+  '--verbose',
+  '--exit',
+  '--open-tty',
+  '--help',
+  '--version',
+]);
+
+/**
+ * The offset of the program xargs runs, or -1 when it runs its default
+ * (`echo`, inert), or null when a flag makes the position unclassifiable.
+ * The old scan skipped every `-` word, so `-I {}` left `{}` as the apparent
+ * program and the real `sh -c '…'` behind it went unread (#16075 R1-1).
+ */
+function xargsProgramOffset(tokens: string[], start: number): number | null {
+  let index = start;
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    if (token === '--') {
+      return index + 1 < tokens.length ? index + 1 : -1;
+    }
+    if (!token.startsWith('-')) return index;
+    if (token.startsWith('--')) {
+      const eq = token.indexOf('=');
+      const name = eq === -1 ? token : token.slice(0, eq);
+      if (XARGS_LONG_REQUIRED.has(name)) {
+        index += eq === -1 ? 2 : 1;
+        continue;
+      }
+      if (XARGS_LONG_OPTIONAL.has(name)) {
+        if (eq !== -1) {
+          index++;
+          continue;
+        }
+        return null;
+      }
+      if (XARGS_LONG_NO_VALUE.has(name)) {
+        index++;
+        continue;
+      }
+      return null;
+    }
+    const letters = token.slice(1);
+    let consumesNext = false;
+    for (let p = 0; p < letters.length; p++) {
+      const letter = letters[p]!;
+      if (XARGS_VALUE_LETTERS.includes(letter)) {
+        consumesNext = p + 1 === letters.length;
+        break; // the rest of the cluster is the attached value
+      }
+      if (XARGS_OPTIONAL_LETTERS.includes(letter)) {
+        if (p + 1 === letters.length) return null;
+        break;
+      }
+      if (!XARGS_NO_VALUE_LETTERS.includes(letter)) return null;
+    }
+    index += consumesNext ? 2 : 1;
+  }
+  return -1;
+}
+
 /**
  * Offsets whose token can be the program of a wrapper that carries its command
  * in argument position: `xargs`'s first operand, the word after `find`'s
@@ -2599,9 +2691,10 @@ const AMEND_EXPANSION_WORD = /\$[A-Za-z0-9_{(@*#?$!-]|`|\{[^{}]*,/;
  *
  * Every other offset above the prefix is an argument, where `echo git commit
  * --amend >> CHANGELOG.md` and `echo bash -c '…'` are data rather than
- * invocations (#16075 review, R5-4).
+ * invocations (#16075 review, R5-4). Returns null when a wrapper's operand
+ * position cannot be classified — the caller fails closed.
  */
-function amendWrapperProgramOffsets(tokens: string[]): Set<number> {
+function amendWrapperProgramOffsets(tokens: string[]): Set<number> | null {
   const offsets = new Set<number>();
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index]!;
@@ -2610,13 +2703,9 @@ function amendWrapperProgramOffsets(tokens: string[]): Set<number> {
       continue;
     }
     if (amendExecutableBasename(token) === 'xargs') {
-      // `-I{}` and `-n1` carry their value in the flag itself, so the program is
-      // the first operand that does not start with `-`.
-      let operand = index + 1;
-      while (operand < tokens.length && tokens[operand]!.startsWith('-')) {
-        operand++;
-      }
-      offsets.add(operand);
+      const operand = xargsProgramOffset(tokens, index + 1);
+      if (operand === null) return null;
+      if (operand >= 0) offsets.add(operand);
       continue;
     }
     if (AMEND_REDIRECT_WORD.test(token)) offsets.add(index + 2);
@@ -2632,6 +2721,13 @@ function amendExecutableBasename(token: string): string {
 
 function skipAmendPrefixes(tokens: string[]): string[] {
   let index = 0;
+
+  // Leading redirections attach to the command, not to the program word:
+  // `>log bash -c '…'` and `2>/dev/null bash -c '…'` run bash (#16075
+  // review, R1-1). A bare operator consumes its target word.
+  while (index < tokens.length && AMEND_REDIRECT_TOKEN.test(tokens[index]!)) {
+    index += AMEND_REDIRECT_WORD.test(tokens[index]!) ? 2 : 1;
+  }
 
   while (index < tokens.length) {
     const token = tokens[index]!;
@@ -2751,28 +2847,230 @@ const AMEND_SHELL_PROGRAMS = new Set([
   'script',
 ]);
 
+/** Long shell options that never consume a following word. Unknown long
+ * options fail closed: the payload position cannot be located. */
+const SHELL_LONG_NO_VALUE = new Set([
+  '--debug',
+  '--debugger',
+  '--dump-po-strings',
+  '--dump-strings',
+  '--help',
+  '--interactive',
+  '--login',
+  '--noediting',
+  '--no-execute',
+  '--noprofile',
+  '--norc',
+  '--posix',
+  '--private',
+  '--protected',
+  '--restricted',
+  '--rpm-requires',
+  '--verbose',
+  '--version',
+]);
+
+/** Long shell options whose value is the next word (or the `=` tail). */
+const SHELL_LONG_WITH_VALUE = new Set([
+  '--rcfile',
+  '--init-file',
+  '--init-command',
+  '--emulate',
+]);
+
 /**
- * The `-c` payload of a shell token, if it carries one (`-c`, `-lc`, `-c'…'`).
+ * The `-c` payload of a shell token, if it carries one.
  *
  * Returns `null` when the token list has no `-c`, and an empty string when `-c`
  * carries no locatable payload — the caller fails closed on that, because a
  * shell whose program this scan cannot read must not answer "not an amend".
+ *
+ * Option operands are consumed, not read as the payload: `ksh -o errexit -c
+ * '…'` and `bash -o posix -c '…'` hand `-c` the word AFTER the option name
+ * (#16075 review, R1-1). A `-c` cluster with letters after the `c` has no
+ * provable payload (bash and dash read it differently) and fails closed.
  */
 function shellDashCPayload(tokens: string[], index: number): string | null {
+  const isFish = amendExecutableBasename(tokens[index] ?? '') === 'fish';
   for (let inner = index + 1; inner < tokens.length; inner++) {
     const token = tokens[inner]!;
     if (token === '-' || !token.startsWith('-')) break;
-    const flag = /^-[A-Za-z]*c/.exec(token);
-    if (!flag) continue;
-    // Tokenization drops the quote but keeps the word, so `-c'…'` arrives as
-    // one token and its payload is the flag's own tail.
-    const attached = token.slice(flag[0].length);
-    if (attached.length > 0) return attached;
-    // `sh -c -- '…'`: the option terminator, not the program.
-    const payload = tokens[inner + 1] ?? '';
-    return payload === '--' ? (tokens[inner + 2] ?? '') : payload;
+    if (token === '--') break; // end of options: the next word is a script file
+    if (token.startsWith('+')) {
+      // `+o` turns an option off and still consumes its name.
+      if (token.includes('o')) inner++;
+      continue;
+    }
+    if (token.startsWith('--')) {
+      const eq = token.indexOf('=');
+      const name = eq === -1 ? token : token.slice(0, eq);
+      if (SHELL_LONG_WITH_VALUE.has(name)) {
+        if (eq === -1) inner++;
+        continue;
+      }
+      if (SHELL_LONG_NO_VALUE.has(name)) continue;
+      return '';
+    }
+    const letters = token.slice(1);
+    const cAt = letters.indexOf('c');
+    if (cAt !== -1) {
+      const trailing = letters.slice(cAt + 1);
+      if (trailing === '') {
+        let payload = tokens[inner + 1] ?? '';
+        if (payload === '--') payload = tokens[inner + 2] ?? '';
+        // An ANSI-C payload decodes to readable command text; analyse that.
+        const decoded = decodeBareAnsiCWord(payload);
+        if (decoded !== payload) return decoded;
+        // A payload that is itself an unresolved expansion (`bash -c $X
+        // '…'`) can be any command text — including the FOLLOWING word when
+        // $X expands to `--`. No program is provable: fail closed.
+        if (/^[$`]/.test(payload)) return '';
+        return payload;
+      }
+      // Letters after `c` disagree between shells: bash reads them as more
+      // options and takes the FIRST NON-OPTION argument as the payload
+      // (`bash -ce 'cmd'` runs `cmd`, witnessed), while dash/zsh/getopt read
+      // them as `-c`'s attached value. No single payload is provable, so the
+      // position is unclassifiable rather than amend-free (#16075 R1-1).
+      return '';
+    }
+    // No `c` in this cluster: consume the operands of value-taking letters so
+    // the scan lands on the real `-c`. fish's `-C`/`-d` take values; bash's
+    // `-C` does not.
+    if (isFish && /[Cd]/.test(letters)) {
+      inner++;
+      continue;
+    }
+    if (/[oO]/.test(letters)) {
+      inner++;
+      continue;
+    }
   }
   return null;
+}
+
+/** env options that never consume a following word (FreeBSD/GNU common
+ * set); anything else unknown fails closed. */
+const ENV_NO_VALUE_FLAGS = new Set([
+  '-i',
+  '--ignore-environment',
+  '-0',
+  '--null',
+  '-v',
+  '--debug',
+]);
+
+/** util-linux su options that consume the next word (su(1)). */
+const SU_VALUE_FLAGS = new Set([
+  '-s',
+  '--shell',
+  '-g',
+  '--group',
+  '-G',
+  '--supp-group',
+  '-w',
+  '--whitelist-environment',
+]);
+
+const SU_NO_VALUE_FLAGS = new Set([
+  '-m',
+  '-p',
+  '-l',
+  '-f',
+  '--login',
+  '--fast',
+  '-P',
+  '--pty',
+  '-T',
+  '--no-pty',
+  '-h',
+  '--help',
+  '-V',
+  '--version',
+]);
+
+/**
+ * Names assigned anywhere in the command — leading assignments, prefix
+ * assignments, and `export`/`declare`/`typeset` arguments, with or without a
+ * value. A program word referencing one of these can expand to whatever the
+ * assignment holds, so it stays unclassifiable even when the assignment is
+ * in another segment (`X=$'git\x20commit\x20--amend'; $X`).
+ */
+function collectAssignedNames(
+  command: string,
+  inherited: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const tokens = tokenize(command);
+  let names: Set<string> | null = null;
+  const add = (name: string) => {
+    if (inherited.has(name)) return;
+    (names ??= new Set(inherited)).add(name);
+  };
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    const assign = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(token);
+    if (assign) {
+      add(assign[1]!);
+      continue;
+    }
+    if (/^(?:export|declare|typeset)$/.test(amendExecutableBasename(token))) {
+      for (let j = i + 1; j < tokens.length; j++) {
+        const arg = tokens[j]!;
+        if (arg.startsWith('-')) continue;
+        const named = /^([A-Za-z_][A-Za-z0-9_]*)(?:=[\s\S]*)?$/.exec(arg);
+        if (!named) break;
+        add(named[1]!);
+      }
+    }
+  }
+  return names ?? inherited;
+}
+
+/**
+ * Whether a program word carrying an expansion can still be git running an
+ * amend (#16075 review, R12-1). The old scan failed closed on EVERY expanded
+ * program word, blocking `$EDITOR notes.txt` and `"$PY" scripts/migrate.py`
+ * — ordinary invocations that can never amend. Fail closed only when the
+ * word can actually be git:
+ *
+ *   - a referenced name assigned in the same command, `IFS`, a command
+ *     substitution, a special parameter or a brace operator expands to
+ *     arbitrary text → unclassifiable;
+ *   - a static basename after the last slash that is not `git`
+ *     (`${BIN}/tool`, `$VENV/bin/pip`) can never run git → amend-free;
+ *   - otherwise the program may be git, and the remaining words decide:
+ *     `$GIT commit --amend` stays blocked, `$MAKE all` does not.
+ *
+ * The git-flag / subcommand / commit-argument expansion checks below the
+ * call site are untouched: those positions decide the invocation even for
+ * a statically known git.
+ */
+function programExpansionCouldAmend(
+  word: string,
+  rest: string[],
+  assignedNames: ReadonlySet<string>,
+): boolean {
+  const refs = word.matchAll(
+    /\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})/g,
+  );
+  for (const match of refs) {
+    const name = (match[1] ?? match[2])!;
+    if (name === 'IFS' || assignedNames.has(name)) return true;
+  }
+  // Strip the plain parameter references; any expansion syntax left over
+  // (`$(…)`, backticks, `${VAR:-…}`, `$1`, …) is unresolvable text.
+  const residual = word.replace(
+    /\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})/g,
+    '',
+  );
+  if (AMEND_EXPANSION_WORD.test(residual) || residual.includes('`')) {
+    return true;
+  }
+  const basename = word.split('/').pop() ?? '';
+  if (!/[$`]/.test(basename) && amendExecutableBasename(basename) !== 'git') {
+    return false;
+  }
+  return isGitAmendInvocationAt(['git', ...rest], 0);
 }
 
 /**
@@ -2790,7 +3088,10 @@ function shellDashCPayload(tokens: string[], index: number): string | null {
  * while a shell fed by an executor or by data the model never reads fails
  * closed.
  */
-function nestedAmendPayloads(tokens: string[]): {
+function nestedAmendPayloads(
+  tokens: string[],
+  assignedNames: ReadonlySet<string> = new Set(),
+): {
   payloads: string[];
   unclassifiable: boolean;
 } {
@@ -2813,43 +3114,99 @@ function nestedAmendPayloads(tokens: string[]): {
   // argument position can run a payload. `echo bash -c '…'` runs `echo`, and
   // `xargs -I{} sh -c '…'` runs `sh` (#16075 review, R5-4).
   const wrapperOffsets = amendWrapperProgramOffsets(tokens);
+  if (wrapperOffsets === null) unclassifiable = true;
   const prefixLength = tokens.length - skipAmendPrefixes(tokens).length;
 
   for (let index = 0; index < tokens.length; index++) {
-    if (index > prefixLength && !wrapperOffsets.has(index)) continue;
+    if (index > prefixLength && !wrapperOffsets?.has(index)) continue;
     const program = amendExecutableBasename(tokens[index]!);
 
     if (program === 'env') {
+      // env's own options come first, then assignments, then the program.
+      // Value-taking options consume their operand: `env -u HOME -S '…'`
+      // hides the payload behind `-u`'s value (#16075 review, R1-1).
+      const valueFlags = AMEND_PREFIX_FLAGS_WITH_VALUE.get('env')!;
       for (let inner = index + 1; inner < tokens.length; inner++) {
         const flag = tokens[inner]!;
-        if (!flag.startsWith('-')) break;
+        if (flag === '--') break;
+        if (flag.startsWith('--split-string=')) {
+          payloads.push(flag.slice('--split-string='.length));
+          continue;
+        }
         if (flag === '-S' || flag === '--split-string') {
           const value = tokens[inner + 1];
           if (value === undefined) unclassifiable = true;
           else payloads.push(value);
+          inner++;
+          continue;
+        }
+        if (flag.startsWith('-S') && flag.length > 2) {
+          payloads.push(flag.slice(2));
+          continue;
+        }
+        if (flag.startsWith('-')) {
+          if (/^(?:-u.|-C.|--unset=|--chdir=)/.test(flag)) continue;
+          if (valueFlags.has(flag)) {
+            inner++;
+            continue;
+          }
+          if (ENV_NO_VALUE_FLAGS.has(flag)) continue;
+          unclassifiable = true;
           break;
         }
-        if (flag.startsWith('--split-string=')) {
-          payloads.push(flag.slice('--split-string='.length));
-          break;
-        }
+        if (isEnvAssignmentToken(flag)) continue;
+        break; // the program env runs
       }
       continue;
     }
 
-    // `su [user] -c '…'` carries a positional user before the `-c` flag, so the
-    // leading-flag scan below would stop at the user and miss the payload. Scan
-    // past positionals for the `-c` flag and read the program it runs.
+    // `su [user] -c '…'` carries a positional user before the `-c` flag, and
+    // util-linux su also spells the flag `--command` / `--session-command`
+    // (su(1)), detached or `=`-glued (#16075 review, R1-1).
     if (program === 'su') {
+      let sawUser = false;
       for (let inner = index + 1; inner < tokens.length; inner++) {
         const flag = tokens[inner]!;
-        const marker = /^-[A-Za-z]*c/.exec(flag);
-        if (!marker) continue;
-        const attached = flag.slice(marker[0].length);
-        const value = attached.length > 0 ? attached : tokens[inner + 1];
-        if (value === undefined) unclassifiable = true;
-        else payloads.push(value);
-        break;
+        if (
+          flag.startsWith('--command=') ||
+          flag.startsWith('--session-command=')
+        ) {
+          payloads.push(flag.slice(flag.indexOf('=') + 1));
+          continue;
+        }
+        if (flag === '--command' || flag === '--session-command') {
+          const value = tokens[inner + 1];
+          if (value === undefined) unclassifiable = true;
+          else payloads.push(value);
+          inner++;
+          continue;
+        }
+        if (flag === '--') break;
+        if (flag === '-') continue; // login shorthand, no operand
+        if (flag.startsWith('-')) {
+          const marker = /^-[A-Za-z]*c/.exec(flag);
+          if (marker) {
+            // su parses with getopt: an attached cluster tail IS the value.
+            const attached = flag.slice(marker[0].length);
+            const value = attached.length > 0 ? attached : tokens[inner + 1];
+            if (value === undefined) unclassifiable = true;
+            else payloads.push(value);
+            if (attached.length === 0) inner++;
+            continue;
+          }
+          if (SU_VALUE_FLAGS.has(flag)) {
+            inner++;
+            continue;
+          }
+          if (SU_NO_VALUE_FLAGS.has(flag)) continue;
+          unclassifiable = true;
+          break;
+        }
+        if (!sawUser) {
+          sawUser = true;
+          continue;
+        }
+        break; // words after the user are the invoked shell's arguments
       }
       continue;
     }
@@ -2862,11 +3219,21 @@ function nestedAmendPayloads(tokens: string[]): {
 
     if (!AMEND_SHELL_PROGRAMS.has(program)) continue;
     const payload = shellDashCPayload(tokens, index);
-    if (payload === null) continue;
     // `-c` with nothing after it: the shell has a program this scan cannot
     // read, so it is unclassifiable rather than amend-free.
     if (payload === '') unclassifiable = true;
-    else payloads.push(payload);
+    else if (payload !== null) payloads.push(payload);
+    // A process-substitution file operand is the script a stdin-reading shell
+    // runs (`bash <(printf '…')`, witnessed to amend); the generated text is
+    // not statically knowable, so the position fails closed (#16075 R1-1).
+    if (SHELLS_READING_STDIN.has(program)) {
+      for (let k = index + 1; k < tokens.length; k++) {
+        if (tokens[k]!.startsWith('<(')) {
+          unclassifiable = true;
+          break;
+        }
+      }
+    }
   }
 
   // Unquoted expansions word-split into argv entries the tokenizer keeps
@@ -2880,7 +3247,11 @@ function nestedAmendPayloads(tokens: string[]): {
   // R8-10).
   const afterPrefix = skipAmendPrefixes(tokens);
   const [programWord] = afterPrefix;
-  if (programWord !== undefined && AMEND_EXPANSION_WORD.test(programWord)) {
+  if (
+    programWord !== undefined &&
+    AMEND_EXPANSION_WORD.test(programWord) &&
+    programExpansionCouldAmend(programWord, afterPrefix.slice(1), assignedNames)
+  ) {
     unclassifiable = true;
   } else if (
     programWord !== undefined &&
@@ -2940,111 +3311,40 @@ function nestedAmendPayloads(tokens: string[]): {
 }
 
 /**
- * Decode the escapes an ANSI-C word (`$'…'`) applies, so a payload hidden
- * behind `\n` is analysed as the two commands bash runs.
- *
- * Bash flattens an escape it does not know to its bare letter only for the
- * four in `ANSI_C_SIMPLE`; every other spelling keeps the backslash. Mapping
- * `\x3b` to `x` produced a word bash never runs (`--amendx3btrue`) while bash
- * ran `--amend; true`, so the numeric forms are decoded for real.
- */
-const ANSI_C_SIMPLE: Record<string, string> = {
-  a: '\x07',
-  b: '\b',
-  e: '\x1b',
-  E: '\x1b',
-  f: '\f',
-  n: '\n',
-  r: '\r',
-  t: '\t',
-  v: '\v',
-  '\\': '\\',
-  "'": "'",
-  '"': '"',
-  '?': '?',
-};
-
-function decodeAnsiCEscape(
-  body: string,
-  index: number,
-): { text: string; length: number } | null {
-  if (body[index] !== '\\' || index + 1 >= body.length) return null;
-  const next = body[index + 1]!;
-  const simple = ANSI_C_SIMPLE[next];
-  if (simple !== undefined) return { text: simple, length: 2 };
-  if (next === 'x' || next === 'u' || next === 'U') {
-    const max = next === 'x' ? 2 : next === 'u' ? 4 : 8;
-    const digits = new RegExp(`^[0-9a-fA-F]{1,${max}}`).exec(
-      body.slice(index + 2),
-    )?.[0];
-    if (digits) {
-      const code = parseInt(digits, 16);
-      const length = 2 + digits.length;
-      // `String.fromCodePoint` throws above U+10FFFF, and bash rejects such a
-      // word rather than running it, so keep the escape literal. Throwing here
-      // would escape the permission guard instead of answering it.
-      if (next !== 'x' && code > 0x10ffff) {
-        return { text: body.slice(index, index + length), length };
-      }
-      return {
-        text:
-          next === 'x' ? String.fromCharCode(code) : String.fromCodePoint(code),
-        length,
-      };
-    }
-  }
-  // `\c` needs an operand letter. At the end of the word bash keeps `\c`
-  // literal; when the tokenizer passes the raw command, the next character
-  // is then the CLOSING quote, and consuming it as the operand left the
-  // ANSI-C state open and swallowed the rest of the command line
-  // (#16075 review, R8-2 / R10-1).
-  if (next === 'c' && index + 2 < body.length && body[index + 2] !== "'") {
-    return {
-      text: String.fromCharCode(
-        body[index + 2]!.toUpperCase().charCodeAt(0) & 0x1f,
-      ),
-      length: 3,
-    };
-  }
-  if (next >= '0' && next <= '7') {
-    const digits = /^[0-7]{1,3}/.exec(body.slice(index + 1))![0];
-    return {
-      text: String.fromCharCode(parseInt(digits, 8) & 0xff),
-      length: 1 + digits.length,
-    };
-  }
-  return null;
-}
-
-function decodeAnsiCWord(body: string): string {
-  let out = '';
-  for (let index = 0; index < body.length; index++) {
-    const escape = decodeAnsiCEscape(body, index);
-    if (!escape) {
-      // Unknown escape: bash keeps the backslash and the letter.
-      out += body[index]!;
-      continue;
-    }
-    out += escape.text;
-    index += escape.length - 1;
-  }
-  return out;
-}
-
-/**
  * Decode a payload that is exactly one quoted word a wrapper hands its
  * program over as: ANSI-C (`bash -c $'…'`, `eval $'…'`) or locale-translation
  * (`bash -c $"…"`) quoting. The locale form keeps its body verbatim — bash
  * translates it but performs the same expansions as a double-quoted word,
  * which the recursive pass models (#16075 review, R8-11).
+ *
+ * The body patterns are escape-aware and anchored to a SINGLE word: the old
+ * greedy `[\s\S]*` swallowed `$'git' commit '--amend'` whole (first `$'` to
+ * last `'`), decoding it into one mangled token bash never sees and missing
+ * the amend bash runs (#16075 review, R1-1). A payload that merely starts
+ * with `$'` but is several words is returned untouched for the tokenizer.
  */
 function decodeBareAnsiCWord(text: string): string {
   const trimmed = text.trim();
-  const ansiC = /^\$'([\s\S]*)'$/.exec(trimmed);
+  const ansiC = /^\$'((?:[^'\\]|\\[\s\S])*)'$/.exec(trimmed);
   if (ansiC) return decodeAnsiCWord(ansiC[1]!);
-  const locale = /^\$"([\s\S]*)"$/.exec(trimmed);
+  const locale = /^\$"((?:[^"\\]|\\[\s\S])*)"$/.exec(trimmed);
   if (locale) return locale[1]!;
   return text;
+}
+
+/**
+ * Remove the backslash escapes the OUTER shell applies to an unquoted
+ * wrapper payload: `bash -c git\ commit\ --amend` hands bash the script
+ * `git commit --amend`, but the recursive pass received the still-escaped
+ * text and tokenized `git\` as the program (#16075 review, R1-1).
+ *
+ * Deny-only: this runs after ANSI-C decoding (so `$'…\x3b…'` keeps its
+ * decoded semicolon) and only ever joins words the shell joins. A backslash
+ * a single-quoted payload would keep literal can at worst split a token the
+ * literal backstop still sees in the raw command.
+ */
+function removeShellBackslashEscapes(text: string): string {
+  return text.replace(/\\\n/g, '').replace(/\\([\s\S])/g, '$1');
 }
 
 /**
@@ -3108,7 +3408,11 @@ function stripUnquotedComments(segment: string): string {
   return out;
 }
 
-function tokensContainGitAmend(segment: string, depth: number): boolean {
+function tokensContainGitAmend(
+  segment: string,
+  depth: number,
+  assignedNames: ReadonlySet<string>,
+): boolean {
   if (depth >= AMEND_UNWRAP_DEPTH_LIMIT) {
     // Fail closed for pathological wrapper nesting in a permission guard.
     return true;
@@ -3119,19 +3423,26 @@ function tokensContainGitAmend(segment: string, depth: number): boolean {
   const unwrapped = stripShellWrapper(segment);
   if (unwrapped !== segment) {
     // Unwrapping `bash -c` leaves a quoted payload as written, so `$'…'` keeps
-    // its introducer and escapes; decode it before scanning the program.
+    // its introducer and escapes; decode it before scanning the program. The
+    // outer shell also removed the backslashes of an UNQUOTED payload
+    // (`bash -c git\ commit\ --amend`), so unescape what decoding left —
+    // ANSI-C first, or a decoded `\x3b` would lose its semicolon again
+    // (#16075 review, R1-1).
     return commandContainsGitAmendAtDepth(
-      decodeBareAnsiCWord(unwrapped),
+      removeShellBackslashEscapes(decodeBareAnsiCWord(unwrapped)),
       depth + 1,
+      assignedNames,
     );
   }
 
   // Wrappers embedding the command behind a flag value (`env -S '…'`) are
   // consumed by skipAmendPrefixes before the scan sees them, so read the
   // payloads off the untouched token stream.
-  const nested = nestedAmendPayloads(tokenize(segment));
+  const nested = nestedAmendPayloads(tokenize(segment), assignedNames);
   for (const payload of nested.payloads) {
-    if (commandContainsGitAmendAtDepth(payload, depth + 1)) return true;
+    if (commandContainsGitAmendAtDepth(payload, depth + 1, assignedNames)) {
+      return true;
+    }
   }
   if (nested.unclassifiable) return true;
 
@@ -3139,7 +3450,11 @@ function tokensContainGitAmend(segment: string, depth: number): boolean {
   if (tokens.length === 0) return false;
 
   if (amendExecutableBasename(tokens[0]!) === 'eval') {
-    return commandContainsGitAmendAtDepth(tokens.slice(1).join(' '), depth + 1);
+    return commandContainsGitAmendAtDepth(
+      tokens.slice(1).join(' '),
+      depth + 1,
+      assignedNames,
+    );
   }
 
   if (isGitAmendInvocationAt(tokens, 0)) return true;
@@ -3168,7 +3483,7 @@ function tokensContainGitAmend(segment: string, depth: number): boolean {
   if (
     hereString !== null &&
     AMEND_SHELL_PROGRAMS.has(amendExecutableBasename(tokens[0]!)) &&
-    commandContainsGitAmendAtDepth(hereString, depth + 1)
+    commandContainsGitAmendAtDepth(hereString, depth + 1, assignedNames)
   ) {
     return true;
   }
@@ -3403,18 +3718,36 @@ function extractShellFedHeredocBodies(command: string): string[] {
 function commandContainsGitAmendAtDepth(
   command: string,
   depth: number,
+  assignedNames: ReadonlySet<string> = new Set(),
 ): boolean {
+  // Names assigned here or inherited from an enclosing payload can turn an
+  // expanded program word into git (#16075 review, R12-1).
+  const names = collectAssignedNames(command, assignedNames);
   // A heredoc handed to a shell is the program, not data.
   if (depth < AMEND_UNWRAP_DEPTH_LIMIT) {
     for (const body of extractShellFedHeredocBodies(command)) {
-      if (commandContainsGitAmendAtDepth(body, depth + 1)) return true;
+      if (commandContainsGitAmendAtDepth(body, depth + 1, names)) return true;
     }
   }
   // A substitution body is code the shell runs, so analyse it as its own
-  // command before deciding the surrounding segment is amend-free.
+  // command before deciding the surrounding segment is amend-free. An
+  // ANSI-C word inside the body decodes to text with real separators
+  // (`printf $'git\x20commit\x20--amend'` writes an amend script), so a
+  // decoded reading is analysed too — deny-only, and only for bodies, where
+  // the text becomes code (#16075 review, R1-1).
   if (depth < AMEND_UNWRAP_DEPTH_LIMIT) {
     for (const body of extractCommandSubstitutionBodies(command)) {
-      if (commandContainsGitAmendAtDepth(body, depth + 1)) return true;
+      if (commandContainsGitAmendAtDepth(body, depth + 1, names)) return true;
+      if (
+        body.includes("$'") &&
+        commandContainsGitAmendAtDepth(
+          decodeAnsiCQuotedWords(body),
+          depth + 1,
+          names,
+        )
+      ) {
+        return true;
+      }
     }
   }
 
@@ -3430,13 +3763,76 @@ function commandContainsGitAmendAtDepth(
     const consumer = segments[index + 1];
     if ((terminator === '|' || terminator === '|&') && consumer !== undefined) {
       const fed = pipedProgramText(segment, consumer.command);
-      if (fed !== null && commandContainsGitAmendAtDepth(fed, depth + 1)) {
+      if (
+        fed !== null &&
+        commandContainsGitAmendAtDepth(fed, depth + 1, names)
+      ) {
         return true;
       }
     }
-    if (tokensContainGitAmend(segment, depth)) return true;
+    if (tokensContainGitAmend(segment, depth, names)) return true;
   }
   return false;
+}
+
+/**
+ * Replace every unquoted, unescaped ANSI-C word (`$'…'`) in a text with its
+ * decoded body, leaving other quoting intact. The decoded separators become
+ * word boundaries for the next tokenize pass, which is what a shell reading
+ * the text as a script sees. Used only on text that becomes code
+ * (substitution bodies); deny-only, since the original reading still runs.
+ */
+function decodeAnsiCQuotedWords(text: string): string {
+  let out = '';
+  let quote: '"' | "'" | null = null;
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i]!;
+    if (quote !== null) {
+      out += ch;
+      if (ch === '\\' && quote === '"' && i + 1 < text.length) {
+        out += text[i + 1];
+        i += 2;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      i++;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < text.length) {
+      out += ch + text[i + 1];
+      i += 2;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      out += ch;
+      i++;
+      continue;
+    }
+    if (ch === '$' && text[i + 1] === "'") {
+      let j = i + 2;
+      let body = '';
+      while (j < text.length) {
+        if (text[j] === '\\' && j + 1 < text.length) {
+          body += text.slice(j, j + 2);
+          j += 2;
+          continue;
+        }
+        if (text[j] === "'") break;
+        body += text[j];
+        j++;
+      }
+      if (j < text.length) {
+        out += decodeAnsiCWord(body);
+        i = j + 1;
+        continue;
+      }
+    }
+    out += ch;
+    i++;
+  }
+  return out;
 }
 
 /**
@@ -3748,17 +4144,45 @@ function hasUnquotedParens(segment: string): boolean {
 /**
  * Locate the compound segments that DIRECTLY invoke `git commit --amend`,
  * with the cwd each runs under, for the session-commit exemption (#16075
- * review, R7-2 fix-induced). Heredoc bodies are data, not segments; `cd` /
- * `pushd` shift the effective cwd; subshell parentheses, `popd` and dynamic
- * cd targets make the cwd untrackable, which fails closed. An empty segment
- * list means the amend exists only inside a nested payload (a wrapper `-c`
- * operand, a shell-fed heredoc, a substitution).
+ * review, R7-2). Heredoc bodies are data unless a shell reads them; `cd` /
+ * `pushd` shift the effective cwd only when they run in THIS shell (not
+ * backgrounded, not in a pipeline, not in a subshell); wrapper payloads are
+ * walked recursively at the cwd they inherit, and their inner `cd` never
+ * moves the outer cwd. `eval`/`source`, exported `GIT_DIR`/`GIT_WORK_TREE`,
+ * subshell parentheses, `popd` and dynamic cd targets make the cwd
+ * untrackable, which fails closed. An empty segment list means the amend
+ * exists only in a carrier this walk does not attribute (su, env -S, xargs,
+ * find -exec, …) — the caller refuses the exemption.
  */
 export function amendSegmentsForExemption(
   command: string,
   cwd: string,
 ): AmendSegmentAnalysis {
-  const segments = splitCompoundCommandSegments(stripHeredocBodies(command));
+  return walkAmendSegments(command, cwd, 0, new Set());
+}
+
+/** `builtin cd` / `command cd` run the cd builtin in this shell; the query
+ * forms (`command -v cd`) run nothing and must not move the cwd. */
+function stripCdPrefixWords(segment: string): string {
+  const prefix = /^(?:builtin|command)[ \t]+/.exec(segment);
+  if (!prefix) return segment;
+  const rest = segment.slice(prefix[0].length);
+  const flags = /^(?:-[A-Za-z]+[ \t]+)*/.exec(rest)![0];
+  const after = rest.slice(flags.length);
+  if (!/[vV]/.test(flags) && /^(?:cd|pushd)(?:[ \t]|$)/.test(after)) {
+    return after;
+  }
+  return segment;
+}
+
+function walkAmendSegments(
+  command: string,
+  cwd: string,
+  depth: number,
+  inheritedNames: ReadonlySet<string>,
+): AmendSegmentAnalysis {
+  if (depth >= AMEND_UNWRAP_DEPTH_LIMIT) return { kind: 'untrackable' };
+  const names = collectAssignedNames(command, inheritedNames);
   let effectiveCwd = cwd;
   let cwdKnown = true;
   // The splitter does not keep subshell boundaries, so once unquoted
@@ -3766,17 +4190,185 @@ export function amendSegmentsForExemption(
   // and an amend may run under a cwd this walk cannot attribute. Both fail
   // closed rather than exempt against the wrong repository.
   let sawSubshell = false;
+  // An exported GIT_DIR/GIT_WORK_TREE relocates every later amend to a repo
+  // this walk cannot attribute segment-by-segment; fail closed on it.
+  let envRelocated = false;
+  let allexport = false;
   const amendSegments: AmendSegment[] = [];
-  for (const { command: segment, terminator } of segments) {
+
+  // A substitution body that amends is a second amend whose cwd this walk
+  // does not model (`git amend -m "$(git -C B amend)"` amends BOTH repos,
+  // witnessed); refuse the exemption rather than attribute one of them.
+  for (const body of extractCommandSubstitutionBodies(command)) {
+    if (commandContainsGitAmendAtDepth(body, depth + 1, names)) {
+      return { kind: 'untrackable' };
+    }
+  }
+
+  // Shell-fed heredoc bodies in opener order; the owning segment below
+  // consumes its body at the cwd effective there.
+  const fedBodies = extractShellFedHeredocBodies(command);
+  let fedIndex = 0;
+  const walkInner = (text: string): AmendSegmentAnalysis =>
+    walkAmendSegments(text, effectiveCwd, depth + 1, names);
+
+  const segments = splitCompoundCommandSegments(stripHeredocBodies(command));
+  let prevTerminator = '';
+  for (let i = 0; i < segments.length; i++) {
+    const { command: segment, terminator } = segments[i]!;
     if (hasUnquotedParens(segment)) sawSubshell = true;
+    const cleaned = segment.replace(AMEND_LEADING_FLOW_NOISE, '');
+    const tokens = skipAmendPrefixes(tokenize(stripUnquotedComments(segment)));
+    const program = amendExecutableBasename(tokens[0] ?? '');
+
+    // A wrapper payload runs at the cwd it inherits; its inner cd moves only
+    // its own shell. `bash -c 'cd B && git amend'` amends B, and
+    // `bash -c 'git amend' && cd A` amends the cwd BEFORE the cd (#16075
+    // review, R7-2).
+    const unwrapped = stripShellWrapper(cleaned);
+    if (unwrapped !== cleaned) {
+      const payload = removeShellBackslashEscapes(
+        decodeBareAnsiCWord(unwrapped),
+      );
+      const inner = walkInner(payload);
+      if (inner.kind === 'untrackable') return inner;
+      amendSegments.push(...inner.segments);
+      prevTerminator = terminator;
+      continue;
+    }
+
+    // A heredoc fed to a stdin-reading shell is its program. The body is
+    // consumed in opener order, matching extractShellFedHeredocBodies.
+    const hasHeredocOpener = scanHeredocOpeners(segment).some(
+      (opener) => !opener.hereString,
+    );
+    if (hasHeredocOpener && fedIndex < fedBodies.length) {
+      const next = segments[i + 1];
+      const nextProgram = next
+        ? amendExecutableBasename(
+            skipAmendPrefixes(
+              tokenize(stripUnquotedComments(next.command)),
+            )[0] ?? '',
+          )
+        : '';
+      const pipeFed =
+        (terminator === '|' || terminator === '|&') &&
+        SHELLS_READING_STDIN.has(nextProgram);
+      if (SHELLS_READING_STDIN.has(program) || pipeFed) {
+        const inner = walkInner(fedBodies[fedIndex++]!);
+        if (inner.kind === 'untrackable') return inner;
+        amendSegments.push(...inner.segments);
+        prevTerminator = terminator;
+        continue;
+      }
+    }
+
+    // A pipe into a stdin-reading shell hands it the producer's text as its
+    // program (`echo 'cd B && git amend' | bash`, witnessed to amend B).
+    if (
+      (prevTerminator === '|' || prevTerminator === '|&') &&
+      SHELLS_READING_STDIN.has(program) &&
+      i > 0
+    ) {
+      const fed = pipedProgramText(segments[i - 1]!.command, segment);
+      if (fed) {
+        const inner = walkInner(fed);
+        if (inner.kind === 'untrackable') return inner;
+        amendSegments.push(...inner.segments);
+      }
+      prevTerminator = terminator;
+      continue;
+    }
+
+    // eval / source / . can move the cwd through text this walk does not
+    // read; every later attribution is untrustworthy.
+    if (program === 'eval' || program === 'source' || program === '.') {
+      cwdKnown = false;
+      prevTerminator = terminator;
+      continue;
+    }
+
+    // Exported GIT_DIR / GIT_WORK_TREE persist across segments and relocate
+    // the repository independently of the cwd; `set -a` turns plain
+    // assignments into exports. Track them and fail closed on an amend
+    // under an active relocation (#16075 review, R7-2).
+    const rawTokens = tokenize(stripUnquotedComments(segment));
+    if (program === 'set') {
+      for (let k = 1; k < rawTokens.length; k++) {
+        const t = rawTokens[k]!;
+        if (t === '-o' || t === '+o') {
+          if (rawTokens[k + 1] === 'allexport') allexport = t === '-o';
+          k++;
+          continue;
+        }
+        if (/^-[a-z]*a/.test(t)) allexport = true;
+        else if (/^\+[a-z]*a/.test(t)) allexport = false;
+      }
+    } else if (
+      program === 'export' ||
+      program === 'declare' ||
+      program === 'typeset'
+    ) {
+      const exporting =
+        program === 'export' || rawTokens.some((t) => t === '-x');
+      for (let k = 1; k < rawTokens.length; k++) {
+        const t = rawTokens[k]!;
+        if (t.startsWith('-')) {
+          if (t !== '-p' && t !== '-x') envRelocated = true;
+          continue;
+        }
+        const name = /^([A-Za-z_][A-Za-z0-9_]*)(?:=|$)/.exec(t)?.[1];
+        if (name === undefined) {
+          envRelocated = true;
+          continue;
+        }
+        if (
+          (name === 'GIT_DIR' || name === 'GIT_WORK_TREE') &&
+          (exporting || allexport)
+        ) {
+          envRelocated = true;
+        }
+      }
+    } else if (program === 'unset') {
+      for (let k = 1; k < rawTokens.length; k++) {
+        const t = rawTokens[k]!;
+        if (t.startsWith('-')) {
+          if (t !== '-v') envRelocated = true;
+          continue;
+        }
+        if (t === 'GIT_DIR' || t === 'GIT_WORK_TREE') envRelocated = false;
+      }
+    } else if (allexport && rawTokens.length > 0) {
+      for (const t of rawTokens) {
+        if (/^(?:GIT_DIR|GIT_WORK_TREE)=/.test(t)) envRelocated = true;
+      }
+    }
+
+    // A redirection on a cd hides the builtin from the word scan; the cwd
+    // move is real but unattributable here.
+    if (
+      rawTokens.length > 0 &&
+      AMEND_REDIRECT_TOKEN.test(rawTokens[0]!) &&
+      /\b(?:cd|pushd)\b/.test(segment)
+    ) {
+      cwdKnown = false;
+    }
+
     const cdTarget = resolveCdTargetCwd(
-      segment.replace(AMEND_LEADING_FLOW_NOISE, ''),
+      stripCdPrefixWords(cleaned),
       effectiveCwd,
       !cwdKnown,
     );
     if (cdTarget.kind !== 'not-cd') {
-      // A backgrounded `cd` runs in a subshell and does not move this cwd.
-      if (terminator !== '&' && !sawSubshell) {
+      // A cd moves THIS cwd only when it runs in this shell: not
+      // backgrounded, not either side of a pipeline (both run in subshells),
+      // not after subshell parentheses (#16075 review, R7-2).
+      const inPipeline =
+        terminator === '|' ||
+        terminator === '|&' ||
+        prevTerminator === '|' ||
+        prevTerminator === '|&';
+      if (terminator !== '&' && !inPipeline && !sawSubshell) {
         if (cdTarget.kind === 'static') {
           effectiveCwd = cdTarget.cwd;
           cwdKnown = !cdTarget.cwdUnknown;
@@ -3784,12 +4376,15 @@ export function amendSegmentsForExemption(
           cwdKnown = false;
         }
       }
+      prevTerminator = terminator;
       continue;
     }
-    const tokens = skipAmendPrefixes(tokenize(stripUnquotedComments(segment)));
     if (tokens.length > 0 && isGitAmendInvocationAt(tokens, 0)) {
-      if (!cwdKnown || sawSubshell) return { kind: 'untrackable' };
+      if (!cwdKnown || sawSubshell || envRelocated) {
+        return { kind: 'untrackable' };
+      }
       amendSegments.push({ segment, cwd: effectiveCwd });
+      prevTerminator = terminator;
       continue;
     }
     // A direct git invocation the recognizer cannot classify (an expansion
@@ -3799,11 +4394,16 @@ export function amendSegmentsForExemption(
     if (
       tokens.length > 0 &&
       amendExecutableBasename(tokens[0]!) === 'git' &&
-      nestedAmendPayloads(tokens).unclassifiable
+      nestedAmendPayloads(tokenize(stripUnquotedComments(segment)), names)
+        .unclassifiable
     ) {
       return { kind: 'untrackable' };
     }
+    prevTerminator = terminator;
   }
+  // A shell-fed body the segment loop did not consume belongs to an opener
+  // this walk could not attribute: its amend may run under any cwd.
+  if (fedIndex < fedBodies.length) return { kind: 'untrackable' };
   if ((!cwdKnown || sawSubshell) && amendSegments.length === 0) {
     return { kind: 'untrackable' };
   }
@@ -3843,9 +4443,43 @@ export function amendSegmentRelocations(
   // through the prefix command: skipAmendPrefixes consumes it as noise, so
   // scan the region it ate for relocations too. Missing one would exempt an
   // amend of another repository against this cwd's registered HEAD.
+  // The prefix's own chdir options relocate the same way: `env -C B git …`
+  // and `sudo -D B git …` run git in B (witnessed), so they are read as a
+  // `-C` relocation of the amend (#16075 review, R7-2). doas's `-C` is a
+  // config check, NOT a chdir, and is deliberately not read here.
   const consumed = tokens.length - index - rest.length;
+  let prefixProgram = '';
   for (let k = index; k < index + consumed; k++) {
-    if (isEnvAssignmentToken(tokens[k]!)) takeAssignment(tokens[k]!);
+    const token = tokens[k]!;
+    if (isEnvAssignmentToken(token)) {
+      takeAssignment(token);
+      continue;
+    }
+    if (!token.startsWith('-')) {
+      prefixProgram = amendExecutableBasename(token);
+      continue;
+    }
+    const isEnv = prefixProgram === 'env';
+    const isSudo = prefixProgram === 'sudo';
+    let value: string | undefined;
+    if (
+      (isEnv && (token === '-C' || token === '--chdir')) ||
+      (isSudo && (token === '-D' || token === '--chdir'))
+    ) {
+      value = tokens[k + 1];
+      k++;
+    } else if (isEnv && token.startsWith('-C') && token.length > 2) {
+      value = token.slice(2);
+    } else if (isSudo && token.startsWith('-D') && token.length > 2) {
+      value = token.slice(2);
+    } else if ((isEnv || isSudo) && token.startsWith('--chdir=')) {
+      value = token.slice('--chdir='.length);
+    }
+    if (value !== undefined) {
+      relocations.push({ flag: '-C', value });
+      continue;
+    }
+    if (AMEND_PREFIX_FLAGS_WITH_VALUE.get(prefixProgram)?.has(token)) k++;
   }
   if (amendExecutableBasename(rest[0] ?? '') !== 'git') return relocations;
   let cursor = 1;
@@ -3885,26 +4519,6 @@ export function amendSegmentRelocations(
     }
   }
   return relocations;
-}
-
-/** A repo-relocation spelling at a word boundary. */
-const AMEND_RELOCATION_SPELLING =
-  /(?:^|[\s'"])(?:-C|--git-dir|--work-tree|GIT_DIR=|GIT_WORK_TREE=)/;
-
-/**
- * Does the command spell a repo relocation anywhere — including inside an
- * ANSI-C-encoded wrapper payload (`bash -c $'git\x20-C\x20/repo\x20commit…'`)
- * whose decoded words the raw text hides? The exemption's nested-payload
- * branch cannot attribute a relocation to the inner invocation, so any
- * spelling refuses the exemption (fail closed).
- */
-export function commandSpellsRepoRelocation(command: string): boolean {
-  if (AMEND_RELOCATION_SPELLING.test(command)) return true;
-  const decoded = command.replace(
-    /\$'((?:[^'\\]|\\.)*)'/g,
-    (_match, body: string) => decodeAnsiCWord(body),
-  );
-  return decoded !== command && AMEND_RELOCATION_SPELLING.test(decoded);
 }
 
 function walkCompoundCommand(

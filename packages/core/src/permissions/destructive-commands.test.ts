@@ -406,6 +406,30 @@ describe('isDestructiveCommand — git commit --amend', () => {
     expectAllowed(['git commit -m "fix"'], 'commit changes');
   });
 
+  // R12-1: an expanded program word that can never be git is an ordinary
+  // invocation. The old scan failed closed on EVERY expansion in program
+  // position, blocking routine editor/interpreter launches in AUTO mode.
+  it('allows ordinary invocations behind an expanded program word', () => {
+    expectAllowed(['$EDITOR notes.txt'], 'edit notes');
+    expectAllowed(['"$PY" scripts/migrate.py'], 'run the migration');
+    expectAllowed(
+      ['${BIN}/tool --check', '$MAKE all', '"$VENV/bin/pip" install x'],
+      'build the project',
+    );
+  });
+
+  // The narrowing must not reopen the fail-open holes: a program word that
+  // CAN be git, an assigned name, or an unresolvable expansion stays denied.
+  it.each([
+    '$GIT commit --amend',
+    'X=git; $X commit --amend',
+    "X=$'git\\x20commit\\x20--amend'; $X",
+    '${IFS} git commit --amend',
+    '$(which git) commit --amend',
+  ])('keeps a potentially-git program word blocked: %s', (command) => {
+    expectBlocked(command, 'amend the commit', 'amend');
+  });
+
   // ── #16075 R9 structural repair ─────────────────────────────────────────
 
   // B1 (doudouOUC): every spelling below was ALLOWED at head 733b9096 with
@@ -887,6 +911,123 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
         repoA.dir,
       ),
     ).toBeNull();
+  });
+
+  // R7-2: the exemption must follow the repository the amend actually
+  // touches, not the session cwd — prefix chdirs, exported GIT_DIR, builtin
+  // cd, wrapper payloads, piped/heredoc programs and pipeline cds all move
+  // or hide the target (each witnessed with real bash and git).
+  const amendAt = (command: string, cwd: string) =>
+    isDestructiveCommand(command, 'amend the commit', cwd);
+
+  it('blocks an amend relocated by a prefix chdir to an unregistered repo', () => {
+    expect(
+      amendAt(`env -C ${repoB.dir} git commit --amend --no-edit`, repoA.dir),
+    ).not.toBeNull();
+    expect(
+      amendAt(`sudo -D ${repoB.dir} git commit --amend --no-edit`, repoA.dir),
+    ).not.toBeNull();
+  });
+
+  it('exempts an amend relocated by env -C to the registered repo', () => {
+    expect(
+      amendAt(`env -C ${repoA.dir} git commit --amend --no-edit`, repoB.dir),
+    ).toBeNull();
+  });
+
+  it('blocks an amend under an exported GIT_DIR of an unregistered repo', () => {
+    expect(
+      amendAt(
+        `export GIT_DIR=${repoB.dir}/.git; git commit --amend --no-edit`,
+        repoA.dir,
+      ),
+    ).not.toBeNull();
+  });
+
+  it('blocks an amend after builtin/command cd into an unregistered repo', () => {
+    expect(
+      amendAt(
+        `builtin cd ${repoB.dir} && git commit --amend --no-edit`,
+        repoA.dir,
+      ),
+    ).not.toBeNull();
+    expect(
+      amendAt(
+        `command cd ${repoB.dir} && git commit --amend --no-edit`,
+        repoA.dir,
+      ),
+    ).not.toBeNull();
+  });
+
+  it('attributes a wrapper payload amend to the cwd it inherits', () => {
+    // The payload cds to B: the amend targets B, not the outer cwd A.
+    expect(
+      amendAt(
+        `bash -c 'cd ${repoB.dir} && git commit --amend --no-edit'`,
+        repoA.dir,
+      ),
+    ).not.toBeNull();
+    // The payload amends before the outer cd runs: the target is still B.
+    expect(
+      amendAt(
+        `bash -c 'git commit --amend --no-edit' && cd ${repoA.dir}`,
+        repoB.dir,
+      ),
+    ).not.toBeNull();
+    // The payload amends the inherited cwd: the exemption still applies.
+    expect(
+      amendAt("bash -c 'git commit --amend --no-edit'", repoA.dir),
+    ).toBeNull();
+  });
+
+  it('does not move the cwd through a pipelined cd', () => {
+    // Both sides of a pipe run in subshells: the amend stays at B.
+    expect(
+      amendAt(`cd ${repoA.dir} | cat; git commit --amend --no-edit`, repoB.dir),
+    ).not.toBeNull();
+    // Mirror: the pipelined cd to B does not move A, so the amend is exempt.
+    expect(
+      amendAt(`cd ${repoB.dir} | cat; git commit --amend --no-edit`, repoA.dir),
+    ).toBeNull();
+  });
+
+  it('blocks an amend after eval cd and inside piped/heredoc programs', () => {
+    expect(
+      amendAt(
+        `eval 'cd ${repoB.dir}'; git commit --amend --no-edit`,
+        repoA.dir,
+      ),
+    ).not.toBeNull();
+    expect(
+      amendAt(
+        `echo 'cd ${repoB.dir} && git commit --amend --no-edit' | bash`,
+        repoA.dir,
+      ),
+    ).not.toBeNull();
+    expect(
+      amendAt(
+        `bash <<'EOF'\ncd ${repoB.dir}\ngit commit --amend --no-edit\nEOF`,
+        repoA.dir,
+      ),
+    ).not.toBeNull();
+  });
+
+  it('blocks a second amend inside a command substitution', () => {
+    expect(
+      amendAt(
+        `git commit --amend --no-edit -m "$(git -C ${repoB.dir} commit --amend --no-edit)"`,
+        repoA.dir,
+      ),
+    ).not.toBeNull();
+  });
+
+  it('blocks a payload amend relocated by an escaped -C', () => {
+    expect(
+      amendAt(
+        `bash -c 'git \\-C ${repoB.dir} commit --amend --no-edit'`,
+        repoA.dir,
+      ),
+    ).not.toBeNull();
   });
 });
 

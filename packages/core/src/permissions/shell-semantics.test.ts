@@ -912,6 +912,67 @@ describe('commandContainsGitAmend fail-closed backstop (#16075 R9 B1)', () => {
   );
 });
 
+// R1-1: wrapper spellings that really amend HEAD (witnessed with bash 5 and
+// git 2.x) but whose payload the old scans mislocated — an operand read as
+// the program, an option value skipped, a cluster tail read as an attached
+// payload bash never takes. Each row must be denied by the recognizer.
+describe('commandContainsGitAmend wrapper payload attribution (#16075 R1-1)', () => {
+  it.each([
+    // The acceptance row: the outer shell removes the backslashes before
+    // bash reads the payload, so the payload is `git commit --amend`.
+    'bash -c git\\ commit\\ --amend',
+    // xargs value flags consume their operand; the program follows it.
+    "ls | xargs -I {} sh -c 'git commit -m x --amend'",
+    "ls | xargs -n 1 bash -c 'git commit -m x --amend'",
+    // A glued redirection's target is not the program.
+    ">log bash -c 'git commit -m x --amend'",
+    "2>/dev/null bash -c $'git\\x20commit\\x20--amend'",
+    // env's -u consumes HOME; -S carries the payload behind it.
+    "env -u HOME -S $'git commit --am\\x65nd'",
+    // util-linux su spells -c as --command / --session-command (su(1)).
+    "su --command $'git commit --am\\x65nd'",
+    "su --session-command $'git commit --am\\x65nd'",
+    "su --command=$'git\\x20commit\\x20--amend'",
+    // bash reads letters after `c` as options, never as an attached payload
+    // (witnessed: `bash -c'…'` errors); the position is unclassifiable.
+    "find . -exec bash -ce $'git\\x20commit\\x20--amend' {} \\;",
+    // -o consumes its option name before -c reads the next word.
+    "sudo bash -o posix -c $'git commit --am\\x65nd'",
+    "ksh -o errexit -c $'git\\x20commit\\x20--amend'",
+    // setsid is a transparent prefix; the heredoc body is bash's program.
+    "setsid bash <<'EOF'\ngit commit --amend\nEOF",
+    // A process substitution is the script a stdin shell runs; its text is
+    // generated, so the position fails closed (witnessed to amend).
+    "bash <(printf $'git\\x20commit\\x20--amend')",
+    // A substitution body decodes to text with real separators before the
+    // producer shell writes it.
+    "echo $(printf $'git\\x20commit\\x20--amend') | bash",
+    // >| is the clobber-override redirection, not a pipe: one command.
+    'git >| /dev/null commit --amend',
+    'git <> /dev/null commit --amend',
+    // An unresolved expansion in payload position can be `--`, making the
+    // FOLLOWING word the command; no program is provable, so fail closed.
+    "bash -c $TERM $'git\\x20commit\\x20--amend'",
+  ])('denies a wrapper spelling that really amends: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+
+  it.each([
+    // An ANSI-C word in a plain argument is data: the recognizer must not
+    // decode it into a phantom invocation.
+    "grep $'git\\x20commit\\x20--amend' file.txt",
+    // A bare shell operand of xargs/find receives data, not a program.
+    'ls | xargs sh',
+    'find . -name bash',
+    // A decodable ANSI-C payload is readable text, not an unresolvable
+    // expansion: an inert one stays allowed.
+    "bash -c $'echo hi'",
+    "echo x && bash -c $'echo hi'",
+  ])('keeps inert wrapper-adjacent text allowed: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(false);
+  });
+});
+
 // R8-2 / R10-1: a trailing `\c` in an ANSI-C word stays literal. Consuming
 // the closing quote as its operand left the quote state open and swallowed
 // the rest of the line, hiding both the amend and the file operations.

@@ -24,7 +24,6 @@ import {
   amendSegmentRelocations,
   amendSegmentsForExemption,
   commandContainsGitAmend,
-  commandSpellsRepoRelocation,
   stripShellQuotes,
 } from './shell-semantics.js';
 
@@ -178,13 +177,11 @@ function resolveAmendTarget(cwd: string, command: string): AmendTarget | null {
 
   let target: AmendTarget;
   if (analysis.segments.length === 0) {
-    // The amend lives in a nested payload (wrapper `-c` operand, shell-fed
-    // heredoc, substitution). Keep the cwd-only answer when nothing spells
-    // a relocation; a relocation this guard cannot attribute to the inner
-    // invocation refuses the exemption. The spelling check also decodes
-    // ANSI-C words, so `$'git\x20-C\x20/repo…'` cannot hide one.
-    if (commandSpellsRepoRelocation(command)) return null;
-    target = { cwd: analysis.effectiveCwd };
+    // The amend lives in a carrier the exemption walk does not attribute
+    // (su -c, env -S, xargs, find -exec, a process substitution, …). Its
+    // repository cannot be resolved to a registered HEAD, so the exemption
+    // fails closed rather than guess (#16075 review, R7-2).
+    return null;
   } else {
     const perSegment = analysis.segments.map(({ segment, cwd: segCwd }) => ({
       relocations: amendSegmentRelocations(segment),
