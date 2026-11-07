@@ -6,8 +6,10 @@ import type { ChannelPlugin } from '@qwen-code/channel-base';
 import {
   GithubChannel,
   validateBoundSessionConfig,
+  validateRepoFilterConfig,
   PR_NOTIFICATION_REASONS,
   PR_WATCH_EVENTS,
+  REPO_FILTER_MODES,
 } from './GithubAdapter.js';
 
 /**
@@ -140,6 +142,24 @@ export const plugin: ChannelPlugin = {
         })),
       },
       {
+        key: 'repoFilterMode',
+        label: 'Repository Filter',
+        kind: 'enum',
+        default: 'off',
+        description:
+          'Filter incoming notifications by repository: allowlist processes only the listed repositories, blocklist processes all except the listed ones. Notifications about PRs bound to a session are filtered too; only their PR state watch events bypass the filter.',
+        // Built from the adapter's exported vocabulary so the UI options
+        // cannot drift from the validator (the PR_WATCH_EVENTS pattern).
+        options: REPO_FILTER_MODES.map((value) => ({ value, label: value })),
+      },
+      {
+        key: 'repoFilter',
+        label: 'Filtered Repositories',
+        kind: 'string-list',
+        description:
+          'Comma-separated owner/repo repository names used by the repository filter. Requires Repository Filter to be set to allowlist or blocklist.',
+      },
+      {
         key: 'deliverToBoundSessions',
         label: 'Deliver To PR-Bound Sessions',
         kind: 'boolean',
@@ -172,7 +192,10 @@ export const plugin: ChannelPlugin = {
       if (!token && config['useLocalGh'] !== true) {
         return 'Channel requires a token or local GitHub CLI authentication (useLocalGh).';
       }
-      return validateBoundSessionConfig(config, 'github');
+      return (
+        validateBoundSessionConfig(config, 'github') ??
+        validateRepoFilterConfig(config, 'github')
+      );
     },
   },
   createChannel: (name, config, bridge, options) =>

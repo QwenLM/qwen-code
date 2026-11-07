@@ -68,7 +68,7 @@ let injected = false;
 let serviceKilled = false;
 let proxyFailure: unknown;
 let originalCancel:
-  | { path: string; headers: Record<string, string>; body: Buffer }
+  | { path: string; headers: Record<string, string>; body: Buffer<ArrayBuffer> }
   | undefined;
 let releaseFollowupModel!: () => void;
 const followupModel = new Promise<void>((resolve) => {

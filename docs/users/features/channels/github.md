@@ -89,6 +89,8 @@ Local `gh` authentication requires an HTTPS `baseUrl` so the daemon host credent
 | `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"` with the repo (`owner/repo`) listed in `groups`, or `"pairing"` with the repo approved for notifications to flow                                                                   |
 | `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run                                                                                                                                   |
 | `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                                                                                                                                       |
+| `repoFilterMode`          | `"off"`                  | Repository event filter: `"allowlist"` processes only the repositories listed in `repoFilter`, `"blocklist"` processes all except them, `"off"` processes everything. Applies to notification intake only          |
+| `repoFilter`              | unset                    | `owner/repo` repository names used by `repoFilterMode`; required while the mode is `"allowlist"` or `"blocklist"`                                                                                                  |
 | `deliverToBoundSessions`  | `false`                  | Deliver events for PRs bound to a live session into that session as a prompt instead of a channel-owned session (daemon-managed channels only)                                                                     |
 | `prWatchEvents`           | unset                    | Optional state transitions to watch for bound PRs: `ci_failure`, `merge_conflict`, `head_change`, `state_change`. Requires `deliverToBoundSessions`                                                                |
 | `boundSessionActions`     | unset                    | Optional operator instruction templates for bound-session delivery, keyed by event class with optional role prefixes (`review:`, `verify:`, `fix:`). Enables role-aware fan-out. Requires `deliverToBoundSessions` |
@@ -98,6 +100,25 @@ Use `reasonFilter` to drop noisy notification classes such as `ci_activity` or `
 Valid `reasonFilter` values are `mention`, `review_requested`, `assign`, `author`, `comment`, `ci_activity`, `manual`, `state_change`, `subscribed`, `team_mention`, `security_alert`, `approval_requested`, `invitation`, `member_feature_requested`, and `security_advisory_credit`.
 
 Filtered notifications are marked read only after all accepted work in the poll window completes. Removing the filter later will not replay notifications the channel already skipped.
+
+### Repository event filter
+
+Use `repoFilterMode` together with `repoFilter` to filter incoming notifications by repository:
+
+```json
+{
+  "repoFilterMode": "blocklist",
+  "repoFilter": ["octo/noisy-repo", "octo/archive"]
+}
+```
+
+- `"allowlist"` processes only the listed repositories; `"blocklist"` processes every repository except the listed ones; `"off"` (the default) processes everything.
+- Repository names are matched case-insensitively and must be written as `owner/repo`. An active mode with an empty or malformed list is rejected at save time and at channel start.
+- While the mode is `"off"`, a stored list is ignored, so you can park a list without it affecting the channel.
+- The filter composes with `groupPolicy`: when both restrict repositories, only the intersection is processed. It applies to every incoming notification, including notifications about PRs bound to a live session (`deliverToBoundSessions`); only the PR state watch events (`prWatchEvents`) bypass it.
+- Filtered notifications are journaled as `repo_filter` skips in the Channel event timeline and do not hold the poll cursor. Like `reasonFilter` skips, they are marked read with the window and are not replayed when the filter changes.
+
+In the Web Shell editor, **Repository Filter** offers Off / Allowlist / Blocklist, and the **Filtered Repositories** list appears while a mode is active. You can paste repository or PR URLs there; they are shortened to `owner/repo` on save. Only URLs on the channel's own GitHub host are shortened — `github.com`, or the GitHub Enterprise host derived from the API base URL; URLs on any other host are rejected. On that host, URLs under known non-repository GitHub areas (`orgs/`, `apps/`, `settings/`, `trending/`, and similar) are also rejected instead of shortened. That area list is best-effort: a URL from a GitHub area not on the list can still be shortened, so check the saved `owner/repo` entries after pasting.
 
 ### Editing from the Web Shell
 
@@ -197,11 +218,36 @@ so the session that follows the PR handles the event with its existing context.
 - The injected prompt marks all GitHub content as untrusted event data. The
   session's reply stays in the session; it is **not** published to GitHub
   automatically, and the session may act on GitHub through its own tools.
-- Comment sender gates still apply before delivery. When several sessions are
-  bound to the same PR, the most recently updated non-archived session wins;
-  channel-owned sessions are never candidates. With `boundSessionActions`
-  configured, routing becomes role-aware instead: one winner per role,
-  fan-out across roles (see below).
+- Comment sender, repository and pairing gates still apply before delivery.
+  When several sessions are bound to the same PR, the most recently updated
+  non-archived session wins; channel-owned sessions are never candidates. With
+  `boundSessionActions` configured, routing becomes role-aware instead: one
+  winner per role, fan-out across roles (see below).
+- A plain conversation comment on a bound PR reaches the session without a
+  mention when the repository's group sender policy is an allowlist that lists
+  the sender: the mention requirement (`groups.*.requireMention`) keeps ambient
+  chatter out of public replies, and a bound event stays private. Accounts in
+  `operators` keep the mention requirement: a bound session usually acts on
+  GitHub as an operator's account, so list that account in `operators` (which
+  also lets it manage shared sessions), or its own comments come back to it as
+  new turns. Repositories that admit any sender (where every drive-by or bot
+  comment would otherwise become a session turn), the PR's own description and
+  unbound threads still need a mention, and unlisted senders are not delivered
+  at all. Notifications GitHub gives the `author` or `comment` reason are the
+  exception, as before: every comment there that passes the sender gate is
+  forwarded, an operator's included. GitHub keeps a thread's `mention` reason
+  once the bot is mentioned in it, so those rules then apply instead. With
+  `messageRoutes` and no `defaultMessageRoute`, a plain comment also needs a
+  route prefix. On threads GitHub lists as a mention, assignment or review
+  request, such a comment is delivered as a `comment` event, so with
+  `boundSessionActions` it reaches the roles whose templates cover `comment` or
+  `default`, never through a template keyed by the thread's reason (`mention`,
+  `review_requested`); and it is never answered in public: if no bound session
+  is left, it is dropped. The channel only sees comments its account is
+  notified about and reads PR conversation comments, not inline review comments
+  (see Known Limitations); to follow comments on PRs the bot account did not
+  open or review, have that account watch the repository, and include
+  `subscribed` if you set `reasonFilter`.
 - When no bound session exists (or it cannot be restored), **comment** events
   fall back to the normal channel path and its public-reply contract — on a
   complete binding snapshot; while the snapshot is partial or its refresh is
