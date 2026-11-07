@@ -414,13 +414,16 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
     >
       {/* Render standard message types */}
       {itemForDisplay.type === 'user' && (
-        <UserMessage text={itemForDisplay.text} />
+        <UserMessage text={itemForDisplay.text} contentWidth={contentWidth} />
       )}
       {itemForDisplay.type === 'notification' && (
         <InfoMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'user_shell' && (
-        <UserShellMessage text={itemForDisplay.text} />
+        <UserShellMessage
+          text={itemForDisplay.text}
+          contentWidth={contentWidth}
+        />
       )}
       {itemForDisplay.type === 'gemini' && (
         <>
