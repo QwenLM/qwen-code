@@ -8,6 +8,8 @@ remaining acceptance work. The investigation used `523be857db`. This design supe
 boundary in the [source layout](2026-10-15-managed-agent-server-layout.md) and
 [Java package design](2026-10-19-managed-agent-package-boundaries.md).
 
+The five-backend extraction and the updated dependency matrix are defined in the [Runtime backend module design](2026-10-31-managed-runtime-backend-modules.md). The matrix below records the original #15871 boundary.
+
 ## Problem and constraints
 
 The baseline has 391 production Java sources, 614 test Java sources and 18 Maven

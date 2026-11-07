@@ -26,7 +26,7 @@ public final class ToolPublicationRetentionClockFixtureMain {
         var manager = new DataSourceTransactionManager(source);
         var tx = new TransactionTemplate(manager);
         var retention = new ToolPublicationRetentionStore(jdbc, manager);
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String tenant = "clock-" + UUID.randomUUID();
         String session = "session-clock";
         var key = new ObjectMapper().createObjectNode().put("tenantId", tenant)

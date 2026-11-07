@@ -8,7 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepo
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocolTest;
-import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.local.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.sun.net.httpserver.HttpServer;

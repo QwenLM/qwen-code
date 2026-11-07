@@ -10,9 +10,9 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingReposit
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocolTest;
-import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
-import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisionerTest;
-import com.alibaba.qwen.code.runtimebroker.provisioning.StaticRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.local.LocalProcessRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.local.LocalProcessRuntimeProvisionerTest;
+import com.alibaba.qwen.code.runtimebroker.provisioning.staticruntime.StaticRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.h2.jdbcx.JdbcDataSource;
