@@ -198,4 +198,6 @@ OAuth 在共享 V1 schema 基线中增加加密的 `ma_mcp_credential` 和过期
 
 Runtime HTTP 请求为精确 Session/server/配置/凭据 generation/owner 获取当前 access token。刷新使用 lease 与 compare-and-set，不持有长 SQL 事务；轮换交换结果未知时重新授权。撤销阻止后续发放及迟到刷新提交。认证恢复不重放结果未知的 MCP 工具副作用。未证明跨 actor 进程/通道隔离的执行 profile 保持个人 OAuth 关闭。
 
+实现遵守现有类大小预算：独立的 Runtime token 请求 collaborator 负责发放前后的 lease/owner 校验，SQL actor 检查保留在现有带行锁的记录/准入 helper 内。模型目录和 agent revision 校验由模型/策略的现有责任方承担。公共 facade 签名、锁顺序和校验条件保持一致。action/store facade 上限收紧为 825/1167 行，不提高任何现有大小限制。
+
 行为验收计划位于 `.qwen/e2e-tests/2026-11-07-managed-skills-mcp-self-service.md`。实现增量为准备/校验、API/契约、安装 UI、Runtime 快照、OAuth 记录/准入和 HTTP 认证/恢复。本地、真实 MySQL/进程及完整 CI 证据分别报告。

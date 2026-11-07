@@ -460,9 +460,8 @@ final class AgentSessionAdmissions {
         if (existing.isEmpty()) {
             WorkspaceMigrationAdmission.requireSessionOpen(jdbc, tenantId, parentSessionId);
         }
-        SessionRecord parent = storeRows.requireSessionForUpdate(tenantId,
+        SessionRecord parent = storeRows.requireUnattendedSessionForUpdate(tenantId,
                 parentSessionId);
-        ManagedMcpOAuthAdmission.requireUnattendedAllowed(jdbc, tenantId, parentSessionId);
         if (parent.workspace() == null || residentWorkspaces.find(parent.workspace()) != null || !"ACTIVE".equals(parent.status())
                 || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
             throw new ManagedAgentException(409,
