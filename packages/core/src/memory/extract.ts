@@ -19,6 +19,7 @@ import {
   ensureUserAutoMemoryScaffold,
 } from './store.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
+import { blocksAllMemoryWrites } from './write-access.js';
 import {
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
@@ -42,6 +43,7 @@ export interface AutoMemoryExtractResult {
     | 'memory_tool'
     | 'memory_pressure'
     | 'session_mismatch'
+    | 'writes_denied'
     | 'cadence';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
@@ -157,6 +159,23 @@ export async function runAutoMemoryExtract(params: {
     now,
   );
   if (earlyMismatch) return earlyMismatch;
+
+  // A deny list that covers every write tool cannot be worked around by this
+  // agent: the scoped memory allow loses to a base deny, so each save would be
+  // refused after the fork has already run. Report the skip instead of paying
+  // for a run that is guaranteed to save nothing. The cursor stays put, so the
+  // turns stay owed if the caller later allows writes.
+  if (blocksAllMemoryWrites(params.config.getPermissionsDeny?.())) {
+    debugLogger.debug('Skipping auto-memory extract: writes_denied.');
+    return {
+      touchedTopics: [],
+      skippedReason: 'writes_denied',
+      cursor: {
+        sessionId: params.sessionId,
+        updatedAt: now.toISOString(),
+      },
+    };
+  }
 
   // Per-project scaffold is required (extraction cursor + metadata live
   // there). User-level scaffold is optional — a brand-new user without
