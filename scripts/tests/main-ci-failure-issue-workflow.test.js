@@ -459,10 +459,28 @@ cat "\${RUNNER_TEMP}/pulls.json"
             provisional: 'false',
           },
         },
-        rerun_infra: { result: 'skipped' },
+        // The dispatch the `if:` above admits has succeeded, which is the
+        // only state in which the rerun owns the outcome.
+        rerun_infra: { result: 'success' },
       };
       expect(evaluate(String(jobs.rerun_infra.if), needs)).toBe(true);
       expect(evaluate(String(jobs.file_issue.if), needs)).toBe(false);
+      // The rerun owns the outcome, so no PR comment may claim a failure now:
+      // a green rerun is rejected by the analyze gate and there is no DELETE
+      // path, so the red comment would stay for a run whose last attempt passed.
+      expect(evaluate(String(jobs.report_pr.if), needs)).toBe(false);
+      // A rerun that never dispatched leaves `file_issue` false too, so the
+      // comment is the only record of the timeout and must still post.
+      expect(
+        evaluate(String(jobs.report_pr.if), {
+          ...needs,
+          analyze: {
+            ...needs.analyze,
+            outputs: { ...needs.analyze.outputs, comment_body: '### x failed' },
+          },
+          rerun_infra: { result: 'failure' },
+        }),
+      ).toBe(true);
     });
 
     it('files a provisional timeout instead of deferring to a rerun that never runs', () => {
@@ -3472,5 +3490,41 @@ fi
       'pull-requests': 'read',
     });
     expect(privilegedJobs[0][1].needs).toEqual(['analyze', 'rerun_infra']);
+  });
+});
+
+describe('timeout classification wiring', () => {
+  const yml = parse(
+    readFileSync('.github/workflows/main-ci-failure-issue.yml', 'utf8'),
+  );
+  const stepEnv = (jobId, stepId) =>
+    yml.jobs[jobId].steps.find((step) => step.id === stepId).env;
+  const OUTPUTS = {
+    CANCELLATION_KIND: '${{ steps.live.outputs.cancellation_kind }}',
+    TIMEOUT_ATTEMPTS_EXHAUSTED:
+      '${{ steps.live.outputs.timeout_attempts_exhausted }}',
+    TIMEOUT_ANNOTATIONS_READABLE:
+      '${{ steps.live.outputs.timeout_annotations_readable }}',
+    PROVISIONAL: '${{ steps.live.outputs.provisional }}',
+  };
+
+  // Each of these mappings is the only path from the classifier to the step
+  // that acts on it. The step tests spawn the script with the value already in
+  // its environment, so deleting a mapping here keeps them green while the
+  // behaviour it wires disappears from the workflow.
+  it('feeds the classifier outputs to the destination step', () => {
+    expect(stepEnv('analyze', 'destination')).toMatchObject(OUTPUTS);
+  });
+
+  it('feeds the cancellation kind to the summary step', () => {
+    expect(stepEnv('analyze', 'summary').CANCELLATION_KIND).toBe(
+      '${{ steps.live.outputs.cancellation_kind }}',
+    );
+  });
+
+  it('feeds the cancellation kind to the download step', () => {
+    expect(stepEnv('analyze', 'download').CANCELLATION_KIND).toBe(
+      '${{ steps.live.outputs.cancellation_kind }}',
+    );
   });
 });
