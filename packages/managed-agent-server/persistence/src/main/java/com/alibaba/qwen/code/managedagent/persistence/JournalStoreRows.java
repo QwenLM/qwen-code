@@ -724,5 +724,4 @@ final class JournalStoreRows {
     record ActivationChange(String id, String phase, long epoch,
             Long expiresAt) {
     }
-
 }

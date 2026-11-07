@@ -301,5 +301,4 @@ final class ManagedModelDiagnosticProjection {
                 && value.longValue() >= minimum && value.longValue() <= MAX_SAFE_INTEGER
                 ? value.longValue() : null;
     }
-
 }
