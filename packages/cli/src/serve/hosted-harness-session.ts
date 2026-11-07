@@ -8335,13 +8335,14 @@ export function registerHostedHarnessSessionRoutes(
         });
         await session.automations?.reconcileRuns();
         if (phase === 'settle_resources') {
-          // Drain every Runtime a turn left held ahead of the owner close that
-          // asks for the mount back (R22-1, the order the v1 close already
-          // keeps for R14-2): a Hook-configured turn's background Shell keeps
-          // the release-mount guard refusing runtime_session_busy, so a
-          // handback issued first parks the detach on recovery-required for as
-          // long as the process lives. The drain's stops also land their
-          // finalize through the still-open publisher closed below.
+          // Stop what the turns still owe ahead of the owner close that asks
+          // for the mount back (R22-1, the order the v1 close already keeps for
+          // R14-2): a live background run keeps the release-mount guard
+          // refusing runtime_session_busy, so a handback issued first parks the
+          // detach on recovery-required for as long as the process lives. The
+          // stops also land their finalize through the still-open publisher
+          // closed below. Two drains because the debt is recorded in two places
+          // — a descriptor here, a held Runtime below (R24-1).
           if (brokerOptions)
             await retryHostedCleanup(
               session,
@@ -8353,6 +8354,36 @@ export function registerHostedHarnessSessionRoutes(
             );
           else if (hasHostedCleanupDebt(session.managed))
             throw new Error('Runtime cleanup remains owed after drain.');
+          // A Hook-configured turn acquires through hooks.acquire() and writes
+          // no cleanup descriptor, so the debt drain above stops nothing for
+          // it. Its background run is owed client-side as a held Runtime, and
+          // only stopping that run lifts the release-mount busy guard below
+          // (R24-1). Drain it here, where the v1 close already does.
+          if (brokerOptions)
+            for (const heldTurn of [...session.heldRuntimeTurns]) {
+              try {
+                await new HostedWorkspaceBroker(
+                  brokerOptions,
+                  session.managed.authority.sessionHeader.sessionKey,
+                  hostedRuntimeSessionId(heldTurn),
+                ).release({ drain: true });
+                session.heldRuntimeTurns.delete(heldTurn);
+              } catch (cause) {
+                // Nothing remains to stop, so the turn owes nothing and the
+                // handback may proceed — the tolerance the v1 drain carries.
+                if (
+                  cause instanceof HostedWorkspaceBrokerRejection &&
+                  cause.status === 404 &&
+                  cause.code === 'runtime_session_not_found'
+                ) {
+                  session.heldRuntimeTurns.delete(heldTurn);
+                  continue;
+                }
+                // Any other refusal left the run unproven. Park honestly rather
+                // than hand the mount back over a writer that may still live.
+                throw cause;
+              }
+            }
           // Only a delete is terminal; a close keeps the deterministic owner
           // re-acquirable across the reload (R14-1).
           await session.hooks?.close({ terminal: kind === 'delete' });

@@ -55,7 +55,10 @@ import { channelInputId } from '@qwen-code/qwen-code-core/managed-runtime/manage
 import { HostedChannelSession } from './hosted-channel-session.js';
 import { HostedMcpManager } from './hosted-mcp-settings.js';
 import { commitHostedFileHistory } from './hosted-file-history.js';
-import { oweHostedTurnCleanup } from './hosted-turn-cleanup.js';
+import {
+  hasHostedCleanupDebt,
+  oweHostedTurnCleanup,
+} from './hosted-turn-cleanup.js';
 import {
   LlmRequestPreparationError,
   type LlmPreparedRequest,
@@ -22253,6 +22256,7 @@ describe('Hosted Harness no-tool session', () => {
           cleanupBlocked?: boolean;
           hooks?: HostedHookSession;
           cleanupRetry?: Promise<void>;
+          heldRuntimeTurns: Set<string>;
           hooksBusy?: boolean;
           recoveredTurn?: string;
           mcpClosing?: boolean;
@@ -22440,6 +22444,65 @@ describe('Hosted Harness no-tool session', () => {
     // The 200 above is the witness: a handback issued before the drain refuses
     // busy, and the route parks the detach on 503 instead of attaching.
     expect(order).toContain('handback');
+  });
+
+  it('drains the held Runtime a Hook turn leaves without cleanup debt on a v2 close (R24-1)', async () => {
+    const toolProfile = 'hosted-workspace-shell/1';
+    const f = await recoveryFileSession(toolProfile);
+    await f.submit();
+    await f.idle();
+    f.resident.monitorWake?.close();
+    // No f.owe(): a Hook-configured turn acquires through hooks.acquire() and
+    // never writes a cleanup descriptor, so the debt drain has nothing to stop.
+    // What the turn does leave is the held Runtime, recorded client-side.
+    expect(hasHostedCleanupDebt(f.resident.managed)).toBe(false);
+    f.resident.heldRuntimeTurns.add(PROMPT_ID);
+    let backgroundLive = true;
+    const drained: string[] = [];
+    vi.mocked(HostedWorkspaceBroker.prototype.release).mockImplementation(
+      async function (this: HostedWorkspaceBroker, opts) {
+        // Key the guard to the held turn's own Runtime: the lease drain also
+        // carries {drain:true} with no descriptor, so an opts-only check would
+        // let that unrelated call clear the flag and pass a broken build.
+        if (opts?.drain) {
+          drained.push(this.runtimeSessionId);
+          if (this.runtimeSessionId === hostedRuntimeSessionId(PROMPT_ID))
+            backgroundLive = false;
+        }
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'det-claim',
+    );
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'releaseMount',
+    ).mockImplementation(async () => {
+      if (backgroundLive)
+        throw new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy');
+    });
+    const hooks = new HostedHookSession(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      f.resident.managed,
+      hookPin,
+      undefined,
+      () => false,
+      `extensions-components-${'e'.repeat(64)}`,
+    );
+    vi.spyOn(hooks, 'mountHeld', 'get').mockReturnValue(true);
+    f.resident.hooks = hooks;
+    await f
+      .authorize(supertest(f.server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send({
+        protocolVersion: 2,
+        phase: 'settle_resources',
+        kind: 'close',
+        toolProfile,
+        sessionKey: f.resident.managed.authority.sessionHeader.sessionKey,
+        authority: { operationId: 'close-held-drain', claimGeneration: 1 },
+      })
+      .expect(200);
+    expect(drained).toContain(hostedRuntimeSessionId(PROMPT_ID));
   });
 
   it.each([false, true])(
