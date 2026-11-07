@@ -1,11 +1,9 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import org.apache.commons.codec.digest.DigestUtils;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.UUID;
 
 /** Private Session-isolated file profile; it does not enable a worker. */
@@ -45,12 +43,7 @@ public final class CsiFilesRetirementProfile {
     }
 
     private static String digest(String value) {
-        try {
-            return "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException("SHA-256 unavailable", impossible);
-        }
+        return "sha256:" + DigestUtils.sha256Hex(value.getBytes(StandardCharsets.UTF_8));
     }
     public static boolean isProfile(RuntimeScope scope) {
         return scope != null && CAPABILITY_DIGEST.equals(scope.getCapabilityDigest());

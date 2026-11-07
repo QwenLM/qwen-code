@@ -1343,6 +1343,13 @@ export async function runNonInteractive(
             case 'submit_prompt':
               // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
               initialPartList = slashCommandResult.content;
+              // Stacked-skill overflow is a warning: the prompt still runs, so
+              // the run keeps its exit code and stderr carries the notice.
+              if (slashCommandResult.stackedSkillOverflow) {
+                process.stderr.write(
+                  `${slashCommandResult.stackedSkillOverflow}\n`,
+                );
+              }
               // Re-validate provider identity rather than trust the producer:
               // any slash command can set `modelOverride`, so the consumer
               // enforces that it names a model on the active provider before

@@ -212,7 +212,7 @@ function getProviderTextValue(provider: WebShellAtProvider): string {
       ? undefined
       : sanitizeDisplayText(provider.textValue)) ??
     (typeof provider.label === 'string'
-      ? (sanitizeDisplayText(provider.label) ?? undefined)
+      ? sanitizeDisplayText(provider.label)
       : undefined) ??
     safeDisplayText(provider.id) ??
     SAFE_DISPLAY_FALLBACK
