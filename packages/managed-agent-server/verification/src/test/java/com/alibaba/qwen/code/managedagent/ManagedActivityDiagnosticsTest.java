@@ -132,6 +132,22 @@ class ManagedActivityDiagnosticsTest {
         assertThat(summary.path("tools").path("execution").path("success").longValue()).isEqualTo(80);
         assertThat(summary.path("otherTools").path("requested").longValue()).isEqualTo(16);
         assertThat(summary.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length).isLessThan(65_536);
+        ObjectNode unknown = merged.deepCopy().put("delivery", "unknown");
+        ObjectNode known = ManagedActivityDiagnostics.merge(merged, unknown, false);
+        assertThat(known.path("delivery").asText()).isEqualTo("unavailable");
+        ObjectNode partial = last.deepCopy().put("delivery", "unknown");
+        assertThat(ManagedActivityDiagnostics.merge(last, partial, false).path("delivery").asText()).isEqualTo("partial");
+    }
+
+    @Test
+    void executorEvidenceCanCorrectAWeakerTerminalObservation() {
+        ObjectNode before = fact(0, "read_file").put("execution", "error").put("delivery", "partial");
+        ObjectNode executor = before.deepCopy().put("execution", "success");
+        assertThat(ManagedActivityDiagnostics.merge(before, executor, false).path("execution").asText()).isEqualTo("error");
+        assertThat(ManagedActivityDiagnostics.merge(before, executor, false).path("conflictingEvidence").asBoolean()).isTrue();
+        ObjectNode merged = ManagedActivityDiagnostics.merge(before, executor, true);
+        assertThat(merged.path("execution").asText()).isEqualTo("success");
+        assertThat(merged.path("delivery").asText()).isEqualTo("partial");
     }
 
     @Test
@@ -148,6 +164,11 @@ class ManagedActivityDiagnosticsTest {
         assertThat(summary.path("skillLoads").path("requested").longValue()).isEqualTo(2);
         assertThat(summary.path("extensionCommands").path("requested").longValue()).isEqualTo(1);
         assertThat(summary.path("skillBuckets").size()).isEqualTo(3);
+        for (JsonNode bucket : summary.path("skillBuckets")) {
+            assertThat(bucket.path("resource").size()).isEqualTo(3);
+            assertThat(bucket.path("resource").has("origin")).isFalse();
+            assertThat(bucket.path("resource").has("delivery")).isFalse();
+        }
     }
 
     @Test

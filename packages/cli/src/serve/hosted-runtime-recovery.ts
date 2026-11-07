@@ -1406,7 +1406,11 @@ async function hostedSkillResponse(
     }
   }
   if (problem) return refused(problem, 'invalid');
-  const config = session.authority.domainRecord('config_install');
+  const config = getManagedExecutionDiagnostics(session.authority)?.observation(
+    callId,
+  )
+    ? session.authority.domainRecord('config_install')
+    : undefined;
   const revision = config
     ? parseManagedConfigInstallRecord(
         JSON.parse(

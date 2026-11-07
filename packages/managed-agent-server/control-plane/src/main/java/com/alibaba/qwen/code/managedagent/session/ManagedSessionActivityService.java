@@ -35,7 +35,14 @@ public class ManagedSessionActivityService {
         } else {
             ObjectNode value = result.putObject("statistics");
             for (String field : List.of("tools", "files", "fileOperations", "skills", "skillLoads", "extensionCommands", "toolBuckets", "skillBuckets", "otherTools", "otherSkills")) {
-                value.set(field, statistics.path(field));
+                value.set(field, statistics.path(field).deepCopy());
+            }
+            for (String field : List.of("toolBuckets", "skillBuckets")) {
+                for (JsonNode bucket : value.path(field)) {
+                    if (bucket.path("resource").isObject()) {
+                        ((ObjectNode) bucket).set("resource", ManagedActivityDiagnostics.skillIdentity(bucket.path("resource")));
+                    }
+                }
             }
         }
         return result;

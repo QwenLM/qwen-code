@@ -2,6 +2,12 @@ import { useI18n } from '../../i18n';
 
 const messages = {
   title: ['Session diagnostics', '会话诊断'],
+  partialState: ['Partial', '部分'],
+  invocations: ['Agent invocations', '代理调用'],
+  predecessorUnavailable: [
+    'An earlier invocation is unavailable.',
+    '前序调用暂不可读。',
+  ],
   context: ['Context', 'Context'],
   statistics: ['Statistics', '统计'],
   modelStatistics: ['Model statistics', '模型统计'],

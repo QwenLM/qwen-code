@@ -19,6 +19,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelContext;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.StreamReadConstraints;
@@ -207,8 +208,10 @@ public class ManagedExtensionRecordStore
     }
 
     public String diagnosticCommittedSequence(String tenantId, String sessionId) {
-        return jdbc.queryForList("SELECT committed_sequence FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION'"
-                + " AND tenant_id = ? AND session_id = ?", Long.class, tenantId, sessionId).stream()
+        return jdbc.queryForList("SELECT committed_sequence FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?"
+                + " AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'", Long.class,
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                tenantId, sessionId).stream()
                 .findFirst().map(Object::toString).orElse(null);
     }
 

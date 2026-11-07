@@ -5,7 +5,10 @@
  */
 
 import path from 'node:path';
-import { parseManagedExecutionEvidence } from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
+import {
+  EXECUTION_DIAGNOSTICS_KIND,
+  parseManagedExecutionEvidence,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
 import { validateTodos } from '@qwen-code/qwen-code-core/tools/todoWrite.js';
 import { checkHostedTodoWriteInput } from './hosted-workspace-tool-input.js';
 import { readHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
@@ -181,6 +184,7 @@ const DOMAINS = [
   'session_source',
 ];
 const RESOURCE_KINDS = new Set([
+  EXECUTION_DIAGNOSTICS_KIND,
   'managed-definition',
   'managed-agent-instructions',
   'managed-agent-skills',
@@ -1072,7 +1076,7 @@ export async function verifyRecoverySession(
     } else if (ref.kind === 'managed-checkpoint-history') {
       for (const nested of collectNestedResourceRefs(ref, bytes))
         await io.enqueue(nested);
-    } else if (ref.kind === 'managed-execution-diagnostics') {
+    } else if (ref.kind === EXECUTION_DIAGNOSTICS_KIND) {
       if (ref.schemaVersion !== 1)
         throw new Error(
           'Workspace recovery: unsupported execution diagnostics.',

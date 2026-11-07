@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -20,6 +21,7 @@ import {
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { assertManagedSessionDurableRef } from './managed-session-records.js';
 import type { ManagedSessionKey } from './managed-session-records.js';
+import { scanManagedSessionJournal } from './managed-session-storage.js';
 
 const fixture = JSON.parse(
   await fs.readFile(
@@ -99,6 +101,41 @@ async function setup(collect = true) {
 }
 
 describe('Managed execution diagnostics', () => {
+  it.each([false, true])(
+    'binds committed record digests to diagnostic evidence (collect=%s)',
+    async (collect) => {
+      const { session, options, record } = await setup(collect);
+      const message = record('digest');
+      await session.sink.write(message);
+      const event = session.authority.lastEventOfKind('message.committed')!;
+      const content = assertManagedSessionDurableRef(
+        event.payload['contentRef'],
+        'contentRef',
+      );
+      const diagnostics = event.payload['diagnosticsRef'];
+      const expected = collect
+        ? createHash('sha256')
+            .update(
+              JSON.stringify([
+                'managed-execution-commit/1',
+                content.digest,
+                assertManagedSessionDurableRef(diagnostics, 'diagnosticsRef')
+                  .digest,
+              ]),
+            )
+            .digest('hex')
+        : session.authority.sessionHeader.definitionRef.digest;
+      const journal = scanManagedSessionJournal(
+        await fs.readFile(options.transcriptPath),
+        options.sessionKey,
+      );
+      const committed = [...journal.transactions.values()].find(
+        (transaction) => transaction.receipt.commandId === 'recorder:digest',
+      );
+      expect(committed?.contentDigest).toBe(expected);
+      expect(diagnostics !== undefined).toBe(collect);
+    },
+  );
   it('keeps operation observations while trimming optional Unicode paths to the source budget', async () => {
     const { session } = await setup();
     const facts = Array.from({ length: 90 }, (_, ordinal) => ({
@@ -132,6 +169,9 @@ describe('Managed execution diagnostics', () => {
   });
   it('preserves explicit execution evidence independently of omitted delivery', () => {
     const fact = structuredClone(fixture.evidence.observations[0]);
+    fact.execution = 'unknown';
+    fact.delivery = 'unknown';
+    fact.capture = 'unknown';
     observeManagedToolResponse(fact, {
       executionStatus: 'success',
       outputTruncated: true,
@@ -144,6 +184,22 @@ describe('Managed execution diagnostics', () => {
     ]);
     observeManagedToolResponse(fact, { outputOmitted: true });
     expect([fact.execution, fact.delivery]).toEqual(['success', 'unavailable']);
+  });
+  it('reads flattened Shell capture facts without certifying truncated delivery', () => {
+    const fact = structuredClone(fixture.evidence.observations[0]);
+    fact.execution = 'unknown';
+    fact.capture = 'unknown';
+    fact.delivery = 'pending';
+    observeManagedToolResponse(fact, {
+      executionStatus: 'success',
+      captureStatus: 'partial',
+      previewTruncated: true,
+    });
+    expect([fact.execution, fact.capture, fact.delivery]).toEqual([
+      'success',
+      'partial',
+      'partial',
+    ]);
   });
   it('preserves legacy committed messages when collection is enabled later', async () => {
     const { session, record } = await setup(false);

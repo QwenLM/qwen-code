@@ -290,15 +290,23 @@ export function ManagedActivityView({
             <dt>{t('execution')}</dt>
             <dd>{t(item.execution)}</dd>
             <dt>{t('delivery')}</dt>
-            <dd>{t(item.delivery)}</dd>
+            <dd>
+              {t(item.delivery === 'partial' ? 'partialState' : item.delivery)}
+            </dd>
             <dt>{t('capture')}</dt>
-            <dd>{t(item.capture)}</dd>
+            <dd>
+              {t(item.capture === 'partial' ? 'partialState' : item.capture)}
+            </dd>
             {item.skill && (
               <>
                 <dt>{t(item.skill.resourceKind)}</dt>
                 <dd>
                   {item.skill.pin} · {t(item.skill.origin)} ·{' '}
-                  {t(item.skill.delivery)}
+                  {t(
+                    item.skill.delivery === 'partial'
+                      ? 'partialState'
+                      : item.skill.delivery,
+                  )}
                 </dd>
               </>
             )}

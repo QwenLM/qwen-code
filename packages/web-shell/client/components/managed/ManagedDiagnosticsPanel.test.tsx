@@ -249,8 +249,72 @@ describe('ManagedDiagnosticsPanel', () => {
     expect(document.body.textContent).toContain('read_file');
     expect(document.body.textContent).toContain('ExecutionSuccess');
     expect(document.body.textContent).toContain('Delivery');
+    expect(document.body.textContent).toContain('DeliveryPartial');
+    expect(document.body.textContent).toContain(
+      'Some observations are unavailable or incomplete.',
+    );
+    expect(
+      [...document.querySelectorAll('button')].filter(
+        (button) => button.textContent === 'Refresh',
+      ),
+    ).toHaveLength(1);
     expect(document.body.textContent).toContain('assistant-1');
   });
+
+  it.each(['statistics-session', 'page-session', 'page-kind'])(
+    'rejects mismatched activity identity: %s',
+    async (mismatch) => {
+      if (mismatch === 'statistics-session')
+        vi.mocked(provider.getActivityStatistics!).mockResolvedValue({
+          ...activityStatistics,
+          sessionId: 'foreign',
+        });
+      else
+        vi.mocked(provider.listActivity!).mockResolvedValue({
+          ...activityPage,
+          ...(mismatch === 'page-session'
+            ? { sessionId: 'foreign' }
+            : { kind: 'skills' as const }),
+        });
+      await render();
+      await selectTab('Statistics');
+      const tools = [...document.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Tools',
+      )!;
+      await act(async () => tools.click());
+      expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+        'Could not read diagnostics',
+      );
+      expect(document.body.textContent).not.toContain('assistant-1');
+      expect(document.body.textContent).not.toContain('read_file');
+    },
+  );
+
+  it.each(['partial', 'unsupported'] as const)(
+    'preserves %s availability beside a child Session own usage',
+    async (availability) => {
+      vi.mocked(provider.getStatistics).mockImplementation(
+        async (sessionId) => ({
+          ...diagnosticStats,
+          sessionId,
+          availability,
+        }),
+      );
+      await render();
+      await selectTab('Child agents');
+      const own = [...document.querySelectorAll('button')].find(
+        (button) => button.textContent === 'View own usage',
+      )!;
+      await act(async () => own.click());
+      expect(document.body.textContent).toContain(
+        availability === 'partial'
+          ? 'Some observations are unavailable or incomplete.'
+          : 'This Session has no supported diagnostic records.',
+      );
+      if (availability === 'partial')
+        expect(document.body.textContent).toContain('Total tokens: 110');
+    },
+  );
 
   it('clears a stopped Session tree when the next visible permission check fails', async () => {
     vi.mocked(provider.listAgentTrace).mockResolvedValue({

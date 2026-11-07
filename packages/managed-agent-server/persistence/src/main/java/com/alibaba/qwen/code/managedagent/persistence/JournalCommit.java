@@ -248,12 +248,16 @@ final class JournalCommit {
                         ManagedExtensionRecordStore.readBody(evidence));
             }
         }
+        List<JsonNode> diagnosticEvents = new ArrayList<>();
         boolean wakeInput = false;
         for (String line :
                 new String(validated.recordBytes(), StandardCharsets.UTF_8).split("\n")) {
             JsonNode record = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(line);
             if (record != null && record.has("managedSession")) {
                 JsonNode event = record.get("managedSession");
+                if (event.isObject() && event.has("kind")) {
+                    diagnosticEvents.add(event);
+                }
                 wakeInput |= WakeRecoveryStore.isWakeInput(event);
                 ManagedHostedRecoveryRecords.validateEvent(
                         event.path("kind").asText(),
@@ -271,9 +275,6 @@ final class JournalCommit {
         }
         lifecycleAuthorization.authorizeNewLifecycleDispatch(tenantId, sessionId, authority,
                 validated.recordBytes(), reader);
-        List<JsonNode> diagnosticEvents = java.util.Arrays.stream(new String(validated.recordBytes(), StandardCharsets.UTF_8).split("\n"))
-                .map(com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore::parse).filter(Objects::nonNull)
-                .map(record -> record.path("managedSession")).filter(event -> event.isObject() && event.has("kind")).toList();
         if (diagnosticEvents.stream().anyMatch(event -> event.path("payload").has("diagnosticsRef"))) {
             ManagedExtensionRecordStore.require(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics
                     .carrierDigest(diagnosticEvents).equals(request.contentDigest()), "Execution diagnostic commit digest conflicts.");

@@ -142,6 +142,79 @@ describe('private original CSI Hosted routes', () => {
     expect(rpc).not.toHaveBeenCalled();
   });
 
+  it.each([1, 2, 3, 4])(
+    'checks the activity storage floor before publishing CSI genesis (storage=%s)',
+    async (supportedStorageVersion) => {
+      const { app, handle, id, body, headers } = setup();
+      const routes: string[] = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+        const route = new URL(String(url)).pathname;
+        routes.push(route);
+        if (route.endsWith('tool-sessions:acquire'))
+          return Response.json({
+            protocolVersion: 1,
+            acquired: true,
+            harnessSessionId: id,
+            runtimeSessionId: id,
+            scope: {
+              tenantId: 'tenant',
+              workspaceId: 'workspace',
+              workspaceGeneration: '1',
+              canonicalCwd: '/workspace',
+              capabilityDigest: CSI_FILES_ACTIVITY_CAPABILITY_DIGEST,
+              isolationClass: 'session',
+            },
+            runtime: { bindingId: randomUUID(), generation: '1' },
+          });
+        if (route.endsWith('/writers:acquire'))
+          return Response.json(
+            {
+              supportedStorageVersion,
+              activationLeaseRenewal: false,
+              writerGeneration: 1,
+              leaseUntil: Date.now() + 300_000,
+              journalRevision: 0,
+              committedSequence: 0,
+              activationEpoch: 0,
+              replayed: false,
+            },
+            { headers: { 'Cache-Control': 'no-store' } },
+          );
+        return Response.json(
+          {
+            error: {
+              code: 'fixture_stop',
+              message: 'Stop after the floor check.',
+            },
+          },
+          { status: 409 },
+        );
+      });
+      try {
+        const response = await supertest(app)
+          .post('/session/' + id + '/internal-csi/attach')
+          .set(headers)
+          .send(body);
+        expect(routes.some((route) => route.endsWith('/writers:acquire'))).toBe(
+          true,
+        );
+        if (supportedStorageVersion < 4) {
+          expect(response.body.code).toBe('csi_activity_storage_unavailable');
+          expect(routes.some((route) => route.endsWith('/restore'))).toBe(
+            false,
+          );
+        } else {
+          expect(response.body.code).not.toBe(
+            'csi_activity_storage_unavailable',
+          );
+          expect(routes.some((route) => route.endsWith('/restore'))).toBe(true);
+        }
+      } finally {
+        await handle.stopLocal();
+      }
+    },
+  );
+
   it('retains failed attachment identity and closes ordinary aliases and stopped entry', async () => {
     const { app, handle, id, body, headers } = setup();
     const rpc = vi

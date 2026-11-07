@@ -61,6 +61,7 @@ function CoverageReasons({ reasons }: { reasons: string[] }) {
     resource_unavailable: 'resourceUnavailable',
     public_output_limit: 'publicOutputLimit',
     child_unavailable: 'childrenUnavailable',
+    predecessor_unavailable: 'predecessorUnavailable',
     description_unavailable: 'descriptionUnavailable',
     invocation_unavailable: 'invocationUnavailable',
   } as const;
@@ -454,14 +455,16 @@ export function ManagedDiagnosticsPanel({
                 ),
               )}
             </TabsList>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={read.loading}
-              onClick={read.refresh}
-            >
-              {t('refresh')}
-            </Button>
+            {(tab !== 'statistics' || statisticsKind === 'model') && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={read.loading}
+                onClick={read.refresh}
+              >
+                {t('refresh')}
+              </Button>
+            )}
           </div>
           <TabsContent
             value={tab}

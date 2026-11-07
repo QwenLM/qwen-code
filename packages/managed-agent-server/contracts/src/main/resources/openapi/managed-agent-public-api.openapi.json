@@ -8655,7 +8655,11 @@
             "type": "string",
             "enum": ["openai", "openai-responses", "anthropic", "gemini"]
           },
-          "model": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
           "base_url": {
             "type": "string",
             "minLength": 1,
@@ -8672,8 +8676,16 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
-              "top_p": { "type": "number", "minimum": 0, "maximum": 1 },
+              "temperature": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 2
+              },
+              "top_p": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
               "top_k": {
                 "type": "integer",
                 "minimum": 1,
@@ -18737,7 +18749,14 @@
         ],
         "properties": {
           "predecessorTaskId": {
-            "anyOf": [{ "type": "string" }, { "type": "null" }]
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "taskId": {
             "type": "string"
@@ -19272,7 +19291,21 @@
                   "$ref": "#/components/schemas/ManagedActivityMetrics"
                 },
                 "resource": {
-                  "$ref": "#/components/schemas/ManagedActivitySkill"
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["resourceKind", "name", "pin"],
+                  "properties": {
+                    "resourceKind": {
+                      "type": "string",
+                      "enum": ["skill", "extension_command"]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "pin": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }
@@ -19294,7 +19327,21 @@
                   "$ref": "#/components/schemas/ManagedActivityMetrics"
                 },
                 "resource": {
-                  "$ref": "#/components/schemas/ManagedActivitySkill"
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["resourceKind", "name", "pin"],
+                  "properties": {
+                    "resourceKind": {
+                      "type": "string",
+                      "enum": ["skill", "extension_command"]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "pin": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }
@@ -20027,7 +20074,6 @@
           }
         }
       },
-
       "WebShellActivityQueryRequest": {
         "type": "object",
         "additionalProperties": false,
@@ -20065,31 +20111,6 @@
             "$ref": "#/components/schemas/ManagedActivitySkillsPage"
           }
         ]
-      },
-      "WebShellActivityQueryRequest": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["sessionId", "kind"],
-        "properties": {
-          "sessionId": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "kind": {
-            "type": "string",
-            "enum": ["tools", "files", "skills"]
-          },
-          "cursor": {
-            "type": "string",
-            "maxLength": 512
-          },
-          "limit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 100,
-            "default": 50
-          }
-        }
       }
     }
   }

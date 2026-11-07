@@ -13165,3 +13165,79 @@ it('honors an explicit Session allow rule for an extension command step', async 
   expect(permission.allowed).toBe(true);
   expect(actionIds()).toEqual([]);
 });
+
+it('commits a refusal when a Hook expands MCP arguments beyond the durable input budget', async () => {
+  await enableManagedExecutionDiagnostics(session);
+  const name = 'mcp_echo';
+  const mcp = {
+    broker,
+    ensureReady: async () => undefined,
+    refresh: async () => undefined,
+    tools: () => [{ name, parametersJsonSchema: { type: 'object' } }],
+    toolInput: (_tool: string, args: Record<string, unknown>) => ({
+      toolName: 'managed_mcp_call',
+      input: { serverId: 'server', arguments: args },
+    }),
+  };
+  const fire = vi
+    .fn<HostedHookSession['fire']>()
+    .mockImplementation(async (event) =>
+      event === HookEventName.PreToolUse
+        ? replaceWith({ payload: 'x'.repeat(100 * 1024) })()
+        : undefined,
+    );
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    { settings: { mode: 'yolo', timeoutMs: 60000 }, waiters },
+    {
+      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      hooks: hookSession(fire),
+    },
+  );
+  await turn.declarations(new AbortController().signal);
+  const call = { ...calls[0], name, args: { payload: 'short' } };
+  await expect(
+    turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    ),
+  ).resolves.toBeDefined();
+});
+
+it('records an unavailable path for a rejected lone-surrogate file name', async () => {
+  await enableManagedExecutionDiagnostics(session);
+  await turn.execute(
+    [calls[0]],
+    [parts[0]],
+    'model',
+    new AbortController().signal,
+  );
+  await turn.consumeResults();
+  const call = { ...calls[0], args: { file_path: 'docs/\ud800.txt' } };
+  expect(call.args.file_path.charCodeAt(5)).toBe(0xd800);
+  await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const event = session.authority.lastEventOfKind('message.committed')!;
+  const evidence = parseManagedExecutionEvidence(
+    await session.resources.read(
+      assertManagedSessionDurableRef(
+        event.payload['diagnosticsRef'],
+        'diagnosticsRef',
+      ),
+    ),
+  );
+  expect(evidence.observations[0].file?.path).toBeNull();
+});

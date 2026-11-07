@@ -14,16 +14,16 @@
 
 ## 2. 所属代码的调研发现
 
-| 证据                                                                                                                                                                                                                                                            | 发现及设计影响                                                                                                                                                                                                   |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [已审阅提交中的 #16475 设计](https://github.com/QwenLM/qwen-code/blob/42562a31bdd3779002504aeca569d381b0f7dd77/docs/design/2026-11-06-managed-session-diagnostics-and-organization.md)                                                                          | 四组持久化诊断 API；模型总量和近期样本、Skills/MCP 配置、直接子调用。明确排除了工具/文件/Skill 统计和递归图。近期模型样本不能还原无限历史的逐调用时间线。                                                        |
-| [Hosted 工具分发](../../packages/cli/src/serve/hosted-workspace-tool-turn.ts)，4995–5034、5135–5165 行                                                                                                                                                          | 被拒绝批次，以及 agent/message/team/command/plan/question/skill/todo/workflow 调用，可能不经过 native `tool.intent`。应以已提交 assistant functionCall 的每次出现为分母，再结合 intent、receipt 和 domain 证据。 |
-| [ChatRecord](../../packages/core/src/services/chatRecordingService.ts)，412–428 行；[调用绑定](../../packages/cli/src/serve/hosted-workspace-tool-turn.ts)，5214–5228 行                                                                                        | 消息 UUID、Session 身份、prompt 身份和调用序号可建立出现身份。规范化 function-call ID、实际保留的原始 provider ID 和 Runtime execution ID 是不同的关联字段。                                                     |
-| [工具结果协议](../../packages/core/src/managed-runtime/managed-tool-result.ts)，71–100、200–221 行                                                                                                                                                              | 执行、输出捕获和交付有独立状态。命令执行成功但输出被省略，不应变成执行失败。                                                                                                                                     |
-| [Hosted 文件历史](../../packages/cli/src/serve/hosted-workspace-tool-turn.ts)，4947–4970、5817–5827 行                                                                                                                                                          | 备份准备发生在写入前，且有启用条件。它既不能证明修改成功，也不记录每次读取。                                                                                                                                     |
-| [Skill 清单](../../packages/cli/src/serve/hosted-skill-catalog.ts)，266–332 行；[Skill 分发](../../packages/cli/src/serve/hosted-workspace-tool-turn.ts)，8632–8674 行                                                                                          | 普通 Skill 加载指令；同一个 `skill` 工具也可能展开 extension command。资源类型与选定 pin 必须来自解析器。                                                                                                        |
-| [子代理限制](../../packages/core/src/managed-runtime/managed-child-operations.ts)，40–58 行；[子会话准入](../../packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionAdmissions.java)，471–483 行 | Runtime 准入深度为 1。解析器支持更深记录，不证明 public 多层执行已经可用。                                                                                                                                       |
-| [Daemon agent trace](../../packages/core/src/agents/agent-transcript.ts)，198–361 行；[UI telemetry](../../packages/core/src/telemetry/uiTelemetry.ts)，172–206、894–940 行                                                                                     | Daemon 已有本地 metadata 谱系和工具/Skill 计数，但所属边界、证据来源不同。可复用展示思路和纯格式化，不把其本地文件读取或进程聚合当作 Managed 权威。                                                              |
+| 证据                                                                                                                                                                                                                                      | 发现及设计影响                                                                                                                                                                                                   |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [已审阅提交中的 #16475 设计](https://github.com/QwenLM/qwen-code/blob/42562a31bdd3779002504aeca569d381b0f7dd77/docs/design/2026-11-06-managed-session-diagnostics-and-organization.md)                                                    | 四组持久化诊断 API；模型总量和近期样本、Skills/MCP 配置、直接子调用。明确排除了工具/文件/Skill 统计和递归图。近期模型样本不能还原无限历史的逐调用时间线。                                                        |
+| [Hosted 工具分发](../../packages/cli/src/serve/hosted-workspace-tool-turn.ts)                                                                                                                                                             | 被拒绝批次，以及 agent/message/team/command/plan/question/skill/todo/workflow 调用，可能不经过 native `tool.intent`。应以已提交 assistant functionCall 的每次出现为分母，再结合 intent、receipt 和 domain 证据。 |
+| [ChatRecord](../../packages/core/src/services/chatRecordingService.ts)；[调用绑定](../../packages/cli/src/serve/hosted-workspace-tool-turn.ts)                                                                                            | 消息 UUID、Session 身份、prompt 身份和调用序号可建立出现身份。规范化 function-call ID、实际保留的原始 provider ID 和 Runtime execution ID 是不同的关联字段。                                                     |
+| [工具结果协议](../../packages/core/src/managed-runtime/managed-tool-result.ts)                                                                                                                                                            | 执行、输出捕获和交付有独立状态。命令执行成功但输出被省略，不应变成执行失败。                                                                                                                                     |
+| [Hosted 文件历史](../../packages/cli/src/serve/hosted-workspace-tool-turn.ts)                                                                                                                                                             | 备份准备发生在写入前，且有启用条件。它既不能证明修改成功，也不记录每次读取。                                                                                                                                     |
+| [Skill 清单](../../packages/cli/src/serve/hosted-skill-catalog.ts)；[Skill 分发](../../packages/cli/src/serve/hosted-workspace-tool-turn.ts)                                                                                              | 普通 Skill 加载指令；同一个 `skill` 工具也可能展开 extension command。资源类型与选定 pin 必须来自解析器。                                                                                                        |
+| [子代理限制](../../packages/core/src/managed-runtime/managed-child-operations.ts)；[子会话准入](../../packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionAdmissions.java) | Runtime 准入深度为 1。解析器支持更深记录，不证明 public 多层执行已经可用。                                                                                                                                       |
+| [Daemon agent trace](../../packages/core/src/agents/agent-transcript.ts)；[UI telemetry](../../packages/core/src/telemetry/uiTelemetry.ts)                                                                                                | Daemon 已有本地 metadata 谱系和工具/Skill 计数，但所属边界、证据来源不同。可复用展示思路和纯格式化，不把其本地文件读取或进程聚合当作 Managed 权威。                                                              |
 
 以上均为静态源码发现。本次没有读取真实用户 Session，没有测量生产负载，也没有重跑 #16475 报告的测试。
 
@@ -149,8 +149,8 @@ flowchart LR
 - 每个诊断资源遵守已有 UTF-8 64 KiB inline 限制，不塞入 #16475 已分配预算的模型统计 envelope。
 - 概要最多保存 64 个具名工具桶、64 个具名 Skill 桶，并各保留一个显式 Other 桶。覆盖区间内标量总量保持准确；具名桶准入确定且固定，Other 不代表精确 top-N。条目数和序列化 bytes 都要限制，较长标识可能提前触发 overflow。
 - 每条事实最多携带 一个文件目标及有界标识。省略明细必须有原因/数量；生产者不知道省略数量时应明确说明。计数不能假装测量了未记录目标。
-- 活动页默认 50 条，最大 100 条；单次请求最多检查 512 个候选行、读取 8 MiB 资源、返回 1 MiB 公开结果。触及 byte/scan 限制时返回部分覆盖，并从最后检查的 key 继续，避免反复访问同一超限行。
-- 调用树单个视图最多 200 个调用节点、八层展示深度、四个并发读取。这些是读取预算，不是执行配额；未加载分支及限制提示必须可见，不能暗示返回的树已经完整。
+- 活动页默认 50 条，最大 100 条；单次请求最多检查 512 个候选行、资源读取上限为 8 MiB、公开结果上限为 1 MiB；首版分页实现采用更严格的约 1 MiB 资源预算，并为响应 envelope 预留 16 KiB。触及 byte/scan 限制时返回部分覆盖，并从最后检查的 key 继续，避免反复访问同一超限行。
+- 调用树单个视图最多 200 个调用节点、八层展示深度、四个并发读取（一个根 trace 请求，最多三个子树或用量请求）。这些是读取预算，不是执行配额；未加载分支及限制提示必须可见，不能暗示返回的树已经完整。
 
 点查复用 Session/record key。Domain 分页复用 `(session_scope_key, domain, delivery_state, gmt_create, record_key)` 索引，限定 delivery state 为空，并使用稳定 keyset 排序。本方案不新增表或 DDL。验收前必须验证真实 MySQL 执行计划和提交开销；只有实测证明需要时，才修改设计增加针对性索引。
 
@@ -173,7 +173,7 @@ flowchart LR
 
 Child 目标不可用时，仅保留原本可读的父调用，不返回 child ID、链接、指标或后代数量。缺失和无权访问沿用现有不泄露存在性的行为。可见树路径在保留新刷新后代数据之前，应先刷新祖先读取权限；祖先被拒绝时清除对应子树，root 被拒绝时清空面板。独立可读的子会话仍可从其自身授权入口打开。
 
-响应采用 private/no-store。只在视图可见且 Session active 时沿用 #16475 的五秒刷新；关闭的会话按需刷新。Session/provider/actor 变化、节点折叠或弹窗关闭时取消并忽略过期请求。暂时读取失败与“该 child 没有后代”必须区分。
+响应采用 private/no-store。可见诊断视图沿用 #16475 的五秒刷新，包括已经停止的会话，以便撤权后清空持久内容。Runtime 停止不会停止权限复核；隐藏或关闭视图后停止读取。Session/provider/actor 变化、节点折叠或弹窗关闭时取消并忽略过期请求。暂时读取失败与“该 child 没有后代”必须区分。
 
 ## 9. 兼容与恢复
 
@@ -256,9 +256,9 @@ Child 目标不可用时，仅保留原本可读的父调用，不返回 child I
 
 Public `GET /v1/agents/sessions/{id}/activity-stats`、`GET /v1/agents/sessions/{id}/activity` 与 WebShell 对应 `POST /api/agent/web-shell/v1/session-activity-stats/query`、`POST /api/agent/web-shell/v1/session-activity/query` 共用 Session/Workspace 授权和只读 REPEATABLE_READ 服务。响应包含版本、Session、self scope、十进制字符串 revision/sequence（未知 null）、覆盖起点与上界、可用性和原因；未 ready 不暴露貌似完整的部分概要。GET 不 acquire、attach、预热 Runtime，也不 discovery MCP；`private, no-store`。
 
-明细类型由 `kind=tools|files|skills` 闭合选择；默认 50、最多 100。Cursor 绑定 tenant、actor、Session、kind、查询版本、首页 first_sequence 上界及最后已处理候选的排序键，新增文件/Skill 索引不进入固定页集合。每页最多检查 512 个候选、读取 8 MiB 以内来源、返回 1 MiB 以内结果；触及输出预算返回 partial 及续页。状态来自各页独立读取快照，不承诺跨页状态冻结。已知后台任务单独补充 taskState/taskRuntimeState，不改变工具启动成功的含义。
+明细类型由 `kind=tools|files|skills` 闭合选择；默认 50、最多 100。Cursor 绑定 tenant、actor、Session、kind、查询版本、首页 first_sequence 上界及最后已处理候选的排序键，新增文件/Skill 索引不进入固定页集合。每页最多检查 512 个候选、采用更严格的约 1 MiB 投影资源预算（不超过 8 MiB 上限）、返回 1 MiB 以内结果；触及输出预算返回 partial 及续页。状态来自各页独立读取快照，不承诺跨页状态冻结。已知后台任务单独补充 taskState/taskRuntimeState，不改变工具启动成功的含义。
 
-统计子视图为模型、工具、显式文件操作、Skill 加载；覆盖提示与分类数值就近显示，缺少采集与已知零不同。调用树仍逐 parent 调用既有 agent-trace，节点以 parentSessionId+taskId 标识，child 身份独立授权与谱系验证。续接只返回同一可读父会话内验证的 predecessorTaskId。上限为当前视图已准入 200 节点、8 层、4 并发；默认不展开后代，仅选中节点读取自身用量。活动视图每 5 秒刷新，关闭、折叠和身份切换取消旧请求；子树刷新先重验祖先，撤权清空内容。
+统计子视图为模型、工具、显式文件操作、Skill 加载；覆盖提示与分类数值就近显示，缺少采集与已知零不同。调用树仍逐 parent 调用既有 agent-trace，节点以 parentSessionId+taskId 标识，child 身份独立授权与谱系验证。续接只返回同一可读父会话内验证的 predecessorTaskId。上限为当前视图已准入 200 节点、8 层、4 并发（根 trace 占一个，子树及用量最多三个）；默认不展开后代，仅选中节点读取自身用量。可见视图每 5 秒刷新，包括对已停止会话的权限复核，关闭、折叠和身份切换取消旧请求；子树刷新先重验祖先，撤权清空内容。
 
 ### 14.4 兼容、验证与剩余工作
 
@@ -274,7 +274,7 @@ Public `GET /v1/agents/sessions/{id}/activity-stats`、`GET /v1/agents/sessions/
 
 本次改动前，#16475 的弹窗提供 Context、模型统计、资源配置和直接子调用。基线 Chromium fixture 在 1280px 和 390px 通过；基线没有活动诊断接口或递归展开。
 
-以下截图来自依赖更新至 `37e9442f8100f4c975d5ae865eba907fed512c49` 后通过的 Chromium fixture。它们使用确定性的模拟响应说明界面行为，不作为数据库、Runtime 不启动或 native 恢复验收。桌面视图区分执行成功与部分交付；窄屏子调用视图显示续接、独立读取的子会话用量和不可读调用。
+以下截图来自审查修复时依赖更新至 `629b11470b035afc3b63a8624cd15bbf9486e94b` 后的 Chromium fixture。它们使用确定性的模拟响应说明界面行为，不作为数据库、Runtime 不启动或 native 恢复验收。桌面视图区分执行成功与部分交付；窄屏子调用视图显示续接、独立读取的子会话用量和不可读调用。
 
 ![1280px 的工具统计与调用明细](../assets/managed-execution-diagnostics/activity-tools-desktop.png)
 
@@ -282,6 +282,14 @@ Public `GET /v1/agents/sessions/{id}/activity-stats`、`GET /v1/agents/sessions/
 
 ### 14.6 基于更新后依赖的提交
 
-本次提交以 #16475 的 `37e9442f8100f4c975d5ae865eba907fed512c49` 为 base。冲突合并在加入活动视图和调用树的同时，保留依赖的具体覆盖缺口提示及 trace 读取失败后的上一页入口。共用的 CSI profile 缓存读取器支持 `/3`，既有 history 绑定回归测试扩展覆盖该 profile。
+初次提交以 #16475 的 `37e9442f8100f4c975d5ae865eba907fed512c49` 为 base。冲突合并在加入活动视图和调用树的同时，保留依赖的具体覆盖缺口提示及 trace 读取失败后的上一页入口。共用的 CSI profile 缓存读取器支持 `/3`，既有 history 绑定回归测试扩展覆盖该 profile。
 
 更新依赖后，根目录 build、typecheck、bundle 通过；选定 Core 测试 443/443、WebShell provider/hook/panel 119/119、桌面/390px Chromium fixture 4/4 通过。打包 CLI 的三个选定生命周期用例通过，另八例刻意未选，覆盖新空调用 epoch/replay/load、默认 floor-2 兼容及依赖的基础工具 reload 调用方。首轮根 build 发现合并引入的重复翻译键，将集合覆盖提示与单个子调用提示分开后修正。PR 验证报告记录额外 CLI 回归选择和所有待验收项。依赖更新不重置已耗尽的本地 Java 预算；Java 冲突合并与最终服务验收仍待 CI。
+
+### 审查修复与发布顺序
+
+审查修复基于依赖 head `629b11470b035afc3b63a8624cd15bbf9486e94b`，保留依赖的模型诊断早期存储门槛，并在发布 genesis 前校验活动 profile 的存储版本。CSI 文本分发传递拒绝观察；恢复识别执行诊断来源资源；扁平 Shell capture 事实保留部分交付；超限 MCP 请求仍可提交拒绝结果。Skill 桶资源只保留资源类型、名称和 pin：origin、delivery 属于单次调用，交付分布由聚合计数表达。交付状态使用简短标签，覆盖警告单独展示。可见的已停止会话继续进行权限轮询。
+
+发布负责人协调 #16475、#16498 和 #16499。首先升级并验证 CLI/Harness 与 CSI worker reader 对 storage 4 和 `csi-files-retirement/3` 的支持，然后预热兼容的 Server/Broker reader/projector 池。新 producer 通过二进制及 profile 选择启用，没有独立 feature flag。将 producer 流量导向兼容池前，先排空或隔离旧 reader、writer；采用协调的蓝绿切换，避免混合滚动流量将 storage-4 会话交回旧 writer。准入前确认协商版本及 profile。已提升版本的会话不得回滚到旧 writer；回滚时必须继续路由到兼容池，或保持不可用。这些是发布前提，不表示已经部署。
+
+审查修复的定向 TypeScript 和浏览器证据记录在 PR 中。Java 测试预期、surface inventory 和 reducer 回归断言仅作了静态修改；本功能共享的本地 Java 预算仍已耗尽，该版本的编译、Checkstyle、H2/MySQL、Hosted/fault、native CSI 和 SpotBugs 由 CI 验证。保留按顺序恢复回放及有界页内逐项任务查询；吞吐优化和额外的 Java HTTP context 序列化矩阵延至本轮正确性修复之后。本轮不会把这些修改报告为本地 Java 测试通过。

@@ -377,7 +377,7 @@ for (const width of [1280, 390]) {
       'Successful',
     );
     await expect(readCall.locator('dt:has-text("Delivery") + dd')).toHaveText(
-      'Some observations are unavailable or incomplete.',
+      'Partial',
     );
     await expect(
       readCall.locator('dt:has-text("Output capture") + dd'),
@@ -423,7 +423,7 @@ for (const width of [1280, 390]) {
     await expect(skillCall).toContainText(skill.pin);
     await expect(skillCall).toContainText('User');
     await expect(skillCall.locator('dt:has-text("Delivery") + dd')).toHaveText(
-      'Some observations are unavailable or incomplete.',
+      'Partial',
     );
     await page.screenshot({
       path: testInfo.outputPath('activity-skills.png'),

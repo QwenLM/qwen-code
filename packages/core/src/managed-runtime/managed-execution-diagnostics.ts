@@ -99,8 +99,11 @@ export function observeManagedToolResponse(
         ? 'partial'
         : 'complete';
   const capture = response?.['capture'];
-  if (capture && typeof capture === 'object') {
-    const value = capture as Record<string, unknown>;
+  const value =
+    capture && typeof capture === 'object'
+      ? (capture as Record<string, unknown>)
+      : response;
+  if (value) {
     const status = value['captureStatus'];
     if (
       status === 'complete' ||

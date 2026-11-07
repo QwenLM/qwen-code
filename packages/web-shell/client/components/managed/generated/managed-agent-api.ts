@@ -3131,13 +3131,23 @@ export interface components {
                 key: string;
                 name: string;
                 metrics: components["schemas"]["ManagedActivityMetrics"];
-                resource?: components["schemas"]["ManagedActivitySkill"];
+                resource?: {
+                    /** @enum {string} */
+                    resourceKind: "skill" | "extension_command";
+                    name: string;
+                    pin: string;
+                };
             }[];
             skillBuckets: {
                 key: string;
                 name: string;
                 metrics: components["schemas"]["ManagedActivityMetrics"];
-                resource?: components["schemas"]["ManagedActivitySkill"];
+                resource?: {
+                    /** @enum {string} */
+                    resourceKind: "skill" | "extension_command";
+                    name: string;
+                    pin: string;
+                };
             }[];
             skillLoads: components["schemas"]["ManagedActivityMetrics"];
             extensionCommands: components["schemas"]["ManagedActivityMetrics"];

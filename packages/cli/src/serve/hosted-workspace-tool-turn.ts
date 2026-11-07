@@ -3578,7 +3578,7 @@ export class HostedWorkspaceToolTurn {
             request.workflow
           ? 'hosted'
           : 'builtin';
-      if (request.mcp) {
+      if (request.mcp && request.payloadJson) {
         const route = JSON.parse(request.payloadJson) as {
           input?: { serverId?: unknown };
         };
@@ -3602,7 +3602,12 @@ export class HostedWorkspaceToolTurn {
           !raw.includes('://') &&
           !raw.startsWith('/') &&
           !raw.includes('\\') &&
-          ![...raw].some((character) => character.codePointAt(0)! < 32) &&
+          ![...raw].some((character) => {
+            const code = character.codePointAt(0)!;
+            return (
+              code < 32 || code === 127 || (code >= 0xd800 && code <= 0xdfff)
+            );
+          }) &&
           !raw.split('/').includes('..')
             ? raw
             : null;

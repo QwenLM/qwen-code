@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openManagedSession } from './managed-session-assembly.js';
 import { ManagedHookActivationController } from './managed-hook-activation.js';
 import { enableManagedSessionDiagnostics } from './managed-session-diagnostics.js';
+import { enableManagedExecutionDiagnostics } from './managed-execution-diagnostics.js';
 import {
   ManagedSessionMessageProjection,
   projectManagedSessionRecords,
@@ -1795,6 +1796,52 @@ describe('HTTP Managed Session store', () => {
         expect(event.payload['state']).toBe(
           version === 3 ? 'output_committed' : 'started',
         );
+      } finally {
+        await session.close().catch(() => undefined);
+      }
+    },
+  );
+
+  it.each([1, 2, 3, 4])(
+    'requires storage 4 before committing execution diagnostics (version=%s)',
+    async (version) => {
+      const server = new FakeManagedSessionStore();
+      server.supportedStorageVersion = version;
+      const { stores, session } = await bootStoresAndSession(server);
+      try {
+        expect(stores.supportsExecutionDiagnostics()).toBe(version === 4);
+        if (version === 4) server.headOverrides['storageVersion'] = 4;
+        await enableManagedExecutionDiagnostics(session);
+        const record = {
+          uuid: 'activity-request',
+          parentUuid: null,
+          sessionId: SESSION_KEY.sessionId,
+          timestamp: new Date().toISOString(),
+          type: 'assistant' as const,
+          cwd: '/workspace',
+          version: 'test',
+          message: {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'call', name: 'read_file', args: {} } },
+            ],
+          },
+        };
+        if (version === 4) {
+          await session.sink.write(record);
+          expect(
+            session.authority.lastEventOfKind('message.committed')?.payload[
+              'diagnosticsRef'
+            ],
+          ).toBeDefined();
+        } else {
+          await expect(session.sink.write(record)).rejects.toThrow(
+            'storage version 4',
+          );
+          expect(
+            session.authority.lastEventOfKind('message.committed'),
+          ).toBeUndefined();
+        }
       } finally {
         await session.close().catch(() => undefined);
       }

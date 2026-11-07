@@ -1378,16 +1378,15 @@ public final class CsiNativeActivationProof {
         closed(messagePayload, diagnosticFields(messagePayload, Set.of("messageId", "role", "contentRef", "parentMessageId", "modelAttemptId")));
         diagnostics(message, original, resources);
         require(attemptId.equals(id(messagePayload, "modelAttemptId")));
-        var digestInput = JSON.createArrayNode().add(messagePayload.has("diagnosticsRef") ? "managed-final-output/2" : "managed-final-output/1").add(attemptId);
-        List<JsonNode> outputRefs = new java.util.ArrayList<>(List.of(routeRef, checkpointRef, payload.path("usageRef"), messagePayload.path("contentRef")));
-        if (messagePayload.has("diagnosticsRef")) {
-            outputRefs.add(messagePayload.path("diagnosticsRef"));
-        }
-        for (JsonNode ref : outputRefs) {
+        var digestInput = JSON.createArrayNode().add("managed-final-output/1").add(attemptId);
+        for (JsonNode ref : List.of(routeRef, checkpointRef, payload.path("usageRef"), messagePayload.path("contentRef"))) {
             digestInput.add(JSON.createArrayNode().add(ref.path("resourceId")).add(ref.path("kind"))
                     .add(ref.path("schemaVersion")).add(ref.path("byteLength")).add(ref.path("digest")));
         }
-        require(sha256(utf8(digestInput.toString())).equals(text(metadata, "contentDigest")));
+        String digest = messagePayload.has("diagnosticsRef")
+                ? com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.carrierDigest(transaction.events())
+                : sha256(utf8(digestInput.toString()));
+        require(digest.equals(text(metadata, "contentDigest")));
         return messageRecord(message, messagePayload, original, completed, resources, true);
     }
 

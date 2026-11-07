@@ -343,15 +343,22 @@ function Node({
             <p role="alert">{t('failed')}</p>
           ) : !usage ? (
             <p role="status">{t('loading')}</p>
+          ) : usage.availability === 'unsupported' ? (
+            <p>{t('unsupported')}</p>
           ) : usage.statistics ? (
-            <p>
-              {t('requests')}: {usage.statistics.totals.requests.total} ·{' '}
-              {t('totalTokens')}:{' '}
-              {usage.statistics.totals.requests.total > 0 &&
-              usage.statistics.totals.usageKnown.total === 0
-                ? t('unknown')
-                : usage.statistics.totals.tokens.total}
-            </p>
+            <>
+              {usage.availability === 'partial' && (
+                <p role="status">{t('partial')}</p>
+              )}
+              <p>
+                {t('requests')}: {usage.statistics.totals.requests.total} ·{' '}
+                {t('totalTokens')}:{' '}
+                {usage.statistics.totals.requests.total > 0 &&
+                usage.statistics.totals.usageKnown.total === 0
+                  ? t('unknown')
+                  : usage.statistics.totals.tokens.total}
+              </p>
+            </>
           ) : (
             <p>{t('not_recorded')}</p>
           )}
@@ -384,7 +391,7 @@ export function ManagedInvocationTree({
   const ancestors = useMemo<string[]>(() => [], []);
   const admitted = budget.admit(props.sessionId, items);
   return (
-    <div role="tree" aria-label="Agent invocations" className="space-y-3">
+    <div role="tree" aria-label={t('invocations')} className="space-y-3">
       {admitted.map((item) => (
         <Node
           key={`${props.sessionId}:${item.taskId}:${item.childSessionId ?? ''}`}

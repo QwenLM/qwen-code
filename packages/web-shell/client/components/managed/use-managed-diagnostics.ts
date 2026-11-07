@@ -143,8 +143,8 @@ export function useManagedDiagnostics({
 
   return {
     snapshot: current?.snapshot,
-    loading: current?.loading ?? true,
-    error: current?.error ?? false,
+    loading: enabled && (current?.loading ?? true),
+    error: enabled && (current?.error ?? false),
     refresh: () => setRefreshRevision((value) => value + 1),
     hasPrevious: cursors.length > 1,
     previous: () => setPaging({ owner, cursors: cursors.slice(0, -1) }),

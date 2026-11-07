@@ -277,13 +277,18 @@ public final class ManagedActivityDiagnostics {
                     label.offsetByCodePoints(0, Math.min(128, label.codePointCount(0, label.length())))));
             selected.set("metrics", metrics());
             if ("skillBuckets".equals(field)) {
-                selected.set("resource", fact.path("skill").deepCopy());
+                selected.set("resource", skillIdentity(fact.path("skill")));
             }
         }
         if (selected == null && delta > 0) {
             summary.put(field + "Closed", true);
         }
         add(selected == null ? (ObjectNode) summary.path(overflow) : (ObjectNode) selected.path("metrics"), fact, delta);
+    }
+
+    public static ObjectNode skillIdentity(JsonNode resource) {
+        return JSON.objectNode().put("resourceKind", resource.path("resourceKind").asText())
+                .put("name", resource.path("name").asText()).put("pin", resource.path("pin").asText());
     }
 
     private static void add(ObjectNode metrics, JsonNode fact, int delta) {

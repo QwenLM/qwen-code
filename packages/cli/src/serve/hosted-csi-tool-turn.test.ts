@@ -1866,3 +1866,77 @@ it.each([
   expect(managed.authority.committedSequence).toBe(sequence);
   expect(await successor.sink.project()).toEqual(before);
 });
+
+it('preserves refusal diagnostics through the production CSI text turn', async () => {
+  await enableManagedExecutionDiagnostics(managed);
+  const text = 'Refuse invalid file';
+  const contentRef = await managed.resources.publish(
+    'managed-input',
+    Buffer.from(JSON.stringify([{ type: 'text', text }])),
+  );
+  const admissionRef = await managed.resources.publish(
+    'managed-admission',
+    Buffer.from('{}'),
+  );
+  await managed.authority.submitInput(
+    {
+      operation: 'submitInput',
+      commandId: promptId,
+      sessionKey: managed.authority.sessionHeader.sessionKey,
+      contentDigest: contentRef.digest,
+    },
+    {
+      inputId: promptId,
+      turnId: promptId,
+      source: 'hosted-harness',
+      contentRef,
+      admissionRef,
+      deadline: null,
+      wakeReason: 'input',
+    },
+  );
+  vi.mocked(runHostedHarnessTextTurn).mockImplementationOnce(async (input) => {
+    const call = { ...batch().calls[0], args: { file_path: '../outside' } };
+    await input.toolTurn!.declarations(input.signal);
+    await input.toolTurn!.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'unit-model',
+      input.signal,
+    );
+    await input.toolTurn!.consumeResults();
+    return { text: 'done', model: 'unit-model' };
+  });
+  await runHostedCsiTextTurn(
+    {
+      managed,
+      cwd: root,
+      files: {
+        broker: { baseUrl: 'http://127.0.0.1:8080', token: 'unit-broker' },
+        runtime: { bindingId, generation: '1' },
+      },
+    },
+    promptId,
+    text,
+    new AbortController(),
+  );
+  const event = managed.authority
+    .eventsInSequenceRange(1, managed.authority.committedSequence)
+    .filter(
+      (e) =>
+        e.kind === 'message.committed' && e.payload['role'] === 'tool_result',
+    )
+    .at(-1)!;
+  const evidence = parseManagedExecutionEvidence(
+    await managed.resources.read(
+      assertManagedSessionDurableRef(
+        event.payload['diagnosticsRef'],
+        'diagnosticsRef',
+      ),
+    ),
+  );
+  expect(evidence.observations[0]).toMatchObject({
+    admission: 'invalid',
+    execution: 'not_started',
+  });
+});
