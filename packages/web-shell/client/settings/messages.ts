@@ -301,6 +301,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.ui.enableFollowupSuggestions': '启用后续建议',
   'settings.description.ui.enableFollowupSuggestions':
     '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键插入，按 Enter 接受并提交。',
+  'settings.label.ui.customWittyPhrases': '自定义加载短语',
+  'settings.description.ui.customWittyPhrases':
+    '加载过程中轮播显示的自定义俏皮短语列表。',
   'settings.label.ui.compactMode': '紧凑模式',
   'settings.description.ui.compactMode':
     '已退役：紧凑视图在 TUI 和 Web Shell 中都始终开启。保留此键是为了让既有设置文件不再出现告警。',
