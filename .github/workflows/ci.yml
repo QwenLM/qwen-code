@@ -486,10 +486,13 @@ jobs:
             docker rm --volumes --force "${POC_CONTAINER}" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
-          docker build --file - --tag "${POC_IMAGE}" - <<'IMAGE'
+          image_context="$(mktemp -d "${RUNNER_TEMP}/qwen-unit-poc-image-XXXXXX")"
+          cat > "${image_context}/Dockerfile" <<'IMAGE'
           FROM node:22-bookworm
           RUN apt-get update && apt-get install -y --no-install-recommends tmux zip unzip util-linux && rm -rf /var/lib/apt/lists/*
           IMAGE
+          docker build --file "${image_context}/Dockerfile" --tag "${POC_IMAGE}" "${image_context}"
+          rm -rf -- "${image_context}"
           # A job `container:` receives the host Docker socket automatically.
           # Keep the socket out of this explicitly created untrusted-code container.
           docker create \

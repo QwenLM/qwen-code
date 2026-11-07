@@ -1704,6 +1704,8 @@ describe('manual Linux unit container PoC', () => {
       assert.ok(create.includes(fragment), fragment);
     }
     assert.doesNotMatch(create, /docker\.sock|--privileged|--network[ =]host/);
+    assert.match(driver.run, /image_context/);
+    assert.doesNotMatch(driver.run, /docker build --file -/);
     assert.match(driver.run, /^FROM node:22-bookworm$/m);
     assert.equal(driver.env.POC_SHA, '${{ github.event.inputs.branch_ref }}');
     assert.doesNotMatch(driver.run, /2905dccbe45ed2917b28c7de6a935d031546ee43/);
