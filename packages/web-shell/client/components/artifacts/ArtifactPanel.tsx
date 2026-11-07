@@ -19,6 +19,7 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { EditorState } from '@codemirror/state';
 import { basicSetup, EditorView } from 'codemirror';
+import { highlightSpecialChars } from '@codemirror/view';
 import { DownloadIcon } from 'lucide-react';
 import {
   ArchiveIcon,
@@ -63,6 +64,12 @@ import {
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
 import { DiffView } from '../messages/tools/DiffView';
+import {
+  DIFF_INVISIBLE_CHARACTERS,
+  escapeDiffContent,
+  escapePairForMerge,
+} from '../messages/tools/diffContent';
+import diffStyles from '../messages/tools/DiffView.module.css';
 import { TurnCallsPanel } from './TurnCallsPanel';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
@@ -2873,6 +2880,7 @@ function CodeMirrorDiff({
   oldText: string;
   newText: string;
 }) {
+  const { t } = useI18n();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [isWide, setIsWide] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -2897,6 +2905,18 @@ function CodeMirrorDiff({
 
     const extensions = [
       basicSetup,
+      highlightSpecialChars({
+        specialChars: DIFF_INVISIBLE_CHARACTERS,
+        render: (code) => {
+          const node = document.createElement('span');
+          const safe = escapeDiffContent(String.fromCodePoint(code));
+          node.textContent = safe;
+          node.className = diffStyles.escaped;
+          node.title = `${t('gitDiff.escapedCharacter')}: ${safe}`;
+          node.setAttribute('aria-label', node.title);
+          return node;
+        },
+      }),
       EditorView.editable.of(false),
       EditorState.readOnly.of(true),
       EditorView.lineWrapping,
@@ -2904,6 +2924,19 @@ function CodeMirrorDiff({
     const diffConfig = { scanLimit: 1_000, timeout: 500 };
     const collapseUnchanged = { margin: 3, minSize: 8 };
 
+    // In the unified (narrow) view the merge extension renders the deleted
+    // side straight out of its internal originalDoc field through a widget
+    // that writes raw text nodes — no view extension (highlightSpecialChars
+    // included) reaches inside it, so invisible and bidi characters on the
+    // deleted side would render as raw, live control characters while the
+    // inserted side renders escapes: a diff that certifies falsely. Escape
+    // BOTH sides through the same transform before they enter the merge view
+    // so the comparison runs over escaped text and every side renders the
+    // same visible escapes — but only when there is something to escape;
+    // `escapePairForMerge` decides that for the pair, because the transform
+    // is not a no-op on ordinary text. The transform leaves line terminators
+    // alone (see DIFF_MERGE_INVISIBLE_CHARACTERS): this text is a document,
+    // not a row.
     void import('@codemirror/merge')
       .then(({ MergeView, unifiedMergeView }) => {
         if (cancelled) return;
@@ -2922,12 +2955,21 @@ function CodeMirrorDiff({
             return;
           }
 
+          // One decision for both sides: `escapePairForMerge` returns the
+          // pair untouched when neither carries an invisible character, so a
+          // backslash in ordinary source is never doubled on screen, and
+          // escapes both when either does, so the comparison space stays
+          // consistent. The wide branch compares raw text, so gating the
+          // escape on the pair is also what keeps the two branches agreeing
+          // about whether a change exists.
+          const pair = escapePairForMerge(oldText, newText);
+
           view = new EditorView({
-            doc: newText,
+            doc: pair.newText,
             extensions: [
               ...extensions,
               unifiedMergeView({
-                original: oldText,
+                original: pair.oldText,
                 highlightChanges: true,
                 gutter: true,
                 mergeControls: false,
@@ -2953,7 +2995,7 @@ function CodeMirrorDiff({
       cancelled = true;
       view?.destroy();
     };
-  }, [isWide, newText, oldText]);
+  }, [isWide, newText, oldText, t]);
 
   return (
     <div className={styles.codeMirrorDiffWrap}>

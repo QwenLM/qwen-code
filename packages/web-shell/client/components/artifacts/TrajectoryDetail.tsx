@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { getShadowAwareActiveElement, isFocusUnclaimed } from '../../utils/dom';
+import { diffPreviewText } from '../../utils/unifiedDiff';
 import { formatDuration } from '../messages/StatsMessage';
 import { DiffView } from '../messages/tools/DiffView';
 import { daemonToolBlockToToolCall } from '../../adapters/transcriptToMessages';
@@ -676,7 +677,13 @@ export function TrajectoryDetail({
   const sectionText = (section: Section) =>
     section.fields
       ? section.fields.map(([label, value]) => `${label}: ${value}`).join('\n')
-      : (section.diff ?? section.text ?? '').slice(0, limit);
+      : section.diff !== undefined
+        ? // Copy what the pane shows: `DiffView` localizes a marker-only
+          // preview and hides the verdict rows a builder stamped, so copying
+          // the raw payload would hand the user internal tokens the preview
+          // never displayed.
+          diffPreviewText(section.diff, t, limit)
+        : (section.text ?? '').slice(0, limit);
 
   return (
     <section
