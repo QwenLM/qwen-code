@@ -510,15 +510,6 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
           symbolColor={theme.text.accent}
         />
       )}
-      {hasTokenCount && (breakdown.unattributed ?? 0) > 0 && (
-        <CategoryRow
-          symbol={FILLED}
-          label={t('Unattributed')}
-          tokens={breakdown.unattributed!}
-          contextWindowSize={contextWindowSize}
-          symbolColor={theme.text.secondary}
-        />
-      )}
 
       {/* Three-tier compaction thresholds — visible even when isEstimated so
           the user can see the auto-compact landscape before any API call. */}

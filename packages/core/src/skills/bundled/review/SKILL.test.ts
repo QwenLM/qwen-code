@@ -413,10 +413,46 @@ describe('bundled review skill', () => {
       '**Whether a PLAN exists is a separate field: `diffPath`.**',
     );
     // …and the re-run instruction, including the flag-replacement rule that
-    // keeps a second `--since` from reading as two anchors.
+    // keeps a second `--since`/`--since-model` from reading as two anchors.
     expect(body).toContain(
-      'REPLACING any `--since` it already carries, never appending a second one',
+      'REPLACING any `--since` and any `--since-model` it already carries, ' +
+        'never appending a second one',
     );
+    // The marker recovery re-run must carry BOTH fields, taken from the side
+    // file's `sha`/`model` pair. The command "above" it carries neither on this
+    // path (no cache), or another model's when the cache anchor was withheld —
+    // so a reader who copies the model half from there is refused as
+    // `cross-model-anchor` and reviews the full diff. Sliced to THIS sentence
+    // — the same `--since <sha>` words occur in the cache path, where they are
+    // already correct — so the assertion cannot be satisfied by that other
+    // occurrence.
+    const reRunAt = body.indexOf(
+      're-run the `fetch-pr` command from above with',
+    );
+    expect(reRunAt).toBeGreaterThan(-1);
+    const reRunSentence = body.slice(
+      reRunAt,
+      body.indexOf('never appending a second one', reRunAt),
+    );
+    expect(reRunSentence).toContain('--since-model');
+  });
+
+  it('describes the effective incremental scope without the retired range model', () => {
+    // The `effective: true` bullet used to call the report's diff `since..head`
+    // — the full-range model the narrowing replaced. Naming that range invites
+    // a reader to hand the anchor to git, which this same section forbids; the
+    // published scope is `incremental.scope`'s file classes.
+    const body = skillBody();
+    const at = body.indexOf('`effective: true` (no `upToDate`)');
+    expect(at).toBeGreaterThan(-1);
+    const rest = body.slice(at + 1);
+    const nextBullet = rest.indexOf('\n    - `');
+    expect(nextBullet).toBeGreaterThan(-1);
+    const bullet = rest.slice(0, nextBullet);
+    expect(bullet).not.toMatch(/since\.\.head/);
+    expect(bullet).toContain('`deltaFiles`');
+    expect(bullet).toContain('`interaction[]`');
+    expect(bullet).toContain('`contextFileCount`');
   });
 
   it('pins which refusal reasons the recovery flow may retry', () => {
@@ -1023,6 +1059,138 @@ describe('bundled review skill', () => {
     expect(body).toContain('One slice of this fact survives a resume');
     expect(body).toContain(
       "Only a never-resumed run's re-entry records nothing",
+    );
+  });
+
+  it('pins the conversational-intent routing and the resume exclusion', () => {
+    // A prose re-review request ("有更新了，重新评审") carries no target the
+    // parser could classify: alone it becomes a file path, and beside a PR
+    // number it stole the target (the parser half is pinned in
+    // parse-args.test.ts). The routing clause is the ONE sanctioned
+    // departure from copy-verbatim, so pin its boundary sentences too —
+    // widening it re-opens the transcribed-argument incident.
+    const body = skillBody();
+    expect(body).toContain(
+      'Route conversational intent, guarded by the parser',
+    );
+    expect(body).toContain(
+      'never guess, and never review the prose as a file path',
+    );
+    expect(body).toContain(
+      'any input already carrying a number, URL, or path goes to the parser untouched',
+    );
+    expect(body).toContain("keep the CLI's args file untouched");
+    expect(body).toContain('copy it, do not reconstruct it');
+    // Resolution is for PR re-review requests only, and a bare `/review`
+    // stays a local review. Without these boundaries the clause reads as
+    // "no classifiable target → resolve a PR", hijacking local runs.
+    expect(body).toContain(
+      'Resolution is for requests to review a PULL REQUEST again',
+    );
+    // Review R2-3: the guard keys on what the user SPELLED, not on the
+    // verdict's target type — prose parses to a file target, so a
+    // verdict-keyed guard excludes the only input the clause exists for.
+    expect(body).toContain('spells no target of its own');
+    expect(body).toContain(
+      "Judge by what the user SPELLED, not by the verdict's target type",
+    );
+    expect(body).toContain(
+      'that fallback is exactly the shape this clause rescues',
+    );
+    expect(body).toContain(
+      'a bare `/review` with no arguments is a local review',
+    );
+    // Verification F1 (prose local-write hijack): "review my local changes
+    // --fix" matches the no-target trigger, and resolving a PR into it
+    // disarms --fix. The guard is mechanical — the ORIGINAL verdict's
+    // fix.effective — not a wording guess; prose local intent without
+    // --fix is excluded too. The hash-decoration rule closes the "#15998"
+    // copy ambiguity the same report measured.
+    expect(body).toContain(
+      'when the original verdict has `fix.effective: true`',
+    );
+    expect(body).toContain('never resolve a PR into it');
+    expect(body).toContain(
+      'Prose that asks for a LOCAL review is not re-review intent',
+    );
+    expect(body).toContain(
+      'a `#` prefix is reference decoration, not part of the target',
+    );
+    // Verification F2: delta scoping is high-only; the clause must not
+    // promise it to lower efforts.
+    expect(body).toContain(
+      'at high effort the incremental check below scopes the delta',
+    );
+    // Review R1-1: the rationale must mark the prose-steals-target half as
+    // PRE-FIX behavior — the parser preference in this same PR closed it,
+    // and a prompt describing it as live re-derives a closed bug.
+    expect(body).toContain('Before the PR-shape preference in parse-args');
+    expect(body).toContain(
+      'this paragraph must not be read as describing current behavior',
+    );
+    // Review R2-1/R2-2: a promoted bare number never carries posting
+    // authority — the parser withholds comment.effective, and the clause
+    // confirms the target before running. The local-intent move must be
+    // executable (prose never parses to local), and the hash form has an
+    // operational resolution, not just a decoration note.
+    expect(body).toContain(
+      'a promoted bare number never carries posting authority',
+    );
+    expect(body).toContain(
+      'When the verdict marks the target as a promoted bare number (`promotedNumberTarget`), confirm the target with the user before running',
+    );
+    expect(body).toContain('never post on it silently');
+    expect(body).toContain('prose never parses to a local target');
+    expect(body).toContain('resolve to the bare number (or ask for it)');
+    expect(body).toContain(
+      'requested posting on a PR target whose bare number was promoted from prose',
+    );
+    // Review R1-2: the restart cost belongs to a SURVIVING interrupted
+    // attempt only; after a completed round the refusal costs nothing,
+    // and worktree-gone is its own shape (report survived, tree vanished).
+    expect(body).toContain(
+      'after a completed round the state is cleaned up and the refusal',
+    );
+    expect(body).toContain(
+      "worktree-gone` means the report survived but the attempt's worktree vanished",
+    );
+    // The resolved invocation keeps the flags the input already carries,
+    // so the parser still sees them — but carrying a flag is NOT posting
+    // authority (see the hard-boundary pins below).
+    expect(body).toContain(
+      'the target plus any flags the input already carries',
+    );
+    // Review P2 (option-only hijack): `/review --fix` and `/review --effort
+    // low` are non-empty and carry no classifiable target, so the routing
+    // condition literally matched them and would retarget a working-tree
+    // run into the last PR — disarming `--fix` on the way. The exclusion
+    // must survive verbatim.
+    expect(body).toContain(
+      'an option-only invocation — flags and their values alone, like `/review --fix` or `/review --effort low` — is a supported local review the parser owns verbatim',
+    );
+    // Review P2 (authorization break): the write gate re-parses the CLI's
+    // verbatim record on purpose, so a model-written resolution can never
+    // authorise posting. The clause must keep the hard boundary (present
+    // the resolved invocation, ask for an explicit re-run) instead of
+    // promising a posting authority the gate refuses.
+    expect(body).toContain("Posting is the resolution's hard boundary.");
+    expect(body).toContain(
+      'a model-written resolution is not an authorization source',
+    );
+    expect(body).toContain(
+      'do not run a review whose submission is already refused',
+    );
+    expect(body).toContain('ask the user to re-invoke it explicitly');
+    // --resume continues an interrupted run at an UNMOVED head only. The
+    // exclusion must survive in the verdict bullet and the routing clause,
+    // the two surfaces read before the flag is chosen; the frontmatter
+    // description carries the same exclusion for the invoking model.
+    expect(body).toContain(
+      'It is never the flag for a re-review after the PR gained commits',
+    );
+    expect(body).toContain('at an UNMOVED head');
+    expect(coreBody()).toContain(
+      'at an unmoved head (a re-review after new commits is a plain `/review <pr-number>`)',
     );
   });
 

@@ -66,11 +66,11 @@ public class WakeRecoveryStore
                         + " h.committed_sequence, h.compacted_through_revision, s.parent_session_id,"
                         + " s.parent_child_run_id FROM ma_session_head h JOIN ma_session s ON"
                         + " s.tenant_id = h.tenant_id AND s.session_id = h.session_id WHERE"
-                        + " h.head_kind = 'MANAGED_SESSION' AND h.wake_scan_pending = TRUE"
+                        + " h.head_kind = 'MANAGED_SESSION' AND h.is_wake_scan_pending = TRUE"
                         + " AND h.compacted_through_revision = 0"
-                        + " AND h.wake_pending = ? AND h.wake_retry_at <= " + ManagedSchemaTime.SQL_NOW + " AND" + UNOWNED
+                        + " AND h.is_wake_pending = ? AND h.wake_retry_at <= " + ManagedSchemaTime.SQL_NOW + " AND" + UNOWNED
                         + " AND s.session_kind = 'PUBLIC' AND s.status = 'ACTIVE'"
-                        + " AND s.retired_at IS NULL AND s.csi_guard = FALSE"
+                        + " AND s.retired_at IS NULL AND s.is_csi_guard = FALSE"
                         + " AND h.workspace_id = COALESCE(s.workspace_id, ?)"
                         + " ORDER BY h.wake_retry_at, h.tenant_key, h.harness_key LIMIT ?",
                 (row, index) -> new Candidate(row.getString("tenant_id"), row.getString("workspace_id"),
@@ -87,7 +87,7 @@ public class WakeRecoveryStore
             // subquery would first lock the head, then wait for a shared Session lock.
             var session = jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id = ?"
                             + " AND session_id = ? AND session_kind = 'PUBLIC' AND status = 'ACTIVE'"
-                            + " AND retired_at IS NULL AND csi_guard = FALSE"
+                            + " AND retired_at IS NULL AND is_csi_guard = FALSE"
                             + " AND (workspace_id IS NULL OR workspace_id = ?) FOR UPDATE",
                     String.class, candidate.tenantId(), candidate.sessionId(), candidate.workspaceId());
             if (session.isEmpty() || ManagedConfigStore.blocked(jdbc, candidate.tenantId(), candidate.sessionId())) {
@@ -98,7 +98,7 @@ public class WakeRecoveryStore
                         + " AND h.session_id = ? AND h.workspace_id = ?"
                         + " AND h.head_kind = 'MANAGED_SESSION' AND h.journal_revision = ?"
                         + " AND h.compacted_through_revision = 0"
-                        + " AND h.wake_scan_pending = TRUE AND h.wake_retry_at <= " + ManagedSchemaTime.SQL_NOW + " AND" + UNOWNED,
+                        + " AND h.is_wake_scan_pending = TRUE AND h.wake_retry_at <= " + ManagedSchemaTime.SQL_NOW + " AND" + UNOWNED,
                 ManagedSchemaKeys.key(candidate.tenantId()),
                 ManagedSchemaKeys.key(candidate.sessionId()), candidate.tenantId(), candidate.sessionId(),
                 candidate.workspaceId(), candidate.journalRevision()) == 1;
@@ -231,9 +231,9 @@ public class WakeRecoveryStore
                         + " WHERE h.tenant_key = ? AND h.harness_key = ? AND h.tenant_id = ?"
                         + " AND h.session_id = ? AND h.workspace_id = ? AND h.head_kind = 'MANAGED_SESSION'"
                         + " AND h.journal_revision = ? AND h.committed_sequence = ?"
-                        + " AND h.compacted_through_revision = 0 AND h.wake_scan_pending = TRUE AND" + UNOWNED
+                        + " AND h.compacted_through_revision = 0 AND h.is_wake_scan_pending = TRUE AND" + UNOWNED
                         + " AND s.session_kind = 'PUBLIC' AND s.status = 'ACTIVE'"
-                        + " AND s.retired_at IS NULL AND s.csi_guard = FALSE"
+                        + " AND s.retired_at IS NULL AND s.is_csi_guard = FALSE"
                         + " AND (s.workspace_id IS NULL OR s.workspace_id = ?)",
                 Long.class, ManagedSchemaKeys.key(candidate.tenantId()), ManagedSchemaKeys.key(candidate.sessionId()),
                 candidate.tenantId(), candidate.sessionId(), candidate.workspaceId(), candidate.journalRevision(),
@@ -242,7 +242,7 @@ public class WakeRecoveryStore
 
     /** Only a full prefix at this exact revision may clear the hint. */
     public boolean recordPending(Candidate candidate, boolean pending) {
-        return jdbc.update("UPDATE ma_session_head SET wake_pending = ?, wake_head_revision = ?"
+        return jdbc.update("UPDATE ma_session_head SET is_wake_pending = ?, wake_head_revision = ?"
                         + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
                         + " AND session_id = ? AND workspace_id = ? AND journal_revision = ?"
                         + " AND compacted_through_revision = 0",

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.repository;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedUserQuestions;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
@@ -71,6 +72,9 @@ public interface ManagedActionStore {
     }
 
     public static String decisionDigest(JsonNode response) {
+        if (response.has("answers")) {
+            return ManagedUserQuestions.decisionDigest(response);
+        }
         Map<String, Object> decision = new LinkedHashMap<>();
         decision.put("v", 1);
         decision.put("optionId", response.path("optionId").asText());

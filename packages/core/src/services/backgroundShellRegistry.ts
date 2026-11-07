@@ -23,8 +23,12 @@ import * as fs from 'node:fs';
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getInvocationContext } from '../utils/invocation-context.js';
 import { openSyncNoFollow } from '../utils/no-follow-open.js';
-import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
 import {
   isBidiControlChar,
   stripDisplayControlChars,
@@ -172,6 +176,14 @@ export type BackgroundShellStatus =
 export interface ShellTask extends TaskBase {
   kind: 'shell';
   /**
+   * Turn that registered this shell, captured once at `register()` time.
+   * The Web Shell session only delivers a queued notification into the turn
+   * it belongs to, so stamping the registering turn is what lets a shell
+   * that settles mid-turn surface mid-turn instead of waiting for the turn
+   * to end. Absent for shells registered with no turn context.
+   */
+  sourceTurnId?: string;
+  /**
    * @deprecated Read `id` instead; kept as a synonym during the back-compat
    * window. Always equals `id`.
    */
@@ -236,6 +248,7 @@ export interface ShellNotificationMeta {
   status: BackgroundShellStatus;
   exitCode?: number;
   todoWorkChainId?: string;
+  sourceTurnId?: string;
 }
 
 export type BackgroundShellNotificationCallback = (
@@ -327,6 +340,13 @@ export class BackgroundShellRegistry {
     entry.outputOffset = 0;
     entry.notified = false;
     entry.todoWorkChainId ??= todoWorkChainContext.getStore();
+    // Capture the registering turn here, once, because both ways a shell
+    // becomes background — a direct `is_background: true` spawn and a
+    // foreground→background promote — funnel through `register()`. For a
+    // promoted shell this attributes the result to the promoting turn, which
+    // is the turn that ends up waiting for it.
+    entry.sourceTurnId =
+      getInvocationContext()?.promptId ?? promptIdContext.getStore();
     this.entries.set(entry.shellId, entry);
     this.writeStatusFile(entry);
     this.fireRegister(entry);
@@ -570,6 +590,7 @@ export class BackgroundShellRegistry {
       status: entry.status,
       exitCode: entry.exitCode,
       todoWorkChainId: entry.todoWorkChainId,
+      sourceTurnId: entry.sourceTurnId,
     };
 
     try {

@@ -38,6 +38,44 @@ function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
 }
 
 describe('SystemMessage — prompt_cancelled marker', () => {
+  it('uses shared quota copy in the Chinese Desktop and VS Code message component', () => {
+    const container = render(
+      <SystemMessage
+        content="You've used up your weekly credits. Your credits are expected to reset in 3 hours. Please try again after the reset."
+        variant="error"
+        source="turn_error"
+        data={{
+          subscriptionQuota: {
+            type: 'subscription_quota',
+            memberType: 'pro',
+            resetAt: Math.floor(Date.now() / 1000) + 3 * 3600,
+          },
+        }}
+      />,
+      'zh-CN',
+    );
+    expect(container.textContent).toContain(
+      '周额度已用完，预计将于3小时后恢复，请在额度恢复后重试。',
+    );
+    expect(container.textContent).not.toContain('/upgrade');
+  });
+
+  it('preserves backend public text in the Chinese error component', () => {
+    const container = render(
+      <SystemMessage content="Backend public text" variant="error" />,
+      'zh-CN',
+    );
+    expect(container.textContent).toContain('Backend public text');
+  });
+  it('does not infer quota errors from backend message wording', () => {
+    const message =
+      "You've used up your weekly credits. Please try again after the reset.";
+    const container = render(
+      <SystemMessage content={message} variant="error" />,
+      'zh-CN',
+    );
+    expect(container.textContent).toContain(message);
+  });
   it.each([
     ['zh-CN', 10999, '你在 11s 后取消了请求'],
     ['zh-CN', 999, '你在 1s 后取消了请求'],

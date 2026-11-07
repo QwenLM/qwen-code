@@ -21,6 +21,29 @@ import {
 } from './transcriptToMessages.js';
 import { getToolDescription } from '../components/messages/toolFormatting';
 
+it('preserves marked quota data when projecting a terminal error', () => {
+  const subscriptionQuota = { type: 'subscription_quota', memberType: 'pro' };
+  const state = reduceDaemonTranscriptEvents(
+    createDaemonTranscriptState(),
+    normalizeDaemonEvent({
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session',
+        message: 'quota fallback',
+        subscriptionQuota,
+      },
+    }),
+  );
+  expect(transcriptBlocksToDaemonMessages(state.blocks)).toContainEqual(
+    expect.objectContaining({
+      role: 'system',
+      variant: 'error',
+      data: { subscriptionQuota },
+    }),
+  );
+});
+
 function textBlock(
   id: string,
   kind: 'user' | 'assistant' | 'thought',

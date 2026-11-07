@@ -1,4 +1,5 @@
 import { parseDaemonBackgroundTurn } from '@qwen-code/sdk/daemon';
+import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import { useSubagentDetails } from '../../subagentDetailsContext';
 import { memo, useCallback } from 'react';
 import {
@@ -175,6 +176,21 @@ export const SystemMessage = memo(function SystemMessage({
   onRetryClick,
 }: SystemMessageProps) {
   const { language, t } = useI18n();
+  if (
+    variant === 'error' &&
+    data &&
+    typeof data === 'object' &&
+    'subscriptionQuota' in data
+  ) {
+    content =
+      formatSubscriptionQuotaDisplay(data.subscriptionQuota, t) ?? content;
+  }
+  if (
+    content ===
+    'Your login credentials are no longer valid. Run /auth to sign in again.'
+  ) {
+    content = t('subscription.loginRequired');
+  }
   const backgroundDetails = useSubagentDetails()?.onOpenBackground;
   const [copied, flashCopied] = useCopiedFlash();
   const handleCopy = useCallback(() => {
