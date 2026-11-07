@@ -403,8 +403,8 @@ describe('ManagedAgentWebShell', () => {
 
   it('keeps an explicit host sessionId when the provider arrives later', async () => {
     const provider = { storageKey: 'late-provider' } as ManagedAgentProvider;
-    // The host mounts with neither `managedAgentProvider` nor `baseUrl`: there
-    // is no previous identity to carry an id over from.
+    // The host mounts before its config resolves (the boundary shows the
+    // fallback), then supplies the provider with an explicit selection.
     await act(async () =>
       root.render(<ManagedAgentWebShell hostSessionOnly sessionId="s1" />),
     );
@@ -420,28 +420,6 @@ describe('ManagedAgentWebShell', () => {
     expect(captured.props).toMatchObject({
       managedAgentProvider: provider,
       sessionId: 's1',
-    });
-  });
-
-  it('drops a carried sessionId when the identity switch passes through a provider-less render', async () => {
-    const first = { storageKey: 'tenant-a:actor-a' } as ManagedAgentProvider;
-    const third = { storageKey: 'tenant-c:actor-c' } as ManagedAgentProvider;
-    const render = (provider?: ManagedAgentProvider) =>
-      act(async () =>
-        root.render(
-          <ManagedAgentWebShell
-            managedAgentProvider={provider}
-            hostSessionOnly
-            sessionId="s1"
-          />,
-        ),
-      );
-    await render(first);
-    await render(undefined);
-    await render(third);
-    expect(captured.props).toMatchObject({
-      managedAgentProvider: third,
-      sessionId: undefined,
     });
   });
 

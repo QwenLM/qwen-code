@@ -22,11 +22,7 @@ import {
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WebShellCustomizationProvider } from './customization';
-import {
-  I18nProvider,
-  normalizeLanguage,
-  type WebShellLanguage,
-} from './i18n';
+import { I18nProvider, normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellPortalRootContext } from './portalRoot';
 import {
   ThemeProvider,
