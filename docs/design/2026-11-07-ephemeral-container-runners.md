@@ -1,107 +1,135 @@
-# 外部 PR 的一次性容器 runner
+# Ephemeral container runners for external PRs
 
-日期：2026-11-07。状态：已实现并完成单机受控测试；未部署生产服务、未启用线上路由。
+[English](2026-11-07-ephemeral-container-runners.md) | [简体中文](2026-11-07-ephemeral-container-runners.zh-CN.md)
 
-杭州共享测试机上已验证 10 个槽位同时注册并执行 10 个私有仓库的无密钥
-测试 job，容器、网络和注册均已回收。真实 GitHub App 认证及完整 PR CI 仍
-未验证；共享测试机不能因此视为适合承接不可信 PR。
+Date: 2026-11-07. Status: implemented and verified with controlled single-machine
+tests; no production service deployed, no live routing enabled.
 
-后续模型访问见 [runner 与模型代理结合方案](2026-11-07-ephemeral-runner-model-proxy.md)；
-该方案尚未实现或启用。
+Ten slots registering and running ten keyless test jobs of a private repository
+at the same time on the Hangzhou shared test machine; containers, networks and
+registrations were all reclaimed. Real GitHub App authentication and full PR CI
+remain unverified, so the shared test machine must not be treated as suitable
+for untrusted PRs because of this result.
 
-## 目标和边界
+Follow-up model access is described in
+[the runner and model-proxy combination](2026-11-07-ephemeral-runner-model-proxy.md);
+that proposal is neither implemented nor enabled.
 
-将整个 GitHub Actions runner 放进一次性 Docker 容器。容器执行一个 job，
-随后删除；下一次从同一个干净镜像创建新容器、新 runner 身份和新工作目录。
-用户不希望为 CI 中的每条命令维护权限白名单。
+## Goals and boundaries
 
-一次性单位是 job，不是 workflow、step 或 PR。多个 job 通过 GitHub artifacts
-交换文件，不共享可写工作目录。
+Put the whole GitHub Actions runner into a disposable Docker container. The
+container runs one job and is then deleted; the next job gets a new container,
+a new runner identity and a new working directory from the same clean image.
+Users do not want to maintain a per-command permission allowlist for CI.
 
-本设计解决运行环境残留和跨任务文件、进程污染。普通 Docker 共享宿主机内核，
-不提供虚拟机级恶意代码隔离；传入 job 的任何密钥仍可能被该 job 读取。
-首期只接无长期密钥的 Linux CI，不建设模型网关，不迁移发布、自动修复、
-真实模型 E2E 或需要 Docker daemon 的任务。
+The disposable unit is a job, not a workflow, a step or a PR. Multiple jobs
+exchange files through GitHub artifacts and never share a writable working
+directory.
 
-## 架构
+This design addresses run-environment residue and cross-task file and process
+contamination. Plain Docker shares the host kernel and gives no virtual-machine
+isolation from malicious code; any secret passed into a job can still be read
+by that job. The first phase accepts only Linux CI work without long-lived
+secrets: no model gateway is built here, and release, autofix, real-model E2E
+and tasks that need a Docker daemon are not migrated.
+
+## Architecture
 
 ```text
-外部 CI 专用 ECS
-├── systemd 托管的管理程序（长期运行，可信）
-│   ├── 使用 GitHub App 申请 JIT runner 配置
-│   ├── 启动、监控、删除容器及其独立网络
-│   └── 保存管理状态、导出日志、恢复异常任务
-├── 槽位 1：容器 A → 一个 job → 删除 → 容器 C
-└── 槽位 2：容器 B → 一个 job → 删除 → 容器 D
+External-CI dedicated ECS
+├── systemd-managed manager (long-running, trusted)
+│   ├── requests JIT runner configuration with the GitHub App
+│   ├── starts, monitors and deletes containers and their isolated networks
+│   └── keeps management state, exports logs, recovers interrupted tasks
+├── slot 1: container A → one job → delete → container C
+└── slot 2: container B → one job → delete → container D
 
-每个容器
-├── 一个 JIT runner，主动连接 GitHub
-├── Node.js 22、Git 和 CI 依赖
-└── 独立的 HOME、工作目录、临时目录、npm 缓存
+Each container
+├── one JIT runner that connects to GitHub on its own
+├── Node.js 22, Git and the CI dependencies
+└── its own HOME, working directory, temporary directory and npm cache
 ```
 
-管理程序按配置维护固定数量的槽位，每个槽位最多一个容器；单机试运行使用
-一个槽位。不接 webhook、不自行调度 PR、不引入 Kubernetes 或数据库。
-GitHub 根据 runner 标签分配任务。
+The manager keeps a configured number of slots, at most one container per slot;
+the single-machine trial run uses one slot. It takes no webhook, schedules no PR
+itself, and introduces neither Kubernetes nor a database. GitHub assigns work by
+runner label.
 
-镜像由可信构建生成并固定 digest。管理程序和镜像只能从经过维护者控制的版本
-部署，不从任务 checkout 或 PR artifacts 更新。
+Images are produced by a trusted build and pinned by digest. The manager and the
+image may only be deployed from versions maintained under maintainer control,
+never updated from a job checkout or from PR artifacts.
 
-## 所有权和生命周期
+## Ownership and lifecycle
 
-| 对象                         | 所有者       | 生命周期                            |
-| ---------------------------- | ------------ | ----------------------------------- |
-| ECS、Docker daemon、管理程序 | 运维/维护者  | 长期                                |
-| GitHub App 私钥和管理令牌    | 管理程序     | 不进入任务容器                      |
-| 干净镜像                     | 可信镜像构建 | 版本化、不可由 job 回写             |
-| JIT 配置、runner 身份        | 单个容器实例 | 只用于一个 job                      |
-| 容器可写层和任务数据         | 单个容器实例 | 销毁时删除                          |
-| Docker bridge 网络           | 单个容器实例 | 销毁时删除                          |
-| 诊断日志                     | 管理程序导出 | 有大小和保留期限，不被后续 job 读取 |
+| Object                                   | Owner                 | Lifetime                                    |
+| ---------------------------------------- | --------------------- | ------------------------------------------- |
+| ECS, Docker daemon, manager              | Ops / maintainers     | Long term                                   |
+| GitHub App private key and admin token   | Manager               | Never enters a job container                |
+| Clean image                              | Trusted image build   | Versioned, not writable from a job          |
+| JIT configuration, runner identity       | One container instance | Used for a single job                      |
+| Container writable layer and job data    | One container instance | Deleted on destruction                     |
+| Docker bridge network                    | One container instance | Deleted on destruction                     |
+| Diagnostic logs                          | Exported by the manager | Size and retention bounded, unreadable by later jobs |
 
-正常路径：申请 JIT → 创建独立网络和容器 → runner 上线 → 执行一个 job →
-runner 退出 → 导出日志 → 删除容器与网络 → 清理残留注册 → 创建下一份。
+Normal path: request JIT → create the isolated network and container → runner
+comes online → run one job → runner exits → export logs → delete the container
+and network → clean up the leftover registration → create the next one.
 
-JIT 提供正常协议下的单任务注册语义；宿主机管理程序负责实际销毁。
-不能依赖恶意任务自行退出、完成最后一个 cleanup step 或保持 runner 完整。
-容器外 watchdog 强制限制最长存活时间，管理程序重启时先对账旧资源。
+JIT provides single-job registration semantics under the normal protocol; the
+host manager is responsible for actually destroying the container. The design
+must not rely on a malicious job exiting on its own, finishing a final cleanup
+step, or keeping the runner intact. A watchdog outside the container enforces a
+maximum lifetime, and a manager restart reconciles old resources first.
 
-容器删除失败时停止对应槽位；GitHub 注册清理失败时记录并重试，不继续无限
-申请新身份。宿主机故障期间无法即时清理，恢复后必须先回收再接新任务。
+If deleting a container fails, that slot stops; if GitHub registration cleanup
+fails, the failure is recorded and retried instead of endlessly requesting new
+identities. Host failures cannot clean up immediately, so recovery must reclaim
+before accepting new work.
 
-## 最少但必要的部署边界
+## Minimal but necessary deployment boundary
 
-- 使用外部 CI 专用 ECS；不与持有长期密钥的现有 runner 共用主机。
-- 不挂载宿主机 home、工作区、管理状态、凭证目录、Docker socket；不使用
-  privileged、host PID 或 host network。容器内无需逐命令白名单。
-- 镜像不声明持久 VOLUME，首期不创建任务卷；全部任务写入容器可写层。
-- 宿主机外/容器无法修改的网络策略阻止访问管理接口、敏感内网、实例凭证和
-  元数据；配置实际需要的 GitHub、npm、镜像服务出口。
-- 旧可信 runner 的访问权必须在 GitHub 侧检查。标签和 PR 可修改的 YAML 都
-  不是授权边界；外部 PR 不得通过修改 runs-on 绕回敏感池。
-- 不因启用自托管 runner 而开放 fork secrets，也不引入执行 PR 代码的
-  pull_request_target 特权流程。
+- Use an ECS dedicated to external CI; do not share a host with existing runners
+  that hold long-lived secrets.
+- Mount no host home, workspace, management state, credential directory or
+  Docker socket; use neither privileged mode, host PID nor host networking. No
+  per-command allowlist is needed inside the container.
+- Images declare no persistent VOLUME and the first phase creates no job volume;
+  all job writes go to the container writable layer.
+- Network policy outside the host and unmodifiable from the container blocks the
+  management interface, sensitive intranets, instance credentials and metadata;
+  configure only the GitHub, npm and image-service egress actually required.
+- Access granted to the old trusted runners must be verified on the GitHub side.
+  Neither labels nor PR-modifiable YAML are an authorization boundary; an
+  external PR must not route back into a sensitive pool by editing runs-on.
+- Do not open fork secrets because a self-hosted runner is enabled, and do not
+  introduce a privileged pull_request_target flow that executes PR code.
 
-## 首期路由决策
+## Initial routing decision
 
-保留现有 `ubuntu_runner` 输出及其所有旧语义，新增 `pr_test_runner` 输出，
-用于 `test_build` 和 `test`。默认复制旧输出；仅在开关开启且事件属于外部
-非可信作者 PR 时，改选新池；同条件下 `lint_runner` 也改选新池，影响
-`lint_and_static` 和 `integration_no_ak`。全局 kill-switch 和 hosted 设置优先。
+Keep the existing `ubuntu_runner` output and all of its former semantics, and add
+a `pr_test_runner` output used by `test_build` and `test`. Default it to the old
+output; only when the switch is enabled and the event belongs to an external
+untrusted-author PR does it select the new pool. Under the same condition
+`lint_runner` also selects the new pool, affecting `lint_and_static` and
+`integration_no_ak`. The global kill-switch and the hosted setting take
+precedence.
 
-`classify_pr`、`web_shell_e2e_smoke`、`integration_cli`、其他 workflow
-保持当前路由。这样不把新镜像尚未验证的浏览器系统依赖一起迁入，也不改变
-现有分类 job 与其他 workflow 的路由镜像关系。
+`classify_pr`, `web_shell_e2e_smoke`, `integration_cli` and the other workflows
+keep their current routing. This avoids migrating browser system dependencies
+that the new image has not verified, and leaves the routing image relationship
+of the existing classifier job and the other workflows unchanged.
 
-新池标签为 `ecs-qwen-ephemeral`。默认路由使用 x64，设置变量
-`EXTERNAL_PR_EPHEMERAL_ARCH=arm64` 可改用 ARM64；完整 PR CI 在新镜像上的
-工具链仍须验证。
+The new pool label is `ecs-qwen-ephemeral`. Default routing uses x64; setting
+`EXTERNAL_PR_EPHEMERAL_ARCH=arm64` selects ARM64 instead. The toolchain of full
+PR CI on the new image still has to be verified.
 
-## 依据
+## References
 
-- [GitHub ephemeral runner 语义与清理责任](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#ephemeral-runners-for-autoscaling)
-- [GitHub 仓库级 JIT API](https://docs.github.com/en/rest/actions/self-hosted-runners#create-configuration-for-a-just-in-time-runner-for-a-repository)
-- [Docker 的 daemon 与内核安全边界](https://docs.docker.com/engine/security/)
+- [GitHub ephemeral runner semantics and cleanup responsibility](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#ephemeral-runners-for-autoscaling)
+- [GitHub repository-level JIT API](https://docs.github.com/en/rest/actions/self-hosted-runners#create-configuration-for-a-just-in-time-runner-for-a-repository)
+- [Docker daemon and kernel security boundary](https://docs.docker.com/engine/security/)
 
-本设计采用的事实已在本次讨论中核对官方文档；部署时再次确认实际 runner
-版本、GitHub 账户能力、API 权限和 ECS 网络配置。
+The facts this design relies on were checked against the official documentation
+during this discussion; the actual runner version, GitHub account capabilities,
+API permissions and ECS network configuration must be confirmed again at
+deployment time.

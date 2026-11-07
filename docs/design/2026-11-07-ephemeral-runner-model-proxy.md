@@ -1,113 +1,163 @@
-# 一次性 runner 与模型代理的结合方案
+# Combining ephemeral runners with a model proxy
 
-日期：2026-11-07。状态：方案与局部验证完成；尚未实现组合服务、部署或启用。
+[English](2026-11-07-ephemeral-runner-model-proxy.md) | [简体中文](2026-11-07-ephemeral-runner-model-proxy.zh-CN.md)
 
-## 目标与范围
+Date: 2026-11-07. Status: proposal and partial verification complete; the
+combined service is neither implemented, deployed nor enabled.
 
-外部 PR 的 CI 需要调用真实模型时，每个一次性 runner 使用独立、短期、受限的
-代理凭证。真实模型 AK 只交给可信模型代理，不进入 runner 容器。runner 执行
-一个 job 后，管理服务回收容器并撤销该凭证。原有无 AK 的 job 不需要改变。
+## Goals and scope
 
-不改变现有 triage/verify 的运行方式，不让所有外部 PR 默认获得无限制模型
-访问，不承诺 Docker 是对恶意代码的虚拟机级隔离。本方案不提供发布、模型输出
-可信性或 prompt 注入防护。
+When CI for an external PR needs a real model, every ephemeral runner uses its
+own short-lived, restricted proxy credential. The real model AK goes only to the
+trusted model proxy and never into a runner container. After the runner finishes
+one job, the management service reclaims the container and revokes the
+credential. Existing keyless jobs need no change.
 
-## 当前代码与验证
+The existing triage/verify execution model is unchanged, no external PR gains
+unrestricted model access by default, and Docker is not claimed to be
+virtual-machine isolation from malicious code. This proposal provides neither
+release capability, model-output trustworthiness, nor prompt-injection
+protection.
 
-- `scripts/ci/ephemeral-runner/manager.mjs` 为固定槽位创建单 job JIT runner，
-  每个容器使用单独的 bridge，回收完毕后再补充。当前没有模型代理集成。
-- `.github/workflows/qwen-triage.yml` 的 `tmux-testing` 与 `verify` 各有一份
-  内嵌的模型代理：监听本机 loopback，以随机 bearer 校验请求，替换为真实 AK，
-  只转发 `POST .../chat/completions`，支持流式响应与空闲超时。它们是各自
-  workflow 的临时进程，不是独立网关。
-- 使用从现有 `verify` workflow 提取的代理和假上游，验证了错误 token 返回
-  401、其他路径返回 403、正确 token 转发且上游只收到假真实 AK，以及流式
-  数据返回。两个正确请求都能成功：现有实现没有按请求数撤销 token 的行为。
-- 现有 triage 测试中选中的 5 项通过，包含认证、两条 lane 的流式空闲超时。
-- 在杭州 hz4 通过一个临时 Docker bridge 和单个受限测试容器验证：容器内
-  `127.0.0.1` 不能访问宿主机的 loopback 服务。测试资源已清理。这**不证明**
-  容器不能访问宿主机 bridge 地址或其他宿主机服务。
-- 未使用真实模型 AK；未验证真实 GitHub App、实际代理部署、凭证签发与
-  撤销、配额、外部 PR 的模型 job、或生产网络隔离。
+## Current code and verification
 
-## 信任边界
+- `scripts/ci/ephemeral-runner/manager.mjs` creates a single-job JIT runner for
+  each fixed slot, gives every container its own bridge, and replenishes after
+  reclamation. Model-proxy integration does not exist yet.
+- `tmux-testing` and `verify` in `.github/workflows/qwen-triage.yml` each embed
+  a model proxy: it listens on host loopback, validates requests with a random
+  bearer, substitutes the real AK, forwards only `POST .../chat/completions`,
+  and supports streaming responses and an idle timeout. These are per-workflow
+  temporary processes, not standalone gateways.
+- Using the proxy extracted from the existing `verify` workflow plus a fake
+  upstream, we verified that a wrong token returns 401, other paths return 403,
+  a correct token is forwarded with the upstream receiving only the fake real
+  AK, and streamed data is returned. Two correct requests both succeed: the
+  current implementation has no per-request revocation.
+- Five selected existing triage tests pass, covering authentication and the
+  streaming idle timeout on both lanes.
+- On Hangzhou hz4, with a temporary Docker bridge and a single restricted test
+  container, we verified that `127.0.0.1` inside the container cannot reach a
+  loopback service on the host. Test resources were cleaned up. This does **not
+  prove** that a container cannot reach the host bridge address or other host
+  services.
+- No real model AK was used; real GitHub App authentication, an actual proxy
+  deployment, credential issuance and revocation, quotas, model jobs for
+  external PRs, and production network isolation were not verified.
+
+## Trust boundary
 
 ```text
-GitHub job 队列
-    ↓ 分派到带标签的一次性 runner
-外部 CI 专用 ECS                         可信代理服务环境
-  runner 管理服务 ──受保护的签发/撤销──→ 模型代理管理接口
-       │                                │
-       └─ runner 容器 ──短期 token────→ 模型调用接口 ──真实 AK──→ 上游
+GitHub job queue
+    ↓ dispatched to a labelled ephemeral runner
+External-CI dedicated ECS                    Trusted proxy service environment
+  runner management service ──protected issue/revoke──→ model proxy admin API
+       │                                              │
+       └─ runner container ──short-lived token──────→ model endpoint ──real AK──→ upstream
 ```
 
-模型代理优先部署在独立可信主机或服务，真实 AK 不放在 runner ECS。宿主机
-管理服务保存 GitHub App 私钥和调用代理管理接口的管理凭证；这些都不挂载、
-注入或暴露给 runner 容器。管理接口与模型调用接口分开授权，并通过 TLS 和
-网络策略限制来源；容器不能访问签发、撤销接口、管理服务、Docker socket、
-敏感内网和 ECS 元数据。runner 仅获准访问模型调用接口及必要 CI 出口。
+The model proxy is preferably deployed on a separate trusted host or service;
+the real AK does not live on the runner ECS. The host management service holds
+the GitHub App private key and the admin credential for the proxy admin API;
+neither is mounted, injected into, or exposed to runner containers. The admin
+API and the model endpoint are authorized separately and restricted by TLS and
+network policy; containers cannot reach the issue/revoke endpoints, the
+management service, the Docker socket, sensitive intranets, or ECS metadata.
+Runners are allowed to reach only the model endpoint and the CI egress they
+need.
 
-容器有 sudo，不能依赖容器内 root/node 用户隔离真实 AK。普通 Docker 共享
-宿主机内核；涉及不可信代码时仍需专用主机，按风险考虑虚拟机级隔离。网络
-策略由容器不能修改的宿主机或外部网络设备执行并实际验证。
+Containers have sudo, so isolating the real AK from the container's root/node
+users cannot be relied on. Plain Docker shares the host kernel; untrusted code
+still needs a dedicated host, with virtual-machine isolation considered
+according to risk. Network policy is enforced by the host or external network
+devices that the container cannot modify, and is verified in practice.
 
-## 凭证和槽位生命周期
+## Credential and slot lifecycle
 
-第一版按 **runner 实例**签发，而不是假装按 PR 或 job 签发：管理服务创建
-runner 时还不知道 GitHub 将分配哪个 job。模型能力需使用独立的专用 runner
-标签与 runner group，只供经明确允许的模型测试 workflow 使用；不要把模型
-token 注入默认无 AK 的 runner 池。GitHub 侧 runner group 权限必须经过核验，
-标签或 PR 中的 workflow YAML 不是授权边界。
+The first version issues credentials per **runner instance**, rather than
+pretending to issue per PR or per job: the management service does not yet know
+which job GitHub will assign when it creates a runner. Model capability needs
+its own dedicated runner label and runner group, used only by explicitly
+permitted model-test workflows; model tokens must not be injected into the
+default keyless runner pool. Runner group permissions on the GitHub side must be
+verified: labels or workflow YAML in a PR are not an authorization boundary.
 
-每个实例的状态机：
+State machine for each instance:
 
-1. 生成不可复用的实例 ID。通过受保护的管理接口申请随机 token，设置模型、
-   请求大小、并发、调用速率、总量及绝对过期时间。只在代理端保存验证所需
-   信息；持久状态和日志不记录明文 token。
-2. 将 proxy 地址和 token 交付给对应新容器；管理服务自身不能将管理凭证或
-   上游 AK 交给容器。以 `OPENAI_BASE_URL`、`OPENAI_API_KEY` 供兼容的测试
-   使用，token 对这个 job 视为已公开，不依赖日志脱敏作为安全边界。
-3. runner 空闲时也占用凭证有效期。第一版凭证有效期覆盖实例最长生命周期，
-   空闲太久后连 runner 一起回收；不能承诺任务开始时仍有固定剩余时间。
-4. 正常退出、失败、取消、超时或重启恢复均撤销 token、删除容器和网络、
-   清理 GitHub 注册。新实例获得新 token；旧 token 被拒绝。
-5. 签发结果不确定时，不创建可访问模型的容器；撤销失败时停止对应槽位补充
-   并重试，凭证绝对过期作为最终兜底。管理服务/代理重启后应先对账，不能
-   因重启丢失已签发 token 的撤销状态或重置预算。
+1. Generate a non-reusable instance ID. Request a random token through the
+   protected admin API, setting model, request size, concurrency, call rate,
+   total volume and an absolute expiry. Store on the proxy only what validation
+   needs; persistent state and logs never record the plaintext token.
+2. Deliver the proxy address and token to the corresponding new container; the
+   management service itself must not hand management credentials or the
+   upstream AK to a container. Supply them as `OPENAI_BASE_URL` and
+   `OPENAI_API_KEY` for compatible tests. The token is considered public to that
+   job; log redaction is not treated as a security boundary.
+3. An idle runner still consumes its credential's lifetime. In the first
+   version the credential lifetime covers the instance's maximum lifetime, and
+   an instance left idle too long is reclaimed together with its runner; no
+   fixed remaining time at job start can be promised.
+4. Normal exit, failure, cancellation, timeout and restart recovery all revoke
+   the token, delete the container and network, and clean up the GitHub
+   registration. A new instance gets a new token; old tokens are rejected.
+5. When issuance is uncertain, do not create a container that can reach the
+   model; when revocation fails, stop replenishing that slot and retry, with the
+   absolute expiry as the final backstop. After a management-service or proxy
+   restart, reconcile first: the restart must not lose the revocation state or
+   reset budgets for already-issued tokens.
 
-容器中任何脚本都能使用或泄露 token，且撤销前可能产生费用；环境变量、
-容器元数据、日志和 artifact 都不能被视作对该 job 保密。必须限制凭证能力，
-并允许立即整体关闭模型池或代理调用接口。
+Any script in the container can use or leak the token and may incur cost before
+revocation; environment variables, container metadata, logs and artifacts are
+all untrusted for that job. Credential capability must therefore be limited,
+and the whole model pool or proxy endpoint must be switchable off immediately.
 
-## 代理功能与预算
+## Proxy features and budget
 
-从现有转发逻辑提取可测试的共享实现，保持已有两条 triage lane 行为；
-新的独立服务另加凭证签发、吊销、持久状态、统计和限额，不直接修改既有
-workflow 的权限或触发方式。只允许配置好的上游目标、模型和确切 API 路径，
-不得让请求控制上游 URL 或传递上游授权头；限制请求体大小、超时和并发，
-保留流式断连处理，避免客户端触发任意地址访问或无限资源消耗。
+Extract a testable shared implementation from the existing forwarding logic and
+preserve the behaviour of the two triage lanes; the new standalone service adds
+credential issuance, revocation, persistent state, statistics and limits
+separately, without changing the permissions or triggers of the existing
+workflows. Allow only configured upstream targets, models and exact API paths;
+requests must not control the upstream URL or pass an upstream authorization
+header. Bound request body size, timeout and concurrency, keep streamed
+disconnect handling, and prevent a client from triggering arbitrary address
+access or unbounded resource use.
 
-按实例设置请求数、速率、并发和输入/输出上限，并设置所有实例共享的总预算
-及上游账户侧的硬额度或告警。并发扣额需要原子处理，拒绝超额请求。请求数
-和输出参数上限并不等于精确费用上限；流式响应可能在断连后仍产生费用。
-精确成本上限依赖模型供应方的计量/限额能力，应在选定上游后验证。不要记录
-明文凭证、完整 prompt 或回复，除非后续有明确需求和数据处理策略。
+Set per-instance request counts, rates, concurrency and input/output limits, plus
+a shared budget across all instances and a hard quota or alert on the upstream
+account. Concurrent debits must be atomic and over-limit requests rejected.
+Request-count and output-parameter caps are not an exact cost cap; a streamed
+response may still incur cost after disconnect. An exact cost cap depends on the
+model provider's metering and quota capability and must be verified once the
+upstream is chosen. Do not log plaintext credentials, complete prompts or
+responses unless a concrete later requirement and data-handling policy exist.
 
-## 实施和验收
+## Implementation and acceptance
 
-1. 确定哪些模型测试确实需要外部 PR 执行、上游模型及预算；默认只开放一条
-   受控测试 workflow，先不要改变现有 `integration_no_ak` 或其他 CI 路由。
-2. 提取并测试现有 proxy 的 HTTP/流式核心，保留两个 triage lane 行为。实现
-   独立代理的管理接口、独立凭证、权限、持久化、过期、撤销和预算。
-3. 为管理服务增加可选的模型池生命周期；签发或清理不确定时 fail closed。
-   明确 token 注入、日志脱敏、异常恢复及旧 token 失效的测试。
-4. 在独立测试环境使用假上游、1 个槽位及受控私有仓库，验证两次连续 job：
-   两个 token 不同；正常和流式调用通过；错误、旧、撤销和过期 token 被拒；
-   超额、并发竞争、上游故障、管理服务/代理重启不绕过限制。
-5. 从 job 内验证不能读到真实 AK、App 私钥、代理管理凭证，也不能访问元数据、
-   Docker socket、其他容器和宿主机管理服务；验证代理只能访问允许的上游。
-   容器清理和凭证撤销失败均阻止槽位补充。
-6. 准备隔离的专用 ECS 和代理服务、实测网络与 GitHub 授权，再用低预算真实
-   模型凭证进行一槽位试运行。通过后由维护者决定是否启用相应模型测试路由。
+1. Determine which model tests actually need external-PR execution, and which
+   upstream model and budget they use; by default open exactly one controlled
+   test workflow and do not change the existing `integration_no_ak` or other CI
+   routing.
+2. Extract and test the HTTP/streaming core of the existing proxy, preserving
+   both triage lanes. Implement the standalone proxy's admin API, separate
+   credentials, permissions, persistence, expiry, revocation and budget.
+3. Add optional model-pool lifecycle to the management service; fail closed when
+   issuance or cleanup is uncertain. Cover token injection, log redaction,
+   abnormal recovery and old-token invalidation in tests.
+4. In an isolated test environment with a fake upstream, one slot and a
+   controlled private repository, verify two consecutive jobs: the two tokens
+   differ; normal and streamed calls succeed; wrong, old, revoked and expired
+   tokens are rejected; over-limit requests, concurrency races, upstream
+   failures, and management-service/proxy restarts do not bypass the limits.
+5. From inside a job, verify that the real AK, the App private key and the proxy
+   admin credential are unreadable, and that metadata, the Docker socket, other
+   containers and host management services are unreachable; verify that the
+   proxy can reach only the permitted upstream. Both container-cleanup and
+   credential-revocation failures must stop slot replenishment.
+6. Prepare isolated dedicated ECS capacity and proxy services, and measure the
+   network and GitHub authorization, then run a one-slot trial with a low-budget
+   real model credential. Only after it passes does a maintainer decide whether
+   to enable the corresponding model-test routing.
 
-现有 runner 方案见 [一次性 runner 设计](2026-11-07-ephemeral-container-runners.md)。
+The existing runner design is described in
+[the ephemeral runner design](2026-11-07-ephemeral-container-runners.md).
