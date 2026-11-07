@@ -6,6 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+EnvironmentFile=/etc/qwen-ephemeral-runner/credentials.env
 WorkingDirectory=/opt/qwen-ephemeral-runner
 ExecStart=/usr/bin/env node /opt/qwen-ephemeral-runner/manager.mjs /etc/qwen-ephemeral-runner/config.json
 Restart=always

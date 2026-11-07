@@ -47,19 +47,30 @@ hosts without a central scheduler. `slots` is a per-host limit, not a fleet tota
 New runner names start with `ecs-qwen-` so the existing CI worker caps and test
 timeouts apply. Restart recovery also accepts the earlier `qwen-` identities.
 
-Install Docker, Node 22, `gh`, and `flock` on the host. Create a GitHub App
-installed only on the intended repository with repository Administration:
-write, and store its private key in a root-readable file. The manager uses it to
-request JIT configurations and delete stale runner registrations; it does not
-pass the key or installation token to job containers.
+Install Docker, Node 22, `gh`, and `flock` on the host. The manager uses a
+dedicated PAT supplied as `GH_TOKEN`. The account must administer the target
+repository. Prefer a fine-grained PAT restricted to that repository with
+Administration: write and a short expiry. GitHub currently requires this broader
+permission for runner registration; it is not a runner-only credential. Some
+organization or outside-collaborator policies prevent fine-grained access. Do
+not silently replace it with a classic `repo` token, which can cover other
+repositories the account can access.
+
+Store `GH_TOKEN=<PAT>` in `/etc/qwen-ephemeral-runner/credentials.env`, owned by
+root with mode `600`, inside the root-only configuration directory. The supplied
+systemd unit loads this file; do not put it in shell history, config JSON, job
+environments or the repository. Replace it and restart the service to rotate or
+renew the token. The service fails startup if `GH_TOKEN` is missing. Docker child
+environments are allowlisted, and only the one-time JIT configuration enters a
+job container. Host root and Docker administrators are trusted and can access
+host credentials; ordinary container isolation does not change that boundary.
 
 Copy `config.example.json` to `/etc/qwen-ephemeral-runner/config.json` and
-replace the placeholders: repository, App and installation IDs, private key
-path, actual runner group ID, unique host/pool ID, immutable image reference,
-and matching architecture and labels. Use a unique test label and a controlled
-test repository for a trial. The example runs one slot; increase only after
-measuring the host. Restrict the configuration and key directories to the
-manager account and do not put secrets in the repository.
+replace the placeholders: repository, actual runner group ID, unique host/pool
+ID, immutable image reference, and matching architecture and labels. Use a
+unique test label and a controlled test repository for a trial. The example runs
+one slot; increase only after measuring the host. Restrict configuration and
+credential directories to the manager account.
 
 The `ttlSeconds` limit starts when the container starts, including idle time.
 A job assigned near the deadline can be interrupted. The manager removes and
@@ -81,7 +92,7 @@ sudo install -m 644 scripts/ci/ephemeral-runner/manager.mjs /opt/qwen-ephemeral-
 sudo install -m 644 scripts/ci/ephemeral-runner/qwen-ephemeral-runner.service /etc/systemd/system/qwen-ephemeral-runner.service
 ```
 
-Finish the configuration and private-key setup above before starting. A Docker-authorized user
+Finish the configuration and PAT setup above before starting. A Docker-authorized user
 has host-level power; the unit is intended for a trusted dedicated host.
 
 ```sh

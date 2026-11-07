@@ -2,11 +2,15 @@
 
 [English](2026-11-07-ephemeral-container-runners.md) | [简体中文](2026-11-07-ephemeral-container-runners.zh-CN.md)
 
-日期：2026-11-07。状态：已实现并完成单机受控测试；未部署生产服务、未启用线上路由。
+日期：2026-11-07。状态：已实现并在 hz4 部署单槽位 systemd 试运行服务；
+外部 PR 的生产路由仍未启用。
 
 杭州共享测试机上已验证 10 个槽位同时注册并执行 10 个私有仓库的无密钥
-测试 job，容器、网络和注册均已回收。真实 GitHub App 认证及完整 PR CI 仍
-未验证；共享测试机不能因此视为适合承接不可信 PR。
+测试 job，容器、网络和注册均已回收。后续单槽位试运行使用真实 PAT，
+通过两个串行 GitHub Actions job 验证注册、容器替换、工作区隔离及 job 内
+没有 PAT；强制结束 manager 后也验证了 systemd 重启及补位前清理。
+试运行发现并修复了 gh 2.46 分页兼容性及 Docker quiet 模式覆盖格式化
+槽位输出的问题。完整 PR CI 和生产隔离仍未验证，共享主机只用于受控试验。
 
 后续模型访问见 [runner 与模型代理结合方案](2026-11-07-ephemeral-runner-model-proxy.zh-CN.md)；
 该方案尚未实现或启用。
@@ -30,7 +34,7 @@
 ```text
 外部 CI 专用 ECS
 ├── systemd 托管的管理程序（长期运行，可信）
-│   ├── 使用 GitHub App 申请 JIT runner 配置
+│   ├── 使用宿主机 PAT 申请 JIT runner 配置
 │   ├── 启动、监控、删除容器及其独立网络
 │   └── 保存管理状态、导出日志、恢复异常任务
 ├── 槽位 1：容器 A → 一个 job → 删除 → 容器 C
@@ -55,12 +59,20 @@ Docker socket，使用独立的 `poolId` 和按主机配置的 `slots`。各主�
 镜像由可信构建生成并固定 digest。管理程序和镜像只能从经过维护者控制的版本
 部署，不从任务 checkout 或 PR artifacts 更新。
 
+认证使用专用 PAT，以 `GH_TOKEN` 写入仅 root 可读的 systemd EnvironmentFile：
+`/etc/qwen-ephemeral-runner/credentials.env`。fine-grained token 应只选择目标
+仓库及 GitHub API 要求的 Administration: write；它不只限于 runner 操作。
+外部协作者身份或组织策略可能使 fine-grained token 不可用，改用权限更宽的
+classic token 必须明确决定。PAT 留在宿主机，不进入配置 JSON 或任务容器。
+宿主机 root 和 Docker 管理员仍属于可信边界。到期前替换凭证文件并重启服务；
+仓库级 runner 不需要 GitHub App 或组织级 runner 管理权限。
+
 ## 所有权和生命周期
 
 | 对象                         | 所有者       | 生命周期                            |
 | ---------------------------- | ------------ | ----------------------------------- |
 | ECS、Docker daemon、管理程序 | 运维/维护者  | 长期                                |
-| GitHub App 私钥和管理令牌    | 管理程序     | 不进入任务容器                      |
+| 宿主机 runner 管理 PAT       | 管理程序     | 不进入任务容器                      |
 | 干净镜像                     | 可信镜像构建 | 版本化、不可由 job 回写             |
 | JIT 配置、runner 身份        | 单个容器实例 | 只用于一个 job                      |
 | 容器可写层和任务数据         | 单个容器实例 | 销毁时删除                          |

@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,18 +10,12 @@ async function fixture(t) {
   t.after(() => rm(dir, { recursive: true, force: true }));
   await mkdir(join(dir, 'state'));
   await mkdir(join(dir, 'logs'));
-  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
-  const key = join(dir, 'private.pem');
-  await writeFile(key, privateKey.export({ type: 'pkcs8', format: 'pem' }));
   const config = {
     repo: 'owner/repo',
     poolId: 'trial',
     image: `image@sha256:${'a'.repeat(64)}`,
     slots: 1,
     runnerGroupId: 1,
-    appId: 1,
-    installationId: 1,
-    privateKeyPath: key,
     labels: ['self-hosted', 'linux', 'ARM64', 'trial-only'],
     cpus: 1,
     memory: '1g',
@@ -45,8 +38,6 @@ async function fixture(t) {
     calls.push({ program, args, options });
     if (program === 'gh') {
       const path = args.find((v) => v.startsWith('/'));
-      if (path.includes('/access_tokens'))
-        return JSON.stringify({ token: 'secret-token' });
       if (path.includes('generate-jitconfig')) {
         const body = JSON.parse(options.input);
         runner = { id: ++counter, name: body.name };
@@ -57,7 +48,7 @@ async function fixture(t) {
         runner = undefined;
         return '';
       }
-      return JSON.stringify([{ runners: runner ? [runner] : [] }]);
+      return JSON.stringify(runner ? [runner] : []);
     }
     if (args[0] === 'ps') return container ? `${container}\n` : '';
     if (args[0] === 'network' && args[1] === 'ls')
@@ -100,6 +91,12 @@ async function fixture(t) {
 }
 
 test('creates a new runner and container per job and keeps GitHub token out of Docker', async (t) => {
+  const previousToken = process.env.GH_TOKEN;
+  process.env.GH_TOKEN = 'host-only-pat';
+  t.after(() => {
+    if (previousToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = previousToken;
+  });
   const f = await fixture(t);
   const manager = createManager(f.config, { command: f.command });
   await manager.cycle(1);
@@ -117,6 +114,7 @@ test('creates a new runner and container per job and keeps GitHub token out of D
       JSON.parse(c.options.input).name.startsWith('ecs-qwen-'),
     ),
   );
+  assert.ok(requests.every((c) => c.options.env.GH_TOKEN === 'host-only-pat'));
   assert.equal(creates.length, 2);
   assert.notEqual(
     JSON.parse(requests[0].options.input).name,
@@ -281,9 +279,7 @@ test('rejects same-name runner with a different ID without deleting it', async (
   );
   const command = (program, args, options) => {
     if (program === 'gh' && args.includes('--paginate'))
-      return Promise.resolve(
-        JSON.stringify([{ runners: [{ name: state.name, id: 43 }] }]),
-      );
+      return Promise.resolve(JSON.stringify([{ name: state.name, id: 43 }]));
     return f.command(program, args, options);
   };
   await assert.rejects(
@@ -300,7 +296,7 @@ test('rejects same-name runner with a different ID without deleting it', async (
   );
 });
 
-test('reconciles a legacy runner identity before registering its replacement', async (t) => {
+test('reconciles a legacy identity on a later page before registering its replacement', async (t) => {
   const f = await fixture(t);
   const name = 'qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';
   await writeFile(
@@ -314,7 +310,9 @@ test('reconciles a legacy runner identity before registering its replacement', a
   let deleted = false;
   const command = (program, args, options) => {
     if (program === 'gh' && args.includes('--paginate') && !deleted) {
-      return Promise.resolve(JSON.stringify([{ runners: [{ name, id: 42 }] }]));
+      assert.ok(!args.includes('--slurp'));
+      assert.equal(args[args.indexOf('--jq') + 1], '.runners | @json');
+      return Promise.resolve('[]\n' + JSON.stringify([{ name, id: 42 }]));
     }
     if (
       program === 'gh' &&
@@ -335,6 +333,69 @@ test('reconciles a legacy runner identity before registering its replacement', a
   };
   await createManager(f.config, { command }).cycle(1);
   assert.ok(deleted);
+});
+
+test('startup reclaims a live container before replenishing after a crash', async (t) => {
+  const f = await fixture(t);
+  const previousPath = process.env.PATH;
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  await writeFile(
+    join(f.config.stateDir, 'slot-1.json'),
+    JSON.stringify({
+      name: 'ecs-qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+      runnerId: 42,
+      uncertain: false,
+    }),
+  );
+  let oldContainer = true;
+  let manager;
+  const command = async (program, args, options) => {
+    if (program === 'docker' && args[0] === 'ps') {
+      if (args.includes('--format')) {
+        // Docker quiet mode overrides --format, as on the trial host.
+        return oldContainer
+          ? args.includes('-aq')
+            ? 'old-container'
+            : '1'
+          : '';
+      }
+      if (oldContainer) return 'old-container';
+    }
+    if (
+      program === 'docker' &&
+      args[0] === 'rm' &&
+      args.includes('old-container')
+    ) {
+      oldContainer = false;
+      return '';
+    }
+    if (
+      program === 'gh' &&
+      args.includes('/repos/owner/repo/actions/runners/generate-jitconfig')
+    ) {
+      assert.equal(
+        oldContainer,
+        false,
+        'remove old container before registration',
+      );
+    }
+    if (program === 'docker' && args[0] === 'start') manager.stop();
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, { command });
+  await manager.start();
+  assert.equal(oldContainer, false);
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'create')
+      .length,
+    1,
+  );
 });
 
 test('accepts immutable local image IDs and rejects mutable tags and invalid configuration', async (t) => {
@@ -362,9 +423,11 @@ test('does not expose malformed GitHub responses in errors', async (t) => {
   const command = (program, args, options) => {
     if (
       program === 'gh' &&
-      args.some((arg) => arg.includes('/access_tokens'))
+      args.some((arg) => arg.includes('generate-jitconfig'))
     ) {
-      return Promise.resolve('malformed-secret-token');
+      return f
+        .command(program, args, options)
+        .then(() => 'malformed-secret-token');
     }
     return f.command(program, args, options);
   };

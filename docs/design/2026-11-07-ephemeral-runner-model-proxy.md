@@ -41,8 +41,8 @@ protection.
   loopback service on the host. Test resources were cleaned up. This does **not
   prove** that a container cannot reach the host bridge address or other host
   services.
-- No real model AK was used; real GitHub App authentication, an actual proxy
-  deployment, credential issuance and revocation, quotas, model jobs for
+- No real model AK was used; an actual proxy deployment, credential issuance
+  and revocation, quotas, model jobs for
   external PRs, and production network isolation were not verified.
 
 ## Trust boundary
@@ -58,7 +58,7 @@ External-CI dedicated ECS                    Trusted proxy service environment
 
 The model proxy is preferably deployed on a separate trusted host or service;
 the real AK does not live on the runner ECS. The host management service holds
-the GitHub App private key and the admin credential for the proxy admin API;
+the runner-management PAT and the admin credential for the proxy admin API;
 neither is mounted, injected into, or exposed to runner containers. The admin
 API and the model endpoint are authorized separately and restricted by TLS and
 network policy; containers cannot reach the issue/revoke endpoints, the
@@ -149,7 +149,7 @@ responses unless a concrete later requirement and data-handling policy exist.
    differ; normal and streamed calls succeed; wrong, old, revoked and expired
    tokens are rejected; over-limit requests, concurrency races, upstream
    failures, and management-service/proxy restarts do not bypass the limits.
-5. From inside a job, verify that the real AK, the App private key and the proxy
+5. From inside a job, verify that the real AK, the runner-management PAT and the proxy
    admin credential are unreadable, and that metadata, the Docker socket, other
    containers and host management services are unreachable; verify that the
    proxy can reach only the permitted upstream. Both container-cleanup and

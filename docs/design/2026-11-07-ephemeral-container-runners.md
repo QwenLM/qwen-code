@@ -2,14 +2,18 @@
 
 [English](2026-11-07-ephemeral-container-runners.md) | [简体中文](2026-11-07-ephemeral-container-runners.zh-CN.md)
 
-Date: 2026-11-07. Status: implemented and verified with controlled single-machine
-tests; no production service deployed, no live routing enabled.
+Date: 2026-11-07. Status: implemented; a one-slot systemd trial is deployed on
+hz4. Production external-PR routing remains disabled.
 
 Ten slots registering and running ten keyless test jobs of a private repository
 at the same time on the Hangzhou shared test machine; containers, networks and
-registrations were all reclaimed. Real GitHub App authentication and full PR CI
-remain unverified, so the shared test machine must not be treated as suitable
-for untrusted PRs because of this result.
+registrations were all reclaimed. A subsequent one-slot trial uses a real PAT
+and two sequential GitHub Actions jobs to verify registration, container
+replacement, workspace separation and absence of the PAT in jobs. A forced
+manager exit verified systemd restart and cleanup before replacement. These
+trials found and fixed compatibility with gh 2.46 pagination and Docker's quiet
+mode overriding formatted slot output. Full PR CI and production isolation
+remain unverified, so the shared host is still only a controlled trial host.
 
 Follow-up model access is described in
 [the runner and model-proxy combination](2026-11-07-ephemeral-runner-model-proxy.md);
@@ -38,7 +42,7 @@ and tasks that need a Docker daemon are not migrated.
 ```text
 External-CI dedicated ECS
 ├── systemd-managed manager (long-running, trusted)
-│   ├── requests JIT runner configuration with the GitHub App
+│   ├── requests JIT runner configuration with the host-only PAT
 │   ├── starts, monitors and deletes containers and their isolated networks
 │   └── keeps management state, exports logs, recovers interrupted tasks
 ├── slot 1: container A → one job → delete → container C
@@ -66,17 +70,28 @@ Images are produced by a trusted build and pinned by digest. The manager and the
 image may only be deployed from versions maintained under maintainer control,
 never updated from a job checkout or from PR artifacts.
 
+Authentication uses a dedicated PAT in the root-only systemd EnvironmentFile,
+`/etc/qwen-ephemeral-runner/credentials.env`, as `GH_TOKEN`. A fine-grained token
+should select only the target repository and Administration: write, the GitHub
+API's required permission. It is not restricted to runner operations alone.
+Fine-grained access can be unavailable for outside collaborators or under
+organization policy; a broader classic token requires an explicit decision.
+The PAT stays on the host, never in the config JSON or a job container. Host
+root and Docker administrators remain trusted. Rotate the credential file and
+restart the service before expiry; no GitHub App or organization runner
+permission is needed for repository-scoped runners.
+
 ## Ownership and lifecycle
 
-| Object                                 | Owner                   | Lifetime                                             |
-| -------------------------------------- | ----------------------- | ---------------------------------------------------- |
-| ECS, Docker daemon, manager            | Ops / maintainers       | Long term                                            |
-| GitHub App private key and admin token | Manager                 | Never enters a job container                         |
-| Clean image                            | Trusted image build     | Versioned, not writable from a job                   |
-| JIT configuration, runner identity     | One container instance  | Used for a single job                                |
-| Container writable layer and job data  | One container instance  | Deleted on destruction                               |
-| Docker bridge network                  | One container instance  | Deleted on destruction                               |
-| Diagnostic logs                        | Exported by the manager | Size and retention bounded, unreadable by later jobs |
+| Object                                | Owner                   | Lifetime                                             |
+| ------------------------------------- | ----------------------- | ---------------------------------------------------- |
+| ECS, Docker daemon, manager           | Ops / maintainers       | Long term                                            |
+| Host-only runner-management PAT       | Manager                 | Never enters a job container                         |
+| Clean image                           | Trusted image build     | Versioned, not writable from a job                   |
+| JIT configuration, runner identity    | One container instance  | Used for a single job                                |
+| Container writable layer and job data | One container instance  | Deleted on destruction                               |
+| Docker bridge network                 | One container instance  | Deleted on destruction                               |
+| Diagnostic logs                       | Exported by the manager | Size and retention bounded, unreadable by later jobs |
 
 Normal path: request JIT → create the isolated network and container → runner
 comes online → run one job → runner exits → export logs → delete the container

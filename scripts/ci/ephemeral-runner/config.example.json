@@ -1,8 +1,5 @@
 {
   "repo": "QwenLM/qwen-code",
-  "appId": 1,
-  "installationId": 1,
-  "privateKeyPath": "/etc/qwen-ephemeral-runner/app.pem",
   "runnerGroupId": 1,
   "poolId": "external-ci-host-1",
   "image": "registry.example.invalid/qwen-runner@sha256:0000000000000000000000000000000000000000000000000000000000000000",

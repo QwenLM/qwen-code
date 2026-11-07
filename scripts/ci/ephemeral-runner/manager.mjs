@@ -1,4 +1,4 @@
-import { createSign, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import {
   lstat,
@@ -75,18 +75,12 @@ function validate(c) {
     c.slots > 10 ||
     !Number.isInteger(c.runnerGroupId) ||
     c.runnerGroupId < 1 ||
-    !Number.isSafeInteger(c.appId) ||
-    c.appId < 1 ||
-    !Number.isSafeInteger(c.installationId) ||
-    c.installationId < 1 ||
     !Array.isArray(c.labels) ||
     !c.labels.length ||
     !c.labels.every(
       (label) =>
         typeof label === 'string' && /^[a-zA-Z0-9_-]{1,63}$/.test(label),
     ) ||
-    typeof c.privateKeyPath !== 'string' ||
-    !isAbsolute(c.privateKeyPath) ||
     typeof c.stateDir !== 'string' ||
     !isAbsolute(c.stateDir) ||
     typeof c.logDir !== 'string' ||
@@ -142,38 +136,9 @@ export function createManager(config, dependencies = {}) {
     }
   }
 
-  async function installationToken() {
-    const now = Math.floor(Date.now() / 1000);
-    const encode = (v) => Buffer.from(JSON.stringify(v)).toString('base64url');
-    const payload = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({ iat: now - 60, exp: now + 540, iss: String(config.appId) })}`;
-    const signer = createSign('RSA-SHA256');
-    signer.update(payload);
-    const signature = signer.sign(
-      await readFile(config.privateKeyPath),
-      'base64url',
-    );
-    const appJwt = `${payload}.${signature}`;
-    const response = parseJson(
-      await gh(
-        [
-          '-X',
-          'POST',
-          `/app/installations/${config.installationId}/access_tokens`,
-        ],
-        undefined,
-        appJwt,
-      ),
-    );
-    const token = response.token;
-    if (typeof token !== 'string' || !token || /[\r\n]/.test(token))
-      throw new Error('GitHub returned no valid installation token');
-    return token;
-  }
-
-  async function gh(args, input, jwt) {
-    const token = jwt || (await installationToken());
+  async function gh(args, input) {
     return run('gh', ['api', ...args, ...(input ? ['--input', '-'] : [])], {
-      env: { ...process.env, GH_TOKEN: token },
+      env: process.env,
       input: input && JSON.stringify(input),
     });
   }
@@ -242,20 +207,18 @@ export function createManager(config, dependencies = {}) {
   }
 
   async function listRunners() {
-    const pages = parseJson(
-      await gh([
-        '--paginate',
-        '--slurp',
-        `/repos/${config.repo}/actions/runners?per_page=100`,
-      ]),
-    );
+    const output = await gh([
+      '--paginate',
+      '--jq',
+      '.runners | @json',
+      `/repos/${config.repo}/actions/runners?per_page=100`,
+    ]);
+    const pages = output.trim().split('\n').map(parseJson);
     if (
-      !Array.isArray(pages) ||
-      !pages.length ||
       !pages.every(
-        (page) =>
-          Array.isArray(page?.runners) &&
-          page.runners.every(
+        (runners) =>
+          Array.isArray(runners) &&
+          runners.every(
             (runner) =>
               typeof runner?.name === 'string' &&
               Number.isSafeInteger(runner.id) &&
@@ -264,7 +227,7 @@ export function createManager(config, dependencies = {}) {
       )
     )
       throw new Error('Invalid GitHub runner list');
-    return pages.flatMap((page) => page.runners);
+    return pages.flat();
   }
 
   async function pruneLogs() {
@@ -397,7 +360,6 @@ export function createManager(config, dependencies = {}) {
       throw new Error(
         `Insufficient disk capacity on Docker Root Dir ${dockerRoot}`,
       );
-    const token = await installationToken();
     state = {
       name: `ecs-qwen-${config.poolId}-${slot}-${randomUUID()}`,
       createdAt: new Date().toISOString(),
@@ -419,7 +381,6 @@ export function createManager(config, dependencies = {}) {
             labels: config.labels,
             work_folder: '_work',
           },
-          token,
         ),
       );
     } catch (error) {
@@ -548,7 +509,7 @@ export function createManager(config, dependencies = {}) {
       const slots = (
         await run('docker', [
           'ps',
-          '-aq',
+          '-a',
           '--filter',
           `label=qwen.pool=${config.poolId}`,
           '--format',
@@ -617,6 +578,7 @@ if (
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
   try {
+    if (!process.env.GH_TOKEN?.trim()) throw new Error('GH_TOKEN is required');
     const config = JSON.parse(
       await readFile(resolve(process.argv[2] || ''), 'utf8'),
     );
