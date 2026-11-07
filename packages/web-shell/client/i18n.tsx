@@ -4801,7 +4801,7 @@ const EN: Messages = {
     'state_change — the PR is merged or closed',
   'channels.editor.field.github.prWatchLimit': 'PR Watch Limit',
   'channels.editor.field.github.prWatchLimit.description':
-    'Maximum bound PRs watched per poll. Open PRs are watched first; a reserved slice (20%, at least one) drains merged/closed bindings. Each watched PR costs about one API request per poll — at the 60s default, a 5000/hour token budget admits ~80 PRs; over budget, every watch pass aborts on rate limits. Raise the poll interval when raising this. Requires Deliver To PR-Bound Sessions and PR Watch Events. Leave empty for the default (30).',
+    'Maximum open bound PRs watched per poll. Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR costs about one API request per poll — at the 60s default, a 5000/hour token budget admits ~80 watched PRs (~69 open while a terminal backlog drains at the 1.2x fan-out); over budget, every watch pass aborts on rate limits. Raise the poll interval when raising this. Requires Deliver To PR-Bound Sessions and PR Watch Events. Leave empty for the default (30).',
   'channels.editor.field.github.prWatchLimit.disabledHint':
     'Enable "Deliver To PR-Bound Sessions" above to set the watch limit.',
   'channels.editor.field.github.boundSessionActions': 'Bound Session Actions',
@@ -9520,7 +9520,7 @@ const ZH: Messages = {
     'state_change — PR 被合并或关闭',
   'channels.editor.field.github.prWatchLimit': 'PR 监视上限',
   'channels.editor.field.github.prWatchLimit.description':
-    '每轮轮询最多监视的绑定 PR 数。优先监视 open PR；预留一部分名额（20%，至少一个）用于排出已合并/关闭的绑定。每个被监视的 PR 每轮约消耗一次 API 请求——按默认 60 秒间隔，5000 次/小时的 token 预算约容纳 80 个 PR；超出预算会让每轮监视都因限流中止。提高本值时请同时提高轮询间隔。需开启"投递到 PR 绑定会话"并配置监视事件。留空则使用默认值（30）。',
+    '每轮轮询最多监视的 open 绑定 PR 数。open PR 独占全部预算；已合并/关闭的绑定在预算之外的一块额外名额（上限的 20%，至少一个）中排出，因此绝不会挤占 open PR。每个被监视的 PR 每轮约消耗一次 API 请求——按默认 60 秒间隔，5000 次/小时的 token 预算约容纳 80 个被监视 PR（终态积压按 1.2 倍扇出排出时约 69 个 open）；超出预算会让每轮监视都因限流中止。提高本值时请同时提高轮询间隔。需开启"投递到 PR 绑定会话"并配置监视事件。留空则使用默认值（30）。',
   'channels.editor.field.github.prWatchLimit.disabledHint':
     '开启上方「投递到 PR 绑定会话」后即可设置监视上限。',
   'channels.editor.field.github.boundSessionActions': '绑定会话动作模板',

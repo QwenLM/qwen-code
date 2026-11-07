@@ -70,7 +70,8 @@ bindings):
     and `DEFAULT_PR_WATCH_LIMIT` (30) so the form bound and the effective
     bound cannot drift; the description states the rate arithmetic (~60
     requests/hour per watched PR at the 60 s default; a 5000/hour PAT
-    budget admits ~80 PRs; over budget, every watch pass aborts).
+    budget admits ~80 watched PRs, ~69 open while a terminal backlog
+    drains at the 1.2x fan-out; over budget, every watch pass aborts).
   - Adapter: a `prWatchLimit` getter clamps like the existing
     `pollInterval` getter (invalid/unset → 30; fractional → rounded up;
     above 500 → clamped to 500). Hand-edited settings reach the getter
@@ -85,17 +86,24 @@ bindings):
     registry must not let an observed-closed PR hold an open-tier slot);
   - **terminal-pending**: everything else that still needs its terminal
     observation.
-    Selection reserves a terminal slice inside the budget —
-    `min(terminalCount, max(1, ceil(limit * 0.2)))` — gives open PRs the
-    rest (by `updatedAt` desc), and lets terminal-pending PRs use any
-    further leftover. Without the reservation, `limit == openCount` would
-    starve the drain forever and the active set would grow with every
-    merge. Each drained binding leaves the active set for good, so the
-    reservation frees up once the backlog clears.
+    Open PRs take the FULL budget (by `updatedAt` desc). Terminal-pending
+    PRs drain in an ADDITIONAL slice outside it —
+    `min(terminalCount, max(1, ceil(limit * 0.2)))`, plus any leftover
+    open budget. Without the slice, `limit == openCount` would starve the
+    drain forever and the active set would grow with every merge. An
+    IN-budget reservation was tried and removed: it excludes up to
+    `ceil(limit * 0.2)` open bindings while the backlog drains, and an
+    edge event on an excluded binding inside that window is swallowed
+    permanently — the very defect this design fixes. The additional
+    slice costs at most `ceil(limit * 0.2)` extra `pulls.get` per poll
+    during the drain; each drained binding leaves the active set for
+    good, so the fan-out returns to the open budget once the backlog
+    clears.
 - The cap warning keeps the `PR watch cap exceeded` prefix (pinned by
-  tests) and fires whenever the budget cannot cover the whole active set:
-  it reports `watched/active` counts, the configured limit, and the excluded
-  keys (open and terminal-pending alike).
+  tests) and fires whenever the selection cannot cover the whole active
+  set: it reports `watched/active` counts (watched may exceed the open
+  limit while the terminal slice drains), the configured open limit, and
+  the excluded keys (open and terminal-pending alike).
 - Terminal observation stays API-authoritative: no `state_change` is ever
   synthesized from binding registry data. The registry and the watch
   entry only decide _priority_, never event content. A genuinely reopened
@@ -187,19 +195,27 @@ bindings):
 
 ## Design decisions and rationale
 
-1. **Open-first priority with a reserved terminal slice.** A larger hard
-   cap only postpones starvation and spends rate budget on dead PRs.
-   Priority fixes the ordering defect; the reservation (20%, at least
-   one) guarantees the drain progresses even when open PRs fill the
-   limit, and frees up once the backlog clears.
+1. **Open-first priority with an additional terminal slice.** A larger
+   hard cap only postpones starvation and spends rate budget on dead
+   PRs. Priority fixes the ordering defect; the additional slice (20% of
+   the limit, at least one, OUTSIDE the open budget) guarantees the drain
+   progresses even when open PRs fill the limit without excluding a
+   single open binding, and disappears once the backlog clears. The
+   in-budget variant was measured to re-starve the oldest open bindings
+   for the whole drain window (verification fixture: 30 open + 5
+   terminal at limit 30 must still deliver the oldest open PR's head
+   change), so the slice is additive and the worst-case fan-out is
+   bounded at the limit plus `ceil(limit * 0.2)` (1.2x at the default
+   30).
 2. **Configurable limit, default unchanged (30).** Each watched PR costs
    roughly one `pulls.get` per poll plus conditional Checks fetches —
    ~60 requests/hour at the 60 s default, so a 5000 req/h PAT budget
-   admits ~80 PRs. Operators with more open bindings raise `prWatchLimit`
-   (and `pollInterval`) deliberately. The watch pass already fails fast
-   on rate limits, so an over-budget configuration degrades instead of
-   hammering the API; the arithmetic is stated in the descriptor and the
-   guide.
+   admits ~80 watched PRs (~69 open while a terminal backlog drains at
+   the 1.2x fan-out). Operators with more open bindings raise
+   `prWatchLimit` (and `pollInterval`) deliberately. The watch pass
+   already fails fast on rate limits, so an over-budget configuration
+   degrades instead of hammering the API; the arithmetic is stated in
+   the descriptor and the guide.
 3. **Concurrency 1 runner, not per-session parallelism.** The defect is
    liveness, not throughput. Serial execution preserves reply ordering
    and avoids bridge-level concurrent-prompt hazards documented in
@@ -239,9 +255,12 @@ bindings):
 ## Validation plan
 
 - Unit tests (collocated): open-first selection with the incident shape;
-  terminal reservation at `limit == openCount`; stale-open tiering;
-  limit clamping (over-ceiling, zero, non-finite) and descriptor
-  acceptance; validation prerequisite; warning shape; runner hand-off,
+  the additional terminal slice at `limit == openCount` (every open
+  binding keeps its observation while the backlog drains, and the oldest
+  open PR's head change inside the drain window is delivered);
+  stale-open tiering; limit clamping (over-ceiling, zero, non-finite) and
+  descriptor acceptance; validation prerequisite; warning shape; runner
+  hand-off,
   FIFO order, in-flight dedupe via a mid-turn recovery pass, recovery
   retarget skip, gone-session requeue, same-instance reconnect,
   disconnect stop + idle waiters, held-thread fetch skip, failure
@@ -251,20 +270,22 @@ bindings):
   the channel real-scenario harness. Baseline dry-run on the installed
   release must show both defects; the local build must pass all groups.
 - Mutation witnesses: revert open-first ordering, revert the enqueue
-  hand-off, remove the recovery in-flight skip, remove the terminal
-  reservation, remove the disconnect generation guard — each must turn
-  a dedicated test red.
+  hand-off, remove the recovery in-flight skip, remove the additional
+  terminal slice, shrink the open budget by the slice (the removed
+  in-budget reservation), remove the disconnect generation guard — each
+  must turn a dedicated test red.
 
 ## Acceptance criteria
 
 - With >30 open bound PRs and default limit, the most recent open PRs
-  are watched within the open share of the budget and terminal-pending
-  PRs drain through the reserved slice; with `prWatchLimit` raised to
-  the open count plus headroom, every open bound PR receives
-  `head_change` delivery.
+  are watched within the FULL open budget and terminal-pending PRs drain
+  through the additional slice outside it; with `prWatchLimit` raised to
+  the open count, every open bound PR receives `head_change` delivery.
 - Terminal-pending PRs leave the active set after one observed poll,
-  even when open PRs fill the limit; the active count in the cap warning
-  shrinks accordingly.
+  even when open PRs fill the limit, without excluding any open binding
+  (fixture: 30 open + 5 newer terminal at limit 30 — the oldest open PR
+  is observed and its head change is delivered); the active count in the
+  cap warning shrinks accordingly.
 - While a public review turn runs for minutes, a bound PR's head change
   is still delivered within one poll interval, new notifications are
   still claimed, and the held thread's comments are not re-fetched every

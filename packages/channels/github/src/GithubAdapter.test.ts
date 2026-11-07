@@ -18422,8 +18422,8 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       );
       // Incident shape: older merged bindings linger while newer open
       // bindings arrive. Recency-only selection never drains the merged
-      // bindings; open-first with a reserved terminal slice drains them
-      // without letting them crowd out open PRs by recency.
+      // bindings; open-first with an additional terminal slice drains them
+      // without taking a single slot away from the open budget.
       const bindings = [];
       for (let i = 1; i <= 5; i++) {
         bindings.push(
@@ -18440,7 +18440,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           }),
         );
       }
-      for (let i = 6; i <= 35; i++) {
+      for (let i = 6; i <= 40; i++) {
         bindings.push(
           makeBinding({
             sessionId: `s-${i}`,
@@ -18479,21 +18479,23 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       } finally {
         stderr.mockRestore();
       }
-      // Reserved terminal slice: min(5, max(1, ceil(30*0.2))) = 5 merged
-      // observed, the 25 newest open watched, the 5 oldest open excluded.
+      // Open keeps the FULL limit (the 30 newest of 35); the additional
+      // terminal slice min(5, max(1, ceil(30*0.2))) = 5 drains the merged
+      // bindings outside it. Only open PRs beyond the limit are excluded.
       expect([...fetched].sort((a, b) => a - b)).toEqual([
         1, 2, 3, 4, 5, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-        25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
+        25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
       ]);
       expect(errText).toContain('PR watch cap exceeded');
       expect(errText).toContain('owner/repo#6');
+      expect(errText).not.toContain('owner/repo#1,');
 
       // The merged bindings drained: the next poll watches only open PRs.
       fetched.length = 0;
       mockNotificationsOnce([]);
       await pollOnce();
       expect([...fetched].sort((a, b) => a - b)).toEqual(
-        Array.from({ length: 30 }, (_, i) => i + 6),
+        Array.from({ length: 30 }, (_, i) => i + 11),
       );
     });
 
@@ -18552,20 +18554,122 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           };
         },
       );
-      // limit == open count: without a reserved slice the merged bindings
-      // would never be observed and would accumulate forever. The terminal
-      // tier drains most-recent-first: #7 then #6.
+      // limit == open count: without an additional terminal slice the
+      // merged bindings would never be observed and would accumulate
+      // forever. The slice sits OUTSIDE the open budget, so every open PR
+      // keeps its observation while the terminal tier drains
+      // most-recent-first: #7 then #6.
       mockNotificationsOnce([]);
       await pollOnce();
-      expect(fetched).toContain(7);
+      expect([...fetched].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 7]);
+      fetched.length = 0;
       mockNotificationsOnce([]);
       await pollOnce();
-      expect(fetched).toContain(6);
+      expect([...fetched].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6]);
       // Both drained: a third poll watches only the 5 open PRs.
       fetched.length = 0;
       mockNotificationsOnce([]);
       await pollOnce();
       expect([...fetched].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5]);
+    });
+
+    it('keeps every open binding observed while newer terminal bindings drain', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true, prWatchEvents: ['head_change'] },
+        { boundSessions },
+      );
+      // Verification fixture: 30 open bindings fill the default limit and
+      // 5 NEWER terminal-pending bindings wait to drain. The terminal
+      // slice is additional, so the oldest open binding keeps its first
+      // observation and a head change inside the drain window is still
+      // delivered (an in-budget reservation excluded it and swallowed the
+      // event permanently).
+      const bindings = [];
+      for (let i = 1; i <= 30; i++) {
+        bindings.push(
+          makeBinding({
+            sessionId: `s-open-${i}`,
+            updatedAt: `2026-07-02T00:00:${String(i).padStart(2, '0')}.000Z`,
+            prs: [
+              {
+                number: i,
+                url: `https://github.com/owner/repo/pull/${i}`,
+                state: 'open',
+              },
+            ],
+          }),
+        );
+      }
+      for (let i = 901; i <= 905; i++) {
+        bindings.push(
+          makeBinding({
+            sessionId: `s-merged-${i}`,
+            updatedAt: `2026-07-03T00:00:0${i - 900}.000Z`,
+            prs: [
+              {
+                number: i,
+                url: `https://github.com/owner/repo/pull/${i}`,
+                state: 'merged',
+              },
+            ],
+          }),
+        );
+      }
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings,
+        partial: false,
+      });
+      const fetched: number[] = [];
+      mockOctokit.rest.pulls.get.mockImplementation(
+        async (params: { pull_number: number }) => {
+          fetched.push(params.pull_number);
+          return {
+            data: makePrMeta(
+              params.pull_number >= 901
+                ? { state: 'closed', merged: true }
+                : {},
+            ),
+          };
+        },
+      );
+      mockNotificationsOnce([]);
+      await pollOnce();
+      // All 30 open observed (including the oldest #1) plus the 5 terminal.
+      expect([...fetched].sort((a, b) => a - b)).toEqual([
+        ...Array.from({ length: 30 }, (_, i) => i + 1),
+        901,
+        902,
+        903,
+        904,
+        905,
+      ]);
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+
+      // Head change on the oldest open PR inside the drain window.
+      fetched.length = 0;
+      mockOctokit.rest.pulls.get.mockImplementation(
+        async (params: { pull_number: number }) => {
+          fetched.push(params.pull_number);
+          return {
+            data: makePrMeta(
+              params.pull_number === 1
+                ? { head: { sha: 'sha-2' } }
+                : params.pull_number >= 901
+                  ? { state: 'closed', merged: true }
+                  : {},
+            ),
+          };
+        },
+      );
+      mockNotificationsOnce([]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      const [sessionId, prompt] = boundSessions.deliverPrompt.mock.calls[0] as [
+        string,
+        string,
+      ];
+      expect(sessionId).toBe('s-open-1');
+      expect(prompt).toContain('head moved from sha-1 to sha-2');
     });
 
     it('tiers a stale-open binding as terminal once the watch observed closed', async () => {
@@ -18634,8 +18738,9 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       await pollOnce();
       // Without the watch-state tiering the ten stale bindings take every
       // open slot by recency and NO genuinely open PR is watched. With it,
-      // the reserved slice is 2 and 8 real open PRs get through.
-      expect(fetched.filter((n) => n >= 11)).toHaveLength(8);
+      // all 10 real open PRs keep the full budget and the additional
+      // terminal slice (2) drains the stale bindings outside it.
+      expect(fetched.filter((n) => n >= 11)).toHaveLength(10);
       expect(fetched.filter((n) => n <= 10)).toHaveLength(2);
     });
 

@@ -477,12 +477,13 @@ function isBoundActionKey(key: string): boolean {
 }
 
 /**
- * Default watch fan-out per poll (~1 pulls.get per watched PR plus
- * conditional Checks fetches). Operators with more open bindings raise
- * `prWatchLimit` (and `pollInterval`) deliberately; the watch pass already
- * fails fast on rate limits, so an over-budget configuration degrades
- * instead of hammering the API. Exported for the descriptor so the form
- * bound and the effective bound cannot drift.
+ * Default open-PR watch fan-out per poll (~1 pulls.get per watched PR plus
+ * conditional Checks fetches; terminal-pending bindings drain in an
+ * additional slice of up to 20% outside this budget). Operators with more
+ * open bindings raise `prWatchLimit` (and `pollInterval`) deliberately;
+ * the watch pass already fails fast on rate limits, so an over-budget
+ * configuration degrades instead of hammering the API. Exported for the
+ * descriptor so the form bound and the effective bound cannot drift.
  */
 export const DEFAULT_PR_WATCH_LIMIT = 30;
 
@@ -6407,9 +6408,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
-   * Watch fan-out per poll. Clamped like pollInterval: unset or invalid
-   * keeps the default; a fractional count rounds up so the configured
-   * budget is never silently smaller than requested.
+   * Open-PR watch fan-out per poll (terminal-pending bindings drain in an
+   * additional slice outside it). Clamped like pollInterval: unset or
+   * invalid keeps the default; a fractional count rounds up so the
+   * configured budget is never silently smaller than requested.
    */
   private get prWatchLimit(): number {
     const configured: unknown = (this.config as GithubConfig).prWatchLimit;
@@ -6548,14 +6550,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }
       }
     }
-    // Open bindings take priority over terminal-pending ones: a merged or
-    // closed PR that the watch has not observed yet must never crowd a live
-    // PR out of the budget by recency alone. A slice of the budget is still
-    // reserved for terminal-pending bindings (20%, at least one): without
-    // headroom they would never receive their one terminal observation when
-    // open PRs fill the limit, and the active set would grow with every
-    // merge. Each drained binding leaves the active set for good, so the
-    // reservation frees up once the backlog clears.
+    // Open bindings take the FULL watch budget: a merged or closed PR that
+    // the watch has not observed yet must never crowd a live PR out of it,
+    // even when open bindings fill the limit. Terminal-pending bindings
+    // drain in an ADDITIONAL slice outside the open budget (20% of the
+    // limit, at least one, plus any leftover open budget): without it they
+    // would never receive their one terminal observation when open PRs
+    // fill the limit, and the active set would grow with every merge. The
+    // extra slice costs at most ceil(limit*0.2) additional pulls.get per
+    // poll while a backlog drains; each drained binding leaves the active
+    // set for good, so the fan-out returns to the open budget once the
+    // backlog clears.
     const limit = this.prWatchLimit;
     const byRecency = (
       a: [string, { updatedAt: string }],
@@ -6571,7 +6576,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       terminalEntries.length > 0
         ? Math.min(terminalEntries.length, Math.max(1, Math.ceil(limit * 0.2)))
         : 0;
-    const watched = openEntries.slice(0, Math.max(0, limit - terminalReserved));
+    const watched = openEntries.slice(0, limit);
     const terminalSlots = Math.max(terminalReserved, limit - watched.length);
     watched.push(
       ...terminalEntries.slice(
@@ -6589,7 +6594,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         (key) => !watchedKeys.has(key),
       );
       process.stderr.write(
-        `[Channel:${this.name}] PR watch cap exceeded: watching ${watched.length}/${active.size} bound PRs (open first, most recent; limit ${limit}); not watched: ${excluded.join(', ')}\n`,
+        `[Channel:${this.name}] PR watch cap exceeded: watching ${watched.length}/${active.size} bound PRs (open first, most recent; open limit ${limit}); not watched: ${excluded.join(', ')}\n`,
       );
     }
     for (const [key, candidate] of watched) {
