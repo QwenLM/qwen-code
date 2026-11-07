@@ -5,8 +5,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Switch all online hk1/hk2 runners between review and CI, twice a day.
-// `day` keeps a named handful on `ecs-review` so reviews start during the
+// Switch the managed runner fleet between review and CI, twice a day.
+// `day` keeps a configured count on `ecs-review` so reviews start during the
 // daytime too, and returns the rest of the fleet to CI.
 // Offline runners are skipped; their labels stay unchanged.
 // Running jobs finish normally; labels only control which job starts next.
@@ -17,40 +17,79 @@ import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCallback);
 const MANAGED_LABELS = ['ecs-review', 'ecs-qwen'];
-// One literal for both the switch filter and the fleet guard below: the
-// guard's whole job is to prove the filter will match something, so two
-// copies that can drift would reintroduce the silent no-op it prevents.
-const FLEET_NAME = /^ecs-qwen-hk[12]-\d+$/;
+// Labels that mark a runner as dedicated to a non-review workload (release
+// hosts, benchmarking, etc). They must never receive an `ecs-review` or
+// `ecs-qwen` label, so the planner filters them out by name pattern.
+const EXCLUDED_LABELS = new Set(['ecs-qwen-release-host']);
+// Architecture the review workflow requires (`runs-on: [..., "x64"]`). A
+// runner that lacks this label can never be assigned a review job, so it
+// does not count toward daytime review capacity.
+const REQUIRED_ARCH_LABEL = 'x64';
 
 const MODES = ['review', 'day', 'ci'];
 
-// `dayKeep` is the runner-name list that stays on `ecs-review` in `day` mode.
-// Every other managed runner then serves CI, so the daytime review capacity is
-// exactly those runners and never the whole fleet.
-export function planLabels(runners, mode, dayKeep = []) {
+// Compile the fleet-name regex from configuration, never from a hardcoded
+// region. Falling back to a restrictive default keeps a forgotten variable
+// from silently widening the managed fleet on the next tick.
+export function fleetNameFromEnv(env = process.env) {
+  const source =
+    env.QWEN_REVIEW_FLEET_NAME_PATTERN || '^ecs-qwen-hz[1-6]-\\d+$';
+  try {
+    return new RegExp(source);
+  } catch (error) {
+    throw new Error(
+      `QWEN_REVIEW_FLEET_NAME_PATTERN is not a valid regex: ${error.message}`,
+    );
+  }
+}
+
+// True when a runner is eligible to be managed by this schedule. Filters
+// out: runners without the architecture the review workflow targets, and
+// runners carrying a reserved label such as `ecs-qwen-release-host`.
+export function isManagedRunner(runner, fleetName) {
+  if (!fleetName.test(runner.name)) return false;
+  const labels = runner.labels.map((l) => l.name.toLowerCase());
+  if (!labels.includes(REQUIRED_ARCH_LABEL)) return false;
+  return !labels.some((l) => EXCLUDED_LABELS.has(l));
+}
+
+// `dayCount` is how many runners stay on `ecs-review` in `day` mode. The
+// fleet is sorted by name and the first `dayCount` online managed runners
+// keep the label; every other managed runner then serves CI, so the daytime
+// review capacity is exactly that count and never the whole fleet. Numeric
+// sort (hz1-2 before hz1-10) keeps the pick deterministic across runs and
+// across changes in runner count.
+export function planLabels(runners, mode, dayCount = 0, fleetName) {
+  const fleet = fleetName ?? fleetNameFromEnv();
   if (!MODES.includes(mode)) {
     throw new Error('mode must be review, day or ci');
   }
+  const eligible = runners.filter((r) => isManagedRunner(r, fleet));
   if (mode === 'day') {
-    if (!dayKeep.length) {
-      throw new Error('mode day needs at least one review-day runner name');
-    }
-    // Typo defence: a name that matches no registered hk1/hk2 runner would
-    // silently shrink the daytime pool every morning. Offline runners stay
-    // allowed — they keep their labels and rejoin when they come back.
-    const registered = new Set(
-      runners.filter((r) => FLEET_NAME.test(r.name)).map((r) => r.name),
-    );
-    const unknown = dayKeep.filter((name) => !registered.has(name));
-    if (unknown.length) {
+    if (!Number.isInteger(dayCount) || dayCount < 1) {
       throw new Error(
-        `review-day runner names match no registered hk1/hk2 runner: ${unknown.join(', ')}`,
+        'mode day needs a positive integer review-day runner count',
       );
     }
   }
-  const keep = new Set(mode === 'day' ? dayKeep : []);
-  return runners
-    .filter((r) => r.status === 'online' && FLEET_NAME.test(r.name))
+  const sorted = eligible
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const onlineSorted = sorted.filter((r) => r.status === 'online');
+  // Soft cap: an over-large count truncates to whatever is online, with a
+  // warning the operator can read in the run summary. Hard-failing here
+  // would leave every runner in its previous pool (potentially the whole
+  // fleet on review at 05:00) until somebody notices.
+  const effectiveDayCount =
+    mode === 'day' ? Math.min(dayCount, onlineSorted.length) : 0;
+  const truncated = mode === 'day' && dayCount > onlineSorted.length;
+  const keep = new Set(
+    mode === 'day'
+      ? onlineSorted.slice(0, effectiveDayCount).map((r) => r.name)
+      : [],
+  );
+  const actions = eligible
+    .filter((r) => r.status === 'online')
     .flatMap((r) => {
       const target =
         mode === 'review' || keep.has(r.name) ? 'ecs-review' : 'ecs-qwen';
@@ -63,6 +102,14 @@ export function planLabels(runners, mode, dayKeep = []) {
         ? [{ id: r.id, name: r.name, add, remove }]
         : [];
     });
+  return {
+    actions,
+    keptNames: mode === 'day' ? [...keep] : [],
+    truncated,
+    requestedDayCount: dayCount,
+    effectiveDayCount,
+    onlineManaged: onlineSorted.length,
+  };
 }
 
 async function gh(args) {
@@ -77,23 +124,36 @@ async function main() {
   const [repo, mode, ...rest] = process.argv.slice(2);
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? '')) {
     throw new Error(
-      'usage: review-runner-schedule.mjs <owner/repo> <review|day|ci> [review-day runner names]',
+      'usage: review-runner-schedule.mjs <owner/repo> <review|day|ci> [review-day runner count]',
     );
   }
-  const dayKeep = rest.join(' ').split(/\s+/).filter(Boolean);
-  // Validate the mode (and the day list shape) before spending an
-  // authenticated call on it.
   if (!MODES.includes(mode)) {
     throw new Error('mode must be review, day or ci');
   }
-  if (mode === 'day' && !dayKeep.length) {
-    throw new Error('mode day needs at least one review-day runner name');
+  // Strict integer parse: `Number.parseInt` accepts trailing garbage (`4O`,
+  // `40.9`, `1e2` all silently coerce), which would silently shrink the
+  // daytime pool — the exact property this var is supposed to defend.
+  const rawCount = rest.join(' ').trim();
+  let dayCount = 0;
+  if (mode === 'day') {
+    if (!/^\d+$/.test(rawCount)) {
+      throw new Error(
+        'mode day needs a positive integer review-day runner count',
+      );
+    }
+    dayCount = Number(rawCount);
+    if (!Number.isSafeInteger(dayCount) || dayCount < 1) {
+      throw new Error(
+        'mode day needs a positive integer review-day runner count',
+      );
+    }
   }
   if (!process.env.RUNNER_ADMIN_TOKEN) {
     throw new Error(
       'RUNNER_ADMIN_TOKEN is empty (needs Administration: write)',
     );
   }
+  const fleetName = fleetNameFromEnv();
   const pages = JSON.parse(
     await gh([
       'api',
@@ -103,12 +163,14 @@ async function main() {
     ]),
   );
   const runners = pages.flatMap((page) => page.runners);
-  if (!runners.some((r) => FLEET_NAME.test(r.name))) {
-    throw new Error('no ecs-qwen-hk1-<n> or ecs-qwen-hk2-<n> runner found');
+  if (!runners.some((r) => isManagedRunner(r, fleetName))) {
+    throw new Error(
+      `no runner matches QWEN_REVIEW_FLEET_NAME_PATTERN (${fleetName.source})`,
+    );
   }
-  const actions = planLabels(runners, mode, dayKeep);
+  const plan = planLabels(runners, mode, dayCount, fleetName);
   const results = await Promise.all(
-    actions.map(async ({ id, name, add, remove }) => {
+    plan.actions.map(async ({ id, name, add, remove }) => {
       try {
         // Add before removing. A failed POST leaves the host in its previous
         // pool only; a failed DELETE leaves it in both. Neither leaves it with
@@ -144,9 +206,22 @@ async function main() {
     }),
   );
   const summary = [
-    `### hk1/hk2 runner pool: ${mode}`,
-    ...(mode === 'day' ? [`- keeping on review: ${dayKeep.join(', ')}`] : []),
-    `- ${actions.length} runners to switch`,
+    `### runner pool: ${mode}`,
+    `- fleet pattern: \`${fleetName.source}\``,
+    ...(mode === 'day'
+      ? [
+          `- keeping on review (${plan.effectiveDayCount}${
+            plan.truncated ? ` of requested ${plan.requestedDayCount}` : ''
+          }):`,
+          ...plan.keptNames.map((name) => `  - ${name}`),
+        ]
+      : []),
+    ...(plan.truncated
+      ? [
+          `- ::warning::requested ${plan.requestedDayCount} day runners but only ${plan.onlineManaged} are online — pool truncated`,
+        ]
+      : []),
+    `- ${plan.actions.length} runners to switch`,
     ...results.map((r) => r.message),
   ].join('\n');
   console.log(summary);

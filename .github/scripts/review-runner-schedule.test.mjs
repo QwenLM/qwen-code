@@ -11,26 +11,95 @@ import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
-import { planLabels } from './review-runner-schedule.mjs';
+import {
+  fleetNameFromEnv,
+  isManagedRunner,
+  planLabels,
+} from './review-runner-schedule.mjs';
 
-const runner = (id, labels, extra = {}) => ({
-  id,
-  name: `ecs-qwen-hk2-${id}`,
-  labels: labels.map((name) => ({ name })),
-  status: 'online',
-  ...extra,
-});
+const FLEET = /^ecs-qwen-hz[1-6]-\d+$/;
+
+// Every fixture runner needs the architecture label the review workflow
+// targets — without it `isManagedRunner` returns false and the planner
+// skips the runner entirely.
+const runner = (id, labels, extra = {}) => {
+  const { name, ...rest } = extra;
+  return {
+    id,
+    name: name ?? `ecs-qwen-hz2-${id}`,
+    labels: ['X64', ...labels].map((n) => ({ name: n })),
+    status: 'online',
+    ...rest,
+  };
+};
+
+const plan = (runners, mode, dayCount = 0) =>
+  planLabels(runners, mode, dayCount, FLEET).actions;
 
 describe('review runner schedule', () => {
-  it('switches online hk1 and hk2 runners, including busy runners', () => {
+  describe('fleetNameFromEnv', () => {
+    it('falls back to the hz fleet when unset', () => {
+      assert.equal(fleetNameFromEnv({}).source, '^ecs-qwen-hz[1-6]-\\d+$');
+    });
+    it('honours an override and rejects an invalid regex', () => {
+      assert.equal(
+        fleetNameFromEnv({ QWEN_REVIEW_FLEET_NAME_PATTERN: '^foo-\\d+$' })
+          .source,
+        '^foo-\\d+$',
+      );
+      assert.throws(
+        () => fleetNameFromEnv({ QWEN_REVIEW_FLEET_NAME_PATTERN: '(' }),
+        /not a valid regex/,
+      );
+    });
+  });
+
+  describe('isManagedRunner', () => {
+    it('requires the review architecture label', () => {
+      // hz1-17..hz1-32 carry ARM64 only — they can never be assigned a
+      // review job whose runs-on includes "x64", so they must not count
+      // toward the daytime pool.
+      assert.equal(
+        isManagedRunner(
+          runner(1, ['ecs-qwen', 'ARM64'], {
+            // strip the default X64 to model the real host
+          }),
+          FLEET,
+        ),
+        true,
+      );
+      const armOnly = {
+        id: 17,
+        name: 'ecs-qwen-hz1-17',
+        labels: ['self-hosted', 'Linux', 'ARM64', 'ecs-qwen'].map((n) => ({
+          name: n,
+        })),
+        status: 'online',
+      };
+      assert.equal(isManagedRunner(armOnly, FLEET), false);
+    });
+    it('excludes reserved-label hosts such as ecs-qwen-release-host', () => {
+      const releaseHost = {
+        id: 17,
+        name: 'ecs-qwen-hz1-17',
+        labels: ['self-hosted', 'Linux', 'X64', 'ecs-qwen-release-host'].map(
+          (n) => ({ name: n }),
+        ),
+        status: 'online',
+      };
+      assert.equal(isManagedRunner(releaseHost, FLEET), false);
+    });
+  });
+
+  it('switches online hz1-hz6 runners, including busy runners', () => {
     const runners = Array.from({ length: 32 }, (_, i) =>
       runner(i + 1, ['ecs-qwen', 'ecs-autofix', 'diagnostic'], {
-        name: `ecs-qwen-hk${(i % 2) + 1}-${i + 1}`,
+        name: `ecs-qwen-hz${(i % 6) + 1}-${i + 1}`,
         busy: i % 2 === 0,
         status: i < 2 ? 'offline' : 'online',
       }),
     );
-    const actions = planLabels(runners, 'review');
+    const actions = plan(runners, 'review');
     const onlineRunners = runners.filter(({ status }) => status === 'online');
     assert.equal(actions.length, 30);
     for (const [i, action] of actions.entries()) {
@@ -49,26 +118,26 @@ describe('review runner schedule', () => {
 
   it('returns every online review runner to CI and leaves unrelated runners alone', () => {
     assert.deepEqual(
-      planLabels(
+      plan(
         [
           runner(1, ['ecs-review', 'diagnostic']),
-          runner(2, ['ecs-autofix'], { name: 'ecs-qwen-hk1-2' }),
-          runner(3, ['ecs-review'], { name: 'ecs-qwen-hk2-3-extra' }),
+          runner(2, ['ecs-autofix'], { name: 'ecs-qwen-hz1-2' }),
+          runner(3, ['ecs-review'], { name: 'ecs-qwen-hz2-3-extra' }),
           runner(4, ['ecs-review'], { status: 'offline' }),
-          runner(5, ['ecs-review'], { name: 'ecs-qwen-hk3-5' }),
+          runner(5, ['ecs-review'], { name: 'ecs-qwen-hk1-5' }),
         ],
         'ci',
       ),
       [
         {
           id: 1,
-          name: 'ecs-qwen-hk2-1',
+          name: 'ecs-qwen-hz2-1',
           add: ['ecs-qwen'],
           remove: ['ecs-review'],
         },
         {
           id: 2,
-          name: 'ecs-qwen-hk1-2',
+          name: 'ecs-qwen-hz1-2',
           add: ['ecs-qwen'],
           remove: [],
         },
@@ -78,82 +147,174 @@ describe('review runner schedule', () => {
 
   it('is idempotent and rejects invalid modes', () => {
     assert.deepEqual(
-      planLabels([runner(1, ['ecs-review', 'diagnostic'])], 'review'),
+      plan([runner(1, ['ecs-review', 'diagnostic'])], 'review'),
       [],
     );
-    assert.deepEqual(planLabels([runner(1, ['ecs-qwen'])], 'ci'), []);
-    assert.throws(
-      () => planLabels([], 'invalid'),
-      /mode must be review, day or ci/,
-    );
+    assert.deepEqual(plan([runner(1, ['ecs-qwen'])], 'ci'), []);
+    assert.throws(() => plan([], 'invalid'), /mode must be review, day or ci/);
   });
 
-  it('keeps the named runners on review and returns the rest to CI in day mode', () => {
+  it('keeps the first N runners on review and returns the rest to CI in day mode', () => {
     assert.deepEqual(
-      planLabels(
+      plan(
         [
-          runner(1, ['ecs-qwen', 'ecs-autofix'], { name: 'ecs-qwen-hk2-1' }),
-          runner(2, ['ecs-qwen'], { name: 'ecs-qwen-hk2-2' }),
-          runner(3, ['ecs-review'], { name: 'ecs-qwen-hk1-7' }),
-          runner(4, ['ecs-qwen'], { name: 'ecs-qwen-hk1-8' }),
-          runner(5, ['ecs-qwen'], { name: 'ecs-qwen-hk3-9' }),
+          runner(1, ['ecs-qwen', 'ecs-autofix'], { name: 'ecs-qwen-hz2-1' }),
+          runner(2, ['ecs-qwen'], { name: 'ecs-qwen-hz2-2' }),
+          runner(3, ['ecs-review'], { name: 'ecs-qwen-hz1-7' }),
+          runner(4, ['ecs-qwen'], { name: 'ecs-qwen-hz1-8' }),
+          runner(5, ['ecs-qwen'], { name: 'ecs-qwen-hk1-9' }),
         ],
         'day',
-        ['ecs-qwen-hk2-1'],
+        3,
       ),
       [
+        // Sorted by name (numeric), the day pool is hz1-7, hz1-8, hz2-1 —
+        // hz2-2 is the first runner past the cut and returns to CI. hk1-9
+        // is outside the fleet and untouched. hz2-2 already carries the CI
+        // label, and hz1-7 already carries review, so neither appears in
+        // the action list. Actions are emitted in the order runners were
+        // passed in, not the sorted pick order.
         {
           id: 1,
-          name: 'ecs-qwen-hk2-1',
+          name: 'ecs-qwen-hz2-1',
           add: ['ecs-review'],
           remove: ['ecs-qwen'],
         },
         {
-          id: 3,
-          name: 'ecs-qwen-hk1-7',
-          add: ['ecs-qwen'],
-          remove: ['ecs-review'],
+          id: 4,
+          name: 'ecs-qwen-hz1-8',
+          add: ['ecs-review'],
+          remove: ['ecs-qwen'],
         },
       ],
     );
   });
 
-  it('is idempotent for day mode and rejects a review-day name the fleet lacks', () => {
+  it('sorts numerically so hz1-2 stays ahead of hz1-10', () => {
+    const runners = [
+      runner(10, ['ecs-qwen'], { name: 'ecs-qwen-hz1-10' }),
+      runner(2, ['ecs-qwen'], { name: 'ecs-qwen-hz1-2' }),
+      runner(1, ['ecs-qwen'], { name: 'ecs-qwen-hz1-1' }),
+    ];
+    const actions = plan(runners, 'day', 2);
+    // Numeric sort puts hz1-1, hz1-2 in the keep set; hz1-10 falls outside
+    // and would go to CI — but it already has the CI label, so no action.
+    assert.deepEqual(actions, [
+      {
+        id: 2,
+        name: 'ecs-qwen-hz1-2',
+        add: ['ecs-review'],
+        remove: ['ecs-qwen'],
+      },
+      {
+        id: 1,
+        name: 'ecs-qwen-hz1-1',
+        add: ['ecs-review'],
+        remove: ['ecs-qwen'],
+      },
+    ]);
+  });
+
+  it('truncates to the online fleet when dayCount exceeds it, and reports the pick', () => {
+    const result = planLabels(
+      [runner(1, ['ecs-qwen']), runner(2, ['ecs-qwen'])],
+      'day',
+      5,
+      FLEET,
+    );
+    // Truncation, not failure: every online managed runner goes on review
+    // and the summary flags the gap for the operator.
+    assert.equal(result.truncated, true);
+    assert.equal(result.requestedDayCount, 5);
+    assert.equal(result.effectiveDayCount, 2);
+    assert.equal(result.onlineManaged, 2);
+    assert.deepEqual(result.keptNames.sort(), [
+      'ecs-qwen-hz2-1',
+      'ecs-qwen-hz2-2',
+    ]);
+    assert.equal(result.actions.length, 2);
+  });
+
+  it('is idempotent for day mode and validates the count', () => {
     assert.deepEqual(
-      planLabels(
-        [runner(1, ['ecs-review'], { name: 'ecs-qwen-hk2-1' })],
-        'day',
-        ['ecs-qwen-hk2-1'],
-      ),
+      plan([runner(1, ['ecs-review'], { name: 'ecs-qwen-hz2-1' })], 'day', 1),
       [],
     );
-    // A typo would otherwise shrink the daytime pool on every morning tick
-    // while the run stays green.
     assert.throws(
-      () => planLabels([runner(1, ['ecs-qwen'])], 'day', ['ecs-qwen-hk9-1']),
-      /match no registered hk1\/hk2 runner/,
+      () => plan([runner(1, ['ecs-qwen'])], 'day', 0),
+      /needs a positive integer review-day runner count/,
     );
     assert.throws(
-      () => planLabels([], 'day', []),
-      /needs at least one review-day runner name/,
+      () => plan([runner(1, ['ecs-qwen'])], 'day', Number.NaN),
+      /needs a positive integer review-day runner count/,
     );
   });
 
-  it('leaves an offline review-day runner untouched', () => {
+  it('skips offline runners when picking the day pool', () => {
     assert.deepEqual(
-      planLabels(
+      plan(
         [
           runner(1, ['ecs-review'], {
-            name: 'ecs-qwen-hk2-1',
+            name: 'ecs-qwen-hz1-1',
             status: 'offline',
           }),
-          runner(2, ['ecs-qwen'], { name: 'ecs-qwen-hk2-2' }),
+          runner(2, ['ecs-qwen'], { name: 'ecs-qwen-hz1-2' }),
+          runner(3, ['ecs-qwen'], { name: 'ecs-qwen-hz1-3' }),
         ],
         'day',
-        ['ecs-qwen-hk2-1'],
+        1,
       ),
-      [],
+      [
+        // hz1-1 is offline so the pick falls through to hz1-2 (the first
+        // online runner). hz1-3 was not picked and was not on review, so no
+        // label change is needed.
+        {
+          id: 2,
+          name: 'ecs-qwen-hz1-2',
+          add: ['ecs-review'],
+          remove: ['ecs-qwen'],
+        },
+      ],
     );
+  });
+
+  it('excludes ARM64-only and reserved-label hosts from the day pool', () => {
+    const arm = (id) => ({
+      id,
+      name: `ecs-qwen-hz1-${id}`,
+      labels: ['self-hosted', 'Linux', 'ARM64', 'ecs-qwen'].map((n) => ({
+        name: n,
+      })),
+      status: 'online',
+    });
+    const releaseHost = {
+      id: 99,
+      name: 'ecs-qwen-hz1-99',
+      labels: ['self-hosted', 'Linux', 'X64', 'ecs-qwen-release-host'].map(
+        (n) => ({ name: n }),
+      ),
+      status: 'online',
+    };
+    const x64 = (id) =>
+      runner(id, ['ecs-qwen'], { name: `ecs-qwen-hz1-${id}` });
+    // Sorted: hz1-1 (arm, skipped), hz1-2 (x64), hz1-3 (x64), hz1-17 (arm,
+    // skipped), hz1-99 (release-host, skipped). Day count 2 picks the two
+    // usable x64 hosts.
+    const result = planLabels(
+      [arm(1), x64(2), x64(3), arm(17), releaseHost],
+      'day',
+      2,
+      FLEET,
+    );
+    assert.deepEqual(result.keptNames.sort(), [
+      'ecs-qwen-hz1-2',
+      'ecs-qwen-hz1-3',
+    ]);
+    assert.equal(result.onlineManaged, 2);
+    assert.equal(result.truncated, false);
+    // Reserved-label and ARM-only hosts must not be touched at all.
+    const ids = result.actions.map((a) => a.id).sort();
+    assert.deepEqual(ids, [2, 3]);
   });
 
   it('wires two daily UTC switches and manual pool selection', () => {
@@ -177,15 +338,22 @@ describe('review runner schedule', () => {
     );
     assert.ok(schedule.includes('"$GITHUB_REPOSITORY" "$POOL"'));
     assert.ok(schedule.includes('secrets.RUNNER_ADMIN_PAT'));
-    // The daytime pool. Four names stay on review after the 05:00 switch; an
-    // unset override falls back to them, and a name the fleet does not have
-    // fails the tick instead of shrinking the pool silently.
+    // The daytime pool. A configured count of runners stay on review after
+    // the 05:00 switch; an unset override falls back to 40, and a count that
+    // exceeds the online fleet truncates with a warning rather than
+    // silently shrinking the pool or failing the whole tick.
     assert.ok(schedule.includes("- 'day'"));
     assert.match(
       schedule,
-      /REVIEW_DAY_HOSTS: .*'ecs-qwen-hk2-1 ecs-qwen-hk2-2 ecs-qwen-hk2-3 ecs-qwen-hk2-4'/,
+      /REVIEW_DAY_RUNNER_COUNT: .*\$\{\{ vars\.QWEN_REVIEW_DAY_RUNNER_COUNT \|\| '40' \}\}/,
     );
-    assert.ok(schedule.includes('"${day_hosts[@]}"'));
+    assert.ok(schedule.includes('"$REVIEW_DAY_RUNNER_COUNT"'));
+    // The fleet pattern is configurable so a region change is a var edit,
+    // not a code change.
+    assert.match(
+      schedule,
+      /QWEN_REVIEW_FLEET_NAME_PATTERN: .*\$\{\{ vars\.QWEN_REVIEW_FLEET_NAME_PATTERN/,
+    );
     // The in-repo half of the fence on the admin PAT. Losing it is silent:
     // a dispatch from any other branch still runs, now executing that
     // branch's copy of the planner with the token in its environment. The
@@ -217,13 +385,18 @@ if (!args.includes('--method')) {
   );
 };
 
-const spawnPlanner = (dir, runners, { fail = false } = {}) =>
+const spawnPlanner = (
+  dir,
+  runners,
+  { fail = false, mode = 'review', dayCount = '' } = {},
+) =>
   spawnSync(
     process.execPath,
     [
       fileURLToPath(new URL('./review-runner-schedule.mjs', import.meta.url)),
       'example/repo',
-      'review',
+      mode,
+      ...(mode === 'day' ? [dayCount] : []),
     ],
     {
       encoding: 'utf8',
@@ -272,7 +445,7 @@ it(
 );
 
 it(
-  'fails loudly when no hk1 or hk2 runner exists instead of switching nothing',
+  'fails loudly when no managed runner exists instead of switching nothing',
   { skip: process.platform === 'win32' },
   () => {
     // Without the guard a renamed or empty fleet exits 0 after reporting
@@ -286,18 +459,119 @@ it(
       writeFakeGh(dir);
       for (const runners of [
         [],
-        [runner(1, ['ecs-qwen'], { name: 'ecs-qwen-hk3-1' })],
-        [runner(1, ['ecs-qwen'], { name: 'ecs-qwen-hk1-1-extra' })],
+        [runner(1, ['ecs-qwen'], { name: 'ecs-qwen-hk1-1' })],
+        [runner(1, ['ecs-qwen'], { name: 'ecs-qwen-hz7-1' })],
+        [runner(1, ['ecs-qwen'], { name: 'ecs-qwen-hz1-1-extra' })],
       ]) {
         writeFileSync(log, '');
         const result = spawnPlanner(dir, runners);
         assert.equal(result.status, 1, result.stderr);
         assert.match(
           result.stderr,
-          /::error::no ecs-qwen-hk1-<n> or ecs-qwen-hk2-<n> runner found/,
+          /::error::no runner matches QWEN_REVIEW_FLEET_NAME_PATTERN/,
         );
         assert.equal(readFileSync(log, 'utf8'), '');
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
+  'day mode end-to-end: applies keep-set labels and writes a kept-names summary',
+  { skip: process.platform === 'win32' },
+  () => {
+    const dir = mkdtempSync(join(tmpdir(), 'runner-switch-'));
+    try {
+      const log = join(dir, 'calls');
+      writeFakeGh(dir);
+      writeFileSync(log, '');
+      const summaryPath = join(dir, 'summary.md');
+      const result = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(
+            new URL('./review-runner-schedule.mjs', import.meta.url),
+          ),
+          'example/repo',
+          'day',
+          '1',
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: dir + delimiter + process.env.PATH,
+            RUNNER_ADMIN_TOKEN: 'test-only',
+            GITHUB_STEP_SUMMARY: summaryPath,
+            PROBE_LOG: log,
+            PROBE_FAIL: 'false',
+            PROBE_RUNNERS: JSON.stringify([
+              runner(1, ['ecs-qwen'], { name: 'ecs-qwen-hz1-1' }),
+              runner(2, ['ecs-qwen'], { name: 'ecs-qwen-hz1-2' }),
+            ]),
+          },
+        },
+      );
+      assert.equal(result.status, 0, result.stderr);
+      // hz1-1 is the pick: POST ecs-review then DELETE ecs-qwen.
+      // hz1-2 already carries ecs-qwen and stays on CI: no calls.
+      assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), [
+        'POST',
+        'DELETE',
+      ]);
+      const summary = readFileSync(summaryPath, 'utf8');
+      assert.match(summary, /keeping on review \(1\):/);
+      assert.match(summary, /ecs-qwen-hz1-1/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+it(
+  'day mode rejects a non-numeric count before touching the API',
+  { skip: process.platform === 'win32' },
+  () => {
+    const dir = mkdtempSync(join(tmpdir(), 'runner-switch-'));
+    try {
+      const log = join(dir, 'calls');
+      writeFakeGh(dir);
+      writeFileSync(log, '');
+      // `parseInt` would accept each of these as `4` — the strict regex
+      // rejects them so a typo cannot silently shrink the daytime pool.
+      for (const bad of ['4O', '4.5', '4 0', '1e2', 'abc', '']) {
+        const result = spawnSync(
+          process.execPath,
+          [
+            fileURLToPath(
+              new URL('./review-runner-schedule.mjs', import.meta.url),
+            ),
+            'example/repo',
+            'day',
+            bad,
+          ],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: dir + delimiter + process.env.PATH,
+              RUNNER_ADMIN_TOKEN: 'test-only',
+              GITHUB_STEP_SUMMARY: '',
+              PROBE_LOG: log,
+              PROBE_FAIL: 'false',
+              PROBE_RUNNERS: '[]',
+            },
+          },
+        );
+        assert.equal(result.status, 1, `expected ${bad} to fail`);
+        assert.match(
+          result.stderr,
+          /needs a positive integer review-day runner count/,
+        );
+      }
+      assert.equal(readFileSync(log, 'utf8'), '');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
