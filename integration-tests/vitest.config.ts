@@ -7,6 +7,7 @@
 import { defineConfig } from 'vitest/config';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DurationSequencer } from '../.github/scripts/ci/vitest-duration-sequencer.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const timeoutMinutes = Number(process.env['TB_TIMEOUT_MINUTES'] || '5');
@@ -17,6 +18,9 @@ export default defineConfig({
   test: {
     testTimeout: testTimeoutMs,
     globalSetup: './globalSetup.ts',
+    // `--shard` splits the files by their measured run time
+    // (.github/scripts/ci/test-durations.json), not by count.
+    sequence: { sequencer: DurationSequencer },
     reporters: ['default'],
     include: ['**/*.test.ts'],
     exclude: [

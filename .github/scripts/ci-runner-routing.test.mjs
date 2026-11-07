@@ -123,6 +123,7 @@ function runPickRunnerOutputs({
   eventName,
   dispatch,
   fleet,
+  buildLabels,
 }) {
   const tmp = mkdtempSync(join(tmpdir(), 'pick-runner-'));
   const outputFile = join(tmp, 'github_output');
@@ -134,6 +135,7 @@ function runPickRunnerOutputs({
       EVENT_NAME: eventName,
       LINUX_RUNNER_FLEET: fleet ?? '',
       DISPATCH_LINUX_RUNNER: dispatch ?? '',
+      BUILD_RUNNER_LABELS: buildLabels ?? '',
       GITHUB_OUTPUT: outputFile,
     },
     encoding: 'utf8',
@@ -150,6 +152,7 @@ function runPickRunnerOutputs({
   };
   const ubuntuRunner = select('Selected Linux runner: ');
   const lintRunner = select('Selected lint runner: ');
+  const buildRunner = select('Selected build runner: ');
   // The stdout echo and the published output must agree — a rename of the
   // GITHUB_OUTPUT key would otherwise pass the echo parse and break every
   // downstream runs-on at runtime.
@@ -161,7 +164,11 @@ function runPickRunnerOutputs({
     outputs.split('\n').includes(`lint_runner=${lintRunner}`),
     `lint_runner not published: ${outputs}`,
   );
-  return { ubuntuRunner, lintRunner };
+  assert.ok(
+    outputs.split('\n').includes(`build_runner=${buildRunner}`),
+    `build_runner not published: ${outputs}`,
+  );
+  return { ubuntuRunner, lintRunner, buildRunner };
 }
 
 function runPickRunner(inputs) {
@@ -439,6 +446,67 @@ describe('ci.yml lint_runner routing', () => {
       });
       assert.equal(out.lintRunner, out.ubuntuRunner, `fleet='${fleet}'`);
     }
+  });
+});
+
+describe('ci.yml build_runner routing', () => {
+  const HK = '["self-hosted", "linux", "x64", "ecs-qwen", "ecs-qwen-hk"]';
+  const buildRunner = (inputs) => runPickRunnerOutputs(inputs).buildRunner;
+
+  it('follows ubuntu_runner while BUILD_RUNNER_LABELS is empty', () => {
+    for (const sameRepo of [true, false]) {
+      for (const assoc of ASSOCIATIONS) {
+        const inputs = { ecsDisabled: false, sameRepo, assoc };
+        for (const eventName of ['pull_request', 'push', 'merge_group']) {
+          const out = runPickRunnerOutputs({ ...inputs, eventName });
+          assert.equal(out.buildRunner, out.ubuntuRunner);
+        }
+      }
+    }
+  });
+
+  it('narrows only the x64 fleet routing to the configured hosts', () => {
+    assert.equal(
+      buildRunner({
+        ecsDisabled: false,
+        sameRepo: true,
+        assoc: 'NONE',
+        eventName: 'pull_request',
+        buildLabels: HK,
+      }),
+      HK,
+    );
+    // A fork stays on its hosted runner, the kill-switch and the hosted or
+    // ARM64 fleet selectors keep their routing.
+    for (const inputs of [
+      { sameRepo: false, assoc: 'NONE' },
+      { sameRepo: true, assoc: 'NONE', ecsDisabled: true },
+      { sameRepo: true, assoc: 'NONE', fleet: 'hosted' },
+      { sameRepo: true, assoc: 'NONE', fleet: 'arm64' },
+    ]) {
+      const out = runPickRunnerOutputs({
+        ecsDisabled: false,
+        eventName: 'pull_request',
+        buildLabels: HK,
+        ...inputs,
+      });
+      assert.equal(out.buildRunner, out.ubuntuRunner, JSON.stringify(inputs));
+    }
+  });
+
+  it('routes only test_build through build_runner', () => {
+    assert.equal(
+      ciDoc.jobs.classify_pr.outputs.build_runner,
+      '${{ steps.pick_runner.outputs.build_runner }}',
+    );
+    const readers = Object.entries(ciDoc.jobs)
+      .filter(([, job]) => /outputs\.build_runner/.test(String(job['runs-on'])))
+      .map(([id]) => id);
+    assert.deepEqual(readers, ['test_build']);
+    assert.equal(
+      String(ciDoc.jobs.test_build['runs-on']),
+      '${{ fromJSON(needs.classify_pr.outputs.build_runner || \'["ubuntu-latest"]\') }}',
+    );
   });
 });
 

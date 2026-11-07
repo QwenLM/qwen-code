@@ -6,6 +6,7 @@
 
 import { defineConfig } from 'vitest/config';
 import path from 'node:path';
+import { DurationSequencer } from '../../.github/scripts/ci/vitest-duration-sequencer.mjs';
 
 export default defineConfig({
   test: {
@@ -37,6 +38,9 @@ export default defineConfig({
       '../../scripts/vitest-global-setup.js',
     ),
     setupFiles: ['./test-setup.ts'],
+    // `--shard` splits the files by their measured run time
+    // (.github/scripts/ci/test-durations.json), not by count.
+    sequence: { sequencer: DurationSequencer },
     outputFile: {
       junit: 'junit.xml',
     },

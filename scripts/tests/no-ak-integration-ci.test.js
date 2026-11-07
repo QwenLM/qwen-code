@@ -240,6 +240,7 @@ describe('no-AK integration CI wiring', () => {
       './interactive/workflow-intent.test.ts',
       './interactive/workflow-mode.test.ts',
       './interactive/mods-tool-middleware.test.ts',
+      './interactive/mods-tool-middleware.rest.test.ts',
       './interactive/mods-prompt-submit.test.ts',
       './interactive/statusline-parity.test.ts',
       './interactive/tui-editor-parity.test.ts',
@@ -631,6 +632,12 @@ describe('no-AK integration CI wiring', () => {
     expect(gateStep).toContain(`npm run ${NO_AK_SCRIPT}`);
     expect(gateStep.indexOf(integrationTypecheckCommand)).toBeLessThan(
       gateStep.indexOf(`npm run ${NO_AK_SCRIPT}`),
+    );
+    // The typecheck runs beside the tests; the gate must still wait for it
+    // and fail with it.
+    expect(gateStep).toContain('wait "${typecheck_pid}" || typecheck_rc=$?');
+    expect(gateStep).toContain(
+      'test "${tests_rc}" -eq 0 && test "${typecheck_rc}" -eq 0',
     );
     // The job's first step publishes the run-unique HOME via GITHUB_ENV
     // (2026-11-02 round-2: fork code starts at checkout/install, not at the

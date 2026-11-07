@@ -101,8 +101,8 @@ env:
   # re-runs every suite after `npm ci`, and a push to main always classifies
   # `full` (classify_pr computes a profile only for pull_request), so what
   # the fast lane skips is still re-checked post-merge.
-  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs'
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs'
+  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/ci/test-shard-plan.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/ci/test-shard-plan.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -149,6 +149,9 @@ jobs:
       # association gate in ubuntu_runner still governs every other Linux
       # lane; do not "simplify" the two outputs into one.
       lint_runner: '${{ steps.pick_runner.outputs.lint_runner }}'
+      # test_build's routing: ubuntu_runner, or the hosts BUILD_RUNNER_LABELS
+      # names when that is the x64 fleet.
+      build_runner: '${{ steps.pick_runner.outputs.build_runner }}'
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     steps:
       - name: 'Detect release version-sync PR'
@@ -213,6 +216,9 @@ jobs:
           LINUX_RUNNER_FLEET: '${{ vars.LINUX_RUNNER_FLEET }}'
           EVENT_NAME: '${{ github.event_name }}'
           DISPATCH_LINUX_RUNNER: '${{ github.event.inputs.linux_runner }}'
+          # Optional labels for test_build alone, e.g. the x64 fleet's labels
+          # plus "ecs-qwen-hk". Empty keeps it on ubuntu_runner.
+          BUILD_RUNNER_LABELS: '${{ vars.BUILD_RUNNER_LABELS }}'
         run: |-
           ubuntu_runner='["ubuntu-latest"]'
           trusted_author=false
@@ -250,6 +256,16 @@ jobs:
           fi
           echo "lint_runner=${lint_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected lint runner: ${lint_runner}"
+          # test_build heads the unit-test and integration lanes, and the
+          # x64 fleet's ARM64 hosts build it at about half the speed of its
+          # x64 ones. BUILD_RUNNER_LABELS narrows that one job to the hosts
+          # it names, only where ubuntu_runner already picked the x64 fleet.
+          build_runner="${ubuntu_runner}"
+          if [[ -n "${BUILD_RUNNER_LABELS}" && "${ubuntu_runner}" == '["self-hosted", "linux", "x64", "ecs-qwen"]' ]]; then
+            build_runner="${BUILD_RUNNER_LABELS}"
+          fi
+          echo "build_runner=${build_runner}" >> "${GITHUB_OUTPUT}"
+          echo "Selected build runner: ${build_runner}"
 
       # The product jobs later check out the PR head. Classify before that
       # from an explicit base-SHA checkout so no fork can replace the
@@ -423,7 +439,7 @@ jobs:
     name: 'Build unit-test tree (ubuntu-latest, Node 22.x)'
     needs: 'classify_pr'
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
-    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.build_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 45
     permissions:
       contents: 'read'
@@ -3275,10 +3291,21 @@ jobs:
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
           mkdir -p "${QWEN_HOME}"
+          # Shard 1 also type-checks the integration sources, beside its
+          # tests rather than before them (~100s); either failing fails it.
+          typecheck_pid=''
           if [ "${{ matrix.shard }}" = 1 ]; then
-            npm run typecheck:integration
+            npm run typecheck:integration > "${RUNNER_TEMP}/typecheck-integration.log" 2>&1 &
+            typecheck_pid=$!
           fi
-          npm run test:integration:no-ak:sandbox:none -- --shard=${{ matrix.shard }}/3
+          tests_rc=0
+          npm run test:integration:no-ak:sandbox:none -- --shard=${{ matrix.shard }}/3 || tests_rc=$?
+          typecheck_rc=0
+          if [ -n "${typecheck_pid}" ]; then
+            wait "${typecheck_pid}" || typecheck_rc=$?
+            cat "${RUNNER_TEMP}/typecheck-integration.log"
+          fi
+          test "${tests_rc}" -eq 0 && test "${typecheck_rc}" -eq 0
 
       # Reclaim the run-unique HOME (constructed path, never $HOME) so it
       # does not accumulate in RUNNER_TEMP on this persistent pool.
