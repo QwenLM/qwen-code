@@ -2519,6 +2519,26 @@ describe('loadCliConfig', () => {
     ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
   });
 
+  it('does not expose aux-selector credentials in the startup error', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const failure = await loadCliConfig(
+      {
+        advisorModel:
+          'openai:missing-advisor\0https://user:sk-secret@gw.example/v1',
+      },
+      argv,
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(FatalConfigError);
+    expect((failure as Error).message).toContain(
+      "Advisor model 'openai:missing-advisor (https://gw.example/v1)' is not configured.",
+    );
+    expect((failure as Error).message).not.toContain('sk-secret');
+    expect((failure as Error).message).not.toContain('\0');
+  });
+
   it('should use settings fallback models when the CLI flag is absent', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
