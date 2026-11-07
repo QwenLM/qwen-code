@@ -22,14 +22,12 @@ import type {
 import type { AgentViewSupervisorClientHandle } from '../agent-view/supervisor-runner.js';
 import { ensureAgentViewSupervisor } from '../agent-view/supervisor-runner.js';
 import { requireAgentViewEnabled } from '../agent-view/feature.js';
-import { runAgentViewRosterApp } from '../ui/agent-view/AgentViewApp.js';
 import type { AgentViewRosterResult } from '../ui/agent-view/AgentViewApp.js';
 import type {
   AgentViewHeaderInfo,
   AgentViewPanel,
   AgentViewSessionPanel,
 } from '../ui/agent-view/AgentViewRoster.js';
-import { showResumeSessionPicker } from '../ui/components/StandaloneSessionPicker.js';
 import type { AgentRosterRow } from '../ui/agent-view/roster-model.js';
 import { buildAgentRosterRows } from '../ui/agent-view/roster-model.js';
 import { getAuthTypeFromEnv } from '../utils/modelConfigUtils.js';
@@ -234,6 +232,11 @@ async function adoptResumeSessionFromPicker(
   const runtimeOutputDir = loadSettings(cwd, {
     skipLoadEnvironment: true,
   }).merged.advanced?.runtimeOutputDir;
+  // Loaded lazily: config.ts imports this module, so a static import would
+  // pull the Ink/React UI into the ACP agent's startup bundle.
+  const { showResumeSessionPicker } = await import(
+    '../ui/components/StandaloneSessionPicker.js'
+  );
   const sessionId = await Storage.runWithRuntimeBaseDir(
     runtimeOutputDir,
     cwd,
@@ -329,6 +332,9 @@ async function defaultRenderAgentsRoster(
   header?: AgentViewHeaderInfo,
 ): Promise<AgentViewRosterResult | void> {
   if (process.stdin.isTTY && process.stdout.isTTY) {
+    const { runAgentViewRosterApp } = await import(
+      '../ui/agent-view/AgentViewApp.js'
+    );
     return runAgentViewRosterApp(rows, actions, header, initialPeekPanel);
   }
   if (
