@@ -2,8 +2,9 @@
 
 Each slot registers one just-in-time runner and runs it in a new container.
 After at most one job, the manager removes the container and runner registration
-before creating the next one. An external watchdog also removes a container
-whose runner does not exit.
+before creating the next one. While the manager waits on a container it also
+enforces a per-slot deadline and removes a container whose runner does not exit;
+a manager crash is covered by reconciling leftover resources on the next start.
 
 Each job has a separate Docker bridge with inter-container communication
 disabled. Deleting the network is part of cleanup and a failure blocks slot
