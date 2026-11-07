@@ -1301,6 +1301,8 @@ export interface components {
             worktree?: {
                 baseRef?: string;
             };
+            /** @description Optional immutable binding to the authenticated user's personal MemoryStore. Omission disables long-term memory. Bound Sessions require owner access as well as existing Workspace grants; creation idempotency includes this field. */
+            memoryStoreId?: string;
         };
         WebShellSubmitRequest: {
             /** @description Trace correlation only. */

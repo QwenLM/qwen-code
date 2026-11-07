@@ -45,7 +45,7 @@ public class ManagedActionService {
     private static final Pattern UPPERCASE_LETTER = Pattern.compile("([A-Z])");
     private static final Set<String> PREVIEW_TOOLS =
             Set.of("web_fetch", "read_file", "write_file", "edit", "run_shell_command",
-                    "todo_write",
+                    "todo_write", "context_search", "context_remember", "context_get", "context_forget",
                     "agent", "send_message", "team_create", "task_create",
                     "task_update", "workflow", "request_shutdown", "exit_plan_mode",
                     "team_plan_approval");

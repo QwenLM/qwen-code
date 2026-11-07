@@ -107,6 +107,7 @@ export function createJavaManagedAgentProvider(
     request: {
       agentId: string;
       modelId?: string;
+      memoryStoreId?: string;
       workspaceId: string;
       cwdRelative: string;
       text?: string;
@@ -131,6 +132,9 @@ export function createJavaManagedAgentProvider(
           ? {}
           : { worktree: request.worktree }),
         ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
+        ...(request.memoryStoreId === undefined
+          ? {}
+          : { memoryStoreId: request.memoryStoreId }),
         ...(request.skills?.length ? { skills: request.skills } : {}),
         ...(request.extensionPins === undefined
           ? {}
@@ -806,6 +810,7 @@ export function createJavaManagedAgentProvider(
               {
                 agentId,
                 modelId,
+                memoryStoreId,
                 workspaceId,
                 cwdRelative,
                 approvalMode,
@@ -820,6 +825,7 @@ export function createJavaManagedAgentProvider(
                 {
                   agentId,
                   modelId,
+                  memoryStoreId,
                   workspaceId,
                   cwdRelative,
                   approvalMode,
@@ -911,6 +917,9 @@ export function createJavaManagedAgentProvider(
           idempotencyKey: command.idempotencyKey,
           agentId,
           title: titleFor(request.text),
+          ...(request.memoryStoreId === undefined
+            ? {}
+            : { memoryStoreId: request.memoryStoreId }),
           input: request.input ?? [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
         },

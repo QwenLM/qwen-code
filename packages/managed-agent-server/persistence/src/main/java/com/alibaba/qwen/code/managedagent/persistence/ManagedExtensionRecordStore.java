@@ -1797,20 +1797,15 @@ public class ManagedExtensionRecordStore
                         "Session message from a child must come from the"
                                 + " Session its run attached.");
             }
+            ManagedSessionMessageRoutes.requirePrivateRoute(jdbc, tenantId, sender, target);
             return;
         }
         // The lineage is stamped at creation and never changes, so a plain
         // read decides; read directly, since a store built beside no
         // public Session table holds no AgentStateStore.
-        List<String[]> lineage = jdbc.query("SELECT parent_session_id,"
-                        + " parent_child_run_id FROM ma_session"
-                        + " WHERE tenant_id = ? AND session_id = ?",
-                (result, row) -> new String[] {
-                        result.getString("parent_session_id"),
-                        result.getString("parent_child_run_id") },
-                tenantId, sessionId);
-        String parent = lineage.isEmpty() ? null : lineage.get(0)[0];
-        String edge = lineage.isEmpty() ? null : lineage.get(0)[1];
+        String[] lineage = ManagedSessionMessageRoutes.lineage(jdbc, tenantId, sessionId);
+        String parent = lineage == null ? null : lineage[0];
+        String edge = lineage == null ? null : lineage[1];
         boolean follows = parent != null && childRunId.equals(edge)
                 && (outbound ? target == null || target.equals(parent)
                         : sender.equals(parent));
@@ -1822,6 +1817,7 @@ public class ManagedExtensionRecordStore
                             : "Session message from a parent must follow this"
                                     + " Session's lineage.");
         }
+        ManagedSessionMessageRoutes.requirePrivateRoute(jdbc, tenantId, sender, target);
     }
 
     /**
@@ -1848,15 +1844,9 @@ public class ManagedExtensionRecordStore
             // to_parent on the member's own journal: the lineage is
             // stamped at creation and never changes, so a plain read
             // decides, exactly like the message channel's.
-            List<String[]> lineage = jdbc.query("SELECT parent_session_id,"
-                            + " parent_child_run_id FROM ma_session"
-                            + " WHERE tenant_id = ? AND session_id = ?",
-                    (result, row) -> new String[] {
-                            result.getString("parent_session_id"),
-                            result.getString("parent_child_run_id") },
-                    tenantId, sessionId);
-            String parent = lineage.isEmpty() ? null : lineage.get(0)[0];
-            String edge = lineage.isEmpty() ? null : lineage.get(0)[1];
+            String[] lineage = ManagedSessionMessageRoutes.lineage(jdbc, tenantId, sessionId);
+            String parent = lineage == null ? null : lineage[0];
+            String edge = lineage == null ? null : lineage[1];
             boolean follows = parent != null && childRunId.equals(edge)
                     && (target == null || target.equals(parent));
             if (!follows) {
@@ -1865,6 +1855,7 @@ public class ManagedExtensionRecordStore
                         "Session command to a parent must follow this"
                                 + " Session's lineage.");
             }
+            ManagedSessionMessageRoutes.requirePrivateRoute(jdbc, tenantId, sender, target);
             return;
         }
         // to_parent's receipt on the lead's journal: exactly H4d-b's
@@ -1883,6 +1874,7 @@ public class ManagedExtensionRecordStore
         require(sender.equals(attachedNode.textValue()),
                 "Session command from a child must come from the Session"
                         + " its run attached.");
+        ManagedSessionMessageRoutes.requirePrivateRoute(jdbc, tenantId, sender, target);
     }
 
     /**

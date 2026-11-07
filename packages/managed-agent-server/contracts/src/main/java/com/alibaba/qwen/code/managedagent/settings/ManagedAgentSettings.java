@@ -27,6 +27,7 @@ public interface ManagedAgentSettings {
     public List<String> getDefinitionModels();
     public List<? extends ModelOption> getModelCatalog();
     public default List<String> getModelConfigBaseUrls() { return List.of(); }
+    public default boolean isMemoryEnabled() { return false; }
     public interface ModelOption {
         public String getModelId();
         public String getLabel();

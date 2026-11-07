@@ -218,6 +218,16 @@ Running the processes of selected extension packages inside Workspace Runtime wo
 | `enabled` | `QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_ENABLED` | boolean | `false` | Whether Workspace Runtimes run with the managed extension execution profile, which lets selected extension packages run their processes (such as Hooks and MCP servers) in Runtime workers. Requires `qwen.managed-agent.extensions.enabled` (startup refusal) and `qwen.managed-agent.managed-extensions.cache-directory`, plus `qwen.managed-agent.managed-extensions.cgroup-root` on Linux. |
 | `mode` | `QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_MODE` | string | `linux-cgroup` | The extension execution mode: `linux-cgroup` contains extension processes in a delegated cgroup v2 subtree, and `developer-process-group` is a weaker process-group mode for native macOS development. Linux workers always use `linux-cgroup`; a macOS worker is refused unless this is `developer-process-group`. |
 
+## `qwen.managed-agent.memory`
+
+Opt-in personal MemoryStores: server-side Holo access for explicitly bound, owner-only Sessions.
+
+| Property | Variable | Type | Default | Description |
+| --- | --- | --- | --- | --- |
+| `api-key` | — | string | — | Service credential used by the control plane for Holo requests when memory is enabled. Required, nonblank and without CR or LF. Keep it in server-side secret configuration; it is not forwarded to the model, Hosted Harness, sandbox or MCP configuration. |
+| `enabled` | — | boolean | `false` | Whether personal memory is available. Defaults to false. Enable only after qualifying a dedicated Holo Mem0 service with cross-service sharing disabled. Requires Session Store and the Hosted session-memory/1 capability; Sessions must explicitly select a Store at creation. |
+| `endpoint` | — | string | — | Base URL of the dedicated Holo Mem0 service, read only when memory is enabled. Requires HTTPS except for loopback HTTP tests; embedded credentials, query strings and fragments are refused. This address stays in the control plane. |
+
 ## `qwen.managed-agent.runtime-broker`
 
 The embedded Runtime Broker: its private HTTP listener for the Hosted Harness, the provisioner that places and recovers the Runtime workers that run Hosted tools, their Workspace mounts and isolation, and the keys that encrypt the Runtime credentials it persists.
