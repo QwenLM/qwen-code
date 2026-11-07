@@ -1040,10 +1040,11 @@ it(
         const exitHint = 'Press Ctrl+C again to exit.';
         // The value arm is column-exact at the scenario's pinned cols: 100.
         // Ink spends two columns on its `> ` prefix, so its padding run is 79
-        // where OpenTUI's is 81 (caret cell included). A `[ \t]*` here absorbs
-        // the phantom column an empty `after` text node mounts — the layout
-        // regression this case exists to catch. Only the whitespace outside
-        // the frame stays tolerant: ink trims the row tail, OpenTUI pads it.
+        // where OpenTUI's is 81 (caret cell included). A `[ \t]*` here would
+        // absorb a phantom column from an unguarded empty caret segment — the
+        // layout regression this case exists to catch. Only the whitespace
+        // outside the frame stays tolerant: ink trims the row tail, OpenTUI
+        // pads it to the terminal.
         const originalRuleRow =
           renderer === 'ink'
             ? /^[ \t]*│[ \t]*│ > WebFetch {79}│[ \t]*│[ \t]*$/m
