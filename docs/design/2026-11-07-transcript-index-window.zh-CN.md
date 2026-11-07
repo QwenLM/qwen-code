@@ -2,7 +2,7 @@
 
 [English](2026-11-07-transcript-index-window.md) | [简体中文](2026-11-07-transcript-index-window.zh-CN.md)
 
-- 状态：提议（草稿 PR，契约变更需维护者批准）
+- 状态：提议（契约变更需维护者批准）
 - 日期：2026-11-07
 - Issue：#13113
 - 范围：`packages/core/src/services/session-transcript-reader.ts`、`HistoryGap` 与

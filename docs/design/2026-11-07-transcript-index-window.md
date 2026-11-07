@@ -2,7 +2,7 @@
 
 [English](2026-11-07-transcript-index-window.md) | [简体中文](2026-11-07-transcript-index-window.zh-CN.md)
 
-- Status: proposed (draft PR, needs maintainer approval of the contract change)
+- Status: proposed (needs maintainer approval of the contract change)
 - Date: 2026-11-07
 - Issue: #13113
 - Scope: `packages/core/src/services/session-transcript-reader.ts`, the
