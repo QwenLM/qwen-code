@@ -665,6 +665,62 @@ describe('session-commit exemption scoping (#16075 R9 B2)', () => {
     expect(result!.blocked).toBe(true);
   });
 
+  // R7-2 (second round): the walk must refuse the exemption whenever it
+  // cannot prove which repository the amend rewrites. Each row keeps repo A's
+  // HEAD registered while the amend really runs in repo B (or after a segment
+  // that moved HEAD), so the guard has to stay live.
+  it('blocks a cd that `||` makes conditional (true || cd A && amend, cwd=B)', () => {
+    expect(
+      isDestructiveCommand(
+        `true || cd ${repoA.dir} && git commit --amend --no-edit`,
+        'amend the commit',
+        repoB.dir,
+      ),
+    ).not.toBeNull();
+  });
+
+  it('blocks an assignment-prefixed cd (FOO=1 cd B; amend, cwd=A)', () => {
+    expect(
+      isDestructiveCommand(
+        `FOO=1 cd ${repoB.dir}; git commit --amend --no-edit`,
+        'amend the commit',
+        repoA.dir,
+      ),
+    ).not.toBeNull();
+  });
+
+  it('blocks an export hidden behind `builtin` (builtin export GIT_DIR=B)', () => {
+    expect(
+      isDestructiveCommand(
+        `builtin export GIT_DIR=${repoB.dir}/.git; git commit --amend --no-edit`,
+        'amend the commit',
+        repoA.dir,
+      ),
+    ).not.toBeNull();
+  });
+
+  it('keeps an exported GIT_DIR across a backgrounded unset', () => {
+    expect(
+      isDestructiveCommand(
+        `export GIT_DIR=${repoB.dir}/.git; unset GIT_DIR & git commit --amend --no-edit`,
+        'amend the commit',
+        repoA.dir,
+      ),
+    ).not.toBeNull();
+  });
+
+  it('refuses the exemption after a segment that moved HEAD (#16075 R14-1)', () => {
+    // `git reset --soft HEAD~1` moves HEAD before the amend runs, so the
+    // registered commit is not the one the amend rewrites.
+    expect(
+      isDestructiveCommand(
+        'git reset --soft HEAD~1 && git commit --amend --no-edit',
+        'amend the commit',
+        repoA.dir,
+      ),
+    ).not.toBeNull();
+  });
+
   it('allows an amend relocated to the repo whose HEAD is registered', () => {
     // cwd=B (unregistered), but -C targets A: the exemption follows the
     // target, not the cwd.

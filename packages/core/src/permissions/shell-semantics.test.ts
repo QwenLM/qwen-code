@@ -1009,6 +1009,66 @@ describe('commandContainsGitAmend xargs value-flag attribution', () => {
   });
 });
 
+// R1-1 (second round): constructs whose argv or data flow the hand-rolled
+// model cannot positively compute. Each row returns `false` at 3375347b8 while
+// real bash amends, so the recogniser now reads the construct both ways and
+// fails closed when neither reading proves the command amend-free.
+describe('commandContainsGitAmend fails closed on unprovable constructs', () => {
+  it.each([
+    // printf splices `%s` from its literal argument.
+    "printf 'g%s commit --amend' it | bash",
+    // A quoted `-c` payload keeps its backslashes for the printf that decodes
+    // them; the raw reading and the unescaped one both have to be analysed.
+    'bash -c "printf \'git\\x20commit\\x20--amend\' | bash"',
+    // A redirection glued to the shell, or between the shell and `-c`, does not
+    // hide the payload.
+    'bash<<\'X\' -c "git commit -C HEAD --amend"',
+    'bash 2>/dev/null -c "git commit -C HEAD --amend"',
+    // script's `-t` takes an ATTACHED value; `-c` still follows.
+    "script -t/dev/null -c $'git commit --am\\x65nd'",
+    // Pathname expansion decides the program/subcommand/flag word.
+    'git commi? --amend',
+    'git commit --?mend',
+    // IFS decides how the expansion word-splits.
+    "IFS=:; X='git:commit:--amend'; $X",
+    // An unset expansion expands to nothing, gluing the decisive words.
+    "A='git commit'; $A$UNSET_VAR --amend",
+    // Options between the shell and `-c`; a shell-fed heredoc; a fed payload
+    // shifted by the producer's own option word.
+    "bash -c -x 'git commit --amend'",
+    "cat <<'EOF' | cat | bash\ngit commit --amend\nEOF",
+    "echo -n 'cd /b && git commit --amend' | bash",
+  ])('denies a construct the model cannot compute: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+
+  it.each([
+    // The narrowing may only add denials: the inert and allowlisted shapes the
+    // base guard already kept have to stay amend-free.
+    "cat <<'EOF'\ngit commit --amend\nEOF",
+    'git status; echo done',
+    "grep $'git\\x20commit\\x20--amend' file.txt",
+    // A static value that is not git stays allowed, IFS or not.
+    "IFS=:; X='git:status'; $X",
+    // An assignment word in argument position sets nothing.
+    'echo X=ls; $X',
+  ])('keeps a computable or inert command allowed: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(false);
+  });
+});
+
+// R12-1 (second round): the static value proof may only trust a name when the
+// command has no OTHER construct that writes it.
+describe('commandContainsGitAmend static value proof is not a proof', () => {
+  it.each([
+    "X=ls; read X <<< $'git commit --am\\x65nd'; $X",
+    "mapfile -t X <<< $'git commit --amend'; $X",
+    "IFS=:; X='git:commit:--amend'; $X",
+  ])('denies a name written outside NAME=value: %s', (command) => {
+    expect(commandContainsGitAmend(command)).toBe(true);
+  });
+});
+
 // R8-2 / R10-1: a trailing `\c` in an ANSI-C word stays literal. Consuming
 // the closing quote as its operand left the quote state open and swallowed
 // the rest of the line, hiding both the amend and the file operations.
