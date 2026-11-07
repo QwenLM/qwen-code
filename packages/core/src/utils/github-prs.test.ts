@@ -14,19 +14,27 @@ vi.mock('node:child_process', () => ({
 }));
 
 // Root enters any directory, so a test that needs one it cannot enter sets
-// the error accessSync throws instead of relying on chmod.
+// the error accessSync throws, and the path it throws for, instead of
+// relying on chmod. The path is compared as given: the view passes `cwd`
+// to accessSync unchanged.
 const fsControl = vi.hoisted(() => ({
   accessError: undefined as NodeJS.ErrnoException | undefined,
+  accessPath: undefined as string | undefined,
 }));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
-    // Refuses only the search (X_OK) check, so a check for another mode
-    // passes and the test notices.
+    // Refuses only the search (X_OK) check of the one path the test names,
+    // so a check for another mode or of another directory passes and the
+    // test notices.
     accessSync: (...args: Parameters<typeof actual.accessSync>) => {
       const mode = args[1] ?? actual.constants.F_OK;
-      if (fsControl.accessError && mode & actual.constants.X_OK) {
+      if (
+        fsControl.accessError &&
+        args[0] === fsControl.accessPath &&
+        mode & actual.constants.X_OK
+      ) {
         throw fsControl.accessError;
       }
       return actual.accessSync(...args);
@@ -845,6 +853,7 @@ describe('fetchGitHubPullRequestView', () => {
     fsControl.accessError = Object.assign(new Error('permission denied'), {
       code: 'EACCES',
     });
+    fsControl.accessPath = tmp.dir;
     try {
       expect(await fetchGitHubPullRequestView(url, tmp.dir)).toEqual({
         kind: 'failed',
@@ -853,6 +862,7 @@ describe('fetchGitHubPullRequestView', () => {
       });
     } finally {
       fsControl.accessError = undefined;
+      fsControl.accessPath = undefined;
     }
     expect(mockExecFile).not.toHaveBeenCalled();
   });
