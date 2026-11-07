@@ -448,6 +448,8 @@ export default {
   'disabled (bare mode)': 'désactivé (mode minimal)',
   'disabled (safe mode)': 'désactivé (mode sécurisé)',
   'disabled (disableAllHooks)': 'désactivé (disableAllHooks)',
+  'disabled (not approved)': 'désactivé (non approuvé)',
+  'disabled (rejected)': 'désactivé (refusé)',
   'disabled (folder not trusted)': 'désactivé (dossier non approuvé)',
   'disabled (turned off for this session)':
     'désactivé (désactivé pour cette session)',
@@ -1919,6 +1921,8 @@ export default {
   'System prompt': 'Invite système',
   'Built-in tools': 'Outils intégrés',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Fichiers d’instructions',
+  'Auto memory': 'Mémoire automatique',
   'Memory files': 'Fichiers mémoire',
   Skills: 'Compétences',
   Messages: 'Messages',
@@ -2222,6 +2226,8 @@ export default {
   out: 'sort.',
   'In/Out': 'Ent/Sort',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'La mise à jour vers une version précise nécessite une installation autonome. Installez manuellement la version {{version}} avec votre méthode d’installation.',
   'Check for Qwen Code updates and install if available':
     'Vérifier les mises à jour de Qwen Code et installer si disponible',
   'Qwen Code update available! {{current}} → {{latest}}':

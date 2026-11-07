@@ -319,6 +319,14 @@ export function useBackgroundTaskView(
     agentRegistry.setApprovalChangeCallback(refreshFromRegistry);
     workflowRegistry.setApprovalChangeCallback(refreshFromRegistry);
 
+    // The change callback above only repaints the "needs approval" badge; it
+    // cannot answer a request, and the registry now fails closed without a
+    // real responder. Register the TUI's snapshot refresh as the host
+    // channel: it makes the parked approval part of `entries`, which the
+    // background-tasks dialog renders and settles through
+    // `resolvePendingApproval`.
+    workflowRegistry.setApprovalRequestCallback(refreshFromRegistry);
+
     // Memory listener fires only on dream-task transitions —
     // `subscribe({ taskType: 'dream' })` skips the per-extract notify
     // entirely so we don't pay the per-UserQuery O(n) signature cost
@@ -345,6 +353,7 @@ export function useBackgroundTaskView(
       workflowRegistry.setStatusChangeCallback(undefined);
       agentRegistry.setApprovalChangeCallback(undefined);
       workflowRegistry.setApprovalChangeCallback(undefined);
+      workflowRegistry.setApprovalRequestCallback(undefined);
       unsubscribeMemory();
     };
   }, [config]);
