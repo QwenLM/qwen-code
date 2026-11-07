@@ -30,7 +30,7 @@ export interface TerminateModeMessage {
  * as GOAL.
  */
 export function terminateModeMessage(
-  mode: AgentTerminateMode | string | undefined,
+  mode: string | undefined,
   loopType?: LoopType | null,
 ): TerminateModeMessage | null {
   switch (mode) {

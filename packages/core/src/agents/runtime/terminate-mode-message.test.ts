@@ -79,6 +79,30 @@ describe('describeTerminateReason', () => {
     }
   });
 
+  it('has wording for every mode it does not leave to the caller', () => {
+    // Visibility for these is owned by the caller: terminateModeMessage()
+    // suppresses them so the caller can emit its own message, or nothing.
+    const callerOwned = new Set<string>([
+      AgentTerminateMode.GOAL,
+      AgentTerminateMode.CANCELLED,
+      AgentTerminateMode.SHUTDOWN,
+    ]);
+
+    for (const mode of Object.values(AgentTerminateMode)) {
+      if (callerOwned.has(mode)) {
+        expect(terminateModeMessage(mode)).toBeNull();
+        continue;
+      }
+      // A member added to AgentTerminateMode lands here and fails until it gets
+      // wording of its own, rather than silently leaking its raw token.
+      expect(
+        terminateModeMessage(mode),
+        `no message for ${mode}`,
+      ).not.toBeNull();
+      expect(describeTerminateReason(mode, 'Agent failed')).not.toContain(mode);
+    }
+  });
+
   it('uses the caller fallback for a suppressed mode', () => {
     expect(
       describeTerminateReason(
