@@ -367,6 +367,59 @@ describe('applyReplacementPreservingLineEndings', () => {
       : replaced;
   };
 
+  it.each([
+    ['LF', ' X = 1 \nkeep\n\nX = 1 \n\nafter\n'],
+    ['CRLF', ' X = 1 \r\nkeep\r\n\r\nX = 1 \r\n\r\nafter\r\n'],
+    ['mixed', ' X = 1 \nkeep\r\n\nX = 1 \n\nafter\n'],
+  ])('uses only validated fuzzy match offsets in a %s file', (_, raw) => {
+    const current = normalized(raw);
+    const { oldString, newString } = normalizeEditStrings(
+      current,
+      'X = 1\n',
+      'Z\n',
+    );
+    const matchOffsets = findLineBasedMatchOffsets(current, oldString);
+    expect(matchOffsets).toEqual([14]);
+    const expected = raw.replace(/(?<=\n)X = 1 /, 'Z');
+    expect(
+      applyReplacementPreservingLineEndings(
+        raw,
+        current,
+        oldString,
+        newString,
+        matchOffsets,
+      ),
+    ).toBe(expected);
+  });
+
+  it.each(['X\nX\n', 'X\r\nX\r\n'])(
+    'does not fall back to literal matches when validated offsets are empty: %j',
+    (raw) => {
+      expect(
+        applyReplacementPreservingLineEndings(
+          raw,
+          normalized(raw),
+          'X',
+          'Z',
+          [],
+        ),
+      ).toBe(raw);
+    },
+  );
+
+  it('replaces multiple validated spans without touching literal substrings', () => {
+    const raw = ' X\r\nX\nX\r\n';
+    expect(
+      applyReplacementPreservingLineEndings(
+        raw,
+        normalized(raw),
+        'X',
+        'Z\nY',
+        [3, 5],
+      ),
+    ).toBe(' X\r\nZ\nY\nZ\r\nY\r\n');
+  });
+
   it('leaves every line the edit did not touch byte-identical', () => {
     expect(splice('one\ntwo\nthree\r\nfour\n', 'two', 'TWO')).toBe(
       'one\nTWO\nthree\r\nfour\n',

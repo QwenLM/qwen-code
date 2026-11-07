@@ -413,6 +413,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
             currentContent,
             finalOldString,
             finalNewString,
+            matchOffsets,
           )
         : newContent;
 

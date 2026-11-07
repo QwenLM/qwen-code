@@ -671,7 +671,7 @@ function normalizedToRawOffsets(
  * of file drops a `\r` that the previous path kept.
  *
  * Two paths, and which one runs is decided by whether the file contains a CRLF
- * at all. A file with none takes the plain literal replace, so the replacement's
+ * at all. A file with none applies the matched spans directly, so the replacement's
  * own line endings are inserted exactly as given and a CRLF inside the
  * replacement will leave the file mixed — which is what the previous path did to
  * such a file as well. A file that does contain a CRLF takes the splice. Local
@@ -680,17 +680,20 @@ function normalizedToRawOffsets(
  * span uses CRLF throughout, matching the previous writer. Bytes outside matched
  * spans stay unchanged.
  *
- * Matches are located in the normalized text and mapped back, so the spans are
- * the same ones `safeLiteralReplace` would have replaced, including its
- * replace-all behaviour.
+ * Validated fuzzy-match offsets are used when provided; otherwise matches are
+ * located literally in the normalized text. Both are mapped back to raw spans.
  */
 export function applyReplacementPreservingLineEndings(
   rawContent: string,
   normalizedContent: string,
   oldString: string,
   newString: string,
+  matchOffsets?: readonly number[],
 ): string {
-  if (oldString === '' || !normalizedContent.includes(oldString)) {
+  if (
+    oldString === '' ||
+    (matchOffsets === undefined && !normalizedContent.includes(oldString))
+  ) {
     return rawContent;
   }
 
@@ -698,7 +701,17 @@ export function applyReplacementPreservingLineEndings(
     // Nothing to map: with no CRLF in the file the normalized copy is byte for
     // byte the file itself, so the replacement can be applied to it directly.
     // This is also exactly what the write path used to do for such a file.
-    return safeLiteralReplace(rawContent, oldString, newString);
+    if (matchOffsets === undefined) {
+      return safeLiteralReplace(rawContent, oldString, newString);
+    }
+    const pieces: string[] = [];
+    let cursor = 0;
+    for (const offset of matchOffsets) {
+      pieces.push(rawContent.slice(cursor, offset), newString);
+      cursor = offset + oldString.length;
+    }
+    pieces.push(rawContent.slice(cursor));
+    return pieces.join('');
   }
 
   const offsets = normalizedToRawOffsets(rawContent, normalizedContent.length);
@@ -706,10 +719,14 @@ export function applyReplacementPreservingLineEndings(
   let result = '';
   let copiedUpTo = 0;
   let searchFrom = 0;
+  let matchIndex = 0;
   const preceding = new PrecedingLineEnding(rawContent);
   let fileEnding: string | null = null;
   for (;;) {
-    const matchAt = normalizedContent.indexOf(oldString, searchFrom);
+    const matchAt =
+      matchOffsets === undefined
+        ? normalizedContent.indexOf(oldString, searchFrom)
+        : (matchOffsets[matchIndex++] ?? -1);
     if (matchAt === -1) {
       break;
     }
