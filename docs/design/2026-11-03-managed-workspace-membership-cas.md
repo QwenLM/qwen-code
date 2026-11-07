@@ -2,6 +2,8 @@
 
 [English](2026-11-03-managed-workspace-membership-cas.md) | [简体中文](2026-11-03-managed-workspace-membership-cas.zh-CN.md)
 
+The rewind exclusion described below is superseded by [rewind without directory exclusion](2026-11-05-managed-rewind-concurrency.md). Shared membership and physical maintenance protections remain.
+
 ## Status and scope
 
 Status: Implemented. Focused H2 and existing MySQL recovery and inventory cases
@@ -95,8 +97,9 @@ Three properties of this shape are the problem:
 ## Non-goals
 
 - CSI reservation, CSI retirement, and the resident profile's admission. The
-  resident branch of `claim` and `release` keeps its current shape, including
-  its tenant guard.
+  resident branch of `claim` and `release` keeps its current shape; its tenant
+  guard is removed separately in the
+  [resident claim design](2026-11-03-managed-resident-claim-tenant-guard.md).
 - The tenant guard held by other domains: Runtime placement, publication,
   migration fence installation, lifecycle admission, and retention sweeps.
 - Replacing the primary keys of the shared baseline. This design assumes the

@@ -107,7 +107,8 @@ Options:
   --runtime-state <dir>    check, backup: the Runtime state directory, or none,
                            instead of the one the server's configuration resolves to
   --server-url <url>       start, verify: control-plane URL (default: the listener
-                           the server's configuration resolves to)
+                           the server's configuration resolves to); check refuses
+                           a URL they would refuse, as its plan repeats it
   --timeout <seconds>      stop, start, verify: how long to wait
   --actor <id>             verify: read Sessions as this actor, through the server's
                            trusted actor header
@@ -495,6 +496,71 @@ export function serverBaseUrl(environment) {
     host = `[${host}]`;
   }
   return `http://${host}:${environment.get('SERVER_PORT') || '8080'}`;
+}
+
+// The ports fetch refuses to dial over http and https, as the Fetch standard
+// lists them (https://fetch.spec.whatwg.org/#bad-port) and Node's fetch reads
+// them.
+const FETCH_BLOCKED_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79,
+  87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137,
+  139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532,
+  540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723,
+  2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669,
+  6679, 6697, 10080,
+]);
+
+/**
+ * Why fetch refuses every request to `url`, or undefined when it dials it: not
+ * a URL, as a link-local IPv6 address with its zone is not; a scheme other
+ * than http and https, as `proxy.test:8443` has; a user name or password,
+ * which a request may not carry; or a port the Fetch standard blocks.
+ */
+export function fetchRefusal(url) {
+  if (!URL.canParse(url)) {
+    return `is not a URL${/\[[^\]]*%/.test(url) ? ': a URL cannot carry an IPv6 zone' : ''}`;
+  }
+  const { protocol, username, password, port } = new URL(url);
+  if (protocol !== 'http:' && protocol !== 'https:') {
+    return 'is not an http or https URL';
+  }
+  if (username || password) {
+    return 'carries a user name or password, so fetch refuses it';
+  }
+  if (FETCH_BLOCKED_PORTS.has(Number(port))) {
+    return `is on port ${port}, so fetch refuses to dial it`;
+  }
+  return undefined;
+}
+
+/**
+ * `url` as a refusal or report row may print it: its user information, a
+ * password or a token in the user-name position, shows as `***`.
+ */
+export function withoutCredentials(url) {
+  let shown = url;
+  if (URL.canParse(url)) {
+    const parsed = new URL(url);
+    if (parsed.username || parsed.password) {
+      parsed.username = '***';
+      parsed.password = '';
+      shown = parsed.href;
+    }
+  }
+  // Past what the parser reads as user information, a value may still spell
+  // some before an @: one the parser rejects or reads without an authority,
+  // and one whose password holds a / ? or # that ends the authority early.
+  // Such a value does not parse, unless the password starts with digits, as
+  // in http://svc:2024#Secret@harness:4170, which the parser and
+  // java.net.URI both read as port 2024 with the rest of the password in
+  // the fragment. So everything up to the last @ shows as ***: of a URL
+  // dialled with an @ in its path, as a base path the configuration sets
+  // may give one, the host and port too, which could as well be the front
+  // of such a password.
+  return shown.replace(
+    /^([a-zA-Z][a-zA-Z0-9+.-]*:(?:\/\/)?|\/\/)?[\s\S]*@/,
+    '$1***@',
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -988,13 +1054,20 @@ async function operatorConfigFiles(root) {
 
 const row = (name, status, detail, fix) => ({ name, status, detail, fix });
 
+// Row text is display text: each control byte shows as U+FFFD, without the
+// length bound printable() also applies, which a long path must not hit.
+function rowText(text) {
+  // eslint-disable-next-line no-control-regex -- matching control bytes is the point
+  return text.replace(/[\x00-\x1F\x7F-\x9F]/g, '\uFFFD');
+}
+
 function printRows(system, title, rows) {
   system.out(title);
   system.out(`${'STATUS'.padEnd(6)} ${'CHECK'.padEnd(14)} DETAIL`);
   for (const { name, status, detail, fix } of rows) {
-    system.out(`${status.padEnd(6)} ${name.padEnd(14)} ${detail}`);
+    system.out(`${status.padEnd(6)} ${name.padEnd(14)} ${rowText(detail)}`);
     if (fix) {
-      system.out(`${''.padEnd(6)} ${''.padEnd(14)} fix: ${fix}`);
+      system.out(`${''.padEnd(6)} ${''.padEnd(14)} fix: ${rowText(fix)}`);
     }
   }
   const count = (status) =>
@@ -1018,7 +1091,54 @@ function versionOutput(system, command, args, searchPath) {
 
 // Flyway's versioned, undo and repeatable prefixes are case-sensitive; its
 // suffix is not.
-const MIGRATION_SCRIPT = /^BOOT-INF\/classes\/(db\/.+\/[VUR][^/]*__[^/]*)$/;
+const MIGRATION_SCRIPT = /^(db\/.+\/[VUR][^/]*__[^/]*)$/;
+// Flyway reads its location off the classpath: the server's own classes, and
+// the nested jars of its modules, since the module that owns the schema
+// ships it in one.
+const CLASSES = 'BOOT-INF/classes/';
+const NESTED_JAR = /^BOOT-INF\/lib\/[^/]+\.jar$/;
+
+/** The entries of the zip archive `read` reads, which is `size` bytes long. */
+async function zipEntries(read, size, label) {
+  const tailLength = Math.min(size, 22 + 0xffff);
+  const tail = await read(tailLength, size - tailLength);
+  const end = tail.lastIndexOf(Buffer.from('PK\x05\x06', 'latin1'));
+  if (end < 0) {
+    throw new Error(`${label} is not a zip archive`);
+  }
+  const count = tail.readUInt16LE(end + 10);
+  const offset = tail.readUInt32LE(end + 16);
+  if (count === 0xffff || offset === 0xffffffff) {
+    throw new Error(`${label} is a ZIP64 archive`);
+  }
+  const directory = await read(tail.readUInt32LE(end + 12), offset);
+  const entries = [];
+  for (let at = 0, index = 0; index < count; index += 1) {
+    if (directory.readUInt32LE(at) !== 0x02014b50) {
+      throw new Error(`${label} has a damaged central directory`);
+    }
+    const nameLength = directory.readUInt16LE(at + 28);
+    entries.push({
+      method: directory.readUInt16LE(at + 10),
+      length: directory.readUInt32LE(at + 20),
+      local: directory.readUInt32LE(at + 42),
+      name: directory.toString('utf8', at + 46, at + 46 + nameLength),
+    });
+    at +=
+      46 +
+      nameLength +
+      directory.readUInt16LE(at + 30) +
+      directory.readUInt16LE(at + 32);
+  }
+  return entries;
+}
+
+// Where an entry's data starts: past its local header, whose name and extra
+// field may differ in length from the central directory's.
+async function dataStart(read, entry) {
+  const header = await read(30, entry.local);
+  return entry.local + 30 + header.readUInt16LE(26) + header.readUInt16LE(28);
+}
 
 /** The Flyway scripts in a Spring Boot jar, by path, as SHA-256 digests. */
 export async function migrationScripts(jar) {
@@ -1031,49 +1151,61 @@ export async function migrationScripts(jar) {
     }
     return buffer;
   };
+  const scripts = new Map();
+  // Where each script was first found: BOOT-INF/classes or a nested jar.
+  const containers = new Map();
+  const add = async (from, entry, script, label, container) => {
+    if (!script || !script.toLowerCase().endsWith('.sql')) {
+      return;
+    }
+    const data = await from(entry.length, await dataStart(from, entry));
+    if (entry.method !== 0 && entry.method !== 8) {
+      throw new Error(
+        `${entry.name} in ${label} uses compression method ${entry.method}`,
+      );
+    }
+    const content = entry.method === 8 ? inflateRawSync(data) : data;
+    const digest = createHash('sha256').update(content).digest('hex');
+    // The same path in the classes and a module, or in two modules, is one
+    // script to Flyway only when the copies match; otherwise which one the
+    // database gets depends on the class loader, so the row cannot tell.
+    if (scripts.has(script) && scripts.get(script) !== digest) {
+      throw new Error(
+        `${jar} ships two different copies of ${script}, in ${containers.get(script)} and in ${container}`,
+      );
+    }
+    scripts.set(script, digest);
+    containers.set(script, containers.get(script) ?? container);
+  };
   try {
     const { size } = await handle.stat();
-    const tailLength = Math.min(size, 22 + 0xffff);
-    const tail = await read(tailLength, size - tailLength);
-    const end = tail.lastIndexOf(Buffer.from('PK\x05\x06', 'latin1'));
-    if (end < 0) {
-      throw new Error(`${jar} is not a zip archive`);
-    }
-    const count = tail.readUInt16LE(end + 10);
-    const offset = tail.readUInt32LE(end + 16);
-    if (count === 0xffff || offset === 0xffffffff) {
-      throw new Error(`${jar} is a ZIP64 archive`);
-    }
-    const directory = await read(tail.readUInt32LE(end + 12), offset);
-    const scripts = new Map();
-    for (let at = 0, index = 0; index < count; index += 1) {
-      if (directory.readUInt32LE(at) !== 0x02014b50) {
-        throw new Error(`${jar} has a damaged central directory`);
+    for (const entry of await zipEntries(read, size, jar)) {
+      if (entry.name.startsWith(CLASSES)) {
+        const script = MIGRATION_SCRIPT.exec(
+          entry.name.slice(CLASSES.length),
+        )?.[1];
+        await add(read, entry, script, jar, 'BOOT-INF/classes');
+      } else if (NESTED_JAR.test(entry.name) && entry.method === 0) {
+        // Spring Boot stores a nested jar as it is, so its own entries read
+        // in place, without reading the whole jar.
+        const label = `${entry.name} in ${jar}`;
+        const start = await dataStart(read, entry);
+        const nested = async (length, position) => {
+          if (position + length > entry.length) {
+            throw new Error(`${label} ends early`);
+          }
+          return read(length, start + position);
+        };
+        for (const inner of await zipEntries(nested, entry.length, label)) {
+          await add(
+            nested,
+            inner,
+            MIGRATION_SCRIPT.exec(inner.name)?.[1],
+            label,
+            entry.name,
+          );
+        }
       }
-      const method = directory.readUInt16LE(at + 10);
-      const length = directory.readUInt32LE(at + 20);
-      const nameLength = directory.readUInt16LE(at + 28);
-      const local = directory.readUInt32LE(at + 42);
-      const name = directory.toString('utf8', at + 46, at + 46 + nameLength);
-      at +=
-        46 +
-        nameLength +
-        directory.readUInt16LE(at + 30) +
-        directory.readUInt16LE(at + 32);
-      const script = MIGRATION_SCRIPT.exec(name)?.[1];
-      if (!script || !script.toLowerCase().endsWith('.sql')) {
-        continue;
-      }
-      const header = await read(30, local);
-      const data = await read(
-        length,
-        local + 30 + header.readUInt16LE(26) + header.readUInt16LE(28),
-      );
-      if (method !== 0 && method !== 8) {
-        throw new Error(`${name} in ${jar} uses compression method ${method}`);
-      }
-      const content = method === 8 ? inflateRawSync(data) : data;
-      scripts.set(script, createHash('sha256').update(content).digest('hex'));
     }
     return scripts;
   } finally {
@@ -1673,9 +1805,27 @@ async function backupRows(system, deployment, options) {
 }
 
 function shellWord(word) {
-  return /^[\w@%+=:,./-]+$/.test(word)
-    ? word
-    : `'${word.replaceAll("'", `'\\''`)}'`;
+  if (/^[\w@%+=:,./-]+$/.test(word)) {
+    return word;
+  }
+  // Quoted, a control character would still reach the terminal; $'...'
+  // spells each as the three-digit octal escapes of its UTF-8 bytes, which
+  // bash, zsh and ksh turn back into it. ksh would read a \x escape on
+  // through a hex digit after it.
+  // eslint-disable-next-line no-control-regex -- matching control bytes is the point
+  if (/[\u0000-\u001F\u007F-\u009F]/.test(word)) {
+    return `$'${word.replace(
+      // eslint-disable-next-line no-control-regex -- as above
+      /[\\'\u0000-\u001F\u007F-\u009F]/g,
+      (character) =>
+        character === '\\' || character === "'"
+          ? `\\${character}`
+          : [...Buffer.from(character)]
+              .map((byte) => `\\${byte.toString(8).padStart(3, '0')}`)
+              .join(''),
+    )}'`;
+  }
+  return `'${word.replaceAll("'", `'\\''`)}'`;
 }
 
 /** The options a phase was given that the printed plan must repeat. */
@@ -1690,6 +1840,7 @@ function planFlags(options, names) {
       options.mysqldump !== 'mysqldump' ? options.mysqldump : undefined,
     'skip-database': options.skipDatabase || undefined,
     'runtime-state': options.runtimeState,
+    // check has refused a --server-url that would print a password.
     'server-url': options.serverUrl,
   };
   return names
@@ -1703,6 +1854,11 @@ function planFlags(options, names) {
 }
 
 async function phaseCheck(system, deployment, options) {
+  // The plan repeats --server-url, so check judges it as start and verify
+  // will, an empty one too, as "$CONTROL_PLANE" leaves with it unset.
+  if (options.serverUrl !== undefined) {
+    refuseServerUrl(options.serverUrl);
+  }
   const rows = await compatibilityRows(system, deployment);
   const backup =
     deployment.problems.length === 0
@@ -2462,18 +2618,20 @@ async function resolveConfiguration(system, deployment) {
  * Harness: the listeners the server's configuration resolves to, with the
  * control plane at --server-url when that is given. When the configuration
  * does not resolve, the URLs server.env names, and a line that says so. A
- * listener without a fixed port or a URL is refused before anything runs.
- * verify, which does not reach the Harness, leaves the configuration alone
- * when --server-url names the control plane.
+ * listener without a fixed port, or at a URL fetch refuses, is refused before
+ * anything runs. verify, which does not reach the Harness, passes
+ * `reachesHarness: false`, and then leaves the configuration alone when
+ * --server-url names the control plane.
  */
 async function listeners(
   system,
   deployment,
   options,
-  { reachesHarness = true } = {},
+  { reachesHarness = true, readsApi = false } = {},
 ) {
   let urls = {};
-  if (reachesHarness || !options.serverUrl) {
+  const named = options.serverUrl !== undefined;
+  if (reachesHarness || !named) {
     const resolved = await resolvedConfiguration(system, deployment);
     if (resolved.error) {
       const environment = deployment.serverEnvironment;
@@ -2486,40 +2644,80 @@ async function listeners(
           'http://127.0.0.1:4170',
       };
       system.out(
-        `Cannot resolve the server's listeners: ${resolved.error}; ${options.serverUrl ? 'using the Harness URL server.env names' : 'using the URLs server.env names, or pass --server-url'}.`,
+        `Cannot resolve the server's listeners: ${resolved.error}; ${named ? 'using the Harness URL server.env names' : 'using the URLs server.env names, or pass --server-url'}.`,
       );
     } else {
       urls = {
         server: resolved.serverUrl,
         health: resolved.healthUrl,
         harness: resolved.harnessBaseUrl,
+        // 'false' when the server would refuse the Harness URL, 'skip' when
+        // it does not read it.
+        harnessOrigin: resolved.harnessOrigin,
       };
     }
   }
-  if (options.serverUrl) {
+  if (named) {
+    refuseServerUrl(options.serverUrl);
     urls.server = options.serverUrl;
     urls.health = `${options.serverUrl}/actuator/health`;
   }
-  if (!urls.server || !urls.health) {
-    throw new Refusal(
-      `The server's configuration gives ${urls.server ? 'the health endpoint' : 'the control plane'} no fixed port: 0 picks one at start, and a negative one opens none. Pass --server-url <a URL that serves /actuator/health>.`,
-    );
-  }
-  // fetch would fail on each probe until the timeout, so say why up front. A
-  // link-local listener keeps its IPv6 zone, which no URL can carry.
-  for (const [name, url] of [
-    ['the control plane', urls.server],
+  // A phase is refused only over a URL it dials: both probe the health
+  // endpoint, and only verify --tenant reads the API.
+  const dialled = [
+    ...(readsApi ? [['the control plane', urls.server]] : []),
     ['the health endpoint', urls.health],
-  ]) {
-    if (!URL.canParse(url)) {
+  ];
+  const serves = 'a URL that serves the API and /actuator/health';
+  for (const [name, url] of dialled) {
+    if (!url) {
       throw new Refusal(
-        options.serverUrl
-          ? `--server-url ${JSON.stringify(options.serverUrl)} is not a URL.`
-          : `The server's configuration puts ${name} at ${JSON.stringify(url)}, which is not a URL${url.includes('%') ? ': a URL cannot carry an IPv6 zone' : ''}. Bind it where a URL can name it, or pass --server-url <a URL that serves /actuator/health>.`,
+        `The server's configuration gives ${name} no fixed port: 0 picks one at start, and a negative one opens none. Pass --server-url <${serves}>.`,
+      );
+    }
+  }
+  // fetch would fail on each probe until the timeout, so say why up front.
+  // --server-url has been judged already.
+  for (const [name, url] of dialled) {
+    const refusal = fetchRefusal(url);
+    if (refusal) {
+      throw new Refusal(
+        `The server's configuration puts ${name} at ${quoted(withoutCredentials(url))}, which ${refusal}. Bind it where fetch can reach it, or pass --server-url <${serves}>.`,
       );
     }
   }
   return urls;
+}
+
+/**
+ * Refuses a --server-url no phase can dial as given, as check does for the
+ * later phases it prints. Past fetchRefusal the URL parser reads no user
+ * information, so a ? or # starts a query or a fragment, which would take in
+ * the paths appended to the URL: http://proxy.test/?a probes
+ * /?a/actuator/health, and fetch drops a fragment with the path after it.
+ * An @ left after that can be the rest of a password that starts with
+ * digits, as in https://svc:12/s3cret@cp.example.com, which the parser reads
+ * as host svc and port 12: dialling it would reach the wrong host, and
+ * naming it would print the password. Such an @ cannot be told from one a
+ * path holds, which the operator writes as %40.
+ */
+function refuseServerUrl(serverUrl) {
+  // The value itself first: https:, which --server-url "https://$HOST"
+  // leaves with HOST unset, is no URL, though https:/actuator/health is one,
+  // of host actuator.
+  const reason =
+    fetchRefusal(serverUrl) ??
+    fetchRefusal(`${serverUrl}/actuator/health`) ??
+    (/[?#]/.test(serverUrl)
+      ? 'carries a query or a fragment, where the /actuator/health and API paths appended to it would land'
+      : serverUrl.includes('@')
+        ? 'carries an @, as a user name or password would before its host; write an @ in a path as %40'
+        : undefined);
+  if (reason) {
+    throw new Refusal(
+      `--server-url ${quoted(withoutCredentials(serverUrl))} ${reason}.`,
+    );
+  }
 }
 
 /**
@@ -2555,17 +2753,169 @@ async function waitFor(system, deadline, probe) {
 // waits for the whole budget.
 const PROBE_TIMEOUT_MS = 5000;
 
+// Endpoint text stops at this many code points.
+const PRINTABLE_LIMIT = 200;
+
+// Endpoint-supplied text — a health body's status, a fetch error's message —
+// is interpolated into single-line terminal reports. Neutralize control bytes
+// so a queryable endpoint cannot drive the terminal that reports it: moving
+// the cursor to repaint a FAIL verdict as PASS, splitting a row with a newline,
+// or writing the clipboard through OSC-52. Replacing every C0 control, DEL and
+// C1 byte with U+FFFD breaks the escape introducer (ESC) and keeps the row on
+// one line, while leaving the readable text intact.
+function printable(text) {
+  let shown = text;
+  if (typeof text !== 'string') {
+    // A JSON value that is no string prints as its JSON: String() throws on
+    // an object whose own toString is no function, as {"toString":1} has,
+    // and JSON.stringify() on one nested deeper than its stack.
+    try {
+      shown = JSON.stringify(text) ?? String(text);
+    } catch {
+      shown = '[unprintable]';
+    }
+  }
+  // Nor can an endpoint scroll the report away: the text stops at
+  // PRINTABLE_LIMIT code points. One pass counts them and keeps the head, so
+  // a status of many megabytes costs no copy of itself; each control byte is
+  // one code point, as its replacement is, so the count is the shown text's.
+  let head = '';
+  let points = 0;
+  for (const point of shown) {
+    if (points < PRINTABLE_LIMIT) {
+      head += point;
+    }
+    points += 1;
+  }
+  // eslint-disable-next-line no-control-regex -- matching control bytes is the point
+  const flat = head.replace(/[\u0000-\u001F\u007F-\u009F]/g, '\uFFFD');
+  return points > PRINTABLE_LIMIT ? `${flat}… (${points} characters)` : flat;
+}
+
+/** A URL as a report prints it: user information masked, controls neutralized. */
+function shown(url) {
+  return printable(withoutCredentials(url));
+}
+
+// A value a refusal or a row quotes, as JSON, which escapes C0 controls but
+// not DEL or C1 bytes, such as the CSI introducer U+009B: printable() takes
+// those, and bounds the text.
+function quoted(value) {
+  return printable(JSON.stringify(value));
+}
+
+// Why fetch rejected: fetch itself words every failure as "fetch failed", and
+// the cause says why, or, for a connection refused on each address of a name,
+// only its code.
+function fetchFailure(error) {
+  return printable(error.cause?.message || error.cause?.code || error.message);
+}
+
+/**
+ * Whether the health endpoint reports UP, and what it answered when it does
+ * not: its status, or why fetch failed, which fetch itself words only as
+ * "fetch failed"; and whether the probe ran out of its time.
+ */
 async function health(system, url, budgetMs, capMs = PROBE_TIMEOUT_MS) {
+  let response;
   try {
-    const response = await system.fetch(url, {
+    response = await system.fetch(url, {
       signal: AbortSignal.timeout(Math.min(budgetMs, capMs)),
     });
-    const body = await response.json();
-    return response.ok && body?.status === 'UP';
-  } catch {
-    return false;
+  } catch (error) {
+    return {
+      up: false,
+      answer: fetchFailure(error),
+      // How fetch rejects once the timeout signal fires.
+      timedOut: error.name === 'TimeoutError',
+    };
   }
+  const status = `HTTP ${response.status}`;
+  let body;
+  try {
+    body = await response.json();
+  } catch (error) {
+    // A proxy's error page is no JSON, and its status says enough.
+    return {
+      up: false,
+      answer: response.ok ? `${status}, ${printable(error.message)}` : status,
+      // The signal ends a body that stalls after its headers as well.
+      timedOut: error.name === 'TimeoutError',
+    };
+  }
+  // Any status the body carries is shown, 0, false or an empty string too,
+  // which a test of its truth would drop; an empty one shows as its JSON, so
+  // the row does not end in a bare "status". A null one, like none, names
+  // nothing.
+  const answered = body?.status ?? undefined;
+  return response.ok && answered === 'UP'
+    ? { up: true }
+    : {
+        up: false,
+        answer:
+          answered === undefined
+            ? status
+            : `${status}, status ${answered === '' ? '""' : printable(answered)}`,
+      };
 }
+
+// What a Harness base URL shows that the server's Harness connector refuses:
+// a user name or password, a query or a fragment, or an @ in an authority
+// that java.net.URI reads, which takes // right after the scheme and ends at
+// a /, ? or #. Each is a reason the server gives too; none predicts how the
+// JVM reads the rest.
+function harnessUrlReason(text, url) {
+  if (url.username || url.password) {
+    return 'carries a user name or password';
+  }
+  if (/[?#]/.test(text)) {
+    return 'carries a query or a fragment';
+  }
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#\\]*@/.test(text)) {
+    return 'carries an @ before its host';
+  }
+  return undefined;
+}
+
+// The Harness base URLs start takes when the server gives no verdict: an
+// http(s) URL whose authority is a host name as java.net.URI reads one, labels
+// of letters, digits and inner hyphens whose last starts with a letter unless
+// it is the only one, with or without the final dot of a fully qualified name,
+// a dotted-quad IPv4 address or a bracketed IPv6 address, which may end in an
+// IPv4 one, as ::ffff:127.0.0.1 does, and an optional port, which may be empty,
+// and whose path holds only the characters a URI path may, untrimmed, a % only
+// as the start of an escape. It is narrower than the server's rule, never
+// wider, by the hosts the URL parser fetch uses reads as another address: a
+// name of one label that it reads as a number, of digits, as 1234 is 0.0.4.210,
+// or of 0x and hex digits, and an octet with a leading zero, which it reads as
+// octal, as 010.0.0.1 is 8.0.0.1.
+const LABEL = '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?';
+const NAME = [
+  `(?:${LABEL}\\.)*[A-Za-z](?:[A-Za-z0-9-]*[A-Za-z0-9])?\\.?`,
+  `(?!(?:[0-9]+|0x[0-9a-f]*)\\.?(?::|/|$))[0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\\.?`,
+].join('|');
+const OCTET = '(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])';
+const IPV4 = `${OCTET}(?:\\.${OCTET}){3}`;
+const H16 = '[0-9A-Fa-f]{1,4}';
+const IPV6 = [
+  `(?:${H16}:){7}${H16}`,
+  `(?:${H16}:){1,7}:`,
+  ...[1, 2, 3, 4, 5, 6].map(
+    (tail) => `(?:${H16}:){1,${7 - tail}}(?::${H16}){1,${tail}}`,
+  ),
+  `:(?::${H16}){1,7}`,
+  '::',
+  // The last 32 bits as an IPv4 address, after six groups or fewer around a ::.
+  `(?:${H16}:){6}${IPV4}`,
+  `::(?:${H16}:){0,5}${IPV4}`,
+  ...[1, 2, 3, 4, 5].map(
+    (head) => `(?:${H16}:){${head}}:(?:${H16}:){0,${5 - head}}${IPV4}`,
+  ),
+].join('|');
+const PLAIN_HTTP_URL = new RegExp(
+  `^https?://(?:${NAME}|${IPV4}|\\[(?:${IPV6})\\])(?::[0-9]{0,5})?(?:/(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9\\-._~!$&'()*+,;=:@/])*)?$`,
+  'i',
+);
 
 async function phaseStart(system, deployment, options) {
   refuseUnless(deployment);
@@ -2589,12 +2939,43 @@ async function phaseStart(system, deployment, options) {
     );
   }
   const urls = await listeners(system, deployment, options);
-  let harnessUrl;
-  try {
-    harnessUrl = new URL(urls.harness);
-  } catch {
+  const harnessUrl = URL.canParse(urls.harness)
+    ? new URL(urls.harness)
+    : undefined;
+  // start waits for the Harness at this URL, so it takes only an http(s) URL,
+  // which has a host: an opaque value such as proxy.test:8443 names none to
+  // wait on. A value that does not parse gets fetchRefusal's reason, which
+  // names an IPv6 zone as --server-url's refusal does.
+  // Past those, the server's verdict, which the resolver passes on: its
+  // Harness connector takes only an http(s) URL with a host and without user
+  // information, a query or a fragment, read untrimmed as java.net.URI reads
+  // it. The preflight fails any other after the Harness restarts, and a
+  // pool, whose row the preflight skips, drops each member over it. 'true'
+  // and 'skip', for a disabled Harness that nothing reads, ask nothing more;
+  // 'false' refuses, with the reason when the value shows it.
+  // Without a verdict, as when the configuration did not resolve, start
+  // takes only a plain http(s) URL, a rule of its own, narrower than the
+  // server's: a disabled Harness's value may then be refused for nothing,
+  // which costs an edit, where letting it through could start a pool that
+  // accepts no Session. The preflight judges the rest, such as reachability.
+  const reason = harnessUrl && harnessUrlReason(urls.harness, harnessUrl);
+  const unusable = !harnessUrl
+    ? fetchRefusal(urls.harness)
+    : !['http:', 'https:'].includes(harnessUrl.protocol)
+      ? 'is not an http or https URL'
+      : ['true', 'skip'].includes(urls.harnessOrigin)
+        ? undefined
+        : urls.harnessOrigin === 'false'
+          ? (reason ??
+            'the server does not take as an http or https base URL, reading it untrimmed as java.net.URI does')
+          : (reason ??
+            fetchRefusal(urls.harness) ??
+            (PLAIN_HTTP_URL.test(urls.harness)
+              ? undefined
+              : 'is not a plain http or https URL, a host java.net.URI and fetch read alike with a port of up to five digits and a path of URI characters, which is all start takes while the configuration does not resolve'));
+  if (unusable) {
     throw new Refusal(
-      `The control plane reaches ${harness.name} at ${JSON.stringify(urls.harness)}, which is not a URL; correct qwen.managed-agent.harness.base-url.`,
+      `The control plane reaches ${harness.name} at ${quoted(withoutCredentials(urls.harness))}, which ${unusable}; correct qwen.managed-agent.harness.base-url.`,
     );
   }
 
@@ -2649,6 +3030,7 @@ async function phaseStart(system, deployment, options) {
   system.out(`Starting ${server.name}`);
   runChecked(system, 'systemctl', ['start', server.name]);
   const serverStarted = await showUnit(system, server.name);
+  let answer;
   const healthy = await waitFor(
     system,
     system.now() + options.timeout * 1000,
@@ -2658,24 +3040,32 @@ async function phaseStart(system, deployment, options) {
       ) {
         return false;
       }
-      return (await health(system, urls.health, budget)) ? true : undefined;
+      const probe = await health(system, urls.health, budget);
+      // A probe the deadline cut short, as it cuts the last one to 1 ms, can
+      // time out before any endpoint answers; it does not replace what an
+      // earlier probe was told. One whose own 5 s ran out before the
+      // deadline can, and so can any other failure.
+      if (!(probe.timedOut && budget < PROBE_TIMEOUT_MS && answer)) {
+        answer = probe.answer;
+      }
+      return probe.up ? true : undefined;
     },
   );
   if (healthy === false) {
     // Ends the restarts systemd would go on with, so start can run again.
     runChecked(system, 'systemctl', ['stop', server.name]);
     throw new Refusal(
-      `${server.name} exited before it reported UP at ${urls.health}, and is stopped now; see journalctl -u ${server.name}, then run start again.`,
+      `${server.name} exited before it reported UP at ${shown(urls.health)}, and is stopped now; see journalctl -u ${server.name}, then run start again.`,
     );
   }
   if (!healthy) {
     // Left running: the journal may show a start that is merely slow.
     throw new Refusal(
-      `${server.name} did not report UP at ${urls.health} within ${options.timeout}s and keeps running; see journalctl -u ${server.name}, then run verify, or run stop to start it again.`,
+      `${server.name} did not report UP at ${shown(urls.health)} within ${options.timeout}s${answer ? ` (the last answer: ${answer})` : ''} and keeps running; see journalctl -u ${server.name}, then run verify, or run stop to start it again.`,
     );
   }
   system.out(
-    `${server.name} is UP at ${urls.health}; its API is at ${urls.server}. Run verify before reopening ingress.`,
+    `${server.name} is UP at ${shown(urls.health)}${urls.server ? `; its API is at ${shown(urls.server)}` : ''}. Run verify before reopening ingress.`,
   );
   return 0;
 }
@@ -2694,7 +3084,8 @@ class ApiError extends Error {
  * and the deadline.
  */
 async function api(system, client, route, init = {}, capMs = Infinity) {
-  const label = `${init.method ?? 'GET'} ${route}`;
+  // A route can carry an id the API returned, as long as the API made it.
+  const label = `${init.method ?? 'GET'} ${printable(route)}`;
   let response;
   try {
     response = await system.fetch(`${client.baseUrl}${route}`, {
@@ -2710,7 +3101,7 @@ async function api(system, client, route, init = {}, capMs = Infinity) {
       },
     });
   } catch (error) {
-    throw new ApiError(`${label}: ${error.message}`, true);
+    throw new ApiError(`${label}: ${fetchFailure(error)}`, true);
   }
   let body;
   try {
@@ -2720,7 +3111,7 @@ async function api(system, client, route, init = {}, capMs = Infinity) {
     // an empty answer; a poll may pass it. An error answer keeps its status.
     if (response.ok) {
       throw new ApiError(
-        `${label}: ${response.status} with an unreadable body (${error.message})`,
+        `${label}: ${response.status} with an unreadable body (${printable(error.message)})`,
         true,
       );
     }
@@ -2728,18 +3119,61 @@ async function api(system, client, route, init = {}, capMs = Infinity) {
   if (!response.ok) {
     const reason = body?.error?.message ?? body?.message ?? response.statusText;
     throw new ApiError(
-      `${label}: ${response.status} ${reason}`,
+      `${label}: ${response.status} ${printable(reason)}`,
       response.status >= 500,
     );
   }
   return body;
 }
 
+// The route of a Session the API answered, which only a string id names:
+// encodeURIComponent() coerces any other, and coercing a JSON object or array
+// calls its toString or joins it, which throws on {"toString":1} or on one
+// nested deeper than the stack, before printable() could say what came back.
+function sessionRoute(session) {
+  if (typeof session?.id !== 'string') {
+    // An entry that is no object, or that has no id, is shown as it came.
+    const shown =
+      session !== null && typeof session === 'object' && 'id' in session
+        ? session.id
+        : session;
+    throw new Error(
+      `the API answered a Session without a string id (${printable(shown)})`,
+    );
+  }
+  // fetch resolves a dot segment, so "." or ".." would read another route,
+  // and an empty id would read the list. A lone surrogate has no UTF-8 to
+  // percent-encode, so encodeURIComponent() would throw "URI malformed".
+  if (['', '.', '..'].includes(session.id) || !session.id.isWellFormed()) {
+    throw new Error(
+      `the API answered a Session whose id ${quoted(session.id)} names no route`,
+    );
+  }
+  return `/v1/agents/sessions/${encodeURIComponent(session.id)}`;
+}
+
+// The list a page of the API answered, which every page carries in its data.
+// Any other value is no list to read: iterating it would throw, or walk a
+// string's characters, its length would be any value it chose, and a page
+// without one would read as an empty list.
+function listed(page, route) {
+  if (Array.isArray(page?.data)) {
+    return page.data;
+  }
+  const shown =
+    page !== null && typeof page === 'object' && 'data' in page
+      ? page.data
+      : page;
+  throw new Error(
+    `GET ${printable(route)} answered no data list (${printable(shown)})`,
+  );
+}
+
 async function sessionRow(system, client) {
   try {
-    const list = await api(system, client, '/v1/agents/sessions?limit=1');
-    const session = list?.data?.[0];
-    if (!session) {
+    const route = '/v1/agents/sessions?limit=1';
+    const [session] = listed(await api(system, client, route), route);
+    if (session === undefined) {
       // Without an actor the API lists only Sessions outside Workspaces.
       return client.actor
         ? row(
@@ -2755,17 +3189,14 @@ async function sessionRow(system, client) {
             'pass --actor <id> to read Workspace Sessions as one of their readers',
           );
     }
-    const id = encodeURIComponent(session.id);
-    await api(system, client, `/v1/agents/sessions/${id}`);
-    const items = await api(
-      system,
-      client,
-      `/v1/agents/sessions/${id}/items?limit=20`,
-    );
+    const read = sessionRoute(session);
+    await api(system, client, read);
+    const items = `${read}/items?limit=20`;
+    const count = listed(await api(system, client, items), items).length;
     return row(
       'session',
       'PASS',
-      `read Session ${session.id} and ${items?.data?.length ?? 0} item(s)`,
+      `read Session ${printable(session.id)} and ${count} item(s)`,
     );
   } catch (error) {
     return row('session', 'FAIL', error.message);
@@ -2786,7 +3217,7 @@ async function turnRow(system, client, timeout) {
         input: [{ type: 'input_text', text: 'Reply with the single word OK.' }],
       }),
     });
-    const id = encodeURIComponent(session.id);
+    const route = sessionRoute(session);
     let after = 0;
     let lastError;
     const terminal = await waitFor(system, client.deadline, async () => {
@@ -2795,7 +3226,7 @@ async function turnRow(system, client, timeout) {
         page = await api(
           system,
           client,
-          `/v1/agents/sessions/${id}/events?after=${after}&limit=100`,
+          `${route}/events?after=${after}&limit=100`,
           {},
           PROBE_TIMEOUT_MS,
         );
@@ -2808,9 +3239,19 @@ async function turnRow(system, client, timeout) {
         return undefined;
       }
       lastError = undefined;
-      for (const event of page?.data ?? []) {
-        after = Math.max(after, Number(event.sequence) || after);
-        if (event.terminal) {
+      for (const event of listed(page, `${route}/events`)) {
+        // A sequence moves the cursor only as a whole number, or the digits
+        // of one: Number() coerces any other value as encodeURIComponent()
+        // would, and reads "Infinity", "0x10" or " 4 " as numbers.
+        const sequence =
+          typeof event?.sequence === 'string' && /^\d+$/.test(event.sequence)
+            ? Number(event.sequence)
+            : event?.sequence;
+        if (Number.isSafeInteger(sequence) && sequence > after) {
+          after = sequence;
+        }
+        // As the API sends it: a "false" is no end.
+        if (event?.terminal === true) {
           return event;
         }
       }
@@ -2820,21 +3261,21 @@ async function turnRow(system, client, timeout) {
       return row(
         'turn',
         'FAIL',
-        `Session ${session.id}: no terminal event within ${timeout}s${lastError ? `; the last poll failed: ${lastError.message}` : ''}`,
+        `Session ${printable(session.id)}: no terminal event within ${timeout}s${lastError ? `; the last poll failed: ${lastError.message}` : ''}`,
       );
     }
-    return /fail|error|cancel/i.test(terminal.type)
-      ? row('turn', 'FAIL', `Session ${session.id} ended with ${terminal.type}`)
-      : row(
-          'turn',
-          'PASS',
-          `Session ${session.id} ended with ${terminal.type}; archive it when done`,
-        );
+    const ended = `Session ${printable(session.id)} ended with ${printable(terminal.type)}`;
+    // Only a string type names an outcome: matching coerces any other value,
+    // as encodeURIComponent() would, and none of them names a success.
+    return typeof terminal.type !== 'string' ||
+      /fail|error|cancel/i.test(terminal.type)
+      ? row('turn', 'FAIL', ended)
+      : row('turn', 'PASS', `${ended}; archive it when done`);
   } catch (error) {
     return row(
       'turn',
       'FAIL',
-      `${session ? `Session ${session.id}: ` : ''}${error.message}`,
+      `${typeof session?.id === 'string' ? `Session ${printable(session.id)}: ` : ''}${error.message}`,
     );
   }
 }
@@ -2851,8 +3292,47 @@ async function phaseVerify(system, deployment, options) {
       `${down.map((unit) => unit.name).join(' and ')} not running; run start first.`,
     );
   }
+  // Whether the session row reads the API comes first, from the resolver run
+  // the listeners take too: the API URL is checked only when it is read.
+  const ingress = 'read a Session through the ingress';
+  const resolved = options.tenant
+    ? await resolvedConfiguration(system, deployment)
+    : undefined;
+  let unread;
+  if (!options.tenant) {
+    unread = row(
+      'session',
+      'SKIP',
+      'no --tenant',
+      'pass --tenant <id> to read an existing Session',
+    );
+  } else if (resolved.error) {
+    unread = row(
+      'session',
+      'SKIP',
+      `cannot resolve the API's auth mode: ${resolved.error}`,
+      ingress,
+    );
+  } else if (resolved.authMode !== 'open') {
+    unread = row(
+      'session',
+      'SKIP',
+      resolved.authMode === 'signed'
+        ? 'the API takes signed requests only'
+        : `the API's auth mode is ${resolved.authMode}`,
+      ingress,
+    );
+  } else if (options.actor && !resolved.trustedActorHeader) {
+    unread = row(
+      'session',
+      'FAIL',
+      '--actor needs a trusted actor header, which the server does not name',
+      'set QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER, or leave --actor out',
+    );
+  }
   const urls = await listeners(system, deployment, options, {
     reachesHarness: false,
+    readsApi: !unread,
   });
   const rows = [];
   system.out(
@@ -2871,53 +3351,18 @@ async function phaseVerify(system, deployment, options) {
   const budget = options.timeout * 1000;
   // start has waited for UP already, so one probe that may take the whole
   // budget tells a slow answer from a wrong one.
+  const probe = await health(system, urls.health, budget, budget);
   rows.push(
-    (await health(system, urls.health, budget, budget))
-      ? row('health', 'PASS', `${urls.health} is UP`)
-      : row('health', 'FAIL', `${urls.health} is not UP`),
+    probe.up
+      ? row('health', 'PASS', `${shown(urls.health)} is UP`)
+      : row(
+          'health',
+          'FAIL',
+          `${shown(urls.health)} is not UP: ${probe.answer}`,
+        ),
   );
-  const ingress = 'read a Session through the ingress';
-  const resolved = options.tenant
-    ? await resolvedConfiguration(system, deployment)
-    : undefined;
-  if (!options.tenant) {
-    rows.push(
-      row(
-        'session',
-        'SKIP',
-        'no --tenant',
-        'pass --tenant <id> to read an existing Session',
-      ),
-    );
-  } else if (resolved.error) {
-    rows.push(
-      row(
-        'session',
-        'SKIP',
-        `cannot resolve the API's auth mode: ${resolved.error}`,
-        ingress,
-      ),
-    );
-  } else if (resolved.authMode !== 'open') {
-    rows.push(
-      row(
-        'session',
-        'SKIP',
-        resolved.authMode === 'signed'
-          ? 'the API takes signed requests only'
-          : `the API's auth mode is ${resolved.authMode}`,
-        ingress,
-      ),
-    );
-  } else if (options.actor && !resolved.trustedActorHeader) {
-    rows.push(
-      row(
-        'session',
-        'FAIL',
-        '--actor needs a trusted actor header, which the server does not name',
-        'set QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER, or leave --actor out',
-      ),
-    );
+  if (unread) {
+    rows.push(unread);
   } else {
     const client = {
       baseUrl: urls.server,

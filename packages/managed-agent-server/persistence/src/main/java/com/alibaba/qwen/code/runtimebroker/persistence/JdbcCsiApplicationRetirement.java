@@ -9,6 +9,8 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Instant;
 
+import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.statement;
+
 /** Same-connection authority for the sole original application retirement. */
 public final class JdbcCsiApplicationRetirement {
     public enum Stage { SETTLING, FROZEN, CUT, DRAINED }
@@ -167,12 +169,6 @@ public final class JdbcCsiApplicationRetirement {
     }
 
     private static byte[] copy(byte[] bytes) { return bytes == null ? null : bytes.clone(); }
-
-    private static PreparedStatement statement(Connection connection, String sql) throws SQLException {
-        var statement = connection.prepareStatement(sql);
-        statement.setQueryTimeout(10);
-        return statement;
-    }
 
     private static void require(boolean valid) {
         if (!valid) {

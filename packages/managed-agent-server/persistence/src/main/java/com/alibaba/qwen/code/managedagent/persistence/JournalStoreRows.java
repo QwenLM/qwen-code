@@ -131,9 +131,13 @@ final class JournalStoreRows {
     }
 
     ActivationLeaseRow activationLeaseRow(HeadRow head) {
+        // Every activation renewal reads this row, three times a minute per
+        // resident Session. Renewals update the activation row in place, so
+        // without idx_ma_session_journal_tx_activation the lookup walked back
+        // over every transaction the activation had committed.
         var rows = jdbc.query("SELECT journal_revision, record_bytes, record_digest, activation_lease_until,"
                         + " activation_renewal_seq FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
-                        + " AND activation_epoch = ? AND operation IN ('installActivation', 'renewActivation')"
+                        + " AND activation_epoch = ? AND is_activation_record = TRUE"
                         + " ORDER BY journal_revision DESC LIMIT 1", (result, index) -> {
                             try {
                                 byte[] raw = result.getBytes("record_bytes");
