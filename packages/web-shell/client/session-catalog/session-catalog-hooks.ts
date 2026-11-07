@@ -269,17 +269,23 @@ export function useSessionActivePromptState(
     setCatalogFallbackArmed(
       Boolean(
         workspaceCwd &&
+          sessionId &&
           !hasLiveSessions &&
           !store.isWorkspaceLiveStateEnabled(workspaceCwd),
       ),
     );
-  }, [store, workspaceCwd, hasLiveSessions]);
+  }, [store, workspaceCwd, sessionId, hasLiveSessions]);
   const catalogQuery = useMemo<SessionCatalogQuery | undefined>(() => {
-    if (!catalogFallbackArmed || hasLiveSessions || !workspaceCwd) {
+    if (
+      !catalogFallbackArmed ||
+      hasLiveSessions ||
+      !workspaceCwd ||
+      !sessionId
+    ) {
       return undefined;
     }
     return { routeKind: 'qualified', workspaceCwd, options: {} };
-  }, [catalogFallbackArmed, hasLiveSessions, workspaceCwd]);
+  }, [catalogFallbackArmed, hasLiveSessions, workspaceCwd, sessionId]);
   // autoLoad keeps the fallback page loading (and the store's error-retry
   // timer armed) for observer panes that never trigger an invalidation.
   const { sessions, page } = useSessionCatalogQuery(client, catalogQuery, {

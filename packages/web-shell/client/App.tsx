@@ -4215,24 +4215,6 @@ export function App({
     () => workspaces.filter((entry) => entry.kind !== 'live'),
     [workspaces],
   );
-  const sidebarlessLiveStateWorkspaceCwds = useMemo(() => {
-    if (sidebarOptions.enabled) return [];
-    return workspaces
-      .filter((entry) => entry.trusted && isAbsolutePath(entry.cwd))
-      .map((entry) => entry.cwd);
-  }, [sidebarOptions.enabled, workspaces]);
-  useWorkspaceSessionLiveState(workspace.client, {
-    pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
-    enabled: Boolean(
-      sidebarlessLiveStateWorkspaceCwds.length > 0 &&
-        connection.capabilities?.features?.includes(
-          SESSION_LIVE_STATE_FEATURE,
-        ) &&
-        typeof workspace.client.getWorkspaceSessionLiveState === 'function',
-    ),
-    workspaceCwds: sidebarlessLiveStateWorkspaceCwds,
-    groupWorkspaceCwds: [],
-  });
   // Daemon-authoritative "turn is running" signal for the connected session:
   // keeps the conversation indicator (and its cancel affordances) alive
   // through >3s silent tool gaps where streamingState drops to idle (#9487).
@@ -4246,6 +4228,48 @@ export function App({
         ? trustedLiveWorkspaces[0]?.cwd
         : undefined
       : connection.workspaceCwd;
+  const [splitPaneWorkspaces, setSplitPaneWorkspaces] = useState<
+    readonly string[]
+  >([]);
+  const reportSplitPaneWorkspaces = useCallback((cwds: readonly string[]) => {
+    setSplitPaneWorkspaces((current) =>
+      current.length === cwds.length &&
+      current.every((cwd, index) => cwd === cwds[index])
+        ? current
+        : cwds,
+    );
+  }, []);
+  const sidebarlessLiveStateWorkspaceCwds = useMemo(() => {
+    if (sidebarOptions.enabled) return [];
+    const targets = new Set(splitPaneWorkspaces);
+    if (connection.sessionId && activePromptWorkspaceCwd) {
+      targets.add(activePromptWorkspaceCwd);
+    }
+    return workspaces
+      .filter(
+        (entry) =>
+          targets.has(entry.cwd) && entry.trusted && isAbsolutePath(entry.cwd),
+      )
+      .map((entry) => entry.cwd);
+  }, [
+    sidebarOptions.enabled,
+    splitPaneWorkspaces,
+    connection.sessionId,
+    activePromptWorkspaceCwd,
+    workspaces,
+  ]);
+  useWorkspaceSessionLiveState(workspace.client, {
+    pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
+    enabled: Boolean(
+      sidebarlessLiveStateWorkspaceCwds.length > 0 &&
+        connection.capabilities?.features?.includes(
+          SESSION_LIVE_STATE_FEATURE,
+        ) &&
+        typeof workspace.client.getWorkspaceSessionLiveState === 'function',
+    ),
+    workspaceCwds: sidebarlessLiveStateWorkspaceCwds,
+    groupWorkspaceCwds: [],
+  });
   const {
     hasActivePrompt: daemonHasActivePrompt,
     activeWorkState: sessionActiveWorkState,
@@ -24553,6 +24577,11 @@ export function App({
                         // callback stable to avoid looping SplitView's reporting
                         // effect.
                         onPanesChange={handleSplitPanesChange}
+                        onPaneWorkspacesChange={
+                          sidebarOptions.enabled
+                            ? undefined
+                            : reportSplitPaneWorkspaces
+                        }
                         onPendingPanesChange={handleSplitPendingPanesChange}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}

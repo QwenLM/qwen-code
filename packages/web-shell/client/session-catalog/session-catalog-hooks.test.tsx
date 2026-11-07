@@ -348,11 +348,15 @@ describe('useSessionActivePromptState (#9487)', () => {
     return listPage;
   }
 
-  function ActivePromptProbe({ sessionId = 'sess-1' }: { sessionId?: string }) {
+  function ActivePromptProbe({
+    sessionId = 'sess-1',
+  }: {
+    sessionId?: string | null;
+  }) {
     const { hasActivePrompt } = useSessionActivePromptState(
       mocks.workspace.client as DaemonClient,
       '/work',
-      sessionId,
+      sessionId ?? undefined,
     );
     return <span>{String(hasActivePrompt)}</span>;
   }
@@ -388,6 +392,17 @@ describe('useSessionActivePromptState (#9487)', () => {
 
     expect(listPage).toHaveBeenCalledTimes(1);
     expect(container.textContent).toBe('true');
+  });
+
+  it('does not load the catalog after the connection clears its session', async () => {
+    const listPage = setQualifiedPage([]);
+
+    await act(async () => {
+      root.render(<ActivePromptProbe sessionId={null} />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+
+    expect(listPage).not.toHaveBeenCalled();
   });
 
   it('prefers the daemon live-state snapshot over a catalog page', async () => {
