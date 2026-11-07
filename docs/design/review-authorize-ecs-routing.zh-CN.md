@@ -1,4 +1,4 @@
-# 将 /review 与 /resolve 的权限门路由到 ECS 池
+# 将命令权限门路由到 ECS 池
 
 [English](review-authorize-ecs-routing.md) | [简体中文](review-authorize-ecs-routing.zh-CN.md)
 
@@ -52,8 +52,9 @@ PR 载荷的事件（`pull_request_target`、`pull_request_review`、
 
 ## 范围边界
 
-- **范围内：** `authorize` job 的 `runs-on` 表达式及其说明注释；一条 pin 住新路由的
-  meta-test。
+- **范围内：** `authorize` 门的 `runs-on` 表达式、说明注释，以及其携带 PAT 步骤的
+  gh 配置加固，涵盖 `qwen-code-pr-review.yml`（/review、/resolve）与
+  `qwen-triage.yml`（/triage、/tmux、/verify）两者；pin 住新路由与加固的 meta-test。
 - **范围外：** `resolve-pr` agent job 与 `publish-resolution` job。两者出于一次性
   （ephemerality）考虑被有意钉在 `ubuntu-latest`（agent 以 `tools.sandbox: false`
   运行不可信 PR 内容；publish job 在一个从未执行过 agent 的 runner 上持有推送
@@ -143,25 +144,43 @@ PR 载荷的事件（`pull_request_target`、`pull_request_review`、
   饱和的托管池仍可能延迟 agent 与推送。本改动只消除门口等待，并不宣称 `/resolve` 变
   得无队列。
 
+## 扩展到 triage 命令门
+
+`qwen-triage.yml` 的 `authorize` 对其 `/triage`、`/tmux`、`/verify` 评论（及其
+`tmux_pr` dispatch）存在同样的仅载荷盲区，因此其 `runs-on` 应用相同的两个析取项。
+与 review 门的单步骤不同，该 job 有**三个**步骤用 `CI_BOT_PAT` 调 `gh`——权限检查、
+verify 确认、以及停用通告——每一步现在都以相同的自包含 `GH_HOST` + 带守卫
+`GH_CONFIG_DIR` 前导开场，遵循仓库的每步约定。把该门搬上池却不加固其中任何一步，都会
+复现 R2-1 改道，因此这里的加固不是可选项。`.github/scripts/qwen-triage-workflow.test.mjs`
+中的一条 meta-test pin 住析取项、无 checkout/无拼接不变量、以及每个调 gh 步骤的加固。
+该 workflow 的记录体积基线（`.github/workflows/.size-baseline`）相应上调以匹配新增
+加固。
+
 ## 验证计划
 
 - `scripts/tests/qwen-pr-review-workflow.test.js` 中的一条 meta-test pin 住
   `authorize` 的精确 `runs-on` 表达式，并断言安全不变量：命令事件到达 ECS；同仓
   fork 守卫、托管回落、ECS 开关全都仍在；该 job 保持无 checkout（无 `uses:` 步骤）；
-  其步骤清单恰为那一个权限步骤、且任何 `run:` 正文都不拼接 `${{`；该步骤携带 gh 配置
-  pin（`GH_HOST=github.com` 加私有、带守卫的 `GH_CONFIG_DIR`）。
-- 变异见证（已在本机验证）：把表达式还原为旧的同仓唯一形式、加一个 `uses:` 步骤、
-  加一个仅 `run:` 的第二步、或删掉 gh 配置前导，都会使测试失败；恢复后通过。
+  其步骤清单恰为那一个权限步骤、且任何 `run:` 正文都不拼接 `${{`。对剥离注释后的有效
+  行，还 pin 住带守卫的 `mktemp` 形式与 fail-closed 形状（`exit 1 … fi … export`）、
+  `GH_HOST`/`GH_CONFIG_DIR` 必须先于第一个 `gh api` 导出、且正文不得以相对路径或解释器
+  执行仓库代码（池上 cwd 是复用的 `$GITHUB_WORKSPACE`）。
+- 变异见证（已在本机验证）：还原表达式、加 `uses:` 步骤、加仅 `run:` 的第二步、删 gh
+  前导、把守卫块换成无守卫单行、或向正文追加 `node ./…` 执行行，都会使测试失败；恢复后
+  通过。
 - 完整 `qwen-pr-review-workflow.test.js`（271 个测试）与
   `qwen-resolve-workflow.test.js`（55 个测试）通过。
+- triage 门由 `.github/scripts/qwen-triage-workflow.test.mjs`（131 个测试）与
+  `.github/scripts/ci-runner-routing.test.mjs`（103 个测试）的路由矩阵 pin 住，两者
+  通过；还原 triage 析取项、删某 gh 步前导、或向其正文追加执行行，均使 triage 测试变红。
 
 ## 验收标准
 
-- 在仓库守卫与开关允许时，`authorize` 把 `issue_comment` 与 `workflow_dispatch` 路
-  由到 ECS 池。
+- 在仓库守卫与开关允许时，两个 `authorize` 门（review 与 triage）都把
+  `issue_comment` 与 `workflow_dispatch` 路由到 ECS 池。
 - PR 载荷事件保持既有的同仓/fork 路由。
-- 该门步骤保持 gh 配置 pin 与无 checkout/无拼接不变量；pin 住它们的 meta-test 能杀死
-  针对每一项的变异。
+- 每个携带 PAT 的门步骤保持 gh 配置 pin（带守卫、先于 gh 调用）与无 checkout/无拼接/
+  不执行仓库代码不变量；pin 住它们的 meta-test 能杀死针对每一项的变异。
 - 其他任何 job 的路由都不变。
 
 ## 未决问题

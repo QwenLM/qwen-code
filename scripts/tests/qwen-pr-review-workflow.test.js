@@ -178,11 +178,35 @@ describe('qwen pr review runner routing', () => {
     const authorizeStep = authorizeJob.steps.find(
       (s) => s.id === 'principal_permission',
     );
-    expect(String(authorizeStep.run)).toContain('export GH_HOST=github.com');
-    expect(String(authorizeStep.run)).toContain(
-      'GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/authorize-gh-config.XXXXXX")"',
+    // Evaluate the live (comment-stripped) lines, not mere substrings: an
+    // unguarded `export GH_CONFIG_DIR="$(mktemp ...)"` one-liner (a failed
+    // mktemp then leaves it empty and gh falls back to the shared config) or
+    // a preamble relocated below the first gh call must both red this test.
+    const live = String(authorizeStep.run)
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('#'))
+      .join('\n');
+    // Fail-closed guarded mint in the sibling route/review-scan shape.
+    const guard =
+      'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/authorize-gh-config.XXXXXX")"; then';
+    expect(live).toContain('export GH_HOST=github.com');
+    expect(live).toContain(guard);
+    expect(live).toMatch(/exit 1\n\s*fi\n\s*export GH_CONFIG_DIR\n/);
+    // Both pins must be exported BEFORE the first permission API call.
+    const api = live.indexOf(
+      'gh api "repos/${GITHUB_REPOSITORY}/collaborators/',
     );
-    expect(String(authorizeStep.run)).toContain('export GH_CONFIG_DIR');
+    expect(api).toBeGreaterThan(-1);
+    expect(live.indexOf('export GH_HOST=github.com')).toBeLessThan(api);
+    expect(live.indexOf(guard)).toBeLessThan(api);
+    // The body must execute no repository code: on the pool the cwd is the
+    // reused $GITHUB_WORKSPACE, which other lanes fill with contributor
+    // files, so a relative-path or interpreter invocation here would run a
+    // planted file with CI_BOT_PAT in the environment.
+    expect(live).not.toMatch(/(^|[\s;&|(`])(\.{1,2}\/)/m);
+    expect(live).not.toMatch(
+      /(^|[\s;&|(`])(source|bash|sh|node|python3?|npx|npm|pnpm|yarn)\s+[^\s-]/m,
+    );
   });
 });
 

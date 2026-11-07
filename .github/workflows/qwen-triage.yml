@@ -74,12 +74,24 @@ jobs:
          startsWith(github.event.comment.body, '@qwen-code /verify '))) ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.tmux_pr != ''))
-    # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
-    # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
-    # use the persistent ECS runner. The job IS the write-permission check, so
-    # it cannot route on its own output; downstream jobs (triage, tmux, verify)
-    # route on what it finds instead.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Runner routing for the write-permission gate. This job loads CI_BOT_PAT
+    # but runs no agent, checks out nothing, and processes no untrusted PR
+    # content — its steps only read event metadata and call read/receipt APIs,
+    # and each gh step pins GH_HOST plus a private GH_CONFIG_DIR (below) — so
+    # it is safe on the persistent ECS pool whenever the trigger cannot carry
+    # fork code into it:
+    # - pull_request_target keeps the canonical same-repo guard: a fork head
+    #   stays on hosted (ephemeral), an in-repo head uses ECS.
+    # - issue_comment (/triage, /tmux, /verify) and workflow_dispatch carry no
+    #   github.event.pull_request payload at all, so the same-repo guard alone
+    #   fell through to ubuntu-latest for EVERY command — the gate then sat in
+    #   the hosted queue while the ECS pool was idle. Route them to ECS like
+    #   qwen-code-pr-review.yml's authorize and qwen-autofix.yml's
+    #   route/review-scan ("no PR payload -> no fork code -> persistent pool").
+    # The job IS the write-permission check, so it cannot route on its own
+    # output; downstream jobs (triage, tmux, verify) route on what it finds
+    # instead.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == ''issue_comment'' || github.event_name == ''workflow_dispatch'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -187,6 +199,20 @@ jobs:
           IS_PR: '${{ github.event.issue.pull_request != null }}'
         run: |-
           set -euo pipefail
+          # Harden gh against the pool's shared, writable HOME config (this
+          # gate now runs on ecs-qwen for comment/dispatch triggers): a
+          # planted ~/.config/gh (http_unix_socket) would otherwise receive
+          # CI_BOT_PAT and could forge the permission response downstream
+          # consumes. Same pins as qwen-autofix.yml's route/review-scan; no
+          # `unset GH_TOKEN` — it is this step's only credential. A failed
+          # mktemp exits 1 (fail closed), never falling back to the shared
+          # config.
+          export GH_HOST=github.com
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/triage-authorize-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
           IS_VERIFY=false
           # VERIFY_LANE is "run the verify job"; IS_VERIFY is "the commenter
           # typed /verify". They differ only for the piggybacked lane, where
@@ -358,9 +384,9 @@ jobs:
 
       # The verify job needs a scarce self-hosted runner; when the pool is
       # saturated (or disabled) the job sits queued with no visible feedback.
-      # Acknowledge the authorized request from this always-hosted job so a
-      # /verify commenter gets a receipt even when the sandbox lane is backed
-      # up. The verify job itself no longer reacts.
+      # Acknowledge the authorized request from this gate job so a /verify
+      # commenter gets a receipt even when the sandbox lane is backed up. The
+      # verify job itself no longer reacts.
       # `github.event.issue.pull_request` is required here as well as on the
       # verify job: /verify on a plain issue would otherwise be acknowledged
       # with 👀 while the verify job's own PR guard skips it and
@@ -377,6 +403,13 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           COMMENT_ID: '${{ github.event.comment.id }}'
         run: |-
+          # gh config reroute hardening — same pins as the perm step above.
+          export GH_HOST=github.com
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/triage-authorize-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
           gh api \
             --method POST \
             "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
@@ -400,6 +433,13 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           NUMBER: '${{ github.event.issue.number }}'
         run: |-
+          # gh config reroute hardening — same pins as the perm step above.
+          export GH_HOST=github.com
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/triage-authorize-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
           printf -v BODY '%s\n\n%s' \
             '**Sandboxed verification unavailable** — the maintainer runner pool is currently disabled, so `/verify` cannot run. Try again once the pool is back, or use `@qwen-code /triage` for the static review.' \
             '**沙箱验证当前不可用** —— 维护者 runner 池已停用，`/verify` 无法运行。请待恢复后重试，或使用 `@qwen-code /triage` 进行静态评审。'

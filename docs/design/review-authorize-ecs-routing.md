@@ -1,4 +1,4 @@
-# Route the /review and /resolve permission gate to the ECS pool
+# Route the command permission gates to the ECS pool
 
 [English](review-authorize-ecs-routing.md) | [简体中文](review-authorize-ecs-routing.zh-CN.md)
 
@@ -57,8 +57,10 @@ hosted pin.
 
 ## Scope boundaries
 
-- **In scope:** the `authorize` job's `runs-on` expression and its explanatory
-  comment; a meta-test pinning the new routing.
+- **In scope:** the `authorize` gate's `runs-on` expression, its explanatory
+  comment, and the gh config hardening of its PAT-bearing steps, in both
+  `qwen-code-pr-review.yml` (/review, /resolve) and `qwen-triage.yml`
+  (/triage, /tmux, /verify); meta-tests pinning the new routing and hardening.
 - **Out of scope:** the `resolve-pr` agent job and the `publish-resolution` job.
   Both are deliberately pinned to `ubuntu-latest` for ephemerality (the agent
   runs untrusted PR content with `tools.sandbox: false`, and the publish job
@@ -165,6 +167,22 @@ PAT-bearing API call cannot be rerouted through the pool's shared, writable
   the push. This change removes the gate wait only; it is not a claim that
   `/resolve` becomes queue-free.
 
+## Extension to the triage command gate
+
+`qwen-triage.yml`'s `authorize` had the identical payload-only blind spot for
+its `/triage`, `/tmux`, and `/verify` comments (and its `tmux_pr` dispatch), so
+the same two disjuncts are applied to its `runs-on`. Unlike the review gate's
+single step, this job has **three** steps that spend `CI_BOT_PAT` on `gh` — the
+permission check, the verify acknowledgement, and the disabled-lane notice —
+and each now opens with the same self-contained `GH_HOST` + guarded
+`GH_CONFIG_DIR` preamble, per the repo's per-step convention. Moving the gate
+to the pool without hardening every one of those steps would reproduce the
+R2-1 reroute, so the hardening is not optional here. A meta-test in
+`.github/scripts/qwen-triage-workflow.test.mjs` pins the disjuncts, the
+checkout-free / no-splice invariants, and the hardening on every gh-calling
+step. The workflow's recorded size baseline (`.github/workflows/.size-baseline`)
+is raised to match the added hardening.
+
 ## Validation plan
 
 - A meta-test in `scripts/tests/qwen-pr-review-workflow.test.js` pins the exact
@@ -172,21 +190,32 @@ PAT-bearing API call cannot be rerouted through the pool's shared, writable
   events reach ECS; the same-repo fork guard, the hosted fallback, and the ECS
   kill switch are all still present; the job stays checkout-free (no `uses:`
   step); its step inventory is exactly the one permission step with no `${{`
-  spliced into any `run:` body; and the step carries the gh config pins
-  (`GH_HOST=github.com` plus a private, guarded `GH_CONFIG_DIR`).
-- Mutation witnesses (verified locally): reverting the expression to the old
-  same-repo-only form, adding a `uses:` step, adding a run-only second step, or
-  removing the gh config preamble each makes the test fail; restoring passes.
+  spliced into any `run:` body. On the comment-stripped live lines it also pins
+  the guarded `mktemp` form and fail-closed shape (`exit 1 … fi … export`), that
+  `GH_HOST`/`GH_CONFIG_DIR` are exported before the first `gh api`, and that the
+  body executes no repository code via a relative path or interpreter (the pool
+  cwd is the reused `$GITHUB_WORKSPACE`).
+- Mutation witnesses (verified locally): reverting the expression, adding a
+  `uses:` step, adding a run-only second step, removing the gh preamble,
+  replacing the guarded block with an unguarded one-liner, or appending a
+  `node ./…` execution line each makes the test fail; restoring passes.
 - Full `qwen-pr-review-workflow.test.js` (271 tests) and
   `qwen-resolve-workflow.test.js` (55 tests) pass.
+- The triage gate is pinned by `.github/scripts/qwen-triage-workflow.test.mjs`
+  (131 tests) and the routing matrix in
+  `.github/scripts/ci-runner-routing.test.mjs` (103 tests); both pass. Mutation
+  witnesses: reverting the triage disjuncts or removing a gh step's preamble
+  each reds the triage test.
 
 ## Acceptance criteria
 
-- `authorize` routes `issue_comment` and `workflow_dispatch` to the ECS pool when
-  the repository guard and kill switch allow.
+- Both `authorize` gates (review and triage) route `issue_comment` and
+  `workflow_dispatch` to the ECS pool when the repository guard and kill switch
+  allow.
 - PR-payload events keep their existing same-repo/fork routing.
-- The gate step keeps the gh config pins and the checkout-free / no-splice
-  invariants; the pinning meta-test kills a mutation of each.
+- Every PAT-bearing gate step keeps the gh config pins (guarded, before the gh
+  call) and the checkout-free / no-splice / no-repository-code invariants; the
+  pinning meta-tests kill a mutation of each.
 - No other job's routing changes.
 
 ## Open questions

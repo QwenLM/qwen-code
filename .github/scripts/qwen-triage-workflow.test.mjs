@@ -771,6 +771,62 @@ describe('qwen-triage: runner routing under token isolation', () => {
     assert.doesNotMatch(authorizeRunsOn, /needs\./);
   });
 
+  it('routes the payload-less command triggers to ECS and keeps the gate hardened', () => {
+    // Same fix as qwen-code-pr-review.yml's authorize: issue_comment
+    // (/triage, /tmux, /verify) and workflow_dispatch carry no
+    // github.event.pull_request payload, so the same-repo guard alone fell
+    // through to ubuntu-latest for every command. Route them to the pool,
+    // keeping the hosted fallback and the kill switch.
+    assert.match(authorizeRunsOn, /github\.event_name == 'issue_comment'/);
+    assert.match(authorizeRunsOn, /github\.event_name == 'workflow_dispatch'/);
+    assert.match(authorizeRunsOn, /fromJSON\('\["ubuntu-latest"\]'\)/);
+    assert.match(
+      authorizeRunsOn,
+      /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
+    );
+    // The gate stays checkout-free and splices no event value into a shell
+    // (everything arrives through env:).
+    assert.ok(authorizeJob.steps.every((s) => s.uses === undefined));
+    for (const s of authorizeJob.steps) {
+      assert.ok(
+        !String(s.run ?? '').includes('${{'),
+        `step splices an expression into the shell: ${s.name}`,
+      );
+    }
+    // Every step that spends CI_BOT_PAT on gh pins gh's config resolution
+    // (GH_HOST + a private, guarded GH_CONFIG_DIR), like the sibling pool
+    // jobs; a planted shared ~/.config/gh must not receive the PAT.
+    const ghSteps = authorizeJob.steps.filter((s) =>
+      /gh (api|pr) /.test(String(s.run ?? '')),
+    );
+    assert.ok(ghSteps.length >= 1, 'expected at least one gh-calling step');
+    const guard =
+      'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/triage-authorize-gh-config.XXXXXX")"; then';
+    for (const s of ghSteps) {
+      // Evaluate the live (comment-stripped) lines, not mere substrings: an
+      // unguarded mktemp one-liner or a preamble moved below the first gh
+      // call must red this, and the body must execute no repository code
+      // from the reused pool workspace.
+      const live = String(s.run)
+        .split('\n')
+        .filter((l) => !l.trim().startsWith('#'))
+        .join('\n');
+      assert.ok(live.includes('export GH_HOST=github.com'), s.name);
+      assert.ok(live.includes(guard), s.name);
+      assert.match(live, /exit 1\n\s*fi\n\s*export GH_CONFIG_DIR\n/, s.name);
+      const firstGh = live.search(/gh (api|pr) /);
+      assert.ok(firstGh > -1, s.name);
+      assert.ok(live.indexOf('export GH_HOST=github.com') < firstGh, s.name);
+      assert.ok(live.indexOf(guard) < firstGh, s.name);
+      assert.doesNotMatch(live, /(^|[\s;&|(`])(\.{1,2}\/)/m, s.name);
+      assert.doesNotMatch(
+        live,
+        /(^|[\s;&|(`])(source|bash|sh|node|python3?|npx|npm|pnpm|yarn)\s+[^\s-]/m,
+        s.name,
+      );
+    }
+  });
+
   it('retires author_can_write (its only consumer was triage routing)', () => {
     assert.equal(authorizeJob.outputs.author_can_write, undefined);
     const perm = authorizeJob.steps.find((s) => s.id === 'perm');
