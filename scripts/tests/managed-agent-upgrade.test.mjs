@@ -2686,10 +2686,11 @@ test('start and verify use server.env when the configuration does not resolve', 
   for (const harnessUrl of [
     'http://127.0.0.1:4172/@acme/harness',
     'http://gateway.example.com/@acme/harness',
-    // An escape, an IPv6 address, and a label that starts with a digit
-    // before the last one.
+    // An escape, an IPv6 address, a trailing DNS root dot, and a label
+    // that starts with a digit before the last one.
     'http://127.0.0.1:4172/a%20b',
     'http://[::1]:4172',
+    'http://harness.internal.:4170/',
     'http://1st.harness.internal:4172/',
   ]) {
     await writeFile(

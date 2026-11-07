@@ -2871,9 +2871,10 @@ function harnessUrlReason(text, url) {
 // The Harness base URLs start takes when the server gives no verdict: an
 // http(s) URL whose authority is a host name as java.net.URI reads one,
 // labels of letters, digits and inner hyphens whose last starts with a
-// letter, a dotted-quad IPv4 address or a bracketed IPv6 address without an
-// embedded IPv4 one, and an optional port, and whose path holds only the
-// characters a URI path may, untrimmed, a % only as the start of an escape.
+// letter and which may end in one DNS root dot, a dotted-quad IPv4 address
+// or a bracketed IPv6 address without an embedded IPv4 one, and an optional
+// port, and whose path holds only the characters a URI path may, untrimmed,
+// a % only as the start of an escape.
 // It is narrower than the server's rule, never wider.
 const LABEL = '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?';
 const OCTET = '(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])';
@@ -2888,7 +2889,7 @@ const IPV6 = [
   '::',
 ].join('|');
 const PLAIN_HTTP_URL = new RegExp(
-  `^https?://(?:(?:${LABEL}\\.)*[A-Za-z](?:[A-Za-z0-9-]*[A-Za-z0-9])?|${OCTET}(?:\\.${OCTET}){3}|\\[(?:${IPV6})\\])(?::[0-9]{1,5})?(?:/(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9\\-._~!$&'()*+,;=:@/])*)?$`,
+  `^https?://(?:(?:${LABEL}\\.)*[A-Za-z](?:[A-Za-z0-9-]*[A-Za-z0-9])?\\.?|${OCTET}(?:\\.${OCTET}){3}|\\[(?:${IPV6})\\])(?::[0-9]{1,5})?(?:/(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9\\-._~!$&'()*+,;=:@/])*)?$`,
   'i',
 );
 
