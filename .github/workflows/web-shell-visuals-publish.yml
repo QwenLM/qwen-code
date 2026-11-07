@@ -60,6 +60,15 @@ jobs:
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
+      # A reused slot keeps the previous job's .git, hooks included, and git
+      # still runs post-checkout hooks after actions/checkout resets the tree —
+      # so the pinned trusted ref alone does not keep old job code out. Drop
+      # the metadata first, exactly as the other pool-routed checkouts do.
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       # Trusted base-repo scripts. workflow_run checks out the default branch,
       # never PR code (the PR head is github.event.workflow_run.head_sha,
       # consumed below as RUN_HEAD_SHA — never as a checkout ref). Sparse —

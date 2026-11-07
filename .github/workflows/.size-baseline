@@ -74,6 +74,6 @@
 6206 verify-landlock-helper.yml
 5575 verify-maven-repo.yml
 2307 web-shell-visuals-cleanup.yml
-22132 web-shell-visuals-publish.yml
+22607 web-shell-visuals-publish.yml
 17127 web-shell-visuals.yml
 5155 windows-runner-smoke.yml

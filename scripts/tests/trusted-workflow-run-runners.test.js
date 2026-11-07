@@ -47,11 +47,13 @@ describe('trusted workflow_run publish lane', () => {
     ]);
   });
 
-  it('repairs a reused slot before the trusted checkout', () => {
+  it('repairs a reused slot and drops its Git metadata before checkout', () => {
     const steps = publish().steps;
     expect(steps[0].name).toBe('Restore workspace ownership');
     expect(steps[0].if).toContain('self-hosted');
-    expect(steps[1].name).toBe('Checkout the publish scripts');
+    expect(steps[1].name).toBe('Recreate runner Git metadata');
+    expect(steps[1].run).toContain('rm -rf -- "$GITHUB_WORKSPACE/.git"');
+    expect(steps[2].name).toBe('Checkout the publish scripts');
   });
 });
 
