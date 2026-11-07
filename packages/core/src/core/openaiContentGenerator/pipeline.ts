@@ -1951,7 +1951,14 @@ export class ContentGenerationPipeline {
           { model, originalError: getErrorMessage(error) },
         );
         try {
-          return await executeAttempt({ ...context, modalities: {} });
+          // The retry disables media itself, so its placeholders must not
+          // repeat the configured source: an entry that *does* declare image
+          // support is exactly why the image went on the wire.
+          return await executeAttempt({
+            ...context,
+            modalities: {},
+            modalitiesSourceKind: undefined,
+          });
         } catch (retryError) {
           return await this.handleError(retryError, context, request);
         }
@@ -2048,6 +2055,26 @@ export class ContentGenerationPipeline {
     );
     const providerOverrides =
       this.config.provider.getRequestContextOverrides?.() ?? {};
+    // The sources belong to the cliConfig's own (primary) model. A generator
+    // built for another model — a sub-agent, a side query — must not report
+    // the primary's modalities source in its own refusal.
+    //
+    // The identity test compares the generator's own config with the one the
+    // cliConfig reports as current, never model names: inside a runtime view
+    // `cliConfig.getModel()` already answers with the view's model, so a name
+    // comparison makes a sub-agent's generator match itself and inherit the
+    // primary's source (QwenLM/qwen-code#16185).
+    const currentConfig = this.config.cliConfig.getContentGeneratorConfig?.();
+    const onPrimaryModel =
+      currentConfig?.model !== undefined &&
+      this.contentGeneratorConfig.model === currentConfig.model &&
+      (currentConfig.authType === undefined ||
+        this.contentGeneratorConfig.authType === currentConfig.authType);
+    const modalitiesSource = onPrimaryModel
+      ? this.config.cliConfig.getContentGeneratorConfigSources?.()['modalities']
+      : undefined;
+    const modalitiesSourceKind = modalitiesSource?.kind;
+    const configModel = this.contentGeneratorConfig.model;
     const toolCallParser = isStreaming
       ? new StreamingToolCallParser()
       : undefined;
@@ -2061,6 +2088,17 @@ export class ContentGenerationPipeline {
     return {
       model: effectiveModel,
       modalities: this.contentGeneratorConfig.modalities ?? {},
+      // `model` is the wire model, which `extra_body.model` /
+      // `samplingParams.model` can override; the kind describes the config's
+      // own modalities, so a refusal must not pair the two when they differ.
+      ...(modalitiesSourceKind && effectiveModel === configModel
+        ? {
+            modalitiesSourceKind,
+            ...(modalitiesSource?.via?.kind
+              ? { modalitiesSourceViaKind: modalitiesSource.via.kind }
+              : {}),
+          }
+        : {}),
       startTime: Date.now(),
       splitToolMedia:
         providerOverrides.splitToolMedia ??

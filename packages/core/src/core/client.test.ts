@@ -230,11 +230,16 @@ vi.mock('./prompts', async (importOriginal) => {
     resolvePathFromEnv: vi.fn(),
   };
 });
+const realBuildAgentContentGeneratorConfig = vi.hoisted(() => ({
+  fn: undefined as unknown as (typeof import('../models/content-generator-config.js'))['buildAgentContentGeneratorConfig'],
+}));
 vi.mock('../models/content-generator-config.js', async (importOriginal) => {
   const actual =
     await importOriginal<
       typeof import('../models/content-generator-config.js')
     >();
+  realBuildAgentContentGeneratorConfig.fn =
+    actual.buildAgentContentGeneratorConfig;
   return {
     ...actual,
     buildAgentContentGeneratorConfig: vi
@@ -15756,6 +15761,16 @@ Other open files:
   });
 
   describe('generateContent with fast model', () => {
+    // The suite-level `beforeEach` resets every mock, which also drops the
+    // pass-through implementation `vi.mock` installed above; without it the
+    // builder returns `undefined`, view creation throws, and the request
+    // silently runs on the main generator instead of the fast model.
+    beforeEach(() => {
+      vi.mocked(buildAgentContentGeneratorConfig).mockImplementation(
+        realBuildAgentContentGeneratorConfig.fn,
+      );
+    });
+
     /** A registry entry for `fast-model` under the OpenAI auth type. */
     const fastModel = (extra: Record<string, unknown> = {}) => ({
       id: 'fast-model',

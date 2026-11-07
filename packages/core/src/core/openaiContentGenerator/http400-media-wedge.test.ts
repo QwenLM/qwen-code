@@ -176,6 +176,12 @@ function createGenerator(modalities?: InputModalities): OpenAIContentGenerator {
     getCliVersion: () => '0.0.0-test',
     getProxy: () => undefined,
     getSessionId: () => 'test-session',
+    // The generator above is this Config's own model, so its sources apply —
+    // unless the retry below degrades the media, in which case they must not.
+    getContentGeneratorConfig: () => contentGeneratorConfig,
+    getContentGeneratorConfigSources: () => ({
+      modalities: { kind: 'modelProviders' },
+    }),
   } as unknown as Config;
   const provider = new DefaultOpenAICompatibleProvider(
     contentGeneratorConfig,
@@ -250,6 +256,33 @@ function bodyHasPartType(
 }
 
 describe('issue #10693: gateway 400 on media-bearing OpenAI-compatible requests', () => {
+  it('drops the modalities source on the degraded retry', async () => {
+    // The entry *does* declare image support — that is why the image went on
+    // the wire — so a retry placeholder naming that declaration would send the
+    // operator to a key that is already correct (QwenLM/qwen-code#16185).
+    const response = await generate(
+      { image: true },
+      mediaBearingContents(),
+      'prompt-16185-source',
+    );
+
+    expect(hasOkText(response)).toBe(true);
+    expect(receivedBodies).toHaveLength(2);
+    // The declaration is exactly why the first attempt carried the image.
+    expect(requestHasInlineMedia(receivedBodies[0]!)).toBe(true);
+    expect(bodyHasPlaceholder(receivedBodies[1]!)).toBe(true);
+    expect(bodyHasPlaceholder(receivedBodies[1]!, 'this provider entry')).toBe(
+      false,
+    );
+    // The bare sentence is what the placeholder falls back to.
+    expect(
+      bodyHasPlaceholder(
+        receivedBodies[1]!,
+        "Model 'qwen3.8-max-dogfooding' does not support image input.",
+      ),
+    ).toBe(true);
+  });
+
   it.each(MEDIA_CASES)(
     'recovers $name by retrying once with the media degraded to a placeholder',
     async (media) => {

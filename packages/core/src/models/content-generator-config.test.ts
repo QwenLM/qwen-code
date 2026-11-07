@@ -641,6 +641,152 @@ describe('createRuntimeContentGeneratorView', () => {
   });
 });
 
+describe('createRuntimeContentGeneratorView modalities source', () => {
+  const primary: ContentGeneratorConfig = {
+    model: 'primary-model',
+    authType: 'openai' as ContentGeneratorConfig['authType'],
+    apiKey: 'primary-key',
+    baseUrl: 'https://primary.example.com',
+  };
+  /** The session's sources: the primary model's modalities came from settings. */
+  const sessionSources = {
+    modalities: {
+      kind: 'settings' as const,
+      settingsPath: 'model.generationConfig.modalities',
+    },
+  };
+
+  /** A Config whose providers map declares `models` for the openai protocol. */
+  function configWithProviders(
+    models: Array<{ id: string; modalities?: Record<string, boolean> }>,
+  ): Config {
+    return {
+      getContentGeneratorConfig: () => primary,
+      getContentGeneratorConfigSources: () => sessionSources,
+      getModelProvidersConfig: () => ({
+        local: models.map((m) => ({
+          id: m.id,
+          baseUrl: 'https://local.example/v1',
+          generationConfig:
+            m.modalities === undefined ? {} : { modalities: m.modalities },
+        })),
+      }),
+      getModelsConfig: () => ({
+        getResolvedModel: (authType: string, modelId: string) => {
+          const entry = models.find((m) => m.id === modelId);
+          return entry
+            ? {
+                id: entry.id,
+                authType,
+                baseUrl: 'https://local.example/v1',
+                registryBaseUrl: 'https://local.example/v1',
+                envKey: 'LOCAL_API_KEY',
+                // The registry fills a missing modalities with the name-based
+                // default; the raw provider entry above is what decides.
+                generationConfig: {
+                  modalities: entry.modalities ?? { image: true },
+                },
+                capabilities: {},
+              }
+            : undefined;
+        },
+      }),
+    } as unknown as Config;
+  }
+
+  beforeEach(() => {
+    vi.mocked(createContentGenerator).mockReset();
+    vi.mocked(createContentGenerator).mockResolvedValue(
+      {} as Awaited<ReturnType<typeof createContentGenerator>>,
+    );
+  });
+
+  const viewFor = (config: Config, modelId: string) =>
+    createRuntimeContentGeneratorView(config, config, modelId, {
+      authType: 'openai',
+    });
+
+  it('does not hand the primary model’s source to an agent on another model', async () => {
+    const view = await viewFor(
+      configWithProviders([{ id: 'agent-model' }]),
+      'agent-model',
+    );
+
+    expect(view.configSources?.['modalities']).toEqual({
+      kind: 'computed',
+      detail: "auto-detected from 'agent-model'",
+      // Derived through the agent's own provider route, so the refusal advice
+      // stays on `modelProviders` rather than naming the settings key.
+      via: {
+        kind: 'modelProviders',
+        authType: 'openai',
+        modelId: 'agent-model',
+        detail: 'generationConfig',
+      },
+    });
+  });
+
+  it('attributes a provider-declared modalities to the agent’s own entry', async () => {
+    const view = await viewFor(
+      configWithProviders([
+        { id: 'agent-model', modalities: { image: true, pdf: true } },
+      ]),
+      'agent-model',
+    );
+
+    expect(view.configSources?.['modalities']).toMatchObject({
+      kind: 'modelProviders',
+      modelId: 'agent-model',
+    });
+  });
+
+  it('keeps the session’s sources for a view on the session’s own model', async () => {
+    const view = await viewFor(
+      configWithProviders([{ id: 'agent-model' }]),
+      undefined as unknown as string,
+    );
+
+    expect(view.configSources?.['modalities']).toEqual(
+      sessionSources.modalities,
+    );
+  });
+
+  it('does not hand the session’s source to a model switch within one auth type', async () => {
+    // `modelId === undefined` with the *same* auth type keeps the session's
+    // map; a provider switch under it must not, since the session's
+    // `modalities` value was resolved for the other provider's entry.
+    const config = configWithProviders([{ id: 'agent-model' }]);
+    const view = await createRuntimeContentGeneratorView(
+      config,
+      config,
+      undefined,
+      { authType: 'anthropic' },
+    );
+
+    expect(view.configSources?.['modalities']?.['kind']).not.toBe('settings');
+  });
+
+  it('falls back the same-provider route to the session’s source, or computed', async () => {
+    // No registry entry and no provider switch: the builder kept the parent's
+    // settings-declared modalities, so the session's source describes it.
+    const config = {
+      ...configWithProviders([]),
+      getAuthType: () => 'openai',
+      getModelsConfig: () => ({ getResolvedModel: () => undefined }),
+    } as unknown as Config;
+    const view = await createRuntimeContentGeneratorView(
+      config,
+      config,
+      'unregistered-model',
+      { authType: 'openai' },
+    );
+
+    expect(view.configSources?.['modalities']).toEqual(
+      sessionSources.modalities,
+    );
+  });
+});
+
 describe('resolveCredentialField', () => {
   afterEach(() => {
     vi.unstubAllEnvs();

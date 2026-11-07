@@ -380,8 +380,14 @@ export async function runHostedHarnessTextTurn(input: {
     );
   else if (!sessionModelConfig) await applyHostedModelPin(config, model);
   if (input.publicChildModelRoute?.origin) {
-    // Config falls back to its own generator until authentication fills this frame.
-    const view = {} as RuntimeContentGeneratorView;
+    // Config falls back to its own generator until authentication fills this
+    // frame. The pin does not resolve a provider entry yet, so the value's
+    // modalities are the name-based default rather than anything declared.
+    const view = {
+      configSources: {
+        modalities: { kind: 'computed', detail: 'hosted model pin' },
+      },
+    } as unknown as RuntimeContentGeneratorView;
     return runWithRuntimeContentGenerator(view, () =>
       runPreparedHostedHarnessTextTurn(input, config, model, view),
     );

@@ -7,7 +7,10 @@
 import process from 'node:process';
 
 import { AuthType } from '../core/contentGenerator.js';
-import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
+import type {
+  ContentGeneratorConfig,
+  InputModalities,
+} from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER } from '../qwen/oauth-config.js';
@@ -24,8 +27,10 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   ModelRegistry,
   resolveModelSelectionAuthType,
+  tryResolveModelProtocol,
 } from './modelRegistry.js';
 import {
+  type ModelConfig,
   type ModelProvidersConfig,
   type ProviderProtocolConfig,
   type ResolvedModelConfig,
@@ -864,11 +869,19 @@ export class ModelsConfig {
    * Clear configuration fields that were sourced from modelProviders.
    * This ensures provider config atomicity when user manually sets credentials.
    * Other layers (CLI, env, settings, defaults) will participate in resolve.
+   *
+   * A field the chosen entry leaves silent is labelled by what the registry
+   * derived (`computed`/`default`) with the route recorded in `via`, so it must
+   * be cleared too: otherwise a value like a model-name-detected `modalities`
+   * outlives the model it described and is sent to the manually configured one.
    */
   private clearProviderSourcedConfig(): void {
     for (const field of PROVIDER_SOURCED_FIELDS) {
       const source = this.generationConfigSources[field];
-      if (source?.kind === 'modelProviders') {
+      if (
+        source?.kind === 'modelProviders' ||
+        source?.via?.kind === 'modelProviders'
+      ) {
         // Clear the value - let other layers resolve it
         delete (this._generationConfig as Record<string, unknown>)[field];
         delete this.generationConfigSources[field];
@@ -989,15 +1002,57 @@ export class ModelsConfig {
 
     // Generation config: apply all fields from MODEL_GENERATION_CONFIG_FIELDS
     const gc = model.generationConfig;
+    // Whether the entry's own text declared a field, before the registry filled
+    // the missing ones from the model name — `model.generationConfig` cannot
+    // tell the two apart, and a refusal that names a key the entry does not
+    // contain sends the operator to edit something that is not there
+    // (QwenLM/qwen-code#16185).
+    const entry = this.findDeclaredEntry(model);
+    const declared = entry?.generationConfig;
+    // A derived field still came from the provider route, so `via` records that
+    // provenance: `clearProviderSourcedConfig()` follows it and keeps provider
+    // atomicity on `updateCredentials()` without the label pretending the user
+    // declared the value.
+    const derivedVia =
+      entry === undefined
+        ? undefined
+        : {
+            kind: 'modelProviders' as const,
+            authType: model.authType,
+            modelId: model.id,
+            detail: 'generationConfig',
+          };
     for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this._generationConfig as any)[field] = gc[field];
-      this.generationConfigSources[field] = {
-        kind: 'modelProviders',
-        authType: model.authType,
-        modelId: model.id,
-        detail: `generationConfig.${field}`,
-      };
+      // `modalities` is the one field the registry can replace wholesale: for
+      // a family whose capabilities are fixed by the model name it canonicalises
+      // the entry's own value away (`shouldUseCanonicalModalities`). Labelling
+      // the used value as declared would then point a refusal at a key that
+      // already says the operator wants the refused modality.
+      const declaredIsUsed =
+        declared?.[field] !== undefined &&
+        (field !== 'modalities' ||
+          ModelsConfig.sameModalities(declared.modalities, gc.modalities));
+      this.generationConfigSources[field] = declaredIsUsed
+        ? {
+            kind: 'modelProviders',
+            authType: model.authType,
+            modelId: model.id,
+            detail: `generationConfig.${field}`,
+          }
+        : // The entry says nothing about this field, or the registry replaced
+          // what it said. `modalities` is the one field the registry derives
+          // from the model name; every other value here is the field's own
+          // built-in default, so labelling those as auto-detected would report
+          // an inference that never happened.
+          field === 'modalities'
+          ? {
+              kind: 'computed',
+              detail: 'auto-detected from model',
+              ...(derivedVia ? { via: derivedVia } : {}),
+            }
+          : { kind: 'default', ...(derivedVia ? { via: derivedVia } : {}) };
     }
 
     // contextWindowSize fallback: auto-detect from model when not set by provider
@@ -1017,6 +1072,60 @@ export class ModelsConfig {
         detail: 'auto-detected from model',
       };
     }
+  }
+
+  /**
+   * The provider entry `model` was resolved from, as declared — not the
+   * resolved copy the registry hands back with its name-based defaults
+   * already filled in.
+   *
+   * Looked up by provider id, not by `model.authType`: the config is keyed by
+   * provider identity while the authType is the resolved SDK protocol, so
+   * indexing by protocol misses a `modelProviders.openai` entry carrying
+   * `wireApi: 'responses'` and any custom id routed by `providerProtocol`.
+   */
+  private findDeclaredEntry(
+    model: ResolvedModelConfig,
+  ): ModelConfig | undefined {
+    const providers = this.getModelProvidersConfig();
+    const protocols = this.getProviderProtocolConfig();
+    if (!providers) return undefined;
+    for (const [providerId, entries] of Object.entries(providers)) {
+      if (!Array.isArray(entries)) continue;
+      const entry = entries.find(
+        (candidate) =>
+          candidate.id === model.id &&
+          (candidate.baseUrl || undefined) === model.registryBaseUrl,
+      );
+      if (!entry) continue;
+      // Several provider ids can resolve to one protocol, so the declared
+      // endpoint above is what keeps the match on the right provider.
+      if (
+        tryResolveModelProtocol(providerId, entry, protocols) === model.authType
+      )
+        return entry;
+    }
+    return undefined;
+  }
+
+  /**
+   * Whether two `modalities` values describe the same capabilities. A field
+   * omitted and a field set to `false` both mean the modality is unsupported,
+   * so they are the same declaration.
+   */
+  private static sameModalities(
+    declared: InputModalities | undefined,
+    used: InputModalities | undefined,
+  ): boolean {
+    const keys: Array<keyof InputModalities> = [
+      'image',
+      'pdf',
+      'audio',
+      'video',
+    ];
+    return keys.every(
+      (key) => Boolean(declared?.[key]) === Boolean(used?.[key]),
+    );
   }
 
   /**

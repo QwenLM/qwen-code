@@ -12,6 +12,7 @@ import type {
 import type { Config } from '../../config/config.js';
 import type {
   ContentGeneratorConfig,
+  ContentGeneratorConfigSourceKind,
   InputModalities,
 } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
@@ -47,6 +48,19 @@ export interface StreamingTextDeltaState {
 export interface RequestContext {
   model: string;
   modalities: InputModalities;
+  /**
+   * Source the resolved `modalities` came from, when known. A media refusal
+   * names it, because a value guessed from the model name and one the user
+   * declared need different next steps (QwenLM/qwen-code#16178).
+   */
+  modalitiesSourceKind?: ContentGeneratorConfigSourceKind;
+  /**
+   * Indirect source behind `modalitiesSourceKind`, when the value was derived
+   * through another one. A `computed` value routed through `modelProviders`
+   * ignores the top-level `model.generationConfig`, so a refusal must not
+   * offer that key as the fix (QwenLM/qwen-code#16178).
+   */
+  modalitiesSourceViaKind?: ContentGeneratorConfigSourceKind;
   startTime: number;
   /**
    * Effective output-token ceiling sent on the wire (`max_tokens` or a

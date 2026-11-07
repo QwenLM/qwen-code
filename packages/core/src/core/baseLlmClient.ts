@@ -21,9 +21,16 @@ import type {
   ContentGeneratorConfig,
   PromptCacheSharingParameters,
 } from './contentGenerator.js';
-import { AuthType, createContentGenerator } from './contentGenerator.js';
+import {
+  AuthType,
+  createContentGenerator,
+  type ContentGeneratorConfigSources,
+} from './contentGenerator.js';
 import type { ResolvedModelConfig } from '../models/types.js';
-import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
+import {
+  buildAgentContentGeneratorConfig,
+  resolveAgentModalitiesSource,
+} from '../models/content-generator-config.js';
 import {
   buildModelIdContext,
   resolveModelId,
@@ -341,6 +348,11 @@ export interface ResolvedGeneratorForModel {
    * then describes the window the request is handed.
    */
   contextWindowSize?: number;
+  /**
+   * Where this generator's own config values came from. Absent on the fallback
+   * route, whose generator *is* the session's and therefore shares its sources.
+   */
+  configSources?: ContentGeneratorConfigSources;
 }
 
 /**
@@ -872,7 +884,7 @@ export class BaseLlmClient {
       };
     }
 
-    const { contentGenerator, contentGeneratorConfig } =
+    const { contentGenerator, contentGeneratorConfig, configSources } =
       await this.createRuntimeViewForModel(
         requested.model,
         selector,
@@ -910,6 +922,7 @@ export class BaseLlmClient {
         ? undefined
         : (resolvedModel?.generationConfig?.contextWindowSize ??
           tokenLimit(targetModel, 'input')),
+      ...(configSources ? { configSources } : {}),
     };
   }
 
@@ -1057,6 +1070,19 @@ export class BaseLlmClient {
             this.config,
           ),
           contentGeneratorConfig: targetConfig,
+          // A frame around this view must not read the session's sources: they
+          // describe the primary model, and this generator serves another one.
+          configSources: {
+            modalities: resolveAgentModalitiesSource(
+              this.config,
+              {
+                authType: resolvedModel.authType,
+                baseUrl: resolvedModel.baseUrl,
+              },
+              targetConfig.model,
+              resolvedModel,
+            ),
+          },
         };
       } catch (err: unknown) {
         this.perModelGeneratorCache.delete(cacheKey);

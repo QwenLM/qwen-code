@@ -24,6 +24,7 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorMessage, isAbortError, isNodeError } from './errors.js';
 import type { InputModalities } from '../core/contentGenerator.js';
+import { unsupportedModalityReason } from './unsupported-modality.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
 import {
   base64ByteLength,
@@ -1176,8 +1177,9 @@ function mediaModalityKey(
 function unsupportedModalityMessage(
   modality: string,
   displayName: string,
+  reason: string,
 ): string {
-  const hint = `This model does not support ${modality} input. The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.`;
+  const hint = `${reason} The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.`;
   return `[Unsupported ${modality} file: "${displayName}". ${hint}]`;
 }
 
@@ -1560,13 +1562,24 @@ export async function processSingleFileContent(
     const modality = mediaModalityKey(fileType);
     if (modality && modality !== 'pdf') {
       if (!modalities[modality]) {
+        const modalitiesSource =
+          config.getContentGeneratorConfigSources?.()['modalities'];
         // On the interactive @-resolution path, the caller can keep image parts
         // inline so the vision bridge can transcribe them downstream for a
         // text-only model. Other media (audio/video) are always skipped.
         const bridgeWillHandleImage =
           modality === 'image' && preserveUnsupportedImage;
         if (!bridgeWillHandleImage) {
-          const message = unsupportedModalityMessage(modality, displayName);
+          const message = unsupportedModalityMessage(
+            modality,
+            displayName,
+            unsupportedModalityReason(
+              modality,
+              config.getModel(),
+              modalitiesSource?.kind,
+              modalitiesSource?.via?.kind,
+            ),
+          );
           debugLogger.warn(
             `Model '${config.getModel()}' does not support ${modality} input. ` +
               `Skipping file: ${relativePathForDisplay}`,
