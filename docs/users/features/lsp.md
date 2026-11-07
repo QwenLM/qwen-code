@@ -312,8 +312,11 @@ Parameters:
 Diagnostics use the LSP pull methods `textDocument/diagnostic` and
 `workspace/diagnostic`; servers must support the corresponding method. Qwen
 Code does not currently consume pushed `publishDiagnostics` notifications.
-Because failed or unsupported requests are skipped, an empty result does not
-reliably prove that the file or workspace has no diagnostics.
+If every relevant server fails, or no server can be confirmed to cover the
+queried file, the operation fails with an error instead of returning an empty
+result, so an empty result means a relevant server answered with no diagnostics.
+When several servers are ready, a server that fails is skipped as long as
+another returns diagnostics, so a non-empty result can be incomplete.
 
 ### Code Actions
 
