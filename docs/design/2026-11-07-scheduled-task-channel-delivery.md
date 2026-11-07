@@ -20,7 +20,7 @@ Fully initialized daemon capabilities include the primary entry in `workspaces`,
 
 Gate editing on `channel_delivery` and discovery on `workspace_channel_observed_contacts`. Preserve saved values across capability loss, missing Channels, stale contacts, and request failures. Show understandable loading, failure, empty, and unavailable states. Only a successfully loaded Channel list establishes that a saved Channel is missing; an initial, loading, or failed request does not. A changed draft cannot be silently ignored after capability loss. The user can discard the unsaved delivery change, restoring the original target (or no target when creating a task), and save other form changes without sending a delivery update.
 
-Delivery requires `persistent`, including the current-session option. Selecting `per_run` never silently clears delivery or switches the chosen mode. Explain the restriction and reject submission until the user explicitly clears delivery or chooses a persistent mode. An unchanged existing destination can be saved without rediscovery.
+Delivery requires `persistent`, including the current-session option. Selecting `per_run` never silently clears delivery or switches the chosen mode. Show the delivery conflict hint only when a target is selected, and reject the invalid combination until the user explicitly clears delivery or chooses a persistent mode. When delivery editing is unavailable and a saved target remains, disable the `per_run` choice while retaining submission validation. Unrelated edits preserve the unchanged target without requiring rediscovery.
 
 ## Affected surfaces and risks
 
@@ -36,6 +36,6 @@ There are no blocking implementation questions. Delivery guarantees, durable ret
 
 ## Browser evidence
 
-Verified with the repository Playwright harness and intercepted daemon responses: [before](assets/scheduled-task-channel-delivery/before.png), [delivery form](assets/scheduled-task-channel-delivery/after-details.png), [saved task](assets/scheduled-task-channel-delivery/after-card.png), and [mobile restriction and long ID](assets/scheduled-task-channel-delivery/mobile.png). These screenshots demonstrate the UI, not real provider receipt.
+Verified with the repository Playwright harness and intercepted daemon responses: [before](assets/scheduled-task-channel-delivery/before.png), [delivery form](assets/scheduled-task-channel-delivery/after-details.png), [saved task](assets/scheduled-task-channel-delivery/after-card.png), and [narrow-viewport restriction and long ID](assets/scheduled-task-channel-delivery/mobile.png). This coverage uses Chromium at desktop and narrow viewport sizes; it does not exercise mobile browser projects, WebKit, or real devices. These screenshots demonstrate the UI, not real provider receipt.
 
 Browser verification against the built CLI also covered [explicit whitespace removal](assets/scheduled-task-channel-delivery/after-whitespace.png) and [a card after delivery is cleared](assets/scheduled-task-channel-delivery/after-cleared-card.png).

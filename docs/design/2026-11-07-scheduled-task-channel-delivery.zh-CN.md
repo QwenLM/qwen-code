@@ -20,7 +20,7 @@ Issue #16516 要求开放 daemon 已有能力：将成功完成的 persistent �
 
 以 `channel_delivery` 控制编辑，以 `workspace_channel_observed_contacts` 控制发现。能力丢失、频道缺失、联系人过期或请求失败均保留已保存值，显示易懂的加载、失败、空列表和不可用状态。只有成功加载的频道列表才能确认已保存的频道不存在；初始状态、加载中或请求失败均不代表频道缺失。能力丢失后不能静默忽略已修改的草稿。用户可以放弃未保存的投递修改，恢复原目标（新建任务时恢复为不投递），然后保存表单中的其他修改，而不发送投递更新。
 
-投递要求 `persistent`，包括当前会话选项。选择 `per_run` 不会自动清除投递或改变用户选择的模式。解释限制并阻止提交，直到用户主动清除投递或选择固定会话模式。保存未修改的已有目标不依赖再次发现。
+投递要求 `persistent`，包括当前会话选项。选择 `per_run` 不会自动清除投递或改变用户选择的模式。仅在已选择目标时显示投递冲突提示，并阻止提交无效组合，直到用户主动清除投递或选择固定会话模式。投递编辑不可用且仍有已保存目标时，禁用 `per_run` 选项，同时保留提交校验。无关编辑保留未修改的目标，不依赖再次发现。
 
 ## 影响面与风险
 
@@ -36,6 +36,6 @@ Issue #16516 要求开放 daemon 已有能力：将成功完成的 persistent �
 
 ## 浏览器证据
 
-通过仓库 Playwright 测试环境及拦截的 daemon 响应验证：[修改前](assets/scheduled-task-channel-delivery/before.png)、[投递表单](assets/scheduled-task-channel-delivery/after-details.png)、[保存后的任务](assets/scheduled-task-channel-delivery/after-card.png)及[移动端限制和长 ID](assets/scheduled-task-channel-delivery/mobile.png)。这些截图展示 UI，不代表真实平台收件。
+通过仓库 Playwright 测试环境及拦截的 daemon 响应验证：[修改前](assets/scheduled-task-channel-delivery/before.png)、[投递表单](assets/scheduled-task-channel-delivery/after-details.png)、[保存后的任务](assets/scheduled-task-channel-delivery/after-card.png)及[窄视口下的限制和长 ID](assets/scheduled-task-channel-delivery/mobile.png)。本次覆盖 Chromium 的桌面及窄视口尺寸，未运行移动浏览器测试项目、WebKit 或真机测试。这些截图展示 UI，不代表真实平台收件。
 
 针对打包后的 CLI 的浏览器验证还覆盖了[明确去除首尾空白](assets/scheduled-task-channel-delivery/after-whitespace.png)及[清除投递后的卡片](assets/scheduled-task-channel-delivery/after-cleared-card.png)。

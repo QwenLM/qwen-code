@@ -174,7 +174,7 @@ export function ScheduledTaskDeliveryFields({
             {t('scheduledTasks.delivery.unavailable')}
           </FieldDescription>
         )}
-        {available && perRun && (
+        {available && perRun && hasTarget && (
           <FieldDescription>
             {t('scheduledTasks.delivery.perRun')}
           </FieldDescription>

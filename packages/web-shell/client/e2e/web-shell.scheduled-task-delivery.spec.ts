@@ -309,7 +309,27 @@ test('creates, preserves, changes and explicitly clears scheduled delivery @smok
   );
   await page.screenshot({ path: info.outputPath('delivery-saved-card.png') });
   state.hideContacts();
+  const refreshedContacts = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname ===
+      '/workspace/channel/observed-contacts',
+  );
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const contactsResponse = await refreshedContacts;
+  await contactsResponse.finished();
+  expect(await contactsResponse.json()).toEqual({ users: [], groups: [] });
+  const suggestions = page.getByRole('combobox', {
+    name: 'Suggested destination',
+    exact: true,
+  });
+  await expect(suggestions).toBeEnabled();
+  await expect(suggestions).not.toContainText('chat-1');
+  await expect(
+    page.getByText(
+      'This destination is not in the recent suggestions. Its ID is preserved; contact discovery is not required for delivery.',
+      { exact: true },
+    ),
+  ).toBeVisible();
   await expect(
     page.getByRole('textbox', { name: 'Destination ID', exact: true }),
   ).toHaveValue('chat-1');
@@ -393,15 +413,34 @@ test('uses the primary cwd when bootstrap capabilities omit workspaces @smoke', 
   });
 });
 
-test('requires an explicit resolution of per-run delivery and supports mobile layout @smoke', async ({
+test('requires explicit per-run delivery resolution in a narrow Chromium viewport @smoke', async ({
   page,
   baseURL,
 }, info) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const state = await install(page, baseURL!);
-  await createForm(page);
+  await page
+    .getByRole('button', { name: 'New scheduled task', exact: true })
+    .click();
+  await expect(page.getByRole('combobox', { name: /^Run in/ })).toHaveValue(
+    'per_run',
+  );
+  const conflictHint = page.getByText(
+    'A new session every run does not support Channel delivery. Choose a persistent session or turn delivery off before saving.',
+    { exact: true },
+  );
+  await expect(conflictHint).not.toBeVisible();
+  await page
+    .getByRole('textbox', { name: 'Prompt', exact: true })
+    .fill('Summarize the project');
   await selectDelivery(page);
+  await expect(conflictHint).toBeVisible();
+  await page
+    .getByRole('combobox', { name: /^Run in/ })
+    .selectOption('dedicated');
+  await expect(conflictHint).not.toBeVisible();
   await page.getByRole('combobox', { name: /^Run in/ }).selectOption('per_run');
+  await expect(conflictHint).toBeVisible();
   await expect(
     page.getByRole('textbox', { name: 'Destination ID', exact: true }),
   ).toHaveValue('chat-1');
@@ -455,6 +494,15 @@ test('preserves saved targets without delivery capability @smoke', async ({
   await expect(
     page.getByRole('textbox', { name: 'Destination ID', exact: true }),
   ).toBeDisabled();
+  const runIn = page.getByRole('combobox', { name: /^Run in/ });
+  await expect(runIn).toBeEnabled();
+  await expect(runIn).toHaveValue('dedicated');
+  await expect(
+    runIn.getByRole('option', {
+      name: 'A new session every run',
+      exact: true,
+    }),
+  ).toHaveJSProperty('disabled', true);
   await page
     .getByRole('textbox', { name: 'Name', exact: true })
     .fill('Renamed without capability');

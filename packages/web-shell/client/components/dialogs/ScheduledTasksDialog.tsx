@@ -1844,7 +1844,10 @@ export function ScheduledTasksDialog({
                   );
                 }}
               >
-                <option value="per_run">
+                <option
+                  value="per_run"
+                  disabled={!deliveryAvailable && delivery !== null}
+                >
                   {t('scheduledTasks.sessionMode.perRun')}
                 </option>
                 <option value="dedicated">

@@ -2956,10 +2956,30 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     );
   });
 
+  it('only warns about per-run delivery while a target is selected', async () => {
+    const warning =
+      'A new session every run does not support Channel delivery.';
+    await mount([], options);
+    await openCreate();
+    expect(findSessionModeSelect()?.value).toBe('per_run');
+    expect(channelSelect().value).toBe('');
+    expect(document.body.textContent).not.toContain(warning);
+    select(channelSelect(), 'team-bot');
+    await flush();
+    expect(document.body.textContent).toContain(warning);
+    select(channelSelect(), '');
+    expect(document.body.textContent).not.toContain(warning);
+  });
+
   it('hides delivery for a daemon without the capability', async () => {
     await mount([], { ...options, deliveryAvailable: false });
     await openCreate();
     expect(channelSelect()).toBeNull();
+    expect(
+      findSessionModeSelect()?.querySelector<HTMLOptionElement>(
+        'option[value="per_run"]',
+      )?.disabled,
+    ).toBe(false);
     expect(actions.listChannelObservedContacts).not.toHaveBeenCalled();
     click(findButton('Create'));
     await flush();
@@ -3139,12 +3159,12 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     );
   });
 
-  it('preserves saved delivery without capability and offers no discovery', async () => {
+  it('preserves saved delivery and persistent mode without capability', async () => {
     const saved = {
       ...delivery,
       target: { ...delivery.target, id: ' group-1 ' },
     };
-    await mount([baseTask({ delivery: saved })], {
+    await mount([baseTask({ delivery: saved, sessionMode: 'persistent' })], {
       ...options,
       deliveryAvailable: false,
     });
@@ -3154,8 +3174,53 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     expect(actions.listChannelObservedContacts).not.toHaveBeenCalled();
     expect(targetInput().value).toBe(' group-1 ');
     expect(findButton('Remove surrounding whitespace')?.disabled).toBe(true);
+    expect(findSessionModeSelect()?.value).toBe('dedicated');
+    expect(
+      findSessionModeSelect()?.querySelector<HTMLOptionElement>(
+        'option[value="per_run"]',
+      )?.disabled,
+    ).toBe(true);
+    input(
+      document.querySelector<HTMLInputElement>('input[maxlength="200"]')!,
+      'Renamed without changing delivery',
+    );
     click(findButton('Save'));
     await flush();
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({
+        name: 'Renamed without changing delivery',
+        sessionMode: 'persistent',
+      }),
+      undefined,
+    );
+    expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
+      'delivery',
+    );
+  });
+
+  it('blocks a selected per-run conflict after delivery capability disappears', async () => {
+    const { rerender } = await mount([baseTask({ delivery })], options);
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+    select(findSessionModeSelect()!, 'per_run');
+    await rerender({ ...options, deliveryAvailable: false });
+    expect(findSessionModeSelect()?.value).toBe('per_run');
+    expect(targetInput().value).toBe('group-1');
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'A new session every run does not support Channel delivery.',
+    );
+    select(findSessionModeSelect()!, 'dedicated');
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({ sessionMode: 'persistent' }),
+      undefined,
+    );
     expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
       'delivery',
     );
@@ -3207,6 +3272,11 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     await mount([baseTask({ delivery })], options);
     click(document.querySelector('[aria-label="Edit"]'));
     await flush();
+    expect(
+      findSessionModeSelect()?.querySelector<HTMLOptionElement>(
+        'option[value="per_run"]',
+      )?.disabled,
+    ).toBe(false);
     select(findSessionModeSelect()!, 'per_run');
     expect(findSessionModeSelect()?.value).toBe('per_run');
     expect(targetInput().value).toBe('group-1');
