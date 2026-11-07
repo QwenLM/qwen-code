@@ -524,6 +524,81 @@ cat "\${RUNNER_TEMP}/pulls.json"
         'Timeout inferred from an unreadable annotation list',
       );
     });
+    it('does not file a timed-out run that resolves to no filing destination', () => {
+      // A `workflow_dispatch` of SDK Java on a branch with an open unmerged PR
+      // is admitted for `cancelled`, and the destination resolves pr_number
+      // with file_issue=false. Forcing file_issue here would file a
+      // main-regression issue for an unmerged head — what the allow-list
+      // exists to prevent — and would buy `actions: write` for a destination
+      // that files nothing.
+      const resolved = resolve([pr({ head: { sha: 'tested-head' } })], {
+        EVENT_NAME: 'workflow_dispatch',
+        HEAD_BRANCH: 'ci/java',
+        HEAD_SHA: 'tested-head',
+        CANCELLATION_KIND: 'timeout',
+        TIMEOUT_ATTEMPTS_EXHAUSTED: 'false',
+        TIMEOUT_ANNOTATIONS_READABLE: 'true',
+      });
+
+      expect(resolved.output).toContain('pr_number=14472');
+      expect(resolved.output).toContain('file_issue=false');
+      expect(resolved.output).toContain('rerun_pending=false');
+      expect(resolved.stdout).toContain('no filing destination');
+    });
+
+    it('files when the rerun it deferred to could not be dispatched', () => {
+      // The destination leaves file_issue false for exactly the timeout whose
+      // filing the rerun inherits. If that dispatch then dies (5xx, 403/409,
+      // a secondary rate limit) the run leaves no issue, no comment and no
+      // rerun — the #16214 silence this workflow exists to end.
+      const evaluate = (condition, needs) =>
+        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
+          needs,
+          () => true,
+        );
+      const needs = {
+        analyze: {
+          result: 'success',
+          outputs: {
+            infra_only: 'false',
+            file_issue: 'false',
+            rerun_pending: 'true',
+            cancellation_kind: 'timeout',
+            timeout_attempts_exhausted: 'false',
+            provisional: 'false',
+          },
+        },
+        rerun_infra: { result: 'failure' },
+      };
+      expect(evaluate(String(jobs.file_issue.if), needs)).toBe(true);
+    });
+
+    it('does not double-file when the rerun was skipped rather than attempted', () => {
+      // A skipped rerun is a provisional or unreadable-annotation run, and
+      // both file through their own destination path. `!= 'success'` here
+      // would file every one of them a second time.
+      const evaluate = (condition, needs) =>
+        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
+          needs,
+          () => true,
+        );
+      const needs = {
+        analyze: {
+          result: 'success',
+          outputs: {
+            infra_only: 'false',
+            file_issue: 'false',
+            rerun_pending: 'true',
+            cancellation_kind: 'timeout',
+            timeout_attempts_exhausted: 'false',
+            provisional: 'false',
+          },
+        },
+        rerun_infra: { result: 'skipped' },
+      };
+      expect(evaluate(String(jobs.file_issue.if), needs)).toBe(false);
+    });
+
     it('degrades to no destination when the PR listing fails', () => {
       // The lookup must fail soft like its neighbouring reads: a transient
       // API error aborting this step would fail the analyze job and lose
@@ -2527,6 +2602,69 @@ printf '%s\\n' '{"jobs":[]}'
     expect(workflow).not.toContain('body<<QWEN_MAIN_CI_FAILURE_BODY\n');
   });
 
+  describe('timeout rendering', () => {
+    const renderWith = (jobs, timedOutJobIds) =>
+      renderFailureComment({
+        analysis: { workflow: 'E2E Tests', tests: [] },
+        occurrence: {
+          sha: 'abc123456789',
+          runId: '42227747366',
+          runUrl:
+            'https://github.com/QwenLM/qwen-code/actions/runs/42227747366',
+        },
+        jobs,
+        cancellationKind: 'timeout',
+        ...(timedOutJobIds === undefined ? {} : { timedOutJobIds }),
+      });
+
+    // Run 42227747366 has both shapes: the lane that hit its cap carries a
+    // failed step before the cancel, and its siblings carry none.
+    const shard = (n, steps) => ({
+      id: 100 + n,
+      name: `E2E Test (Linux) - sandbox:docker - shard ${n}/5`,
+      conclusion: 'cancelled',
+      html_url: `https://github.com/QwenLM/qwen-code/runs/${100 + n}`,
+      steps,
+    });
+    const timedOutLane = shard(1, [
+      { name: 'Run E2E tests', conclusion: 'failure' },
+    ]);
+    const collateral = [2, 3, 4, 5].map((n) =>
+      shard(n, [{ name: 'Set up Docker', conclusion: 'cancelled' }]),
+    );
+
+    it('names only the lane whose annotation named the timeout', () => {
+      // The step-shape heuristic alone cannot do this: a sibling cancelled
+      // mid-step looks the same as the lane that timed out, so the filed
+      // issue named five broken lanes for the one that hit its cap.
+      const body = renderWith(
+        [timedOutLane, ...collateral],
+        [String(timedOutLane.id)],
+      );
+      expect(body).toContain('shard 1/5');
+      for (const n of [2, 3, 4, 5]) {
+        expect(body).not.toContain(`shard ${n}/5`);
+      }
+    });
+
+    it('names a timed-out sibling whose own steps show no failure', () => {
+      // The timed-out job's conclusion is `cancelled`, so reverting to
+      // failure-only would drop it from the report entirely.
+      const quiet = shard(2, [
+        { name: 'Run E2E tests', conclusion: 'cancelled' },
+      ]);
+      const body = renderWith([quiet], [String(quiet.id)]);
+      expect(body).toContain('shard 2/5');
+    });
+
+    it('still renders without an explicit timed-out set', () => {
+      // The workflow passes the set; a caller that has none keeps the older
+      // step-shape heuristic rather than rendering an empty report.
+      const body = renderWith([timedOutLane, ...collateral]);
+      expect(body).toContain('shard 1/5');
+    });
+  });
+
   describe('infrastructure-only failures', () => {
     // 2026-10-06: both ubuntu legs of an SDK Java push run were assigned to
     // one ECS pool whose runners lost the server before executing a single
@@ -2819,8 +2957,89 @@ printf '%s\\n' '{"jobs":[]}'
       expect(condition).toContain("needs.analyze.outputs.file_issue == 'true'");
       expect(condition).toContain("needs.analyze.outputs.infra_only != 'true'");
       // A rerun that could not be dispatched must not swallow the report:
-      // the issue is then the only record of a red main.
-      expect(condition).toContain("needs.rerun_infra.result != 'success'");
+      // the issue is then the only record of a red main. It has to be
+      // `== 'failure'` rather than `!= 'success'`: a SKIPPED rerun is a
+      // provisional or unreadable-annotation run that files through its own
+      // path, and `!= 'success'` would make every such run file here too.
+      expect(condition).toContain("needs.rerun_infra.result == 'failure'");
+      expect(condition).not.toContain("needs.rerun_infra.result != 'success'");
+    });
+
+    it('pins the timeout wiring each step depends on', () => {
+      // Each of these is the only thing carrying the timeout classification
+      // into its step, and each deletion leaves the suite green otherwise:
+      // without the download mapping the per-cancelled-job annotation loop
+      // never runs, and without the summary mapping every timeout report
+      // loses the paragraph that explains the cancellation.
+      const downloadStep = jobs.analyze.steps.find(
+        (step) => step.id === 'download',
+      );
+      const summaryStep = jobs.analyze.steps.find(
+        (step) => step.id === 'summary',
+      );
+      const destinationStep = jobs.analyze.steps.find(
+        (step) => step.id === 'destination',
+      );
+      for (const step of [downloadStep, summaryStep, destinationStep]) {
+        expect(step.env.CANCELLATION_KIND).toBe(
+          '${{ steps.live.outputs.cancellation_kind }}',
+        );
+      }
+      // The whole rerun policy rides these two: without the first the attempt
+      // bound never fires, without the second a readable timeout is guessed at
+      // and never rerun.
+      expect(destinationStep.env.TIMEOUT_ATTEMPTS_EXHAUSTED).toBe(
+        '${{ steps.live.outputs.timeout_attempts_exhausted }}',
+      );
+      expect(destinationStep.env.TIMEOUT_ANNOTATIONS_READABLE).toBe(
+        '${{ steps.live.outputs.timeout_annotations_readable }}',
+      );
+      // The renderer needs the curated set, not just the classification: the
+      // full run-jobs.json cannot tell a collateral cancel from the lane that
+      // timed out.
+      expect(summaryStep.run).toContain(
+        '--timed-out-job-ids "${RUNNER_TEMP}/timed-out-job-ids"',
+      );
+    });
+
+    it('says so when a cancelled job could not be inspected', () => {
+      // The download loop drops a cancelled job whose annotation read failed;
+      // that is unavoidable, but a silent drop makes the report imply a whole
+      // set of cancelled jobs when it has a subset.
+      const downloadStep = jobs.analyze.steps.find(
+        (step) => step.id === 'download',
+      );
+      const summaryStep = jobs.analyze.steps.find(
+        (step) => step.id === 'summary',
+      );
+      // Assert the assignment, not just the echo: the echo alone survives
+      // deleting the `=true`, which is exactly the silent-drop mutation.
+      expect(downloadStep.run).toContain('timed_out_annotations_missing=true');
+      expect(downloadStep.run).toContain(
+        'timed_out_annotations_missing=${timed_out_annotations_missing}',
+      );
+      expect(summaryStep.env.TIMED_OUT_ANNOTATIONS_MISSING).toBe(
+        '${{ steps.download.outputs.timed_out_annotations_missing }}',
+      );
+      expect(summaryStep.run).toContain(
+        "TIMED_OUT_ANNOTATIONS_MISSING}\" == 'true'",
+      );
+    });
+
+    it('documents the timeout path in both design docs', () => {
+      // The design doc is what the next change to this workflow reads. Both
+      // languages have to carry the cancelled-run admission, the attempt
+      // bound and the curated render set, or the doc silently describes a
+      // workflow that no longer exists.
+      for (const file of [
+        'docs/design/2026-10-18-java-ci-failure-reporting.md',
+        'docs/design/2026-10-18-java-ci-failure-reporting.zh-CN.md',
+      ]) {
+        const text = readFileSync(file, 'utf8');
+        expect(text).toContain('timeout-minutes');
+        expect(text).toContain('rerun_pending');
+        expect(text).toMatch(/attempt 3|第 3 次 attempt/);
+      }
     });
 
     it('reports an open PR infra-only run without rerunning or filing', () => {
