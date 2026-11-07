@@ -24,7 +24,7 @@ async function fixture(t) {
     image: `image@sha256:${'a'.repeat(64)}`,
     slots: 1,
     runnerGroupId: 1,
-    labels: ['self-hosted', 'linux', 'ARM64', 'trial-only'],
+    labels: ['self-hosted', 'ecs-qwen-ephemeral'],
     cpus: 1,
     memory: '1g',
     pidsLimit: 100,
@@ -180,9 +180,20 @@ test('creates a new runner and container per job and keeps GitHub token out of D
   );
   assert.ok(requests.every((c) => c.options.env.GH_TOKEN === 'host-only-pat'));
   assert.equal(creates.length, 2);
+  assert.deepEqual(
+    f.calls
+      .filter((c) => c.program === 'gh' && c.args.includes('DELETE'))
+      .map((c) => c.args.find((arg) => arg.startsWith('/'))),
+    [
+      '/repos/owner/repo/actions/runners/1',
+      '/repos/owner/repo/actions/runners/2',
+    ],
+  );
+  assert.equal(JSON.parse(requests[0].options.input).name, 'ecs-qwen-trial-01');
+  assert.equal(JSON.parse(requests[1].options.input).name, 'ecs-qwen-trial-01');
   assert.notEqual(
-    JSON.parse(requests[0].options.input).name,
-    JSON.parse(requests[1].options.input).name,
+    creates[0].args.find((arg) => arg.startsWith('qwen.instance=')),
+    creates[1].args.find((arg) => arg.startsWith('qwen.instance=')),
   );
   assert.deepEqual(
     JSON.parse(requests[0].options.input).labels,
@@ -229,7 +240,7 @@ test('failed cleanup blocks replacement until recovery cleans the old container'
     1,
   );
   f.setFailRemove(false);
-  await manager.cycle(1);
+  await createManager(f.config, { command: f.command }).cycle(1);
   const ops = f.calls
     .filter((c) => c.program === 'docker')
     .map((c) => c.args[0]);
@@ -334,6 +345,7 @@ test('rejects same-name runner with a different ID without deleting it', async (
   const f = await fixture(t);
   const state = {
     name: 'qwen-trial-1-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa',
+    runnerName: 'ecs-qwen-trial-01',
     runnerId: 42,
     uncertain: false,
   };
@@ -343,7 +355,9 @@ test('rejects same-name runner with a different ID without deleting it', async (
   );
   const command = (program, args, options) => {
     if (program === 'gh' && args.includes('--paginate'))
-      return Promise.resolve(JSON.stringify([{ name: state.name, id: 43 }]));
+      return Promise.resolve(
+        JSON.stringify([{ name: state.runnerName, id: 43 }]),
+      );
     return f.command(program, args, options);
   };
   await assert.rejects(
@@ -710,6 +724,15 @@ test('rejects corrupted slot state without deleting a runner', async (t) => {
     {
       label: 'non-boolean uncertain',
       state: { name: validName, runnerId: 42, uncertain: 'no' },
+    },
+    {
+      label: 'foreign display name',
+      state: {
+        name: validName,
+        runnerName: 'ecs-qwen-other-01',
+        runnerId: 42,
+        uncertain: false,
+      },
     },
     {
       label: 'zero runner id',
