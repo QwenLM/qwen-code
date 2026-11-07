@@ -97,6 +97,23 @@ describe('resolveScreenReaderPolicy', () => {
     });
     expect(policy.virtualViewport).toBe(false);
   });
+
+  it('defaults ConEmu/Cmder to the append-only path', () => {
+    const policy = resolveScreenReaderPolicy({
+      screenReader: false,
+      isTTY: true,
+      env: { ConEmuPID: '12345' },
+    });
+    expect(policy.virtualViewport).toBe(false);
+
+    const optedIn = resolveScreenReaderPolicy({
+      screenReader: false,
+      useTerminalBuffer: true,
+      isTTY: true,
+      env: { CMDER_SHELL: 'cmd' },
+    });
+    expect(optedIn.virtualViewport).toBe(true);
+  });
 });
 
 describe('screenReaderRendererOptions', () => {

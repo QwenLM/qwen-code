@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { getSettingsSchema } from '../../config/settingsSchema.js';
 import {
   isInteractiveTerminal,
@@ -13,25 +13,70 @@ import {
 
 describe('shouldUseVirtualViewport', () => {
   it('defaults to virtual viewport when the setting is unset', () => {
-    expect(shouldUseVirtualViewport(undefined, false, true)).toBe(
+    expect(shouldUseVirtualViewport(undefined, false, true, {})).toBe(
       getSettingsSchema().ui.properties.useTerminalBuffer.default,
     );
   });
 
   it('respects explicit terminal buffer settings', () => {
-    expect(shouldUseVirtualViewport(true, false, true)).toBe(true);
-    expect(shouldUseVirtualViewport(false, false, true)).toBe(false);
+    expect(shouldUseVirtualViewport(true, false, true, {})).toBe(true);
+    expect(shouldUseVirtualViewport(false, false, true, {})).toBe(false);
+  });
+
+  it('defaults ConEmu and Cmder to the legacy append-only path', () => {
+    expect(
+      shouldUseVirtualViewport(undefined, false, true, {
+        ConEmuPID: '12345',
+      }),
+    ).toBe(false);
+    expect(
+      shouldUseVirtualViewport(undefined, false, true, {
+        CMDER_SHELL: 'cmd',
+      }),
+    ).toBe(false);
+    expect(
+      shouldUseVirtualViewport(undefined, false, true, {
+        ConEmuPID: '',
+        CMDER_SHELL: '',
+      }),
+    ).toBe(true);
+  });
+
+  it('detects ConEmu from process.env when the env argument is omitted', () => {
+    vi.stubEnv('ConEmuPID', '12345');
+    vi.stubEnv('CMDER_SHELL', '');
+    try {
+      expect(shouldUseVirtualViewport(undefined, false, true)).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps the virtual viewport on ConEmu/Cmder when explicitly enabled', () => {
+    const env = { ConEmuPID: '12345', CMDER_SHELL: 'cmd' };
+    expect(shouldUseVirtualViewport(true, false, true, env)).toBe(true);
+    expect(shouldUseVirtualViewport(false, false, true, env)).toBe(false);
   });
 
   it('keeps screen-reader mode off the virtual viewport path', () => {
-    expect(shouldUseVirtualViewport(undefined, true, true)).toBe(false);
-    expect(shouldUseVirtualViewport(true, true, true)).toBe(false);
-    expect(shouldUseVirtualViewport(false, true, true)).toBe(false);
+    expect(shouldUseVirtualViewport(undefined, true, true, {})).toBe(false);
+    expect(shouldUseVirtualViewport(true, true, true, {})).toBe(false);
+    expect(shouldUseVirtualViewport(false, true, true, {})).toBe(false);
+    expect(
+      shouldUseVirtualViewport(undefined, true, true, {
+        ConEmuPID: '12345',
+      }),
+    ).toBe(false);
   });
 
   it('keeps non-interactive output on the legacy append-only path', () => {
-    expect(shouldUseVirtualViewport(undefined, false, false)).toBe(false);
-    expect(shouldUseVirtualViewport(true, false, false)).toBe(false);
+    expect(shouldUseVirtualViewport(undefined, false, false, {})).toBe(false);
+    expect(shouldUseVirtualViewport(true, false, false, {})).toBe(false);
+    expect(
+      shouldUseVirtualViewport(undefined, false, false, {
+        ConEmuPID: '12345',
+      }),
+    ).toBe(false);
   });
 });
 
