@@ -307,6 +307,16 @@ it.each([
   },
 );
 
+// Sits immediately after the table on purpose. Every table row installs an own
+// `maxTouchPoints` accessor, whose last value (0) is indistinguishable from a
+// clean navigator, so asserting the value would never fail. Asserting that no
+// own property survives is what fails when the afterEach restore is removed.
+it('leaves no touch accessor installed after the guide table', () => {
+  expect(
+    Object.getOwnPropertyDescriptor(window.navigator, 'maxTouchPoints'),
+  ).toBeUndefined();
+});
+
 it.each(['iPhone', 'Linux armv8l'])(
   'does not point at steps it does not render on %s',
   (platform) => {

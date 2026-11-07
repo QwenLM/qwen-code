@@ -103,9 +103,10 @@ the copy that points at the guides. A device is treated as mobile when it
 reports an Apple mobile name (`iPhone`, `iPad`, `iPod`) or reports at least one
 touch point on a non-Windows platform, whatever platform string it carries;
 Apple's names count even at zero touch points, because a phone can report none.
-A non-touch platform that matches no single guide keeps both guides rather than
-losing the help, so a Linux or ChromeOS desktop still renders both. The guide starts collapsed, with a chevron
-beside the heading to expand or collapse the instructions.
+A non-touch platform that matches no single guide and reports no Apple mobile
+name keeps both guides rather than losing the help, so a Linux or ChromeOS
+desktop still renders both. Each guide starts collapsed behind its own chevron,
+so the two expand independently.
 The web page cannot detect OS-level permission; do not claim that it can.
 
 On the first eligible panel appearance, attempt authorization once per browser
