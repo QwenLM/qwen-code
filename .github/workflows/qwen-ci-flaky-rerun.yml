@@ -606,6 +606,21 @@ jobs:
         run: |-
           set -euo pipefail
           export PATH="${TRUSTED_PATH:?}"
+          # Point-of-use recheck; see Scan for why the pool arms are gated.
+          # READLINK_BIN is executed by verify_on_path's symlink arm and arrived
+          # through the same appendable $GITHUB_OUTPUT as the rest.
+          for v in READLINK_BIN; do
+            eval "p=\${$v:-}"
+            if [ -z "${p}" ] || [ ! -x "${p}" ]; then
+              echo "::error::${v} is not an executable at the point of use; refusing to run."
+              exit 1
+            fi
+            if [ "${RUNNER_ENVIRONMENT}" = 'self-hosted' ] &&
+              { [ -w "${p}" ] || [ -O "${p}" ] || [ -w "${p%/*}" ]; }; then
+              echo "::error::${v} is not a verified binary at the point of use; refusing to run."
+              exit 1
+            fi
+          done
           # npm and qwen are not among the guard's eight tools. A planted `qwen`
           # would decide whether to install at all, and its stdout would become
           # the pin the classifier runs with the model's keys — so apply the
@@ -763,6 +778,14 @@ jobs:
           # switch the sandbox OFF and run the agent's tools on the pool host.
           SANDBOX: ''
           QWEN_SANDBOX: ''
+          # The one sandbox variable the launcher EXECUTES: serve/sandbox.ts
+          # interpolates it unquoted into the proxy container's host-side
+          # command line and spawns that with `bash -c`. A residue value is
+          # shell syntax, not data — arbitrary commands at runner uid inside
+          # the step holding OPENAI_API_KEY, plus a proxy network the sandbox's
+          # HTTPS_PROXY is then repointed at. runtime-shell-policy.ts refuses it
+          # only under tools.executionSandbox; this step sets tools.sandbox.
+          QWEN_SANDBOX_PROXY_COMMAND: ''
           BASH_ENV: ''
           SHELLOPTS: ''
           LD_PRELOAD: ''
