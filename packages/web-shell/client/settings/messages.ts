@@ -28,7 +28,7 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
     'Show rotating loading phrases. Turn off to hide both built-in and host-provided phrases.',
   'settings.label.experimental.generatedUi': 'Generated UI',
   'settings.description.experimental.generatedUi':
-    'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+    'Show interactive views from bundled Generated UI in supported local sessions, such as Web Shell. Enabled by default. Restart the owning session to apply changes.',
 
   'settings.models.editWindow': 'Edit context window',
   'settings.models.windowHint':
@@ -126,7 +126,7 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
 export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.experimental.generatedUi': 'Generated UI 生成式界面',
   'settings.description.experimental.generatedUi':
-    '在受支持的本地会话中启用内置 Generated UI。重新创建所属会话后生效。',
+    '在 Web Shell 等受支持的本地会话中，用内置 Generated UI 展示交互视图。默认开启。重新创建所属会话后生效。',
 
   'settings.models.editWindow': '配置窗口大小',
   'settings.models.windowHint':

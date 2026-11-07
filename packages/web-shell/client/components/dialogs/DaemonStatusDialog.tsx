@@ -1,3 +1,5 @@
+import { createDaemonRestRequest } from '../../daemon/rest-request.js';
+import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import {
   useCallback,
   useContext,
@@ -744,18 +746,30 @@ function DaemonStatusDialogInner({
   const report = summary.report ?? full.report;
   const fullReport = full.report;
   const loading = summary.loading || full.loading;
-  const error = summary.error ?? full.error;
+  const availability = useDaemonAvailability();
+  const unavailable = availability !== 'available';
+  const error = unavailable
+    ? new Error(
+        t(
+          availability === 'auth-required'
+            ? 'daemon.connection.authRequired'
+            : 'daemon.connection.unavailable',
+        ),
+      )
+    : (summary.error ?? full.error);
 
   // Rendered on the dashboard and on the load-failure screen alike: an
   // unreachable daemon, a rejected token or a still-booting runtime is exactly
-  // when the operator needs to re-enter a token or pick another target. With a
-  // report on screen only a failing (now stale) summary marks the link as
-  // errored, matching the toolbar banner; with none, any load error does.
-  const connectionFailed = connectionsOnly
-    ? workspace.status === 'error'
-    : report
-      ? Boolean(summary.error && summary.report)
-      : Boolean(error);
+  // when the operator needs to re-enter a token or pick another target. While
+  // reachable, only a failing summary with cached data marks the dashboard
+  // link as errored; without a report, any load error does.
+  const connectionFailed =
+    unavailable ||
+    (connectionsOnly
+      ? workspace.status === 'error'
+      : report
+        ? Boolean(summary.error && summary.report)
+        : Boolean(error));
   const savedConnectionList = savedConnections.length > 0 && (
     <div
       role="group"
@@ -847,7 +861,12 @@ function DaemonStatusDialogInner({
             // reports "the daemon did not answer".
             const owned = (): boolean =>
               probeControllerRef.current === controller;
-            void fetch(`${daemonOrigin}/capabilities`, {
+            void createDaemonRestRequest(
+              daemonOrigin,
+              token,
+              undefined,
+              true,
+            )('/capabilities', {
               headers: token ? { Authorization: `Bearer ${token}` } : {},
               signal: controller.signal,
             })
@@ -1020,14 +1039,16 @@ function DaemonStatusDialogInner({
             time: new Date(report.generatedAt).toLocaleTimeString(),
           })}
         </span>
-        {/* Flag the toolbar only when the summary that owns the visible
+        {/* While reachable, flag only when the summary owning the visible
             counters/timestamp is the failing, stale source: it errored AND
             still has (now-stale) data on screen. When the summary never loaded
             and the cards are rendering from the full fallback, or when only the
             full fetch failed (surfaced in the diagnostics section), the banner
             would misrepresent an otherwise-usable dashboard. */}
-        {summary.error && summary.report && (
-          <span className={styles.refreshError}>{t('daemon.loadFailed')}</span>
+        {(unavailable || (summary.error && summary.report)) && (
+          <span className={styles.refreshError}>
+            {unavailable ? error?.message : t('daemon.loadFailed')}
+          </span>
         )}
         <div className={styles.toolbarActions}>
           <button
