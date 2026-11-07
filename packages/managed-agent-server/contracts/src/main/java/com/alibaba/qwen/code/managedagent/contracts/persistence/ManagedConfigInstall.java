@@ -98,19 +98,25 @@ public final class ManagedConfigInstall {
                 && change.path("serverId").asText().matches("[A-Za-z0-9._:-]{1,128}"), "Invalid independent MCP command");
         count(change.get("expectedRevision"), 0);
         JsonNode servers = change.get("servers");
-        check(servers.isArray() && servers.size() <= 32, "Invalid independent MCP selection");
+        check(servers.isArray(), "Invalid independent MCP selection");
         Set<String> ids = new HashSet<>();
         int enabled = 0;
+        int selected = 0;
         for (JsonNode pin : servers) {
             ManagedExtensionRecords.closed(pin, Set.of("serverId", "serverRevision", "definitionDigest", "state"), "Independent MCP pin");
             check(pin.path("serverId").asText().matches("[A-Za-z0-9._:-]{1,128}") && ids.add(pin.get("serverId").asText())
                     && pin.path("definitionDigest").asText().matches("[a-f0-9]{64}")
                     && Set.of("enabled", "disabled", "removed").contains(pin.path("state").asText()), "Invalid independent MCP pin");
             count(pin.get("serverRevision"), 1);
-            if ("enabled".equals(pin.path("state").asText())) {
+            String state = pin.path("state").asText();
+            if (!"removed".equals(state)) {
+                selected++;
+            }
+            if ("enabled".equals(state)) {
                 enabled++;
             }
         }
+        check(selected <= 32, "Invalid independent MCP selection");
         check(enabled <= 16 && ids.contains(change.path("serverId").asText()), "Independent MCP selection conflicts");
     }
 

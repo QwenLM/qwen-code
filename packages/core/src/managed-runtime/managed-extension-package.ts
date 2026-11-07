@@ -341,7 +341,7 @@ export function parseManagedExtensionApplyCommand(
 function mcpSelections(
   value: unknown,
 ): readonly ManagedExtensionMcpSelection[] {
-  if (!Array.isArray(value) || value.length > 32) invalid('MCP selection');
+  if (!Array.isArray(value)) invalid('MCP selection');
   const selected = value.map((value): ManagedExtensionMcpSelection => {
     const candidate = object(value, 'MCP selection');
     const { state, ...pin } = candidate;
@@ -354,6 +354,7 @@ function mcpSelections(
   });
   if (
     new Set(selected.map((entry) => entry.serverId)).size !== selected.length ||
+    selected.filter((entry) => entry.state !== 'removed').length > 32 ||
     selected.filter((entry) => entry.state === 'enabled').length > 16
   )
     invalid('MCP selection');

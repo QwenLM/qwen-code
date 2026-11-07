@@ -69,4 +69,38 @@ describe('Managed extension apply commands', () => {
   ])('refuses invalid operation identity or revision %j', (input) => {
     expect(() => parseManagedExtensionApplyCommand(input)).toThrow();
   });
+
+  it('charges only live MCP selections against the 32-entry capacity', () => {
+    const server = (index: number, state: string) => ({
+      serverId: `server-${index}`,
+      serverRevision: 1,
+      definitionDigest: 'c'.repeat(64),
+      state,
+    });
+    const mcpChangeFor = (servers: unknown[]) => ({
+      ...command,
+      mcpChange: {
+        action: 'add',
+        serverId: 'server-0',
+        expectedRevision: 0,
+        servers,
+      },
+    });
+    // 32 live + 1 tombstone: the tombstone does not count against the cap.
+    const accepted = parseManagedExtensionApplyCommand(
+      mcpChangeFor([
+        ...Array.from({ length: 32 }, (_, index) => server(index, 'disabled')),
+        server(32, 'removed'),
+      ]),
+    );
+    expect(accepted.mcpChange?.servers).toHaveLength(33);
+    // 33 live (all disabled, so the 16-enabled quota cannot fire): rejected.
+    expect(() =>
+      parseManagedExtensionApplyCommand(
+        mcpChangeFor(
+          Array.from({ length: 33 }, (_, index) => server(index, 'disabled')),
+        ),
+      ),
+    ).toThrow(/MCP selection/);
+  });
 });

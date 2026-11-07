@@ -1913,6 +1913,21 @@ it('charges only live MCP selections against the 32-entry capacity', () => {
   expect(added).toHaveLength(33);
   expect(added.filter((entry) => entry.state !== 'removed')).toHaveLength(2);
 
+  const tooManyLive = Array.from({ length: 32 }, (_, index) => ({
+    ...pin,
+    serverId: `server-${index}`,
+    state: 'disabled' as const,
+  }));
+  expect(() =>
+    selectedMcpServers(
+      tooManyLive,
+      managementCommand('add', 'server-32', 0, {
+        ...pin,
+        serverId: 'server-32',
+      }),
+    ),
+  ).toThrow('MCP selection exceeds its capacity.');
+
   const tooManyEnabled = previous.map((entry, index) => ({
     ...entry,
     state: (index < 16 ? 'enabled' : 'removed') as 'enabled' | 'removed',
@@ -1926,6 +1941,25 @@ it('charges only live MCP selections against the 32-entry capacity', () => {
       }),
     ),
   ).toThrow('MCP selection exceeds its capacity.');
+});
+
+it('commits a 32-live-plus-tombstone snapshot that a fresh reader opens', async () => {
+  const previous = Array.from({ length: 32 }, (_, index) => ({
+    ...pin,
+    serverId: `server-${index}`,
+    state: 'disabled' as const,
+  }));
+  const command = managementCommand('add', 'server-32', 0, {
+    ...pin,
+    serverId: 'server-32',
+  });
+  const servers = selectedMcpServers(previous, command);
+  expect(servers).toHaveLength(33);
+  await commitHostedMcpSettings(session, command, servers);
+  // The reader is the only consumer of the record the writer just overfilled;
+  // restoring `body['servers'].length > 32` there must turn this read red.
+  const history = await readHostedMcpSettings(session);
+  expect(history.at(-1)?.servers).toHaveLength(33);
 });
 
 it('adds MCP to an ordinary Session with no initial pins and rejects an unpublished definition before committing', async () => {

@@ -460,6 +460,9 @@ class ManagedAgentApiContractTest {
                 "/components/schemas/ManagedMcpManagementSnapshot",
                 withRetainedRemoval)).isEmpty();
 
+        // 16 enabled + 17 disabled = 33 live: exercises the disabled arm of
+        // the live-only predicate, which a narrow "enabled"-only `contains`
+        // enum would let through while the implementation rejects it.
         ObjectNode tooManyLive = mcpManagementSnapshot(33, 0);
         assertThat(CONTRACT.validate(
                 "/components/schemas/ManagedMcpManagementSnapshot",
@@ -3708,7 +3711,9 @@ class ManagedAgentApiContractTest {
                     .put("serverId", "server-" + index)
                     .put("serverRevision", 1)
                     .put("definitionDigest", "a".repeat(64))
-                    .put("state", index < live ? "enabled" : "removed");
+                    .put("state", index < live
+                            ? (index < 16 ? "enabled" : "disabled")
+                            : "removed");
         }
         return snapshot;
     }
