@@ -1198,11 +1198,11 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
-  // stopLocal() leaves the grant in place for the whole acquire round trip,
-  // so the late grant it waited for is the live one when the acquire
-  // answers. The grant belongs to a writer that was re-acquired after the
-  // stop began: nothing may adopt it, and the next renewal must not be
-  // scheduled against it.
+  // stopLocal() holds the client open for the whole acquire round trip, so
+  // the late grant it waited for arrives on a client that has already
+  // stopped. Sealing it is refused locally, so `reacquireWriter` restores the
+  // expired grant it replaced: nothing adopts the late grant, and the next
+  // renewal must not be scheduled against it.
   it('holds a local stop open until the deferred acquire answers and does not resume renewal', async () => {
     vi.useFakeTimers();
     const rig = await bootWithHeldRenewalAnswer({ holdAcquires: true });
@@ -1234,7 +1234,11 @@ describe('HTTP Managed Session store', () => {
       // and the lease it waited for is left to lapse on the Store.
       expect(rig.server.sealCount).toBe(sealsWhileWaiting);
       await expect(renewal).rejects.toThrow('locally stopped');
-      // The late grant was left in place, not adopted as renewed.
+      // The expired grant is back, not a writer-less client: the late grant
+      // was acquired for a client that stopped meanwhile, so `sealGrant()`
+      // refused it locally and `reacquireWriter`'s catch restored the grant
+      // it replaced. That is why the lease below is `bootLeaseUntil` and not
+      // the late grant's `bootLeaseUntil + 300_001`.
       expect(rig.grant()?.leaseUntil).toBe(rig.observed.bootLeaseUntil);
       // No renewal timer survives the stop, so the late grant is not kept
       // alive.
