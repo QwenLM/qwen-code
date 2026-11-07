@@ -2702,6 +2702,8 @@ export default {
   'Run /update to install the update.': '运行 /update 安装更新。',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ 历史记录缺口：此处之前的会话记录已丢失（存储中断），且无法找回。',
+  '⚠️ Earlier conversation was not loaded: this session is too large to restore in full, so only its most recent part is shown.':
+    '⚠️ 此处之前的会话记录未加载：该会话过大，无法完整恢复，仅显示最近的部分。',
 
   // ============================================================================
   // reload-plugins 命令

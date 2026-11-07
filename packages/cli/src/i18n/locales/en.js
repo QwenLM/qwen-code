@@ -2920,6 +2920,8 @@ export default {
   'Run /update to install the update.': 'Run /update to install the update.',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.',
+  '⚠️ Earlier conversation was not loaded: this session is too large to restore in full, so only its most recent part is shown.':
+    '⚠️ Earlier conversation was not loaded: this session is too large to restore in full, so only its most recent part is shown.',
 
   // ============================================================================
   // reload-plugins command

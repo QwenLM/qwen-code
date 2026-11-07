@@ -88,6 +88,7 @@ import {
   isTranscriptConversationRecord,
   projectUserTranscriptForDisplay,
   stripGeneratedAttachmentTokens,
+  type TranscriptGapReason,
   type TranscriptRecordInput,
   validateTranscriptRecord,
   walkTranscriptUuidChain,
@@ -218,6 +219,8 @@ export interface SessionTranscriptTurnIndexPage {
   turns: SessionTranscriptNavigationTurn[];
   startTime?: string;
   lastUpdated?: string;
+  /** Where the indexed history stops short; absent when it is complete. */
+  gaps?: HistoryGap[];
 }
 
 export interface SessionTranscriptReadPageOptions {
@@ -559,6 +562,32 @@ interface TranscriptIndex {
    * account for these records.
    */
   projectedRecords?: ReadonlyMap<string, ChatRecord>;
+  /**
+   * Present when the snapshot is larger than the index cap. Only its last
+   * lines are indexed; the prefix is still parsed for validation and for the
+   * few records restore needs from it.
+   */
+  window?: TranscriptWindow;
+}
+
+/**
+ * What an over-cap index keeps from the prefix it does not index. A session's
+ * settings are recorded when they change, so the latest one is often older
+ * than the window. These are the latest of each kind in file order, not on the
+ * active chain, because the prefix has no chain to walk.
+ */
+interface TranscriptWindow {
+  /** Served by uuid in place of a file read. */
+  retainedRecords: ReadonlyMap<string, ChatRecord>;
+  retainedBytes: number;
+  parentSessionUuid?: string;
+  sessionSourceUuid?: string;
+  sessionModelUuid?: string;
+  sessionApprovalModeUuid?: string;
+  sessionWorkflowModeUuid?: string;
+  sourcesUuid?: string;
+  attributionUuid?: string;
+  lastAssistantModel?: string;
 }
 
 interface CacheEntry {
@@ -662,6 +691,7 @@ const indexCache = new Map<string, CacheEntry>();
 // who can already read the key file next to the transcripts it signs.
 const cursorHmacKeys = new Map<string, Buffer>();
 let indexCacheMaxBytesForTest: number | undefined;
+let maxIndexBytesForTest: number | undefined;
 let expandedPageBytesForTest: number | undefined;
 let cooperativeReadByteBudgetForTest: number | undefined;
 let cooperativeReadTimeBudgetMsForTest: number | undefined;
@@ -695,6 +725,10 @@ class CooperativeReadScheduler {
     this.processedBytes = 0;
     this.startedAt = performance.now();
   }
+}
+
+function getMaxIndexBytes(): number {
+  return maxIndexBytesForTest ?? SESSION_TRANSCRIPT_MAX_INDEX_BYTES;
 }
 
 function getExpandedPageBytes(): number {
@@ -1799,7 +1833,8 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
     total +=
       INDEX_ENTRY_BASE_BYTES +
       estimateStringBytes(gap.childUuid) +
-      estimateStringBytes(gap.missingParentUuid);
+      estimateStringBytes(gap.missingParentUuid) +
+      estimateStringBytes(gap.reason);
   }
   for (const [uuid, entry] of index.byUuid) {
     total +=
@@ -1839,6 +1874,12 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(assistantUuid) +
       estimateStringBytes(checkpointUuid);
   }
+  if (index.window) {
+    total +=
+      INDEX_ENTRY_BASE_BYTES +
+      index.window.retainedBytes * INDEX_STRING_BYTES +
+      estimateStringBytes(index.window.lastAssistantModel);
+  }
 
   return total;
 }
@@ -1877,6 +1918,9 @@ function pruneCache(now = Date.now()): void {
   }
 }
 
+/** A line longer than the scan allows; it was not read in full. */
+class TranscriptLineTooLongError extends Error {}
+
 async function forEachLineInSnapshot(
   filePath: string,
   snapshotSize: number,
@@ -1885,15 +1929,19 @@ async function forEachLineInSnapshot(
     offset: number,
     length: number,
   ) => void | Promise<void>,
+  /** Must be the start of a line. Offsets passed to `onLine` stay absolute. */
+  startOffset = 0,
+  /** Stops with `TranscriptLineTooLongError` as soon as a line passes this. */
+  maxLineBytes = Number.POSITIVE_INFINITY,
 ): Promise<void> {
-  if (snapshotSize === 0) return;
+  if (snapshotSize <= startOffset) return;
   const scheduler = new CooperativeReadScheduler();
   let pending: Buffer[] = [];
   let pendingLength = 0;
   let pendingOffset = 0;
-  let streamOffset = 0;
+  let streamOffset = startOffset;
   const stream = fs.createReadStream(filePath, {
-    start: 0,
+    start: startOffset,
     end: snapshotSize - 1,
     highWaterMark: READ_CHUNK_SIZE,
   });
@@ -1910,6 +1958,10 @@ async function forEachLineInSnapshot(
       const lineOffset =
         pendingLength > 0 ? pendingOffset : streamOffset + lineStart;
       const currentLine = buffer.subarray(lineStart, lineEnd);
+      if (pendingLength + currentLine.length > maxLineBytes) {
+        stream.destroy();
+        throw new TranscriptLineTooLongError();
+      }
       const rawLine =
         pendingLength > 0
           ? Buffer.concat(
@@ -1935,6 +1987,10 @@ async function forEachLineInSnapshot(
       const tail = buffer.subarray(lineStart);
       pending.push(tail);
       pendingLength += tail.length;
+      if (pendingLength > maxLineBytes) {
+        stream.destroy();
+        throw new TranscriptLineTooLongError();
+      }
     }
     streamOffset += buffer.length;
   }
@@ -1947,6 +2003,38 @@ async function forEachLineInSnapshot(
         : rawLine;
     await onLine(line, pendingOffset, line.length);
     await scheduler.afterUnit(line.length);
+  }
+}
+
+/**
+ * The offset of the first line that starts within the last `maxBytes` of the
+ * snapshot, or `snapshotSize` when no line starts there.
+ */
+async function findWindowStart(
+  filePath: string,
+  snapshotSize: number,
+  maxBytes: number,
+): Promise<number> {
+  const handle = await fsp.open(filePath, 'r');
+  try {
+    const buffer = Buffer.allocUnsafe(READ_CHUNK_SIZE);
+    // A line starts at the cutoff when the byte before it ends the previous one.
+    let position = snapshotSize - maxBytes - 1;
+    while (position < snapshotSize) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        0,
+        Math.min(buffer.length, snapshotSize - position),
+        position,
+      );
+      if (bytesRead === 0) break;
+      const newline = buffer.subarray(0, bytesRead).indexOf(0x0a);
+      if (newline !== -1) return position + newline + 1;
+      position += bytesRead;
+    }
+    return snapshotSize;
+  } finally {
+    await handle.close();
   }
 }
 
@@ -2026,7 +2114,11 @@ async function forEachAggregatedRecord(
   }
   for (const uuid of uuids) {
     const entry = index.byUuid.get(uuid);
-    if (!entry) continue;
+    if (!entry) {
+      const retainedRecord = index.window?.retainedRecords.get(uuid);
+      if (retainedRecord) await onRecord(retainedRecord);
+      continue;
+    }
     const preloadedRecord = context.preloadedRecords?.get(uuid);
     if (preloadedRecord) {
       context.preloadedRecords?.delete(uuid);
@@ -2055,7 +2147,7 @@ async function forEachAggregatedRecord(
 }
 
 async function withAggregatedRecordReadContext<T>(
-  index: TranscriptIndex,
+  index: Pick<TranscriptIndex, 'filePath' | 'projectedRecords'>,
   callback: (context: AggregatedRecordReadContext) => Promise<T>,
 ): Promise<T> {
   let handle: fsp.FileHandle;
@@ -2162,6 +2254,281 @@ function newIndexEntry(
   };
 }
 
+type RetainedPrefixSlot =
+  | 'first'
+  | 'parentSession'
+  | 'sessionSource'
+  | 'sessionModel'
+  | 'sessionApprovalMode'
+  | 'sessionWorkflowMode'
+  | 'sources'
+  | 'attribution';
+
+/** Validity mirrors restore: an invalid setting record never wins there. */
+function retainedPrefixSlot(
+  record: ChatRecord,
+): RetainedPrefixSlot | undefined {
+  if (isAttributionSnapshotCandidate(record)) return 'attribution';
+  if (record.type !== 'system') return undefined;
+  switch (record.subtype) {
+    case 'parent_session':
+      return 'parentSession';
+    case 'session_source':
+      return 'sessionSource';
+    case 'session_sources_snapshot':
+      return 'sources';
+    case 'session_model':
+      return isValidSessionModelPayload(record.systemPayload)
+        ? 'sessionModel'
+        : undefined;
+    case 'session_approval_mode':
+      return isValidSessionApprovalModePayload(record.systemPayload)
+        ? 'sessionApprovalMode'
+        : undefined;
+    case 'session_workflow_mode':
+      return isValidSessionWorkflowModePayload(record.systemPayload)
+        ? 'sessionWorkflowMode'
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
+function appendIndexFragment(
+  entry: UuidIndexEntry,
+  record: ChatRecord,
+  sessionId: string,
+  segment: RecordSegment,
+): void {
+  const fragmentRecord = {
+    ...record,
+    type: entry.type,
+    subtype: entry.subtype,
+    systemPayload: entry.navigationTextSuppressed
+      ? { displayText: '', hookContext: '' }
+      : undefined,
+  } as ChatRecord;
+  entry.segments.push(segment);
+  entry.sessionIdMatchesFile &&= record.sessionId === sessionId;
+  entry.navigationKind ??= navigationKindForRecord(fragmentRecord);
+  entry.assistantPreviewCandidate ||=
+    isAssistantPreviewCandidate(fragmentRecord);
+  if (entry.type === 'assistant' && record.usageMetadata) {
+    entry.resumeTokenCountsCandidate = isResumeTokenCountsCandidate({
+      ...record,
+      type: entry.type,
+      subtype: entry.subtype,
+    } as unknown as ChatRecord);
+  }
+  entry.turnHint.countsAsUserPrompt ||= getSessionTurnRecordHint(
+    record,
+    sessionId,
+  ).countsAsUserPrompt;
+}
+
+interface PrefixSplitRecord {
+  entry: UuidIndexEntry;
+  bytes: number;
+}
+
+/**
+ * Parses the lines before an over-cap index window without indexing them. They
+ * still go through `executionEngine`, so ownership and completeness cover the
+ * whole file, and they are checked for the parent the window's chain is
+ * missing, which tells a window cut from lost history.
+ */
+async function scanTranscriptPrefix(params: {
+  filePath: string;
+  snapshotSize: number;
+  windowStart: number;
+  maxIndexBytes: number;
+  sessionId: string;
+  executionEngine: SessionExecutionEngineAccumulator;
+  missingParentUuid: string | undefined;
+  /** The window's records; a prefix line of one of them is its earlier part. */
+  windowEntries: ReadonlyMap<string, UuidIndexEntry>;
+}): Promise<{
+  window: TranscriptWindow;
+  firstRecord: ChatRecord | undefined;
+  firstConversationTimestamp: string | undefined;
+  sourceReadComplete: boolean;
+  containsMissingParent: boolean;
+  managed: boolean;
+  /** Earlier fragments and their authoritative first-fragment identity. */
+  splitRecords: Map<string, PrefixSplitRecord>;
+}> {
+  const { filePath, windowStart, sessionId, executionEngine } = params;
+  const splitRecords = new Map<string, PrefixSplitRecord>();
+  let prefixBytes = 0;
+  const reserve = (bytes: number): void => {
+    if (prefixBytes + bytes > params.maxIndexBytes) {
+      throw new SessionTranscriptTooLargeError(
+        sessionId,
+        params.snapshotSize,
+        params.maxIndexBytes,
+      );
+    }
+    prefixBytes += bytes;
+  };
+  let firstMetadata: ChatRecord | undefined;
+  const slots = new Map<RetainedPrefixSlot, string>();
+  const fragments = new Map<string, { records: ChatRecord[]; bytes: number }>();
+  let firstConversationTimestamp: string | undefined;
+  let lastAssistantModel: string | undefined;
+  let sourceReadComplete = true;
+  let containsMissingParent = false;
+  let managed = false;
+  const retain = (
+    slot: RetainedPrefixSlot,
+    record: ChatRecord,
+    bytes: number,
+  ): void => {
+    const previous = slots.get(slot);
+    slots.set(slot, record.uuid);
+    if (
+      previous !== undefined &&
+      previous !== record.uuid &&
+      ![...slots.values()].includes(previous)
+    ) {
+      prefixBytes -= fragments.get(previous)?.bytes ?? 0;
+      fragments.delete(previous);
+    }
+    if (!fragments.has(record.uuid)) {
+      reserve(bytes);
+      fragments.set(record.uuid, { records: [record], bytes });
+    }
+  };
+
+  await forEachLineInSnapshot(
+    filePath,
+    windowStart,
+    (line, offset, length) => {
+      const text = line.toString('utf8').trim();
+      if (text.length === 0) return;
+      let fragmentIndex = 0;
+      for (const { record: parsed } of executionEngine.parseLine(
+        text,
+        filePath,
+      )) {
+        if (!parsed) {
+          sourceReadComplete = false;
+          continue;
+        }
+        const segment = { offset, length, sequence: -1, fragmentIndex };
+        fragmentIndex++;
+        if (parsed.sessionId !== sessionId) {
+          debugLogger.warn(
+            `transcript session mismatch session=${sessionId} uuid=${parsed.uuid}`,
+          );
+          throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+        }
+        const record = parsed as unknown as ChatRecord;
+        if (record.uuid === params.missingParentUuid) {
+          containsMissingParent = true;
+        }
+        if (record.subtype === MANAGED_SESSION_HEADER_SUBTYPE) managed = true;
+        const windowEntry = params.windowEntries.get(record.uuid);
+        if (windowEntry) {
+          let split = splitRecords.get(record.uuid);
+          const bytes =
+            (split?.bytes ??
+              windowEntry.segments.reduce(
+                (total, segment) => total + segment.length,
+                0,
+              )) + length;
+          if (bytes > params.maxIndexBytes) {
+            throw new SessionTranscriptTooLargeError(
+              sessionId,
+              params.snapshotSize,
+              params.maxIndexBytes,
+            );
+          }
+          reserve(length);
+          if (!split) {
+            split = {
+              entry: newIndexEntry(record, sessionId, [segment]),
+              bytes,
+            };
+            splitRecords.set(record.uuid, split);
+          } else {
+            split.bytes = bytes;
+            appendIndexFragment(split.entry, record, sessionId, segment);
+          }
+        }
+        const retained = fragments.get(record.uuid);
+        if (retained) {
+          reserve(line.length);
+          retained.records.push(record);
+          retained.bytes += line.length;
+          continue;
+        }
+        if (isTranscriptConversationRecord(record) && record.timestamp) {
+          firstConversationTimestamp ??= record.timestamp;
+        }
+        if (
+          record.type === 'assistant' &&
+          typeof record.model === 'string' &&
+          record.model.trim()
+        ) {
+          lastAssistantModel = record.model;
+        }
+        const slot = retainedPrefixSlot(record);
+        if (!slots.has('first')) {
+          if (slot) {
+            retain('first', record, line.length);
+          } else {
+            // Kept for the project check and the start time only.
+            const {
+              message: _message,
+              toolCallResult: _toolCallResult,
+              systemPayload: _systemPayload,
+              ...metadata
+            } = record;
+            firstMetadata = metadata as ChatRecord;
+            reserve(Buffer.byteLength(JSON.stringify(firstMetadata), 'utf8'));
+            slots.set('first', record.uuid);
+          }
+        }
+        if (slot) retain(slot, record, line.length);
+      }
+    },
+    0,
+    params.maxIndexBytes,
+  );
+
+  const retainedRecords = new Map<string, ChatRecord>();
+  let retainedBytes = 0;
+  if (firstMetadata) {
+    retainedRecords.set(firstMetadata.uuid, firstMetadata);
+    retainedBytes += JSON.stringify(firstMetadata).length;
+  }
+  for (const [uuid, { records, bytes }] of fragments) {
+    retainedRecords.set(uuid, aggregateTranscriptRecordFragments(records));
+    retainedBytes += bytes;
+  }
+  const firstUuid = slots.get('first');
+  return {
+    window: {
+      retainedRecords,
+      retainedBytes,
+      parentSessionUuid: slots.get('parentSession'),
+      sessionSourceUuid: slots.get('sessionSource'),
+      sessionModelUuid: slots.get('sessionModel'),
+      sessionApprovalModeUuid: slots.get('sessionApprovalMode'),
+      sessionWorkflowModeUuid: slots.get('sessionWorkflowMode'),
+      sourcesUuid: slots.get('sources'),
+      attributionUuid: slots.get('attribution'),
+      lastAssistantModel,
+    },
+    firstRecord: firstUuid ? retainedRecords.get(firstUuid) : undefined,
+    firstConversationTimestamp,
+    sourceReadComplete,
+    containsMissingParent,
+    managed,
+    splitRecords,
+  };
+}
+
 async function buildIndex(params: {
   filePath: string;
   fileIdentity: SessionTranscriptFileIdentity;
@@ -2171,17 +2538,21 @@ async function buildIndex(params: {
   const { filePath, fileIdentity, snapshotSize, lastUpdated } = params;
   const sessionId = path.basename(filePath, '.jsonl');
   const executionEngine = new SessionExecutionEngineAccumulator(sessionId);
-  if (snapshotSize > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) {
+  const maxIndexBytes = getMaxIndexBytes();
+  // Used when an over-cap snapshot cannot be served from its last
+  // `maxIndexBytes` either: no line starts there, the window holds no
+  // conversation, or the log is Managed, whose projection reads all of it.
+  const tooLarge = (cause: string): SessionTranscriptTooLargeError => {
     debugLogger.warn(
       `index rejected: snapshot too large session=${sessionId} ` +
-        `snapshotSize=${snapshotSize} max=${SESSION_TRANSCRIPT_MAX_INDEX_BYTES}`,
+        `snapshotSize=${snapshotSize} max=${maxIndexBytes} cause=${cause}`,
     );
-    throw new SessionTranscriptTooLargeError(
+    return new SessionTranscriptTooLargeError(
       sessionId,
       snapshotSize,
-      SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+      maxIndexBytes,
     );
-  }
+  };
   debugLogger.debug(
     `index build start session=${sessionId} snapshotSize=${snapshotSize}`,
   );
@@ -2196,8 +2567,17 @@ async function buildIndex(params: {
   let firstRecordUuid: string | undefined;
   let firstRecordTimestamp: string | undefined;
   let startTime: string | undefined;
+  let windowStart = 0;
 
   try {
+    if (snapshotSize > maxIndexBytes) {
+      windowStart = await findWindowStart(
+        filePath,
+        snapshotSize,
+        maxIndexBytes,
+      );
+      if (windowStart >= snapshotSize) throw tooLarge('no line in window');
+    }
     await forEachLineInSnapshot(
       filePath,
       snapshotSize,
@@ -2239,31 +2619,12 @@ async function buildIndex(params: {
           };
           fragmentIndex++;
           if (existing) {
-            const fragmentRecord = {
-              ...(record as unknown as ChatRecord),
-              type: existing.type,
-              subtype: existing.subtype,
-              systemPayload: existing.navigationTextSuppressed
-                ? { displayText: '', hookContext: '' }
-                : undefined,
-            } as ChatRecord;
-            existing.segments.push(segment);
-            existing.sessionIdMatchesFile &&= record.sessionId === sessionId;
-            existing.navigationKind ??= navigationKindForRecord(fragmentRecord);
-            existing.assistantPreviewCandidate ||=
-              isAssistantPreviewCandidate(fragmentRecord);
-            if (existing.type === 'assistant' && record.usageMetadata) {
-              existing.resumeTokenCountsCandidate =
-                isResumeTokenCountsCandidate({
-                  ...(record as unknown as ChatRecord),
-                  type: existing.type,
-                  subtype: existing.subtype,
-                } as unknown as ChatRecord);
-            }
-            existing.turnHint.countsAsUserPrompt ||= getSessionTurnRecordHint(
+            appendIndexFragment(
+              existing,
               record as unknown as ChatRecord,
               sessionId,
-            ).countsAsUserPrompt;
+              segment,
+            );
           } else {
             const chatRecord = record as unknown as ChatRecord;
             const entry = newIndexEntry(chatRecord, sessionId, [segment]);
@@ -2271,6 +2632,7 @@ async function buildIndex(params: {
           }
         }
       },
+      windowStart,
     );
   } catch (error) {
     if (isFileMissingError(error)) {
@@ -2278,7 +2640,6 @@ async function buildIndex(params: {
     }
     throw error;
   }
-  sourceReadComplete &&= executionEngine.sourceComplete;
 
   for (const [uuid, entry] of byUuid) {
     if (!entry.sessionIdMatchesFile) {
@@ -2290,26 +2651,131 @@ async function buildIndex(params: {
   }
 
   if (!leafUuid || !firstRecordUuid) {
+    if (windowStart > 0) throw tooLarge('no conversation in window');
     debugLogger.warn(
       `index build failed: no active transcript records session=${sessionId}`,
     );
     throw new EmptySessionTranscriptError(sessionId);
   }
   startTime ??= lastUpdated;
-  const restoreStartTime = firstRecordTimestamp ?? startTime;
+  let restoreStartTime = firstRecordTimestamp ?? startTime;
 
-  const chain = walkTranscriptUuidChain(leafUuid, (uuid) => {
-    const entry = byUuid.get(uuid);
-    return entry && isTranscriptConversationRecord(entry)
-      ? {
-          uuid,
-          parentUuid: entry.parentUuid,
-          sessionId,
-          timestamp: startTime,
-          type: 'system',
+  const walkChain = (leaf: string) =>
+    walkTranscriptUuidChain(leaf, (uuid) => {
+      const entry = byUuid.get(uuid);
+      return entry && isTranscriptConversationRecord(entry)
+        ? {
+            uuid,
+            parentUuid: entry.parentUuid,
+            sessionId,
+            timestamp: startTime,
+            type: 'system',
+          }
+        : undefined;
+    });
+  let chain = walkChain(leafUuid);
+
+  let window: TranscriptWindow | undefined;
+  let indexStartTime = startTime;
+  let gapReason: TranscriptGapReason | undefined;
+  if (windowStart > 0) {
+    let prefix: Awaited<ReturnType<typeof scanTranscriptPrefix>>;
+    const missingParentUuid = chain.gaps[0]?.missingParentUuid;
+    try {
+      prefix = await scanTranscriptPrefix({
+        filePath,
+        snapshotSize,
+        windowStart,
+        maxIndexBytes,
+        sessionId,
+        executionEngine,
+        missingParentUuid,
+        windowEntries: byUuid,
+      });
+    } catch (error) {
+      if (isFileMissingError(error)) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      // No line under the cap is ever read whole, as before the window.
+      if (error instanceof TranscriptLineTooLongError) {
+        throw tooLarge('prefix line over cap');
+      }
+      throw error;
+    }
+    if (prefix.managed) throw tooLarge('managed log');
+    if (prefix.splitRecords.size > 0) {
+      await withAggregatedRecordReadContext({ filePath }, async (context) => {
+        for (const [uuid, split] of prefix.splitRecords) {
+          const windowEntry = byUuid.get(uuid)!;
+          for (const segment of windowEntry.segments) {
+            for (const record of await readSegmentRecords(
+              context.handle,
+              filePath,
+              segment,
+              uuid,
+              context.lineCache,
+            )) {
+              appendIndexFragment(split.entry, record, sessionId, segment);
+            }
+            await context.scheduler.afterUnit(segment.length);
+          }
+          byUuid.set(uuid, split.entry);
         }
-      : undefined;
-  });
+      });
+    }
+    sourceReadComplete &&= prefix.sourceReadComplete;
+    window = prefix.window;
+    indexStartTime = prefix.firstConversationTimestamp ?? startTime;
+    if (prefix.firstRecord) {
+      firstRecordUuid = prefix.firstRecord.uuid;
+      restoreStartTime = prefix.firstRecord.timestamp ?? indexStartTime;
+    }
+    chain = walkChain(leafUuid);
+    const restoredMissingParentUuid = chain.gaps[0]?.missingParentUuid;
+    let containsMissingParent = prefix.containsMissingParent;
+    if (restoredMissingParentUuid !== missingParentUuid) {
+      containsMissingParent = false;
+      if (restoredMissingParentUuid) {
+        try {
+          await forEachLineInSnapshot(
+            filePath,
+            windowStart,
+            (line) => {
+              const text = line.toString('utf8').trim();
+              if (text.length === 0) return;
+              for (const value of jsonl.parseLineTolerant<unknown>(
+                text,
+                filePath,
+              )) {
+                const record = validateTranscriptRecord(value).record;
+                if (record && record.sessionId !== sessionId) {
+                  throw new SessionTranscriptSnapshotUnavailableError(
+                    sessionId,
+                  );
+                }
+                if (record?.uuid === restoredMissingParentUuid) {
+                  containsMissingParent = true;
+                }
+              }
+            },
+            0,
+            maxIndexBytes,
+          );
+        } catch (error) {
+          if (isFileMissingError(error)) {
+            throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+          }
+          if (error instanceof TranscriptLineTooLongError) {
+            throw tooLarge('prefix line over cap');
+          }
+          throw error;
+        }
+      }
+    }
+    if (containsMissingParent) gapReason = 'transcript_window';
+  }
+  sourceReadComplete &&= executionEngine.sourceComplete;
+
   const runtimeUuids = [...chain.uuids];
   const sourceBoundary = runtimeUuids.findIndex(
     (uuid) => byUuid.get(uuid)?.sideTaskSource === true,
@@ -2359,7 +2825,9 @@ async function buildIndex(params: {
       currentPromptTurn = undefined;
     }
   }
-  const gaps: HistoryGap[] = [...chain.gaps];
+  const gaps: HistoryGap[] = chain.gaps.map((gap) =>
+    gapReason ? { ...gap, reason: gapReason } : gap,
+  );
   if (chain.cycleUuid) {
     debugLogger.debug(
       `active chain terminated: cycle session=${sessionId} uuid=${chain.cycleUuid}`,
@@ -2381,7 +2849,7 @@ async function buildIndex(params: {
     `index build complete session=${sessionId} records=${byUuid.size} ` +
       `runtime=${runtimeUuids.length} replay=${replayUuids.length} ` +
       `turns=${navigationTurns.length} gaps=${gaps.length} ` +
-      `branchPoints=${branchPointsByAssistantUuid.size}`,
+      `branchPoints=${branchPointsByAssistantUuid.size} windowStart=${windowStart}`,
   );
 
   await indexBuildCompleteHookForTest?.(filePath);
@@ -2406,10 +2874,11 @@ async function buildIndex(params: {
     goalStatePositions,
     gaps,
     restoreStartTime,
-    startTime,
+    startTime: indexStartTime,
     lastUpdated,
     byUuid,
     branchPointsByAssistantUuid,
+    ...(window ? { window } : {}),
   };
 }
 
@@ -3084,6 +3553,9 @@ export class SessionTranscriptReader {
       turns,
       startTime,
       lastUpdated,
+      ...(!projected && index && index.gaps.length > 0
+        ? { gaps: index.gaps }
+        : {}),
     };
   }
 
@@ -3195,36 +3667,53 @@ export class SessionTranscriptReader {
       index,
       (entry) => entry.resumeTokenCountsCandidate,
     );
-    const attributionUuid = lastUuidMatching(
-      index,
-      (entry) => entry.attributionSnapshotCandidate,
+    // An over-cap index falls back to the prefix for what the window does not
+    // record again.
+    const prefix = index.window;
+    const withPrefix = (uuid: string | undefined, uuids: string[]) =>
+      uuid === undefined ? uuids : [uuid, ...uuids];
+    const attributionUuid =
+      lastUuidMatching(index, (entry) => entry.attributionSnapshotCandidate) ??
+      prefix?.attributionUuid;
+    const parentSessionUuid =
+      lastUuidMatching(
+        index,
+        (entry) =>
+          entry.type === 'system' && entry.subtype === 'parent_session',
+      ) ?? prefix?.parentSessionUuid;
+    const sessionSourceUuid =
+      lastUuidMatching(
+        index,
+        (entry) =>
+          entry.type === 'system' && entry.subtype === 'session_source',
+      ) ?? prefix?.sessionSourceUuid;
+    const sessionModelUuids = withPrefix(
+      prefix?.sessionModelUuid,
+      index.runtimeUuids.filter((uuid) => {
+        const entry = index.byUuid.get(uuid);
+        return entry?.type === 'system' && entry.subtype === 'session_model';
+      }),
     );
-    const parentSessionUuid = lastUuidMatching(
-      index,
-      (entry) => entry.type === 'system' && entry.subtype === 'parent_session',
-    );
-    const sessionSourceUuid = lastUuidMatching(
-      index,
-      (entry) => entry.type === 'system' && entry.subtype === 'session_source',
-    );
-    const sessionModelUuids = index.runtimeUuids.filter((uuid) => {
-      const entry = index.byUuid.get(uuid);
-      return entry?.type === 'system' && entry.subtype === 'session_model';
-    });
     const sessionModelSet = new Set(sessionModelUuids);
-    const sessionApprovalModeUuids = index.runtimeUuids.filter((uuid) => {
-      const entry = index.byUuid.get(uuid);
-      return (
-        entry?.type === 'system' && entry.subtype === 'session_approval_mode'
-      );
-    });
+    const sessionApprovalModeUuids = withPrefix(
+      prefix?.sessionApprovalModeUuid,
+      index.runtimeUuids.filter((uuid) => {
+        const entry = index.byUuid.get(uuid);
+        return (
+          entry?.type === 'system' && entry.subtype === 'session_approval_mode'
+        );
+      }),
+    );
     const sessionApprovalModeSet = new Set(sessionApprovalModeUuids);
-    const sessionWorkflowModeUuids = index.runtimeUuids.filter((uuid) => {
-      const entry = index.byUuid.get(uuid);
-      return (
-        entry?.type === 'system' && entry.subtype === 'session_workflow_mode'
-      );
-    });
+    const sessionWorkflowModeUuids = withPrefix(
+      prefix?.sessionWorkflowModeUuid,
+      index.runtimeUuids.filter((uuid) => {
+        const entry = index.byUuid.get(uuid);
+        return (
+          entry?.type === 'system' && entry.subtype === 'session_workflow_mode'
+        );
+      }),
+    );
     const sessionWorkflowModeSet = new Set(sessionWorkflowModeUuids);
     // The legacy-model fallback reads the last assistant record's `model`.
     // Without an explicit selection it is only dispatched when it happens to
@@ -3261,11 +3750,12 @@ export class SessionTranscriptReader {
           )
         : [],
     );
-    const sourcesUuid = index.physicalRecords.findLast(
-      (record) =>
-        record.type === 'system' &&
-        record.subtype === 'session_sources_snapshot',
-    )?.uuid;
+    const sourcesUuid =
+      index.physicalRecords.findLast(
+        (record) =>
+          record.type === 'system' &&
+          record.subtype === 'session_sources_snapshot',
+      )?.uuid ?? index.window?.sourcesUuid;
     const sourceRecords: ChatRecord[] = [];
     const artifactUuids = selectArtifactUuids(index);
     const artifactSet = new Set(artifactUuids);
@@ -3279,6 +3769,13 @@ export class SessionTranscriptReader {
         lastAssistantUuid,
       ].filter((uuid): uuid is string => uuid !== undefined),
     );
+    // Not on the window's chain. Read first, so a setting the window records
+    // again is dispatched after them.
+    const prefixUuids = prefix
+      ? [...prefix.retainedRecords.keys()].filter(
+          (uuid) => metadataSet.has(uuid) || uuid === attributionUuid,
+        )
+      : [];
     const apiHistory = new SessionApiHistoryAccumulator();
     const resumeTokenCounts = new ResumeTokenCountsAccumulator();
     const turnState = new SessionTurnStateAccumulator(sessionId);
@@ -3460,6 +3957,7 @@ export class SessionTranscriptReader {
           readContext.preloadedRecords = deferredPreReadRecords;
           const remainingUuids = Array.from(
             new Set([
+              ...prefixUuids,
               ...selectedRuntimeUuids,
               ...artifactUuids,
               ...(sourcesUuid ? [sourcesUuid] : []),
@@ -3494,6 +3992,7 @@ export class SessionTranscriptReader {
     }
     const customTitle = persistedTitle.title;
     const titleSource = persistedTitle.source;
+    lastAssistantModel ??= prefix?.lastAssistantModel;
 
     const turnStateValue = turnState.finish();
     const replayRecords = replaySelection
@@ -3833,11 +4332,12 @@ export class SessionTranscriptReader {
         ? undefined
         : replaySelection.index.replayUuids[goalStatePosition];
     const goalStateSet = new Set(goalStateUuid ? [goalStateUuid] : []);
-    const sourcesUuid = index.physicalRecords.findLast(
-      (record) =>
-        record.type === 'system' &&
-        record.subtype === 'session_sources_snapshot',
-    )?.uuid;
+    const sourcesUuid =
+      index.physicalRecords.findLast(
+        (record) =>
+          record.type === 'system' &&
+          record.subtype === 'session_sources_snapshot',
+      )?.uuid ?? index.window?.sourcesUuid;
     const sourceRecords: ChatRecord[] = [];
     const artifactUuids = selectArtifactUuids(index);
     const artifactSet = new Set(artifactUuids);
@@ -4168,6 +4668,7 @@ export function resetSessionTranscriptIndexCacheForTest(): void {
   indexCache.clear();
   cursorHmacKeys.clear();
   indexCacheMaxBytesForTest = undefined;
+  maxIndexBytesForTest = undefined;
   expandedPageBytesForTest = undefined;
   cooperativeReadByteBudgetForTest = undefined;
   cooperativeReadTimeBudgetMsForTest = undefined;
@@ -4207,6 +4708,12 @@ export function setSessionTranscriptIndexCacheMaxBytesForTest(
 ): void {
   indexCacheMaxBytesForTest = maxBytes;
   pruneCache();
+}
+
+export function setSessionTranscriptMaxIndexBytesForTest(
+  maxBytes: number,
+): void {
+  maxIndexBytesForTest = maxBytes;
 }
 
 export function setSessionTranscriptExpandedPageBytesForTest(

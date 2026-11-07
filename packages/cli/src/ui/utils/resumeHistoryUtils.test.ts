@@ -284,6 +284,35 @@ describe('resumeHistoryUtils', () => {
     });
   });
 
+  it('says the earlier history was not loaded when the gap is a window cut', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          uuid: 'b1',
+          message: { parts: [{ text: 'first loaded turn' } as Part] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+      historyGaps: [
+        {
+          childUuid: 'b1',
+          missingParentUuid: 'a9',
+          reason: 'transcript_window',
+        },
+      ],
+    } as ResumedSessionData;
+
+    const [notice] = buildResumedHistoryItems(session, makeConfig({}), 1_000);
+
+    const text = (notice as { text: string }).text;
+    expect(text).toContain('was not loaded');
+    expect(text).not.toContain('could not be recovered');
+  });
+
   it('does not pair a pre-gap @-command with the post-gap user turn', () => {
     // Defense-in-depth: reconstructHistory truncates to the tail island, so a
     // pre-gap at_command is normally never replayed (the gap child is the first
