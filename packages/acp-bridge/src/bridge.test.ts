@@ -28953,6 +28953,32 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('keeps transient model changes on the session event stream', async () => {
+      const { bridge, session } = await setup();
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      await bridge.setSessionModel(session.sessionId, {
+        sessionId: session.sessionId,
+        modelId: 'qwen3-coder',
+        _meta: { [SESSION_MODEL_PERSIST_DEFAULT_META_KEY]: false },
+      });
+      bridge.publishWorkspaceEvent({
+        type: 'settings_reloaded',
+        data: { fence: true },
+      });
+      const seen: string[] = [];
+      for await (const event of iter) {
+        seen.push(event.type);
+        if (event.type === 'settings_reloaded') break;
+      }
+      expect(seen).toContain('model_switched');
+      expect(seen).not.toContain('settings_changed');
+      abort.abort();
+      await bridge.shutdown();
+    });
+
     it('stamps model events with the trusted originator client id', async () => {
       const { bridge, session } = await setup();
       const abort = new AbortController();

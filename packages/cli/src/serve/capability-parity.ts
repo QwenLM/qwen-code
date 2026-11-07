@@ -161,6 +161,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:SESSION_MODEL_CHANGE',
   },
+  session_set_model_transient: LEGACY_ONLY(
+    'the persistDefault option controls legacy user/workspace settings',
+  ),
   client_identity: LEGACY_ONLY(
     'Managed admission is actor- and workspace-scoped',
   ),

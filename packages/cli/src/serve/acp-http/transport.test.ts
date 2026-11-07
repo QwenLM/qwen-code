@@ -3821,6 +3821,85 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }
   });
 
+  it.each([
+    { method: 'session/set_model', model: { modelId: 'qwen-max' } },
+    {
+      method: 'session/set_config_option',
+      model: { configId: 'model', value: 'qwen-max' },
+    },
+  ])(
+    '$method preserves transient model selection and legacy metadata',
+    async ({ method, model }) => {
+      const connId = await initialize();
+      await newSession(connId);
+      const reader = frameReader(await openStream(connId, 'sess-1'));
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 901,
+          method,
+          params: {
+            sessionId: 'sess-1',
+            ...model,
+            persistDefault: false,
+            _meta: {
+              unrelated: 'retained',
+              'qwen.session.modelPersistDefault': false,
+            },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 901,
+          result: expect.anything(),
+        });
+        expect(bridge.lastSetModel).toMatchObject({
+          modelId: 'qwen-max',
+          _meta: {
+            unrelated: 'retained',
+            'qwen.session.modelPersistDefault': false,
+          },
+        });
+      } finally {
+        reader.close();
+      }
+    },
+  );
+
+  it.each([
+    { method: 'session/set_model', model: { modelId: 'qwen-max' } },
+    {
+      method: 'session/set_config_option',
+      model: { configId: 'model', value: 'qwen-max' },
+    },
+  ])(
+    '$method rejects conflicting persistence before mutation',
+    async ({ method, model }) => {
+      const connId = await initialize();
+      await newSession(connId);
+      const reader = frameReader(await openStream(connId, 'sess-1'));
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 902,
+          method,
+          params: {
+            sessionId: 'sess-1',
+            ...model,
+            persistDefault: false,
+            _meta: { 'qwen.session.modelPersistDefault': true },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 902,
+          error: { code: -32602 },
+        });
+        expect(bridge.lastSetModel).toBeUndefined();
+      } finally {
+        reader.close();
+      }
+    },
+  );
+
   it('standard session/set_config_option (model) routes to the bridge', async () => {
     const connId = await initialize();
     await newSession(connId);
