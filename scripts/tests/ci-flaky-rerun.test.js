@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -262,6 +270,52 @@ describe('ci flaky rerun patrol', () => {
       rmSync(dir, { recursive: true });
     }
   });
+
+  // Windows cannot express this fixture: chmodSync sets no executable bit and
+  // execFile cannot run an extensionless #!/bin/sh script (no PATHEXT match),
+  // and the PATH join below is the POSIX spelling. Gate the case rather than
+  // the file, so the rest of the driver suite still runs on the Windows lane —
+  // which downgrades a test:scripts failure to a warning and would otherwise
+  // deposit a permanent silent failure in its log.
+  it.skipIf(process.platform === 'win32')(
+    'spawns the pinned gh, never a bare name from PATH',
+    async () => {
+      // Every other GhClient test stubs api.gh, so none of them exercise the
+      // spawn. On the shared pool a bare `gh` resolves through a PATH whose
+      // directories the job uid can write, and this client runs with the bot PAT
+      // in its environment — a co-tenant's gh would receive it.
+      const dir = mkdtempSync(join(tmpdir(), 'patrol-gh-'));
+      const planted = join(dir, 'planted');
+      const trusted = join(dir, 'trusted');
+      mkdirSync(planted);
+      mkdirSync(trusted);
+      const leaked = join(dir, 'LEAKED');
+      writeFileSync(
+        join(planted, 'gh'),
+        `#!/bin/sh\nprintf '%s' "\${GH_TOKEN:-}" > '${leaked}'\necho planted\n`,
+      );
+      writeFileSync(join(trusted, 'gh'), '#!/bin/sh\necho trusted\n');
+      for (const d of [planted, trusted]) chmodSync(join(d, 'gh'), 0o755);
+      const prevPath = process.env.PATH;
+      const prevGh = process.env.PATROL_GH;
+      const prevToken = process.env.GH_TOKEN;
+      try {
+        process.env.PATH = `${planted}:${prevPath}`;
+        process.env.GH_TOKEN = 'SENTINEL-PAT-VALUE';
+        process.env.PATROL_GH = join(trusted, 'gh');
+        const api = new GhClient('QwenLM/qwen-code');
+        await expect(api.gh(['api', 'user'])).resolves.toBe('trusted\n');
+        expect(existsSync(leaked)).toBe(false);
+      } finally {
+        if (prevGh === undefined) delete process.env.PATROL_GH;
+        else process.env.PATROL_GH = prevGh;
+        if (prevToken === undefined) delete process.env.GH_TOKEN;
+        else process.env.GH_TOKEN = prevToken;
+        process.env.PATH = prevPath;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('ignores empty lines in paginated comment output', async () => {
     const api = new GhClient('QwenLM/qwen-code');
@@ -848,6 +902,45 @@ describe('ci flaky rerun patrol', () => {
       ['rerunFailedJobs', 124],
     ]);
     expect(c.calls.filter((call) => call[0] === 'comment')).toHaveLength(1);
+  });
+
+  it('fails the round when a non-empty decision list matches no candidate', async () => {
+    // The hollow-green shape the workflow's verdict step cannot catch: validate
+    // sees a non-empty array and sets has_decisions=true, so the verdict step is
+    // skipped, act prints "no candidate" per entry and exits 0. The consumer has
+    // to close the loop. `{"pr":123,"action":"rerun"}` is exactly the shape a
+    // model emits when it ignores the five-field key.
+    const c = client();
+    await expect(
+      actOnDecisions(c, [target()], [{ pr: 123, action: 'rerun' }]),
+    ).rejects.toThrow(/matched no scanned candidate/);
+    expect(c.calls).toEqual([]);
+
+    // A mistyped headSha is the same failure, not a per-decision skip.
+    const c2 = client();
+    await expect(
+      actOnDecisions(c2, [target()], [decision({ headSha: 'f'.repeat(40) })]),
+    ).rejects.toThrow(/matched no scanned candidate/);
+    expect(c2.calls).toEqual([]);
+
+    // An empty list is still a legitimate no-op: the workflow's verdict step
+    // owns that case, and the consumer must not throw on it.
+    const c3 = client();
+    await expect(actOnDecisions(c3, [target()], [])).resolves.toBeUndefined();
+    expect(c3.calls).toEqual([]);
+  });
+
+  it('keeps a matched decision that failed per-target from failing the round', async () => {
+    // A candidate superseded between scan and act must not fail the round. It
+    // still counts as matched, because the decision addressed a real target.
+    const c = client({
+      async rerunFailedJobs() {
+        throw new Error('temporary API failure');
+      },
+    });
+    await expect(
+      actOnDecisions(c, [target()], [decision()]),
+    ).resolves.toBeUndefined();
   });
 
   it('persists a zero-count reset marker after success', async () => {

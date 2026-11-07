@@ -547,6 +547,7 @@ export async function actOnDecisions(client, targets, decisions) {
   if (!Array.isArray(targets) || !Array.isArray(decisions)) return;
   const byKey = new Map(targets.map((target) => [decisionKey(target), target]));
   const handled = new Set();
+  let matched = 0;
   for (const decision of decisions) {
     const key = decisionKey(decision);
     if (handled.has(key)) continue;
@@ -559,12 +560,24 @@ export async function actOnDecisions(client, targets, decisions) {
         );
         continue;
       }
+      matched += 1;
       await actOnDecision(client, target, decision);
     } catch (error) {
       process.stderr.write(
         `act: skipping PR ${decision?.prNumber ?? 'unknown'}: ${error.message}${error.stderr ? `\n${String(error.stderr).trim()}` : ''}\n`,
       );
     }
+  }
+  // A non-empty list that matched nothing is the hollow-green shape: the round
+  // uploads, runs act, prints "no candidate" per entry and exits 0, while the
+  // workflow's verdict step is skipped because has_decisions is true. Fail
+  // loudly instead. Per-decision failures stay swallowed above — a candidate
+  // superseded between scan and act must not fail the round, and it still
+  // counts as matched because the decision did address a real scanned target.
+  if (decisions.length > 0 && matched === 0) {
+    throw new Error(
+      `act: ${decisions.length} decision(s) matched no scanned candidate; this round acted on nothing.`,
+    );
   }
 }
 
@@ -599,7 +612,11 @@ export class GhClient {
   }
 
   async gh(args) {
-    const { stdout } = await execFile('gh', args, {
+    // The caller pins an absolute, verified gh. Resolving the bare name here
+    // would search PATH inside this child process, which on the shared pool
+    // can contain a co-tenant's gh in a uid-writable directory — and this
+    // client runs with the bot PAT in its environment.
+    const { stdout } = await execFile(process.env.PATROL_GH || 'gh', args, {
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
       timeout: 60_000,
