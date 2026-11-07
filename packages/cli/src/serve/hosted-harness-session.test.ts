@@ -22342,13 +22342,14 @@ describe('Hosted Harness no-tool session', () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
       'det-claim',
     );
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockImplementation(
-      async () => {
-        order.push('handback');
-        if (backgroundLive)
-          throw new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy');
-      },
-    );
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'releaseMount',
+    ).mockImplementation(async () => {
+      order.push('handback');
+      if (backgroundLive)
+        throw new HostedWorkspaceBrokerRejection(409, 'runtime_session_busy');
+    });
     const hooks = new HostedHookSession(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       f.resident.managed,
