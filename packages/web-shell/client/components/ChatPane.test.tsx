@@ -58,6 +58,10 @@ type ToolApprovalTestProps = Parameters<
   typeof import('./messages/ToolApproval').ToolApproval
 >[0];
 let latestToolApprovalProps: ToolApprovalTestProps | undefined;
+let latestCanScrollToBottomChange:
+  | ((canScrollToBottom: boolean) => void)
+  | undefined;
+const transcriptViewportScrollToBottom = vi.fn();
 let renderRealChatEditor: boolean;
 let latestFollowupAccept: ((suggestion: string) => void) | undefined;
 let latestMonitorDetailsOnOpen:
@@ -232,39 +236,46 @@ vi.mock('../monitorDetailsContext', async () => {
 });
 
 vi.mock('./TranscriptViewport', () => ({
-  TranscriptViewport: (props: any) => (
-    <div
-      data-testid="pane-messages"
-      data-approval={props.pendingApproval ? 'yes' : 'no'}
-    >
-      {props.messages.length}
-      <button
-        data-testid="pane-open-turn-output"
-        type="button"
-        onClick={() =>
-          props.onTurnOutputOpen?.({
-            id: 'artifact:turn-artifact',
-            kind: 'artifact',
-            title: 'Turn artifact',
-            turnId: 'turn-1',
-            artifactId: 'turn-artifact',
-            artifact: { id: 'turn-artifact', title: 'Turn artifact' },
-            workspaceCwd: '/w',
-          })
-        }
-      />
-      <button
-        data-testid="pane-open-attachment"
-        type="button"
-        onClick={() =>
-          props.onAttachmentPreview?.({
-            name: 'data.json',
-            attachmentId: 'attachment-1',
-          })
-        }
-      />
-    </div>
-  ),
+  TranscriptViewport: forwardRef(function TranscriptViewport(props: any, ref) {
+    latestCanScrollToBottomChange = props.onCanScrollToBottomChange;
+    useImperativeHandle(ref, () => ({
+      scrollToBottom: transcriptViewportScrollToBottom,
+    }));
+    return (
+      <div
+        ref={ref}
+        data-testid="pane-messages"
+        data-approval={props.pendingApproval ? 'yes' : 'no'}
+      >
+        {props.messages.length}
+        <button
+          data-testid="pane-open-turn-output"
+          type="button"
+          onClick={() =>
+            props.onTurnOutputOpen?.({
+              id: 'artifact:turn-artifact',
+              kind: 'artifact',
+              title: 'Turn artifact',
+              turnId: 'turn-1',
+              artifactId: 'turn-artifact',
+              artifact: { id: 'turn-artifact', title: 'Turn artifact' },
+              workspaceCwd: '/w',
+            })
+          }
+        />
+        <button
+          data-testid="pane-open-attachment"
+          type="button"
+          onClick={() =>
+            props.onAttachmentPreview?.({
+              name: 'data.json',
+              attachmentId: 'attachment-1',
+            })
+          }
+        />
+      </div>
+    );
+  }),
 }));
 vi.mock('./StreamingStatus', () => ({
   StreamingStatus: (props: any) => (
@@ -479,6 +490,8 @@ beforeEach(() => {
   latestComposerCoreOptions.current = null;
   latestFollowupAccept = undefined;
   latestMonitorDetailsOnOpen = undefined;
+  latestCanScrollToBottomChange = undefined;
+  transcriptViewportScrollToBottom.mockClear();
   sendPromptAdmit = undefined;
   queuedPromptsMock = [];
   queuedTextsMock = [];
@@ -636,6 +649,28 @@ function deferred<T>() {
 }
 
 describe('ChatPane', () => {
+  it('shows a scroll-to-bottom control above the composer while the transcript is detached', () => {
+    render();
+    const label = 'Scroll to bottom';
+    expect(
+      container!.querySelector(`button[aria-label="${label}"]`),
+    ).toBeNull();
+
+    act(() => latestCanScrollToBottomChange?.(true));
+    const button = container!.querySelector<HTMLButtonElement>(
+      `button[aria-label="${label}"]`,
+    );
+    expect(button).not.toBeNull();
+
+    act(() => button!.click());
+    expect(transcriptViewportScrollToBottom).toHaveBeenCalledOnce();
+
+    act(() => latestCanScrollToBottomChange?.(false));
+    expect(
+      container!.querySelector(`button[aria-label="${label}"]`),
+    ).toBeNull();
+  });
+
   it('publishes owner-specific context controls and withdraws them on unmount', () => {
     connectionState.commands = [
       { name: 'compress', source: 'builtin-command' },
