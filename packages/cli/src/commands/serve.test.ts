@@ -11,6 +11,10 @@ import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yargs, { type Argv } from 'yargs';
 import {
+  DEFAULT_RING_MAX_BYTES,
+  MAX_RING_MAX_BYTES,
+} from '@qwen-code/acp-bridge/eventBus';
+import {
   maybeOpenWebShellBrowser,
   serveCommand,
   validateManagedLocalFlags,
@@ -261,6 +265,37 @@ describe('serve command args', () => {
       '--permission-response-timeout-ms 60000',
     );
     expect(parsed['permission-response-timeout-ms']).toBe(60000);
+  });
+
+  it('defaults and parses --event-ring-max-bytes', () => {
+    expect(buildParser().parseSync('')['event-ring-max-bytes']).toBe(
+      DEFAULT_RING_MAX_BYTES,
+    );
+    for (const value of [1, 1024 * 1024, MAX_RING_MAX_BYTES]) {
+      expect(
+        buildParser().parseSync(`--event-ring-max-bytes ${value}`)[
+          'event-ring-max-bytes'
+        ],
+      ).toBe(value);
+    }
+    expect(() => buildParser().parseSync('--event-ring-max-bytes')).toThrow(
+      /Not enough arguments/,
+    );
+  });
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER + 1,
+    MAX_RING_MAX_BYTES + 1,
+  ])('rejects --event-ring-max-bytes=%s', (value) => {
+    expect(() =>
+      buildParser().parseSync(`--event-ring-max-bytes=${value}`),
+    ).toThrow(/eventRingMaxBytes/);
   });
 
   it('parses --compacted-replay-max-bytes as a number', () => {
@@ -591,6 +626,23 @@ describe('serve rate limit env parsing', () => {
       ).experimentalPairedEngines,
     ).toBe(expected);
   });
+
+  it.each([
+    ['', DEFAULT_RING_MAX_BYTES],
+    ['--event-ring-max-bytes 1048576', 1024 * 1024],
+  ] as const)(
+    'forwards the event ring byte cap %s to the daemon',
+    async (args, expected) => {
+      mockRunQwenServe.mockResolvedValueOnce({
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: false,
+      });
+      await startServeHandlerWithArgs(`--no-web ${args}`);
+      expect(mockRunQwenServe.mock.calls[0]?.[0]).toMatchObject({
+        eventRingMaxBytes: expected,
+      });
+    },
+  );
 
   it('applies authenticated open before the yargs path starts the daemon', async () => {
     let tokenAtBoot: string | undefined;
