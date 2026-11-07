@@ -498,7 +498,7 @@ jobs:
           image_context="$(mktemp -d "${RUNNER_TEMP}/qwen-unit-poc-image-XXXXXX")"
           cat > "${image_context}/Dockerfile" <<'IMAGE'
           FROM node:22-bookworm
-          RUN apt-get update && apt-get install -y --no-install-recommends tmux zip unzip util-linux && rm -rf /var/lib/apt/lists/*
+          RUN apt-get update && apt-get install -y --no-install-recommends jq tmux zip unzip util-linux && rm -rf /var/lib/apt/lists/*
           IMAGE
           docker build --file "${image_context}/Dockerfile" --tag "${POC_IMAGE}" "${image_context}"
           rm -rf -- "${image_context}"
@@ -536,6 +536,7 @@ jobs:
             }
           '
           node -e 'if (process.versions.node.split(".")[0] !== "22") process.exit(1)'
+          jq --version
           for endpoint in 169.254.169.254 100.100.100.200; do
             code="$(curl --connect-timeout 2 --max-time 3 -sS -o /dev/null -w '%{http_code}' "http://${endpoint}/latest/meta-data/" || true)"
             case "${code}" in

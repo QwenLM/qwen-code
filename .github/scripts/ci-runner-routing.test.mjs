@@ -1707,6 +1707,8 @@ describe('manual Linux unit container PoC', () => {
     assert.match(driver.run, /image_context/);
     assert.doesNotMatch(driver.run, /docker build --file -/);
     assert.match(driver.run, /^FROM node:22-bookworm$/m);
+    assert.match(driver.run, /apt-get install -y --no-install-recommends jq /);
+    assert.match(driver.run, /jq --version/);
     assert.equal(driver.env.POC_SHA, '${{ github.event.inputs.branch_ref }}');
     assert.doesNotMatch(driver.run, /2905dccbe45ed2917b28c7de6a935d031546ee43/);
     for (const fragment of [

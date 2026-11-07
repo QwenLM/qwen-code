@@ -52,9 +52,9 @@ dispatch 版本在被测 checkout 存在前确定 workflow 定义。被测仓库
 
 1. 可信分类器为普通全量 CI 负载选择 `docs_only`，避免其他既有 job 执行相应测试主体。
 2. `linux_unit_poc` 校验仓库格式与完整 SHA，在唯一 run/attempt 子目录检出，禁用凭据持久化，并验证实际提交及本地 GitHub 认证 header 不存在。
-3. 可信内联 Dockerfile 在 `node:22-bookworm` 上安装 tmux/zip/util-linux 工具，不读取被测 checkout 的上下文或指令。
+3. 可信内联 Dockerfile 在 `node:22-bookworm` 上安装 jq、tmux/zip/util-linux 工具，不读取被测 checkout 的上下文或指令。
 4. 驱动执行 `docker create`，使用 `--init`、`--user node`、`--cap-drop ALL`、`--security-opt=no-new-privileges`，且仅将指定源码目录只读挂载。禁用 privileged、宿主网络、Docker socket、基 workspace 挂载及携带 secret 的环境。
-5. 执行源码脚本前，容器检查 `NoNewPrivs=1`、有效 capability 不含 `SYS_ADMIN`、`SYS_PTRACE`、`NET_ADMIN`、`DAC_OVERRIDE`，无 Docker socket，Node 为 22，AWS/阿里云 metadata 不可达或被明确拒绝。
+5. 执行源码脚本前，容器检查 `NoNewPrivs=1`、有效 capability 不含 `SYS_ADMIN`、`SYS_PTRACE`、`NET_ADMIN`、`DAC_OVERRIDE`，无 Docker socket，Node 为 22，AWS/阿里云 metadata 不可达或被明确拒绝；并确认 jq 已安装。
 6. 将 `/source:ro` 复制到 `/tmp/repository`，以 UID 1000、全新 HOME/Corepack 缓存及清空的模型凭据，安装锁定依赖，运行 `npm run build`、`npm run bundle` 和完整测试脚本。只有预期 SHA 被显式传入测试容器。
 7. `EXIT` trap 强制删除容器及其卷，`docker ps --all` 复核容器已不存在，最后以受保护的步骤删除专用 checkout。
 

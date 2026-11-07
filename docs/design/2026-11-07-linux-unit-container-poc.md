@@ -52,9 +52,9 @@ When `linux_unit_container=true`:
 
 1. The trusted classifier selects `docs_only` for the ordinary full-CI payload, so the unrelated existing jobs do not execute their full test bodies.
 2. `linux_unit_poc` validates the repository format and exact SHA, checks out into a unique run/attempt subdirectory, disables credential persistence, and verifies the actual checked-out commit and absence of a local GitHub authentication header.
-3. A trusted inline Dockerfile extends `node:22-bookworm` with the required tmux/zip/util-linux tools. It does not read any context or instructions from the tested checkout.
+3. A trusted inline Dockerfile extends `node:22-bookworm` with jq, tmux/zip/unzip, and util-linux. It does not read any context or instructions from the tested checkout.
 4. The driver uses `docker create` with `--init`, `--user node`, `--cap-drop ALL`, `--security-opt=no-new-privileges`, and a single read-only source mount. It supplies no privileged mode, no host network, no Docker socket, no base workspace mount, and no secret-bearing environment.
-5. Before executing source scripts, the container checks `NoNewPrivs=1`, absence of effective `SYS_ADMIN`, `SYS_PTRACE`, `NET_ADMIN`, and `DAC_OVERRIDE`, absence of the Docker socket, Node 22, and blocked or explicitly denied AWS/Alibaba Cloud metadata endpoints.
+5. Before executing source scripts, the container checks `NoNewPrivs=1`, absence of effective `SYS_ADMIN`, `SYS_PTRACE`, `NET_ADMIN`, and `DAC_OVERRIDE`, absence of the Docker socket, Node 22, and blocked or explicitly denied AWS/Alibaba Cloud metadata endpoints. It also verifies jq is installed.
 6. The source is copied from `/source:ro` to `/tmp/repository`. Frozen pnpm installation, `npm run build`, `npm run bundle`, and the complete test-lane script execute as UID 1000 with a fresh HOME/Corepack cache and empty model credentials. Only the expected SHA is forwarded explicitly to the test container.
 7. An `EXIT` trap force-removes the container and its volumes. A subsequent `docker ps --all` check proves it is gone, and a guarded final step removes the dedicated checkout.
 
