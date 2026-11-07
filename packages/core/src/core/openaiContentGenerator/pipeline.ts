@@ -76,6 +76,56 @@ import {
 } from '../reasoning-overrides.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
+
+/**
+ * Attributes Qwen Code attaches to the LLM span for OpenRouter's routing
+ * decision. The gateway rotates backends per request, so which backend served
+ * one is what explains a speed/cost/quality difference; OpenRouter reports it
+ * as `X-Generation-Id` on every response and as a top-level `provider` on
+ * every payload. Both are dropped before the normalized response reaches
+ * telemetry, so they are captured at the wire in `pipeline.ts`.
+ *
+ * Vendor-prefixed rather than reusing `gen_ai.provider.name`, which already
+ * means the gateway/protocol provider (`gcp.gemini`).
+ */
+const OPENROUTER_PROVIDER_ATTRIBUTE = 'openrouter.provider';
+const OPENROUTER_GENERATION_ID_ATTRIBUTE = 'openrouter.generation_id';
+
+/**
+ * Reads the OpenRouter backend name out of a raw wire payload. Callers gate
+ * on `isOpenRouterHostname`, so this only has to be tolerant of the shape.
+ */
+function openRouterPayloadProvider(payload: unknown): string | undefined {
+  const provider = (payload as { provider?: unknown } | undefined)?.provider;
+  return typeof provider === 'string' && provider.length > 0
+    ? provider
+    : undefined;
+}
+
+function reportOpenRouterResponseAttributes(
+  telemetryAttempt: GenAiAttemptHandle | undefined,
+  isOpenRouter: boolean,
+  fields: { generationId?: string | null; provider?: string },
+): void {
+  if (!isOpenRouter) return;
+  const controller = telemetryAttempt?.controller;
+  if (!controller) return;
+  if (fields.generationId) {
+    controller.recordResponseAttribute(
+      telemetryAttempt,
+      OPENROUTER_GENERATION_ID_ATTRIBUTE,
+      fields.generationId,
+    );
+  }
+  if (fields.provider) {
+    controller.recordResponseAttribute(
+      telemetryAttempt,
+      OPENROUTER_PROVIDER_ATTRIBUTE,
+      fields.provider,
+    );
+  }
+}
+
 const OPENAI_STRICT_SCHEMA_KEYS = new Set([
   'type',
   'properties',
@@ -559,13 +609,39 @@ export class ContentGenerationPipeline {
           ? createChildAbortController(parentSignal)
           : undefined;
         try {
-          const openaiResponse = (await this.client.chat.completions.create(
+          const createPromise = this.client.chat.completions.create(
             openaiRequest,
             {
               signal: perRequestAc?.signal,
             },
-          )) as OpenAI.Chat.ChatCompletion;
+          );
+          // withResponse() keeps the raw Response reachable so response-header
+          // attributes (OpenRouter's X-Generation-Id) can be recorded. Mocks
+          // and proxy-compatible clients without it fall back to a plain await.
+          const { data: openaiResponse, response: httpResponse } =
+            typeof (createPromise as { withResponse?: unknown })
+              .withResponse === 'function'
+              ? await (
+                  createPromise as unknown as {
+                    withResponse(): Promise<{
+                      data: OpenAI.Chat.ChatCompletion;
+                      response: Response;
+                    }>;
+                  }
+                ).withResponse()
+              : {
+                  data: (await createPromise) as OpenAI.Chat.ChatCompletion,
+                  response: undefined,
+                };
           reportOpenAiResponse(telemetryAttempt, openaiResponse);
+          reportOpenRouterResponseAttributes(
+            telemetryAttempt,
+            isOpenRouterHostname(this.contentGeneratorConfig),
+            {
+              generationId: httpResponse?.headers.get('x-generation-id'),
+              provider: openRouterPayloadProvider(openaiResponse),
+            },
+          );
 
           const llmResponse = OpenAIContentConverter.convertOpenAIResponseToLlm(
             openaiResponse,
@@ -627,6 +703,11 @@ export class ContentGenerationPipeline {
               }
             ).withResponse();
             stream = data;
+            reportOpenRouterResponseAttributes(
+              telemetryAttempt,
+              isOpenRouterHostname(this.contentGeneratorConfig),
+              { generationId: httpResponse.headers.get('x-generation-id') },
+            );
 
             // Validate content-type: a non-SSE content-type on a streaming
             // request means the upstream (gateway/proxy) returned something
@@ -802,8 +883,27 @@ export class ContentGenerationPipeline {
 
     try {
       // Stage 2a: Convert and yield each chunk while preserving original
+      // OpenRouter reports its routing decision on every SSE chunk; the
+      // converter drops the field, so it is read from the raw chunk here.
+      let routingProviderReported = false;
+      // Resolved once per pipeline, not per chunk: the endpoint does not
+      // change mid-stream.
+      const openRouterEndpoint = isOpenRouterHostname(
+        this.contentGeneratorConfig,
+      );
       for await (const chunk of stream) {
         reportOpenAiChunk(telemetryAttempt, chunk);
+        if (!routingProviderReported) {
+          const provider = openRouterPayloadProvider(chunk);
+          if (provider) {
+            routingProviderReported = true;
+            reportOpenRouterResponseAttributes(
+              telemetryAttempt,
+              openRouterEndpoint,
+              { provider },
+            );
+          }
+        }
         // Detect API errors returned as stream content.
         // Some providers return errors (e.g., TPM throttling) as a normal SSE chunk
         // with finish_reason="error_finish" and the error in delta.content,

@@ -62,6 +62,8 @@ import { fnCall } from '../../test-utils/model-fixtures.js';
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
 const mockReportOpenAiResponse = vi.hoisted(() => vi.fn());
 const mockReportOpenAiChunk = vi.hoisted(() => vi.fn());
+/** Span attribute writes made through the attempt handle, keyed as recorded. */
+const mockSpanAttributes = vi.hoisted(() => new Map<string, unknown>());
 
 vi.mock('./converter.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./converter.js')>();
@@ -257,6 +259,11 @@ function expectStopWithUsage(response: GenerateContentResponse) {
 }
 
 describe('ContentGenerationPipeline', () => {
+  const httpResponse = (
+    headers: Record<string, string>,
+    body: ReadableStream | null = null,
+  ) => ({ headers: new Headers(headers), status: 200, body }) as Response;
+
   let pipeline: ContentGenerationPipeline;
   let mockConfig: PipelineConfig;
   let mockProvider: OpenAICompatibleProvider;
@@ -268,6 +275,9 @@ describe('ContentGenerationPipeline', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSpanAttributes.clear();
+    activeHandle = attemptHandle();
+    mockReportOpenAiRequest.mockReturnValue(activeHandle);
 
     mockClient = {
       chat: {
@@ -320,6 +330,26 @@ describe('ContentGenerationPipeline', () => {
   });
 
   const createMock = () => mockClient.chat.completions.create as Mock;
+
+  /**
+   * The handle the pipeline is given for one attempt. `recordResponseAttribute`
+   * is the only member the OpenRouter capture uses, so it records into a map
+   * rather than standing up a real span.
+   */
+  const attemptHandle = () => ({
+    controller: {
+      recordResponseAttribute: (
+        handle: unknown,
+        key: string,
+        value: unknown,
+      ) => {
+        if (handle !== activeHandle) return;
+        mockSpanAttributes.set(key, value);
+      },
+    },
+    generation: 1,
+  });
+  let activeHandle: ReturnType<typeof attemptHandle> | undefined;
 
   /** The body the SDK received on its `index`-th create() call. */
   const sentBody = (index = 0) => createMock().mock.calls.at(index)![0];
@@ -2650,6 +2680,134 @@ describe('ContentGenerationPipeline', () => {
     });
   });
 
+  describe('OpenRouter routing attributes (non-streaming)', () => {
+    /** Serves `completion` from an OpenRouter-configured pipeline. */
+    const completeFromOpenRouter = async (
+      completion: Record<string, unknown>,
+      headers: Record<string, string> = {},
+    ) => {
+      pipelineWith({ baseUrl: OPENROUTER_URL });
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      createMock().mockImplementation(() =>
+        Object.assign(Promise.resolve(completion), {
+          withResponse: () =>
+            Promise.resolve({
+              data: completion,
+              response: httpResponse(headers),
+            }),
+        }),
+      );
+      await pipeline.execute(userRequest(), 'test-id');
+    };
+
+    it('records the X-Generation-Id response header', async () => {
+      await completeFromOpenRouter(
+        { id: 'r', choices: [{ message: { content: 'ok' } }] },
+        { 'x-generation-id': 'gen-abc123' },
+      );
+
+      expect(mockSpanAttributes.get('openrouter.generation_id')).toBe(
+        'gen-abc123',
+      );
+    });
+
+    it('records the provider from the response body', async () => {
+      await completeFromOpenRouter({
+        id: 'r',
+        choices: [{ message: { content: 'ok' } }],
+        provider: 'DigitalOcean',
+      });
+
+      expect(mockSpanAttributes.get('openrouter.provider')).toBe(
+        'DigitalOcean',
+      );
+    });
+
+    it('still reads the body when withResponse is unavailable', async () => {
+      pipelineWith({ baseUrl: OPENROUTER_URL });
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      createMock().mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' } }],
+        provider: 'SiliconFlow',
+      });
+
+      await pipeline.execute(userRequest(), 'test-id');
+
+      expect(mockSpanAttributes.get('openrouter.provider')).toBe('SiliconFlow');
+      expect(mockSpanAttributes.has('openrouter.generation_id')).toBe(false);
+    });
+
+    it('records nothing for a non-OpenRouter endpoint', async () => {
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      createMock().mockImplementation(() =>
+        Object.assign(
+          Promise.resolve({
+            id: 'r',
+            choices: [{ message: { content: 'ok' } }],
+            provider: 'DigitalOcean',
+          }),
+          {
+            withResponse: () =>
+              Promise.resolve({
+                data: {
+                  id: 'r',
+                  choices: [{ message: { content: 'ok' } }],
+                  provider: 'DigitalOcean',
+                },
+                response: httpResponse({ 'x-generation-id': 'gen-abc123' }),
+              }),
+          },
+        ),
+      );
+
+      await pipeline.execute(userRequest(), 'test-id');
+
+      expect(mockSpanAttributes.size).toBe(0);
+    });
+
+    it('records nothing when the exchange is disabled for telemetry', async () => {
+      // `reportOpenAiRequest` returns undefined whenever telemetry is off, so
+      // an OpenRouter response still reaches the capture with no controller.
+      mockReportOpenAiRequest.mockReturnValue(undefined);
+      createMock().mockImplementation(() =>
+        Object.assign(
+          Promise.resolve({
+            id: 'r',
+            choices: [{ message: { content: 'ok' } }],
+            provider: 'DigitalOcean',
+          }),
+          {
+            withResponse: () =>
+              Promise.resolve({
+                data: {
+                  id: 'r',
+                  choices: [{ message: { content: 'ok' } }],
+                  provider: 'DigitalOcean',
+                },
+                response: httpResponse({ 'x-generation-id': 'gen-abc123' }),
+              }),
+          },
+        ),
+      );
+      pipelineWith({ baseUrl: OPENROUTER_URL });
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+
+      const response = await pipeline.execute(userRequest(), 'test-id');
+
+      expect(response).toBeDefined();
+      expect(mockSpanAttributes.size).toBe(0);
+    });
+  });
+
   describe('executeStream', () => {
     /** An APIPromise for `stream` whose withResponse() returns `withResponse()`. */
     const apiPromise = (
@@ -2670,11 +2828,6 @@ describe('ContentGenerationPipeline', () => {
         ),
       );
     }
-
-    const httpResponse = (
-      headers: Record<string, string>,
-      body: ReadableStream | null = null,
-    ) => ({ headers: new Headers(headers), status: 200, body }) as Response;
 
     const bodyOf = (text: string) =>
       new ReadableStream({
@@ -3499,6 +3652,64 @@ describe('ContentGenerationPipeline', () => {
       // streamFrom resolves create() plainly — no withResponse method.
       const results = await streamed(chunkOf({ content: 'Hello' }, 'stop'));
       expect(results.length).toBeGreaterThan(0);
+    });
+
+    describe('OpenRouter routing attributes (streaming)', () => {
+      /** Streams `chunks` from an OpenRouter-configured pipeline. */
+      const streamFromOpenRouter = async (...chunks: unknown[]) => {
+        pipelineWith({ baseUrl: OPENROUTER_URL });
+        convertEveryChunkTo(new GenerateContentResponse());
+        serveWithResponse(httpResponse({}), null, streamOf(...chunks));
+        await collect(await pipeline.executeStream(userRequest(), 'test-id'));
+      };
+
+      it('records the X-Generation-Id response header', async () => {
+        pipelineWith({ baseUrl: OPENROUTER_URL });
+        convertEveryChunkTo(new GenerateContentResponse());
+        serveWithResponse(
+          httpResponse({ 'x-generation-id': 'gen-abc123' }),
+          null,
+        );
+
+        await collect(await pipeline.executeStream(userRequest(), 'test-id'));
+
+        expect(mockSpanAttributes.get('openrouter.generation_id')).toBe(
+          'gen-abc123',
+        );
+      });
+
+      it('records the provider from the first chunk that carries one', async () => {
+        await streamFromOpenRouter(
+          chunkOf({ content: 'a' }, null, { provider: 'SiliconFlow' }),
+          chunkOf({ content: 'b' }, null, { provider: 'DigitalOcean' }),
+        );
+
+        expect(mockSpanAttributes.get('openrouter.provider')).toBe(
+          'SiliconFlow',
+        );
+      });
+
+      it('skips chunks without a provider until the first one that has it', async () => {
+        await streamFromOpenRouter(
+          chunkOf({ content: 'a' }),
+          chunkOf({ content: 'b' }, null, { provider: 'Parasail' }),
+        );
+
+        expect(mockSpanAttributes.get('openrouter.provider')).toBe('Parasail');
+      });
+
+      it('records nothing for a non-OpenRouter endpoint with the same fields', async () => {
+        convertEveryChunkTo(new GenerateContentResponse());
+        serveWithResponse(
+          httpResponse({ 'x-generation-id': 'gen-abc123' }),
+          null,
+          streamOf(chunkOf({ content: 'a' }, null, { provider: 'X' })),
+        );
+
+        await collect(await pipeline.executeStream(userRequest(), 'test-id'));
+
+        expect(mockSpanAttributes.size).toBe(0);
+      });
     });
 
     it('should pass abort signal to OpenAI client for streaming requests', async () => {
