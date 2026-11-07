@@ -4,13 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { parseRule } from '../permissions/rule-parser.js';
+import {
+  parseRule,
+  toolMatchesRuleToolName,
+} from '../permissions/rule-parser.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 /**
  * The tool a memory write goes through. Every managed memory agent that saves
  * anything (extract, remember, dream) writes with one of these two, so a
- * blanket deny on either one closes the whole write path.
+ * blanket deny on both of them closes the whole write path.
  */
 const WRITE_TOOLS = [ToolNames.WRITE_FILE, ToolNames.EDIT] as const;
 
@@ -26,7 +29,11 @@ function isBlanketDenyOf(toolName: string, rawRule: string): boolean {
   if (trimmed.startsWith('mcp__')) return false;
   const rule = parseRule(trimmed);
   if (rule.invalid) return false;
-  if (rule.toolName !== toolName) return false;
+  // A bare `edit` is the meta-tool: the permission engine applies it to
+  // `write_file` too, so an exact name compare would miss the common
+  // `deny: ["Edit"]` spelling and fork an extractor whose every save is then
+  // refused.
+  if (!toolMatchesRuleToolName(rule.toolName, toolName)) return false;
   return !rule.specifier && !rule.toolParamMatchers?.length;
 }
 

@@ -19,7 +19,10 @@ describe('blocksAllMemoryWrites', () => {
 
   it('needs both write tools denied, since either one can save', () => {
     expect(blocksAllMemoryWrites(['write_file'])).toBe(false);
-    expect(blocksAllMemoryWrites(['edit'])).toBe(false);
+    // A bare `edit` denies `write_file` as well, so on its own it is already
+    // both write tools and the extractor has nowhere to save.
+    expect(blocksAllMemoryWrites(['edit'])).toBe(true);
+    expect(blocksAllMemoryWrites(['Edit', 'write_file'])).toBe(true);
   });
 
   it('ignores specifier rules, which allow the tool on other paths', () => {
@@ -33,8 +36,12 @@ describe('blocksAllMemoryWrites', () => {
     expect(
       blocksAllMemoryWrites(['run_shell_command', 'write_file', 'edit']),
     ).toBe(true);
-    expect(blocksAllMemoryWrites(['write_file(broken', 'edit'])).toBe(false);
-    expect(blocksAllMemoryWrites(['mcp__srv__write_file', 'edit'])).toBe(false);
+    expect(blocksAllMemoryWrites(['write_file(broken', 'edit(src/**)'])).toBe(
+      false,
+    );
+    expect(
+      blocksAllMemoryWrites(['mcp__srv__write_file', 'edit(src/**)']),
+    ).toBe(false);
     expect(blocksAllMemoryWrites([])).toBe(false);
     expect(blocksAllMemoryWrites(undefined)).toBe(false);
   });
