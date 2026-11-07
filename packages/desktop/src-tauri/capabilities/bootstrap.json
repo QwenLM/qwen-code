@@ -12,6 +12,8 @@
     "allow-choose-workspace",
     "allow-install-update",
     "allow-open-logs",
-    "allow-restart-runtime"
+    "allow-request-turn-notification-authorization",
+    "allow-restart-runtime",
+    "allow-show-turn-notification"
   ]
 }

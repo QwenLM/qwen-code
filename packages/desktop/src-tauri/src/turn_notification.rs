@@ -11,11 +11,12 @@ use objc2::runtime::Bool;
 use objc2_foundation::{NSError, NSString};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
-    UNTimeIntervalNotificationTrigger, UNUserNotificationCenter,
+    UNUserNotificationCenter,
 };
 
-/// Request system notification authorization. Shows the OS prompt once;
-/// ignored when the user already decided.
+/// Request system notification authorization. Called when the user turns
+/// task notifications on; shows the OS prompt once and is ignored when the
+/// user already decided.
 pub fn request_authorization() {
     let center = UNUserNotificationCenter::currentNotificationCenter();
     let handler: RcBlock<dyn Fn(Bool, *mut NSError)> =
@@ -33,17 +34,13 @@ pub fn show(title: &str, body: &str) {
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body));
-    let trigger =
-        UNTimeIntervalNotificationTrigger::triggerWithTimeInterval_repeats(1.0, false);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or(0);
     let identifier = NSString::from_str(&format!("qwen-turn-{nanos}"));
-    let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-        &identifier,
-        &content,
-        Some(&trigger),
-    );
+    // No trigger: deliver immediately.
+    let request =
+        UNNotificationRequest::requestWithIdentifier_content_trigger(&identifier, &content, None);
     center.addNotificationRequest_withCompletionHandler(&request, None);
 }
