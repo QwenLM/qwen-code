@@ -188,9 +188,12 @@ and each now opens with the same self-contained `GH_HOST` + guarded
 to the pool without hardening every one of those steps would reproduce the
 R2-1 reroute, so the hardening is not optional here. A meta-test in
 `.github/scripts/qwen-triage-workflow.test.mjs` pins the disjuncts, the
-checkout-free / no-splice invariants, and the hardening on every gh-calling
-step. The workflow's recorded size baseline (`.github/workflows/.size-baseline`)
-is raised to match the added hardening.
+checkout-free / no-splice invariants, the no-repository-code invariant on
+every step (not just the PAT-bearing ones — a credential-free step that runs
+a planted file still leaves a survivor on the persistent host), and the gh
+config hardening on every gh-calling step. The workflow's recorded size
+baseline (`.github/workflows/.size-baseline`) is raised to match the added
+hardening.
 
 ## Validation plan
 
@@ -213,8 +216,9 @@ is raised to match the added hardening.
 - The triage gate is pinned by `.github/scripts/qwen-triage-workflow.test.mjs`
   (131 tests) and the routing matrix in
   `.github/scripts/ci-runner-routing.test.mjs` (103 tests); both pass. Mutation
-  witnesses: reverting the triage disjuncts or removing a gh step's preamble
-  each reds the triage test.
+  witnesses: reverting the triage disjuncts, removing a gh step's preamble, or
+  appending a repository-code execution line to any step's body (including
+  the credential-free budget step) each reds the triage test.
 
 ## Acceptance criteria
 
@@ -222,9 +226,9 @@ is raised to match the added hardening.
   `workflow_dispatch` to the ECS pool when the repository guard and kill switch
   allow.
 - PR-payload events keep their existing same-repo/fork routing.
-- Every PAT-bearing gate step keeps the gh config pins (guarded, before the gh
-  call) and the checkout-free / no-splice / no-repository-code invariants; the
-  pinning meta-tests kill a mutation of each.
+- Every gate step keeps the checkout-free / no-splice / no-repository-code
+  invariants, and every PAT-bearing step keeps the gh config pins (guarded,
+  before the gh call); the pinning meta-tests kill a mutation of each.
 - No other job's routing changes.
 
 ## Open questions

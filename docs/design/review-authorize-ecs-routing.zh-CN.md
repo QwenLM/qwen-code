@@ -159,9 +159,10 @@ PR 载荷的事件（`pull_request_target`、`pull_request_review`、
 verify 确认、以及停用通告——每一步现在都以相同的自包含 `GH_HOST` + 带守卫
 `GH_CONFIG_DIR` 前导开场，遵循仓库的每步约定。把该门搬上池却不加固其中任何一步，都会
 复现 R2-1 改道，因此这里的加固不是可选项。`.github/scripts/qwen-triage-workflow.test.mjs`
-中的一条 meta-test pin 住析取项、无 checkout/无拼接不变量、以及每个调 gh 步骤的加固。
-该 workflow 的记录体积基线（`.github/workflows/.size-baseline`）相应上调以匹配新增
-加固。
+中的一条 meta-test pin 住析取项、无 checkout/无拼接不变量、每个步骤（不限于携带 PAT
+的步骤——不携带凭据的步骤若执行植入文件，同样会在持久主机上留下幸存进程）不得执行
+仓库代码的不变量、以及每个调 gh 步骤的 gh 配置加固。该 workflow 的记录体积基线
+（`.github/workflows/.size-baseline`）相应上调以匹配新增加固。
 
 ## 验证计划
 
@@ -179,15 +180,17 @@ verify 确认、以及停用通告——每一步现在都以相同的自包含 
   `qwen-resolve-workflow.test.js`（55 个测试）通过。
 - triage 门由 `.github/scripts/qwen-triage-workflow.test.mjs`（131 个测试）与
   `.github/scripts/ci-runner-routing.test.mjs`（103 个测试）的路由矩阵 pin 住，两者
-  通过；还原 triage 析取项、删某 gh 步前导、或向其正文追加执行行，均使 triage 测试变红。
+  通过；还原 triage 析取项、删某 gh 步前导、或向任一步骤正文（含不携带凭据的
+  budget 步骤）追加仓库代码执行行，均使 triage 测试变红。
 
 ## 验收标准
 
 - 在仓库守卫与开关允许时，两个 `authorize` 门（review 与 triage）都把
   `issue_comment` 与 `workflow_dispatch` 路由到 ECS 池。
 - PR 载荷事件保持既有的同仓/fork 路由。
-- 每个携带 PAT 的门步骤保持 gh 配置 pin（带守卫、先于 gh 调用）与无 checkout/无拼接/
-  不执行仓库代码不变量；pin 住它们的 meta-test 能杀死针对每一项的变异。
+- 门的每个步骤保持无 checkout/无拼接/不执行仓库代码不变量，每个携带 PAT 的步骤
+  保持 gh 配置 pin（带守卫、先于 gh 调用）；pin 住它们的 meta-test 能杀死针对每一
+  项的变异。
 - 其他任何 job 的路由都不变。
 
 ## 未决问题

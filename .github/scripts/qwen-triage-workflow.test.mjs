@@ -801,6 +801,23 @@ describe('qwen-triage: runner routing under token isolation', () => {
         !String(s.run ?? '').includes('${{'),
         `step splices an expression into the shell: ${s.name}`,
       );
+      // No step may execute repository code: on the pool the cwd is the
+      // reused $GITHUB_WORKSPACE, which other lanes fill with contributor
+      // files. This holds for EVERY step, not just the PAT-bearing ones —
+      // even a credential-free step that runs a planted file leaves a
+      // survivor on the persistent host. Evaluate the live
+      // (comment-stripped) lines so a commented-out example cannot red
+      // this, and a live execution line cannot hide behind a comment.
+      const live = String(s.run ?? '')
+        .split('\n')
+        .filter((l) => !l.trim().startsWith('#'))
+        .join('\n');
+      assert.doesNotMatch(live, /(^|[\s;&|(`'"])(\.{1,2}\/)/m, s.name);
+      assert.doesNotMatch(
+        live,
+        /(^|[\s;&|(`])(?:[^\s;&|()`'"]*\/)?(source|bash|sh|node|python[0-9.]*|npx|npm|pnpm|yarn)(\s|$)/m,
+        s.name,
+      );
     }
     // Every step that spends CI_BOT_PAT on gh pins gh's config resolution
     // (GH_HOST + a private, guarded GH_CONFIG_DIR), like the sibling pool
@@ -815,8 +832,8 @@ describe('qwen-triage: runner routing under token isolation', () => {
     for (const s of ghSteps) {
       // Evaluate the live (comment-stripped) lines, not mere substrings: an
       // unguarded mktemp one-liner or a preamble moved below the first gh
-      // call must red this, and the body must execute no repository code
-      // from the reused pool workspace.
+      // call must red this. (The no-repository-code invariant above covers
+      // every step, including this one.)
       const live = String(s.run)
         .split('\n')
         .filter((l) => !l.trim().startsWith('#'))
@@ -828,12 +845,6 @@ describe('qwen-triage: runner routing under token isolation', () => {
       assert.ok(firstGh > -1, s.name);
       assert.ok(live.indexOf('export GH_HOST=github.com') < firstGh, s.name);
       assert.ok(live.indexOf(guard) < firstGh, s.name);
-      assert.doesNotMatch(live, /(^|[\s;&|(`'"])(\.{1,2}\/)/m, s.name);
-      assert.doesNotMatch(
-        live,
-        /(^|[\s;&|(`])(?:[^\s;&|()`'"]*\/)?(source|bash|sh|node|python[0-9.]*|npx|npm|pnpm|yarn)(\s|$)/m,
-        s.name,
-      );
     }
   });
 
