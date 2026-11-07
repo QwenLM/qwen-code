@@ -3652,7 +3652,7 @@ async function executeHostedTurn(
   }
   if (resumeApproval) {
     const plan = resumeApproval.plan;
-    if (plan.runtime.provisionerKind) {
+    if (plan.runtime?.provisionerKind) {
       if (
         !brokerOptions ||
         session.mcp ||
@@ -3690,6 +3690,7 @@ async function executeHostedTurn(
             : undefined;
         onResumeReady?.();
         if (
+          plan.runtime &&
           questionRecoveryBroker &&
           original.state === 'requested' &&
           !abort.signal.aborted &&

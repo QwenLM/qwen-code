@@ -3664,7 +3664,7 @@ export class HostedWorkspaceToolTurn {
       (plan.runtime === null
         ? !this.memory ||
           plan.calls.some((item) => !isHostedMemoryTool(item.call.name))
-        : this.runtimeSessionId !== plan.runtime.runtimeSessionId)
+        : this.broker.runtimeSessionId !== plan.runtime.runtimeSessionId)
     )
       throw new HostedToolRecoveryRequiredError(
         'Unsupported saved batch owner.',
@@ -3808,7 +3808,7 @@ export class HostedWorkspaceToolTurn {
       );
     } catch (cause) {
       if (
-        plan.runtime.provisionerKind &&
+        plan.runtime?.provisionerKind &&
         this.acquired &&
         !this.nativeBatch &&
         signal.aborted &&
@@ -5062,7 +5062,7 @@ export class HostedWorkspaceToolTurn {
           ),
         ),
         releaseQuestionMount: restored
-          ? restored.saved.plan.runtime.provisionerKind === 'local-process'
+          ? restored.saved.plan.runtime?.provisionerKind === 'local-process'
           : requests.length === 1 &&
             requests[0].question === true &&
             this.questionsAdmitted() &&

@@ -218,6 +218,16 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 | `enabled` | `QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_ENABLED` | 布尔 | `false` | Workspace Runtime 是否以托管扩展执行配置运行，使所选扩展包能在 Runtime worker 中运行其进程（如 Hook 和 MCP 服务器）。需要开启 `qwen.managed-agent.extensions.enabled`（否则启动时拒绝）并设置 `qwen.managed-agent.managed-extensions.cache-directory`，Linux 上还需设置 `qwen.managed-agent.managed-extensions.cgroup-root`。 |
 | `mode` | `QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_MODE` | 字符串 | `linux-cgroup` | 扩展执行模式：`linux-cgroup` 将扩展进程限制在已委派的 cgroup v2 子树中；`developer-process-group` 是面向原生 macOS 开发、隔离较弱的进程组模式。Linux worker 始终使用 `linux-cgroup`；macOS worker 只有在该值为 `developer-process-group` 时才被接受。 |
 
+## `qwen.managed-agent.memory`
+
+显式启用的个人 MemoryStore：由服务端访问 Holo，供明确绑定且仅所属用户可见的 Session 使用。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `api-key` | — | 字符串 | — | 开启记忆时，Control Plane 调用 Holo 使用的服务凭据。必填、非空且不能含 CR 或 LF。应保存在服务端密钥配置中，不传入模型、Hosted Harness、沙箱或 MCP 配置。 |
+| `enabled` | — | 布尔 | `false` | 是否提供个人记忆，默认为 false。仅在验证专用 Holo Mem0 服务并关闭跨服务共享后启用。要求开启 Session Store 且 Hosted 声明 session-memory/1 能力；Session 必须在创建时明确选择 Store。 |
+| `endpoint` | — | 字符串 | — | 专用 Holo Mem0 服务的基础 URL，仅在开启记忆时读取。除回环 HTTP 测试外要求 HTTPS；拒绝内嵌凭据、查询参数和片段。该地址仅保留在 Control Plane。 |
+
 ## `qwen.managed-agent.runtime-broker`
 
 内嵌 Runtime Broker：包括面向 Hosted Harness 的私有 HTTP 监听器、放置并恢复执行 Hosted 工具的 Runtime worker 的 provisioner、worker 的 Workspace 挂载与隔离方式，以及加密其持久化 Runtime 凭据的密钥。
