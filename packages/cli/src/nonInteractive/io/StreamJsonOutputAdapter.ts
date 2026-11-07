@@ -100,7 +100,22 @@ export class StreamJsonOutputAdapter
     preserveText: boolean,
     discardedToolCalls: ToolCallRequestInfo[],
   ): void {
-    if (preserveText && discardedToolCalls.length === 0) {
+    if (preserveText) {
+      // A preserving retry keeps the already-delivered text, so it must not run
+      // the retraction branch: those frames are on the wire and still count as
+      // the turn's answer. A buffered tool call still needs its synthetic
+      // not-started result so transcript replay stays valid.
+      if (discardedToolCalls.length === 0) {
+        return;
+      }
+      if (
+        this.mainAgentMessageState.messageStarted &&
+        !this.mainAgentMessageState.finalized
+      ) {
+        this.finalizeAssistantMessage();
+      }
+      this.emitDiscardedAttemptToolResults(discardedToolCalls);
+      super.restartAttempt(true, discardedToolCalls);
       return;
     }
     // Stream frames cannot be retracted. Close the abandoned assistant first,

@@ -1164,6 +1164,29 @@ describe('StreamJsonOutputAdapter', () => {
       expect(parsed.result).toBe('Response text');
     });
 
+    it('should keep the delivered text across a text-preserving continuation retry', () => {
+      // A continuation retry that carries a buffered tool call still calls
+      // restartAttempt with preserveText, and its text frames are already on
+      // the wire. Running the retraction branch there rewinds the tally, so the
+      // next refused send reports an answered turn as error_during_execution.
+      // Round 1 delivers the answer; round 2 is the attempt being retried.
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'First answer',
+      });
+      adapter.startAssistantMessage();
+      adapter.restartAttempt(true, [
+        {
+          callId: 'call-1',
+          name: 'run_shell_command',
+          args: {},
+        } as never,
+      ]);
+
+      expect(adapter.getTurnProducedText()).toBe(true);
+    });
+
     it('should not treat a synthesized reply as the turn text', () => {
       // `emitNonInteractiveAssistantText` renders a slash command's reply as a
       // Content event. That reply is not a prompt's answer, so a refusal on the
