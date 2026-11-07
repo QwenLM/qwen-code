@@ -11,6 +11,14 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
+
+// macOS ships rm at /bin/rm, so a hardcoded /usr/bin/rm exits 127 on the macOS
+// scripts lane (which collects these files — the vitest exclude is win32-only).
+// Resolve external tools the way the workflows themselves do.
+const resolvedBin = (name) =>
+  execFileSync('bash', ['-c', `command -v ${name}`], {
+    encoding: 'utf8',
+  }).trim();
 import { expect, it } from 'vitest';
 
 // The qwen-triage entries are DERIVED, not hand-typed: every pool-routed job
@@ -113,8 +121,8 @@ it.each(jobs)(
             // Steps that use the guard's verified base need those binaries and
             // an output file; a real runner always supplies GITHUB_OUTPUT.
             GITHUB_OUTPUT: join(root, 'gh-output'),
-            RM_BIN: '/usr/bin/rm',
-            MKTEMP_BIN: '/usr/bin/mktemp',
+            RM_BIN: resolvedBin('rm'),
+            MKTEMP_BIN: resolvedBin('mktemp'),
           },
         });
 

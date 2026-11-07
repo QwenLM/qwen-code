@@ -27,15 +27,15 @@ jobs:
     # hosted pool: one round waited 2h09m for a runner, and 17 of 20 recent
     # ticks were cancelled with zero jobs — they never received one at all.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # Budget: capped steps sum to guard 2 + docker recheck 2 + resolve 12 +
-    # classifier 10 = 26, and scan (~1m measured), checkout (~22s), setup-node
-    # and the capture still have to fit. Two earlier caps were wrong: 20 omitted
-    # the guard's own 2 minutes, 25 omitted the classifier raise below. The
-    # resolver can attempt TWO sequential 10-minute pulls, so its step stays
-    # capped below the job: a cold host costs one round, not the job. Cron still
-    # fires every 10 minutes, so a worst-case cold round costs two ticks — the
-    # deliberate trade for not killing a round mid-pull.
-    timeout-minutes: 35
+    # Budget: capped steps sum to guard 2 + capture 1 + docker recheck 2 +
+    # identity 1 + ensure 5 + resolve 12 + classifier 10 = 33, and scan (~1m
+    # measured), checkout (~22s), setup-node and the upload still have to fit.
+    # Earlier caps were wrong twice: 20 omitted the guard's own 2 minutes, 25
+    # omitted the classifier raise. The resolver can attempt TWO sequential
+    # 10-minute pulls, so its step stays capped below the job: a cold host costs
+    # one round, not the job. Cron fires every 10 minutes, so a worst-case cold
+    # round costs ticks — the deliberate trade for not killing a round mid-pull.
+    timeout-minutes: 36
     permissions:
       actions: 'read'
       contents: 'read'
@@ -263,6 +263,12 @@ jobs:
           PATH: '${{ steps.guard.outputs.system_path }}'
           GIT_CONFIG_GLOBAL: '${{ steps.gitmeta.outputs.gitconfig }}'
           GIT_CONFIG_SYSTEM: '${{ steps.gitmeta.outputs.gitconfig }}'
+          # git layers env-provided config ABOVE both file scopes, so
+          # neutralising the files alone leaves core.hooksPath reachable through
+          # $GITHUB_ENV. Same channel qwen-autofix closes; step env, because the
+          # runner takes the last value for a duplicated $GITHUB_ENV key.
+          GIT_CONFIG_COUNT: '0'
+          GIT_CONFIG_PARAMETERS: ''
         with:
           ref: '${{ github.sha }}'
           persist-credentials: false
@@ -291,10 +297,20 @@ jobs:
       # therefore keeps the post-setup-node PATH as-is.
       - name: 'Capture trusted PATH'
         id: 'stage'
+        # A co-tenant can replace $GITHUB_OUTPUT with a FIFO; the append below
+        # would then block until this cap instead of the whole job cap.
+        timeout-minutes: 1
         env:
           SYSTEM_PATH: '${{ steps.guard.outputs.system_path }}'
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
+          # A co-tenant can replace this path with a FIFO; the append would then
+          # block. Check the shell-visible half of fstat's isFile() first, for
+          # BOTH branches, and let the step cap bound the residual race.
+          if [ ! -f "${GITHUB_OUTPUT}" ]; then
+            echo "::error::step output file is not a regular file; refusing to append to it."
+            exit 1
+          fi
           if [ "${RUNNER_ENVIRONMENT}" = 'self-hosted' ]; then
             echo "trusted_path=${SYSTEM_PATH}:${PATH}" >> "${GITHUB_OUTPUT}"
           else
@@ -322,6 +338,8 @@ jobs:
       # CI_BOT_PAT. It needs no checkout, so moving it here costs nothing.
       - name: 'Resolve patrol identity'
         id: 'identity'
+        # Same FIFO exposure as the capture step, and this one holds the PAT.
+        timeout-minutes: 1
         env:
           # The PAT rides in GITHUB_TOKEN and is handed to gh inline, so the
           # preamble below can unset GH_TOKEN without losing the credential.
@@ -348,6 +366,11 @@ jobs:
           export GH_CONFIG_DIR
           bot_login="$(GH_TOKEN="${GITHUB_TOKEN}" "${GH_BIN:?}" api user --jq .login)"
           test -n "${bot_login}"
+          # Same FIFO exposure as the capture step, on the step that holds the PAT.
+          if [ ! -f "${GITHUB_OUTPUT}" ]; then
+            echo "::error::step output file is not a regular file; refusing to append to it."
+            exit 1
+          fi
           echo "bot_login=${bot_login}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Scan stale PR failures'
@@ -764,6 +787,12 @@ jobs:
           PATH: '${{ steps.guard.outputs.system_path }}'
           GIT_CONFIG_GLOBAL: '${{ steps.gitmeta.outputs.gitconfig }}'
           GIT_CONFIG_SYSTEM: '${{ steps.gitmeta.outputs.gitconfig }}'
+          # git layers env-provided config ABOVE both file scopes, so
+          # neutralising the files alone leaves core.hooksPath reachable through
+          # $GITHUB_ENV. Same channel qwen-autofix closes; step env, because the
+          # runner takes the last value for a duplicated $GITHUB_ENV key.
+          GIT_CONFIG_COUNT: '0'
+          GIT_CONFIG_PARAMETERS: ''
         with:
           ref: '${{ github.sha }}'
           persist-credentials: false

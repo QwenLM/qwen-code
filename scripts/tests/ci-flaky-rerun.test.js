@@ -904,6 +904,45 @@ describe('ci flaky rerun patrol', () => {
     expect(c.calls.filter((call) => call[0] === 'comment')).toHaveLength(1);
   });
 
+  it('fails the round when a non-empty decision list matches no candidate', async () => {
+    // The hollow-green shape the workflow's verdict step cannot catch: validate
+    // sees a non-empty array and sets has_decisions=true, so the verdict step is
+    // skipped, act prints "no candidate" per entry and exits 0. The consumer has
+    // to close the loop. `{"pr":123,"action":"rerun"}` is exactly the shape a
+    // model emits when it ignores the five-field key.
+    const c = client();
+    await expect(
+      actOnDecisions(c, [target()], [{ pr: 123, action: 'rerun' }]),
+    ).rejects.toThrow(/matched no scanned candidate/);
+    expect(c.calls).toEqual([]);
+
+    // A mistyped headSha is the same failure, not a per-decision skip.
+    const c2 = client();
+    await expect(
+      actOnDecisions(c2, [target()], [decision({ headSha: 'f'.repeat(40) })]),
+    ).rejects.toThrow(/matched no scanned candidate/);
+    expect(c2.calls).toEqual([]);
+
+    // An empty list is still a legitimate no-op: the workflow's verdict step
+    // owns that case, and the consumer must not throw on it.
+    const c3 = client();
+    await expect(actOnDecisions(c3, [target()], [])).resolves.toBeUndefined();
+    expect(c3.calls).toEqual([]);
+  });
+
+  it('keeps a matched decision that failed per-target from failing the round', async () => {
+    // A candidate superseded between scan and act must not fail the round. It
+    // still counts as matched, because the decision addressed a real target.
+    const c = client({
+      async rerunFailedJobs() {
+        throw new Error('temporary API failure');
+      },
+    });
+    await expect(
+      actOnDecisions(c, [target()], [decision()]),
+    ).resolves.toBeUndefined();
+  });
+
   it('persists a zero-count reset marker after success', async () => {
     const c = client({
       async comments() {
