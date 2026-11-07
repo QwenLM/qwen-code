@@ -1311,6 +1311,7 @@ export default {
   'User settings': 'Пользовательские настройки',
   'Saved in at ~/.qwen/settings.json': 'Сохранено в ~/.qwen/settings.json',
   'Add a new rule…': 'Добавить новое правило…',
+  '(invalid: not applied)': '(недействительно: не применено)',
   'Add {{type}} permission rule': 'Добавить {{type}} permission rule',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
     'permission rules — это имя инструмента, за которым может следовать спецификатор в скобках.',

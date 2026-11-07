@@ -1976,6 +1976,7 @@ export default {
   'User settings': 'User settings',
   'Saved in at ~/.qwen/settings.json': 'Saved in at ~/.qwen/settings.json',
   'Add a new rule…': 'Add a new rule…',
+  '(invalid: not applied)': '(invalid: not applied)',
   'Add {{type}} permission rule': 'Add {{type}} permission rule',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
     'Permission rules are a tool name, optionally followed by a specifier in parentheses.',

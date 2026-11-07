@@ -1700,6 +1700,7 @@ export default {
   'User settings': '用戶設置',
   'Saved in at ~/.qwen/settings.json': '保存在 ~/.qwen/settings.json',
   'Add a new rule…': '添加新規則…',
+  '(invalid: not applied)': '（無效：未套用）',
   'Add {{type}} permission rule': '添加 {{type}} permission rule',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
     'permission rules 是工具名稱，可選地後跟括號中的限定符。',

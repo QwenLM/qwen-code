@@ -1253,6 +1253,11 @@ describe('permissions data and mutations', () => {
           type: 'deny',
           scope: 'session',
         },
+        {
+          rule: { raw: 'Bash(docker *', toolName: 'Bash', invalid: true },
+          type: 'deny',
+          scope: 'user',
+        },
       ],
       addPersistentRule,
       removePersistentRule,
@@ -1273,6 +1278,13 @@ describe('permissions data and mutations', () => {
     expect(data.rules).toEqual([
       { raw: 'Bash(git *)', toolName: 'Bash', type: 'allow', scope: 'user' },
       { raw: 'Write', toolName: 'Write', type: 'deny', scope: 'session' },
+      {
+        raw: 'Bash(docker *',
+        toolName: 'Bash',
+        type: 'deny',
+        scope: 'user',
+        invalid: true,
+      },
     ]);
     expect(data.directories).toEqual(['/workspace/a']);
     expect(data.initialDirectories).toEqual(['/workspace/a']);
@@ -1324,6 +1336,55 @@ describe('permissions data and mutations', () => {
       key: 'permissions.allow',
       value: [],
     });
+  });
+
+  it('deletes a settings rule whose stored spelling has surrounding whitespace', () => {
+    const { settings, written } = createFakeSettings({
+      user: { permissions: { allow: ['  Bash(docker *  '] } } as Settings,
+    });
+
+    deletePermissionRule(config, settings, 'Bash(docker *', 'allow');
+
+    expect(removePersistentRule).toHaveBeenCalledWith('Bash(docker *', 'allow');
+    expect(written).toContainEqual({
+      scope: SettingScope.User,
+      key: 'permissions.allow',
+      value: [],
+    });
+  });
+
+  it('does not throw when settings contain non-string entries', () => {
+    const { settings, written } = createFakeSettings({
+      user: {
+        permissions: {
+          allow: [null as unknown as string, '  Bash(docker *  '],
+        },
+      } as Settings,
+    });
+
+    expect(() =>
+      deletePermissionRule(config, settings, 'Bash(docker *', 'allow'),
+    ).not.toThrow();
+    expect(removePersistentRule).toHaveBeenCalledWith('Bash(docker *', 'allow');
+    expect(written).toContainEqual({
+      scope: SettingScope.User,
+      key: 'permissions.allow',
+      value: [],
+    });
+  });
+
+  it('skips a non-array stored rule set without rewriting it', () => {
+    const { settings, written } = createFakeSettings({
+      user: {
+        permissions: { allow: 'Bash(docker *' },
+      } as unknown as Settings,
+    });
+
+    expect(() =>
+      deletePermissionRule(config, settings, 'Bash(docker *', 'allow'),
+    ).not.toThrow();
+    expect(removePersistentRule).toHaveBeenCalledWith('Bash(docker *', 'allow');
+    expect(written).toEqual([]);
   });
 });
 

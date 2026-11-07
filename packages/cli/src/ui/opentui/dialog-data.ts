@@ -751,6 +751,7 @@ export function buildPermissionsData(
     toolName: entry.rule.toolName,
     type: entry.type,
     scope: entry.scope,
+    ...(entry.rule.invalid ? { invalid: true } : {}),
   }));
   const workspace = config?.getWorkspaceContext();
   return {
@@ -798,11 +799,16 @@ export function deletePermissionRule(
       | Record<string, string[]>
       | undefined;
     const scopeRules = rules?.[type];
-    if (scopeRules?.includes(raw)) {
+    if (
+      Array.isArray(scopeRules) &&
+      scopeRules.some((rule) => typeof rule === 'string' && rule.trim() === raw)
+    ) {
       settings.setValue(
         settingScope,
         `permissions.${type}`,
-        scopeRules.filter((rule) => rule !== raw),
+        scopeRules.filter(
+          (rule) => typeof rule === 'string' && rule.trim() !== raw,
+        ),
       );
       break;
     }
