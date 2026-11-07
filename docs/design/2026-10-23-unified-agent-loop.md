@@ -411,7 +411,25 @@ PR 3b-2a moves the TUI's stops into the batch. The batch ends only when no model
 
 Batches that wait for the streams join the queue that the end of the last stream drains, so the results of every batch completed during one stream go out in one continuation, as today, in the order the batches completed.
 
-The history repair, the split by interaction owner and the tool-use summary check what the next round sends, so they stay in the completion step for now. PR 3b-2b has the turn await the batch, and they run right before the next round.
+PR 3b-2b has the turn await its batch. The batch's completion step still stops the turn or sends its next round, and the turn awaits both, so the history repair, the split by interaction owner and the tool-use summary run in the turn, right before the next round:
+
+| The TUI today                                                                                          | With the setting on                                                                                           |
+| ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| a round returns once its stream ended, and its batch's completion step sends the next round            | the round's turn awaits the batch, its completion step and the round that step sends                          |
+| the scheduler starts no queued batch until the completion step returned, after the next round's stream | until the completion step stopped the turn or is about to send the next round, whose calls need the scheduler |
+| a batch whose executed calls history all answered sends nothing                                        | the same: the batch's replay answers do not go out alone                                                      |
+
+When the turn's stream ends while another stream is active, which may be the stream that sent its round, the turn does not wait: a response of provider replays alone sends its answers before its own stream closes. The batch then waits for the streams to end and completes on its own, as before, and batches that wait for the streams still go out in one continuation.
+
+PR 3c-1 has the turn send the round its batch continues with. The batch's completion step still repairs history, splits the results by interaction owner, starts the tool-use summary and checks the stops, then hands the next round to the turn. The turn builds it as the loop's `nextRound` builds a round after its batch, and sends it:
+
+| The TUI today                                                                                                                            | With the setting on                                           |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| the completion step takes the input queued for the tool boundary, mid-turn messages and then teammate messages, and sends the next round | the turn takes that input after the batch and sends the round |
+
+Until the turn sends the round, the batch keeps the scheduler and keeps the TUI off Idle, so queued batches and idle work do not start in between. A turn that does not wait for its batch, because another stream is active, leaves the round to the batch, which sends it itself. Batches that wait for the streams still go out in one continuation, which the turn whose stream ends last sends.
+
+A retry with Ctrl+Y already runs on the shared round and, from PR 3b-2b, awaits its batch. PR 3c-1 adds the retry scenarios to the Ink parity suite, with a retried tool-result round whose response calls a tool, and a scenario for input queued while a tool runs.
 
 ## Migration
 
@@ -513,6 +531,9 @@ A continuation's request runs under a prompt id of its own on the current loop a
 - a stream that drops and is retried;
 - two prompts in one session;
 - a model error;
+- a retry after a model error, and a retry that fails again;
+- a retried tool-result round whose response calls a tool;
+- input queued while a tool runs, which goes out with the tool's result;
 - a UserPromptSubmit hook that blocks;
 - a Stop hook that blocks once.
 
