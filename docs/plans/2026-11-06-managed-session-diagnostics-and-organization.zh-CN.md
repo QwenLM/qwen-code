@@ -135,3 +135,19 @@ WebShell trace 请求现拒绝未知字段，limit/cursor 限制与 OpenAPI 一�
 修正通过 142 项受影响 Core 测试和定向 ESLint，随后完整根目录 TypeScript build、typecheck、bundle 均通过，退出状态已记录。五回合暖/冷恢复单元回归保留下一 Turn 的 38.25 baseline 和最终 50.25 原始总量。独立使用 Node 22 执行未改动的五回合 producer 成功，记录五次真实 loopback 模型请求；由于其中包含预期的工具拒绝，其保留的原始 baseline 为 28.25，最终原始总量为 40.25。规范化统计保留五次请求、四次成功、一次中断及 usage 缺失覆盖。此前通过的两回合 `/2` producer 与关闭诊断的 `/1` 控制用例证据仍适用，未重复执行。
 
 共享本地 Java 账本仍为 599.08/600 秒。不重新启动 Maven、Java 或 MySQL 验证。Java 计数、精度及二进制 key 回归等待新 head CI；Node producer 检查仅证明夹具生成，不证明 Java admission 或退休行为。
+
+## 13. Full-tier MySQL 证据与 B3 夹具兼容性
+
+`37e9442f81` 的完整 MySQL 作业通过了前置 H2 suite（6,421 项，0 失败/错误，17 跳过）、40 项诊断 MySQL 用例及 38 项诊断查询 MySQL 用例。但完整集成 profile 仍失败：1,630 项中有一项在首次 CSI 文件工具执行期间返回 `runtime_broker_execution_unknown`，尚未到预期的 receipt-complete 中断与冷 writer 竞争阶段。保留的制品只有 554 份文本报告，没有底层 transport、worker 或 SQL 原因。这是尚未解决的集成失败，现有证据不足以支持按基础设施重跑或猜测修改生产代码。
+
+Hosted failover 作业另暴露一个确定的 B3 验证协议不匹配：账本读取仍查找旧的顶层 `models`，而诊断 usage 将有界模型指标保存为 `statistics.models`，将已计费原始输出保存为 `statistics.rawOutputTokensTotal`。读取现按稳定的模型 key 映射诊断指标，并独立保留原始标量，同时保留 legacy 读取、数值预算及其快照精确比较、非空模型账本检查与逐模型单调检查。诊断原始账本还必须为有限数值、崩溃前确实非零、恢复后不得下降；原始输出缺失或重置仍使门禁失败。
+
+纯数据回归在修正前复现两个失败，修正后完整 runner 测试文件 55 项通过。定向 TypeScript 检查、lint 与格式检查覆盖变更的 runner 及测试。下方独立的包内恢复修正需要刷新 workspace build/typecheck/bundle 证据。真实 B3 进程恢复及尚未定位的 MySQL 执行失败仍需进一步证据；未启动本地 Java/Maven/MySQL 验证，也未假定获得额外 Java 预算。
+
+## 14. Workspace 恢复中的诊断资源闭包
+
+Storage-version-3 workspace reader 在遍历资源闭包时仍拒绝三种新增诊断资源。现有的封闭白名单改为复用共享诊断资源种类集合。保留字节长度/digest 校验、引用完成记录，以及对未知协议或缺失资源的拒绝。主 carrier 回归使用真正启用诊断的 Hosted 模型回合；Hook 和独立统计回归使用实际诊断发布器生成的字节，并通过已提交的 reader record 引用到达。这些用例证明资源闭包读取，不证明整个 Hook profile 具备迁移资格。
+
+评审同时指出 `history_maintenance`，但基线 `80fd7c3353` 已存在相同拒绝。它的 Stage H body 与此 reader 支持的通用 revision-chain envelope 不同，仅将名称加入 `DOMAINS` 仍会校验失败。保留这项现有限制，将更广的历史维护 bundle 支持记录为延后事项；本修正不扩展执行或支持的 domain 家族。
+
+修正前，三种新 carrier 用例均因 `unsupported resource protocol` 失败，也遮蔽了新增的缺失字节断言。首次 workspace 构建发现测试专用 reader payload 类型不合法；改用符合类型的 slash-command 结果包络，发布器字节和引用元数据不变。随后完整恢复文件 99 项通过，覆盖全部新增 carrier、缺失/损坏字节用例，以及既有未知协议、未完成工作和迁移拒绝控制。刷新的根目录 build、typecheck 和 bundle 均通过。这是 Node/TypeScript 证据；真实 workspace 导出/导入和修正后的 Hosted B3 进程恢复仍需其 CI 门禁确认。
