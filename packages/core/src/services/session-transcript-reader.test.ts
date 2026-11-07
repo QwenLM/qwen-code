@@ -82,13 +82,13 @@ import {
   getSessionTranscriptIndexCacheStatsForTest,
   InvalidSessionTranscriptCursorError,
   isReplayTurnStartType,
-  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   resetSessionTranscriptIndexCacheForTest,
   setSessionTranscriptCooperativeReadBudgetForTest,
   setSessionTranscriptExpandedPageBytesForTest,
   setSessionTranscriptIndexBuildCompleteHookForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
+  setSessionTranscriptMaxIndexBytesForTest,
   setSessionTranscriptSelectedLineReadHookForTest,
   SessionTranscriptCursorCodec,
   SessionTranscriptSnapshotUnavailableError,
@@ -2608,14 +2608,159 @@ describe('SessionTranscriptReader', () => {
     ]);
   });
 
-  it('rejects oversized snapshots before indexing', async () => {
-    const filePath = await writeRecords([record('u1', null, 'hello')]);
-    await fs.truncate(filePath, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
+  it('rejects an over-cap snapshot when no line starts within the cap', async () => {
+    const filePath = await writeRecords([record('u1', null, 'x'.repeat(4096))]);
+    const { size } = await fs.stat(filePath);
+    setSessionTranscriptMaxIndexBytesForTest(1024);
     await expect(readPage()).rejects.toMatchObject({
       name: 'SessionTranscriptTooLargeError',
       sessionId,
-      snapshotSize: SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1,
-      maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+      snapshotSize: size,
+      maxBytes: 1024,
+    });
+  });
+
+  describe('over-cap transcripts', () => {
+    /** Writes `records` and caps the index at the lines of the last `count`. */
+    async function writeOverCap(records: ChatRecord[], count: number) {
+      await writeRecords(records);
+      const window = records.slice(-count);
+      setSessionTranscriptMaxIndexBytesForTest(
+        jsonBytes(...window) + window.length,
+      );
+    }
+
+    it('indexes the last window and marks where it starts', async () => {
+      await writeOverCap(chain('one', 'reply one', 'two', 'reply two'), 2);
+      const cut = {
+        childUuid: 'u2',
+        missingParentUuid: 'a1',
+        reason: 'transcript_window',
+      };
+      const page = await readPage();
+      expect(uuids(page.records)).toEqual(['u2', 'a2']);
+      expect(page.gaps).toEqual([cut]);
+      const turns = await turnIndex();
+      expect(turns.turns.map((turn) => turn.turnId)).toEqual(['u2']);
+      expect(turns.gaps).toEqual([cut]);
+    });
+
+    it('keeps a parent missing from the whole file a storage gap', async () => {
+      await writeOverCap(
+        [
+          record('u1', null, 'one'),
+          record('a1', 'u1', 'reply one'),
+          record('u2', 'lost', 'two'),
+          record('a2', 'u2', 'reply two'),
+        ],
+        2,
+      );
+      expect((await readPage()).gaps).toEqual([
+        { childUuid: 'u2', missingParentUuid: 'lost' },
+      ]);
+    });
+
+    it('restores settings recorded only before the window', async () => {
+      const sourcesSnapshot = { version: 1, revision: 1, sources: [] };
+      const records = [
+        sys('source', null, 'session_source', {
+          sourceType: 'daemon',
+          sourceId: 'cron-controller',
+        }),
+        sys('model', 'source', 'session_model', {
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        }),
+        sys('workflow', 'model', 'session_workflow_mode', { enabled: true }),
+        record('u1', 'workflow', 'one'),
+        { ...record('a1', 'u1', 'reply one'), model: 'old-model' },
+        sys('sources', 'a1', 'session_sources_snapshot', sourcesSnapshot),
+        record('u2', 'a1', 'two'),
+        record('a2', 'u2', 'reply two'),
+      ];
+      await writeOverCap(records, 2);
+      const validated: string[] = [];
+      const projection = await newReader().readRestoreProjection(
+        sessionId,
+        NONE,
+        {
+          validateFirstRecord: (first) => {
+            validated.push(first.uuid);
+            return true;
+          },
+        },
+      );
+      expect(validated).toEqual(['source']);
+      expect(projection?.startTime).toBe(records[0]!.timestamp);
+      expect(projection?.runtime.historyGaps).toEqual([
+        {
+          childUuid: 'u2',
+          missingParentUuid: 'a1',
+          reason: 'transcript_window',
+        },
+      ]);
+      expect(
+        projection?.runtime.apiHistory.map(({ role, parts }) => ({
+          role,
+          parts,
+        })),
+      ).toEqual([userText('two'), modelText('reply two')]);
+      expect(projection?.runtime.recording).toMatchObject({
+        sourceType: 'daemon',
+        sourceId: 'cron-controller',
+        sessionModel: { modelId: 'qwen3-coder-plus', authType: 'openai' },
+        sessionWorkflowMode: { enabled: true },
+        lastAssistantModel: 'old-model',
+      });
+      const [restored, live] = await restoredAndLive(svc());
+      expect(restored?.sourcesSnapshot).toEqual(sourcesSnapshot);
+      expect(live?.sourcesSnapshot).toEqual(sourcesSnapshot);
+    });
+
+    it('lets a setting the window records again win over the prefix', async () => {
+      await writeOverCap(
+        [
+          sys('model-old', null, 'session_model', {
+            modelId: 'old-model',
+            authType: 'openai',
+          }),
+          record('u1', 'model-old', 'one'),
+          record('a1', 'u1', 'reply one'),
+          sys('model-new', 'a1', 'session_model', {
+            modelId: 'new-model',
+            authType: 'openai',
+          }),
+          record('u2', 'model-new', 'two'),
+          record('a2', 'u2', 'reply two'),
+        ],
+        3,
+      );
+      expect((await coldProjection())?.runtime.recording.sessionModel).toEqual({
+        modelId: 'new-model',
+        authType: 'openai',
+      });
+    });
+
+    it('still rejects a window that holds no conversation', async () => {
+      await writeOverCap(
+        [
+          ...chain('one', 'reply one'),
+          sys('sources-1', 'a1', 'session_sources_snapshot', {
+            version: 1,
+            revision: 1,
+            sources: [],
+          }),
+          sys('sources-2', 'a1', 'session_sources_snapshot', {
+            version: 1,
+            revision: 2,
+            sources: [],
+          }),
+        ],
+        2,
+      );
+      await expect(readPage()).rejects.toMatchObject({
+        name: 'SessionTranscriptTooLargeError',
+      });
     });
   });
 
