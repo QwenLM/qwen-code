@@ -98,13 +98,13 @@ site-setting instructions when denied, and explains background/unfocused trigger
 mounted chats, click behavior, and the notification and Focus settings for the
 browser's own operating system. The guide follows the platform the page reports
 in three outcomes: macOS renders the macOS guide, Windows renders the Windows
-guide, and a phone or tablet renders neither, along with none of the copy that
-points at the guides. A device is treated as mobile when it reports an Apple
-mobile name (`iPhone`, `iPad`, `iPod`) or reports at least one touch point on a
-non-Windows platform, whatever platform string it carries; Apple's names count
-even at zero touch points, because a phone can report none. A non-touch platform
-keeps both guides rather than losing the help, so a Linux or ChromeOS desktop,
-which reports no touch points and matches no single guide, still renders both. The guide starts collapsed, with a chevron
+guide, and a non-Windows phone or tablet renders neither, along with none of
+the copy that points at the guides. A device is treated as mobile when it
+reports an Apple mobile name (`iPhone`, `iPad`, `iPod`) or reports at least one
+touch point on a non-Windows platform, whatever platform string it carries;
+Apple's names count even at zero touch points, because a phone can report none.
+A non-touch platform that matches no single guide keeps both guides rather than
+losing the help, so a Linux or ChromeOS desktop still renders both. The guide starts collapsed, with a chevron
 beside the heading to expand or collapse the instructions.
 The web page cannot detect OS-level permission; do not claim that it can.
 

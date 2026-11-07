@@ -25,6 +25,7 @@ const settings = {
 let root: Root;
 let container: HTMLDivElement;
 let installedTouchPoints: PropertyDescriptor | undefined;
+let touchPointsInstalled = false;
 const selector = '[aria-label="Task notifications"]';
 const popup = '[data-web-shell-notification-help]';
 function render(node: ReactNode = <BrowserNotificationControl />) {
@@ -82,14 +83,20 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   // The platform helper installs an own `maxTouchPoints` accessor on the jsdom
-  // navigator; deleting the original would leak it into the next test.
-  if (installedTouchPoints !== undefined) {
-    Object.defineProperty(
-      window.navigator,
-      'maxTouchPoints',
-      installedTouchPoints,
-    );
+  // navigator, where the property does not exist at all, so there is no
+  // descriptor to restore: delete it or it leaks into the next test.
+  if (touchPointsInstalled) {
+    if (installedTouchPoints === undefined) {
+      Reflect.deleteProperty(window.navigator, 'maxTouchPoints');
+    } else {
+      Object.defineProperty(
+        window.navigator,
+        'maxTouchPoints',
+        installedTouchPoints,
+      );
+    }
     installedTouchPoints = undefined;
+    touchPointsInstalled = false;
   }
 });
 
@@ -243,12 +250,14 @@ function operatingSystemGuides(
   maxTouchPoints = 0,
 ): Array<{ heading: string; body: string }> {
   vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue(platform);
-  // jsdom's navigator has no maxTouchPoints, so it cannot be spied on.
-  if (installedTouchPoints === undefined) {
+  // jsdom's navigator has no maxTouchPoints, so it cannot be spied on. Capture
+  // the descriptor once, before the first install, to know whether it existed.
+  if (!touchPointsInstalled) {
     installedTouchPoints = Object.getOwnPropertyDescriptor(
       window.navigator,
       'maxTouchPoints',
     );
+    touchPointsInstalled = true;
   }
   Object.defineProperty(window.navigator, 'maxTouchPoints', {
     configurable: true,
