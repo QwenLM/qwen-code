@@ -780,6 +780,49 @@ describe('Web Shell markdown-chart integration', () => {
     });
   });
 
+  it('logs a renderer mount failure when the host supplies no onError', async () => {
+    const runtime = {
+      init: vi.fn(() => {
+        throw new Error('mount exploded');
+      }),
+    };
+    const registry = createMarkdownChartRegistry({
+      loadECharts: async () => runtime,
+      resizeObserver: false,
+    });
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    try {
+      const { container } = await mount(
+        <I18nProvider language="en">
+          <WebShellCustomizationProvider
+            value={{ markdown: { chart: { registry } } }}
+          >
+            <Markdown
+              content={`\`\`\`markdown-chart\n${canonicalChart()}\n\`\`\``}
+              source="assistant"
+            />
+          </WebShellCustomizationProvider>
+        </I18nProvider>,
+      );
+      await flushChart();
+
+      expect(consoleError).toHaveBeenCalledWith(
+        '[web-shell] markdown-chart render failed:',
+        expect.objectContaining({
+          message: 'ECharts failed to render the chart',
+        }),
+      );
+      expect(container.querySelector('.markdown-chart-card')).not.toBeNull();
+      expect(
+        container.querySelector('[data-markdown-chart-data-view="true"]'),
+      ).not.toBeNull();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it('localizes graph data-view tabs and column headers', async () => {
     const { instance, runtime } = createFakeRuntime();
     const registry = createMarkdownChartRegistry({

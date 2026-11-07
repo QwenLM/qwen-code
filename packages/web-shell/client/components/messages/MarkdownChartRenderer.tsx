@@ -185,7 +185,7 @@ export function WebShellMarkdownChartProvider({
       theme={theme}
       loadingLabel={customization.loadingLabel ?? t('echartsChart.rendering')}
       labels={labels}
-      onError={customization.onError}
+      onError={customization.onError ?? reportMarkdownChartError}
     >
       {children}
     </MarkdownChartProvider>
@@ -399,7 +399,7 @@ function normalizeLegacyEchartsSource(source: string): {
   return { language: ECHARTS_FULLDATA_LANGUAGE, source };
 }
 
-function reportLegacyMarkdownChartError(error: unknown): void {
+function reportMarkdownChartError(error: unknown): void {
   console.error('[web-shell] markdown-chart render failed:', error);
 }
 
@@ -425,7 +425,7 @@ function MarkdownChartCodeBlock({
       streaming={streaming}
       loadingLabel={t('echartsChart.rendering')}
       labels={labels}
-      onError={reportLegacyMarkdownChartError}
+      onError={reportMarkdownChartError}
     >
       <MarkdownChartBlock
         language={language}
