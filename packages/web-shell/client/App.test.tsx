@@ -26942,6 +26942,108 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.recapSession).not.toHaveBeenCalled();
   });
 
+  it('falls back to 5 minutes when the threshold is missing or not positive', async () => {
+    // The fallback is the documented default: it keeps an unset, non-numeric,
+    // zero, or negative value from firing an automatic recap (and an ambient
+    // model call) on any alt-tab. Loads are not range-validated, so a
+    // hand-edited value reaches this line unchanged.
+    const cases: [string, DaemonSettingDescriptor[]][] = [
+      ['missing', [sessionRecapSetting(true)]],
+      [
+        'not positive',
+        [sessionRecapSetting(true), recapAwayThresholdSetting(0)],
+      ],
+      ['negative', [sessionRecapSetting(true), recapAwayThresholdSetting(-3)]],
+    ];
+    for (const [label, settings] of cases) {
+      mockSessionActions.recapSession.mockReset();
+      testState.settings = settings;
+      const recap = deferred<{ sessionId: string; recap: string | null }>();
+      mockSessionActions.recapSession.mockReturnValue(recap.promise);
+      testState.blocks = [{}, {}, {}, {}];
+      let hidden = true;
+      Object.defineProperty(document, 'hidden', {
+        configurable: true,
+        get: () => hidden,
+      });
+      let now = 1;
+      vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+      const { unmount } = renderApp();
+      await flush();
+      act(() => document.dispatchEvent(new Event('visibilitychange')));
+      now += 4 * 60 * 1000;
+      hidden = false;
+      act(() => document.dispatchEvent(new Event('visibilitychange')));
+      expect(
+        mockSessionActions.recapSession,
+        `${label}: a sub-5-minute return must not recap`,
+      ).not.toHaveBeenCalled();
+
+      const recapAgain = deferred<{
+        sessionId: string;
+        recap: string | null;
+      }>();
+      mockSessionActions.recapSession.mockReturnValue(recapAgain.promise);
+      hidden = true;
+      act(() => document.dispatchEvent(new Event('visibilitychange')));
+      now += 5 * 60 * 1000;
+      hidden = false;
+      act(() => document.dispatchEvent(new Event('visibilitychange')));
+      expect(
+        mockSessionActions.recapSession,
+        `${label}: a 5-minute return must recap`,
+      ).toHaveBeenCalledOnce();
+      unmount();
+    }
+  });
+
+  it('picks up a general.sessionRecapAwayThresholdMinutes change made while the tab is open', async () => {
+    // AWAY_THRESHOLD_MS is frozen at effect setup, so the dependency array is
+    // the only channel by which a mid-session threshold change reaches an
+    // already-mounted tab.
+    testState.settings = [
+      sessionRecapSetting(true),
+      recapAwayThresholdSetting(5),
+    ];
+    const recap = deferred<{ sessionId: string; recap: string | null }>();
+    mockSessionActions.recapSession.mockReturnValue(recap.promise);
+    testState.blocks = [{}, {}, {}, {}];
+    let hidden = true;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    let now = 1;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+    const { rerender } = renderApp();
+    await flush();
+
+    // The user raises the threshold to 30 in the open Settings panel; the
+    // daemon write re-renders App with the new descriptor.
+    testState.settings = [
+      sessionRecapSetting(true),
+      recapAwayThresholdSetting(30),
+    ];
+    hidden = true;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    rerender();
+    await flush();
+
+    now += 10 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(mockSessionActions.recapSession).not.toHaveBeenCalled();
+
+    hidden = true;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    now += 30 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(mockSessionActions.recapSession).toHaveBeenCalledOnce();
+  });
+
   it('honors general.sessionRecapAwayThresholdMinutes when recap is enabled', async () => {
     testState.settings = [
       sessionRecapSetting(true),
