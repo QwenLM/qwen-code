@@ -73,6 +73,7 @@ import {
 } from '../constants/sessions';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SessionDetailsTooltip } from './sidebar/SessionDetailsTooltip';
+import { isAbsolutePath } from './sidebar/WorkspaceSection';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Checkbox } from './ui/checkbox';
@@ -382,33 +383,41 @@ function SessionOverviewPanelInner({
   // isWaitingForUserQuestion and coordinates full-catalog reconciles only when
   // something actually changed. Adopt it only when trusted live-state routes
   // cover every visible workspace; otherwise fall back to catalog polling.
-  const liveStateWorkspaceCwds = useMemo(() => {
-    if (!workspaceCatalogAdvertised) {
-      const legacyCwd = workspaceCwd || primaryCwd;
-      return legacyCwd ? [legacyCwd] : [];
-    }
-    const visible = workspaceCwd
+  const visibleWorkspaces = useMemo(() => {
+    if (!workspaceCatalogAdvertised) return undefined;
+    return workspaceCwd
       ? (registeredWorkspaces ?? []).filter(
           (entry) => entry.cwd === workspaceCwd,
         )
       : (registeredWorkspaces ?? []).filter(
           (entry) => entry.primary || entry.trusted,
         );
-    return visible.length > 0 &&
-      visible.every((entry) => entry.trusted && entry.kind !== 'live')
-      ? visible.map((entry) => entry.cwd)
+  }, [registeredWorkspaces, workspaceCatalogAdvertised, workspaceCwd]);
+  const liveStateWorkspaceCwds = useMemo(() => {
+    if (!visibleWorkspaces) {
+      const legacyCwd = workspaceCwd || primaryCwd;
+      return legacyCwd ? [legacyCwd] : [];
+    }
+    return visibleWorkspaces.length > 0 &&
+      visibleWorkspaces.every((entry) => entry.trusted && entry.kind !== 'live')
+      ? visibleWorkspaces.map((entry) => entry.cwd)
       : [];
-  }, [
-    primaryCwd,
-    registeredWorkspaces,
-    workspaceCatalogAdvertised,
-    workspaceCwd,
-  ]);
-  // Report the displayed set so the app-level sidebarless poller covers
-  // exactly these workspaces (#16355).
+  }, [visibleWorkspaces, primaryCwd, workspaceCwd]);
+  // The app-level sidebarless poller covers workspaces per entry, so report
+  // the pollable subset of the displayed set even when the panel's own
+  // all-or-nothing adoption above falls back to catalog polling (#16355).
+  const reportableLiveStateWorkspaceCwds = useMemo(() => {
+    if (!visibleWorkspaces) return liveStateWorkspaceCwds;
+    return visibleWorkspaces
+      .filter(
+        (entry) =>
+          entry.trusted && entry.kind !== 'live' && isAbsolutePath(entry.cwd),
+      )
+      .map((entry) => entry.cwd);
+  }, [visibleWorkspaces, liveStateWorkspaceCwds]);
   useEffect(() => {
-    onLiveStateWorkspaceCwdsChange?.(liveStateWorkspaceCwds);
-  }, [onLiveStateWorkspaceCwdsChange, liveStateWorkspaceCwds]);
+    onLiveStateWorkspaceCwdsChange?.(reportableLiveStateWorkspaceCwds);
+  }, [onLiveStateWorkspaceCwdsChange, reportableLiveStateWorkspaceCwds]);
   useEffect(
     () => () => onLiveStateWorkspaceCwdsChange?.([]),
     [onLiveStateWorkspaceCwdsChange],

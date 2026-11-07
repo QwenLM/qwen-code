@@ -3960,8 +3960,8 @@ describe('SessionOverviewPanel polling', () => {
     const onLiveStateWorkspaceCwdsChange = vi.fn();
     render({ onLiveStateWorkspaceCwdsChange });
 
-    // The reported set is the panel's own displayed set: the same cwds it
-    // would poll when it owns the channel.
+    // All entries are pollable here, so the reported subset coincides with
+    // what the panel would poll when it owns the channel.
     expect(workspaceLiveStateOptions.workspaceCwds).toEqual(['/w', '/wsB']);
     expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith([
       '/w',
@@ -3995,6 +3995,52 @@ describe('SessionOverviewPanel polling', () => {
       '/w',
       '/wsB',
     ]);
+  });
+
+  it('reports the pollable subset when a live workspace shares the catalog (#16355)', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        {
+          id: 'live',
+          cwd: '/conversations/live',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    const onLiveStateWorkspaceCwdsChange = vi.fn();
+    render({ onLiveStateWorkspaceCwdsChange });
+
+    // The panel's own adoption stays all-or-nothing: a live entry in the
+    // visible set keeps it on the catalog fallback.
+    expect(workspaceLiveStateOptions.enabled).toBe(false);
+    // ...but the app-level poller still receives the pollable subset.
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith([
+      '/w',
+      '/wsB',
+    ]);
+  });
+
+  it('reports the displayed set without untrusted or non-absolute entries', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: false },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+        { id: 'w2', cwd: 'relative/path', primary: false, trusted: true },
+      ],
+    };
+    const onLiveStateWorkspaceCwdsChange = vi.fn();
+    render({ onLiveStateWorkspaceCwdsChange });
+
+    expect(workspaceLiveStateOptions.enabled).toBe(false);
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith(['/wsB']);
   });
 
   it('falls back to the catalog poll without live-state', () => {
