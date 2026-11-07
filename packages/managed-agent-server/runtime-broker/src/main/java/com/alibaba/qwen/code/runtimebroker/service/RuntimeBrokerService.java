@@ -864,8 +864,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         });
     }
 
-    public CompletionStage<RuntimeBindingRecord> warm(
-            String harnessSessionId) {
+    public CompletionStage<RuntimeBindingRecord> warm(String harnessSessionId) {
         return warm(harnessSessionId, null);
     }
 
@@ -1779,8 +1778,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
      * invariant live in {@link RuntimeHoldInventory}; this method keeps the
      * admission, tenant resolution and error-mapping boundary.
      */
-    public CompletionStage<List<String>> listActiveHoldRuntimeSessionIds(
-            String harnessSessionId) {
+    public CompletionStage<List<String>> listActiveHoldRuntimeSessionIds(String harnessSessionId) {
         requireOpen(closed);
         String id = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
         return mapFailure(safeStage(() -> sessionResolver.resolveTenant(id)),
@@ -2297,8 +2295,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         return executionRecovery.stopBackgroundProcess(tenantId, harnessSessionId, executionCallId);
     }
 
-    private CompletionStage<Boolean> releaseSession(
-            SessionContext context, boolean drain) {
+    private CompletionStage<Boolean> releaseSession(SessionContext context, boolean drain) {
         RuntimeSessionRecord persisted = sessionRepository.findById(context.session().getScope(),
                 context.session().getRuntimeSessionId());
         if (persisted != null && persisted.getState() == RuntimeSessionRecord.State.RELEASED) {
@@ -2386,8 +2383,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 "Runtime Session has an active background process"));
     }
 
-    private CompletionStage<Boolean> completeSessionRelease(
-            SessionContext context) {
+    private CompletionStage<Boolean> completeSessionRelease(SessionContext context) {
         CompletableFuture<Boolean> result;
         RuntimeSessionRecord releasing;
         context.lock();
