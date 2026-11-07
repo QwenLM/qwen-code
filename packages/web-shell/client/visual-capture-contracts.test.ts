@@ -272,16 +272,40 @@ describe('visual capture contracts', () => {
     const css = readFileSync(
       join(HERE, 'components/messages/AskUserQuestion.module.css'),
       'utf8',
+    ).replace(/\/\*[\s\S]*?\*\//g, '');
+    // The base rule must wrap, and no later override (e.g. a narrow-width
+    // @container form) may turn wrapping off for the same selector. Matching
+    // each `.actions { … }` block rather than only the first one keeps a later
+    // override from slipping through green.
+    const actionBlocks = [...css.matchAll(/\.actions\s*\{([^}]*)\}/g)].map(
+      (m) => m[1],
     );
-    const start = css.indexOf('.actions {');
     expect(
-      start,
+      actionBlocks.length,
       'AskUserQuestion.module.css must declare .actions',
-    ).toBeGreaterThan(-1);
-    const block = css.slice(start, css.indexOf('}', start));
-    expect(block, '.actions must wrap its buttons').toMatch(
-      /^\s*flex-wrap:\s*wrap;/m,
+    ).toBeGreaterThan(0);
+    expect(actionBlocks[0], '.actions must wrap its buttons').toMatch(
+      /flex-wrap:\s*wrap;/,
     );
+    for (const block of actionBlocks) {
+      expect(block, 'no .actions override may disable wrapping').not.toMatch(
+        /flex-wrap:\s*nowrap;/,
+      );
+    }
+    // Markup half: the wrap rule only protects the details button if that
+    // button is rendered inside the .actions row. Pin that it appears in the
+    // row region of the component, not orphaned by a markup-only refactor.
+    const tsx = readFileSync(
+      join(HERE, 'components/messages/AskUserQuestion.tsx'),
+      'utf8',
+    );
+    const rowAt = tsx.indexOf('className={styles.actions}');
+    expect(rowAt, 'the actions row must be rendered').toBeGreaterThan(-1);
+    const buttonAt = tsx.indexOf('className={styles.detailsButton}');
+    expect(
+      buttonAt,
+      'the details button must be rendered in the actions row',
+    ).toBeGreaterThan(rowAt);
   });
 });
 

@@ -717,39 +717,46 @@ it.each([
   },
 );
 
-it('names a details child from the question, not the instruction boilerplate', async () => {
-  // R1-1: the details prompt leads with the question snapshot so the generic
-  // first-prompt naming (first 200 code points) yields a question-derived title
-  // rather than the identical instruction prefix for every details task.
-  connection.sessionId = 'side-session-1';
-  connection.displayName = 'Side task';
-  connection.status = 'connected';
-  container = document.createElement('div');
-  document.body.appendChild(container);
-  root = createRoot(container);
+it.each([
+  ['en', 'The main session is waiting'],
+  ['zh-CN', '主会话正在等我'],
+])(
+  'names a details child from the question, not the instruction boilerplate (%s)',
+  async (language, boilerplatePrefix) => {
+    // R1-1 / R2-4: both the EN and zh-CN details prompts lead with the question
+    // snapshot so the generic first-prompt naming (first 200 code points) yields
+    // a question-derived title rather than the identical instruction prefix.
+    connection.sessionId = 'side-session-1';
+    connection.displayName = 'Side task';
+    connection.status = 'connected';
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
 
-  const question = 'Which cache backend should the session use?';
-  const questions = `1. ${question}\n   - SQLite: local file database\n   - Redis: in-memory store`;
-  const detailsPrompt = getTranslator('en')('askUser.detailsPrompt', {
-    questions,
-  });
+    const question = 'Which cache backend should the session use?';
+    const questions = `1. ${question}\n   - SQLite: local file database\n   - Redis: in-memory store`;
+    const detailsPrompt = getTranslator(language as 'en' | 'zh-CN')(
+      'askUser.detailsPrompt',
+      { questions },
+    );
 
-  await act(async () => {
-    renderSideTask({
-      initialPrompt: detailsPrompt,
-      modelManagement: { allowAdd: false },
+    await act(async () => {
+      renderSideTask({
+        initialPrompt: detailsPrompt,
+        modelManagement: { allowAdd: false },
+      });
+      await Promise.resolve();
     });
-    await Promise.resolve();
-  });
 
-  expect(sendPrompt).toHaveBeenCalledWith(
-    detailsPrompt,
-    expect.objectContaining({ onAdmitted: expect.any(Function) }),
-  );
-  const title = renameSession.mock.calls[0]?.[0] as string;
-  expect(title).toContain(question);
-  expect(title.startsWith('The main session is waiting')).toBe(false);
-});
+    expect(sendPrompt).toHaveBeenCalledWith(
+      detailsPrompt,
+      expect.objectContaining({ onAdmitted: expect.any(Function) }),
+    );
+    const title = renameSession.mock.calls[0]?.[0] as string;
+    expect(title).toContain(question);
+    expect(title.startsWith(boilerplatePrefix)).toBe(false);
+  },
+);
 
 it('sends a retained initial prompt once transcript loading completes', async () => {
   connection.sessionId = 'side-session-1';

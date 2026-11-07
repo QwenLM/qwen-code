@@ -5804,9 +5804,16 @@ export function App({
                 : {}),
             }),
       };
-      setArtifactPanelTabs((tabs) =>
-        tabs.some((item) => item.id === id) ? tabs : [...tabs, tab],
-      );
+      setArtifactPanelTabs((tabs) => {
+        if (!tabs.some((item) => item.id === id)) return [...tabs, tab];
+        // Reusing a known child keeps the existing tab. A fresh draft (no child
+        // to attach) replaces a stale same-id tab: the read-site check may have
+        // forgotten an archived child while its tab still carries the old
+        // sessionId, and keeping it would re-focus an unloadable pane instead of
+        // provisioning a fresh child. The id stays the same (clientId budget).
+        if (existingChildSessionId) return tabs;
+        return tabs.map((item) => (item.id === id ? tab : item));
+      });
       setActiveArtifactPanelTabId(id);
       setArtifactPanelOpen(true);
       return true;
@@ -8534,6 +8541,8 @@ export function App({
       ? pendingApproval
       : null
     : null;
+  const pendingAskUserApprovalRef = useRef(pendingAskUserApproval);
+  pendingAskUserApprovalRef.current = pendingAskUserApproval;
   const pendingToolApproval =
     pendingApproval && !isAskUserPermission(pendingApproval)
       ? canActOnPendingApproval
@@ -20076,6 +20085,16 @@ export function App({
       } catch {
         // Keep the persisted binding when the check cannot run.
       }
+    }
+    // The catalog query is async: the question may have been answered, ignored
+    // or cancelled, or the user may have switched sessions, during the
+    // round-trip. Re-check before opening a tab so we do not add a details tab
+    // for a resolved question or into another session's tab list.
+    if (
+      pendingAskUserApprovalRef.current?.id !== request.id ||
+      connectionRef.current.sessionId !== parentSessionId
+    ) {
+      return;
     }
     createSideTask(prompt, request.id, childToReuse);
   }, [
