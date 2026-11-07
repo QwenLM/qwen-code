@@ -35,8 +35,10 @@ const until = createUntil(15_000);
  * both renderers pad to that same width — ink trims the row tail, OpenTUI pads
  * it to the terminal, so only the whitespace outside the frame stays tolerant.
  * The value arm must be column-exact: a `[ \t]*` there absorbs the phantom
- * column an empty `after` text node mounts, which is the layout regression
- * these rows exist to catch. Values are the plain ASCII this scenario types.
+ * column an unguarded empty caret segment mounts. Reverting the guards shifts
+ * `source-undo` from `bZ` to ` bZ` — a leading empty `before` node costs a
+ * column, while a trailing empty `after` node collapses to zero. Values are
+ * the plain ASCII this scenario types.
  */
 const sourceRow = (value: string) =>
   new RegExp(`^[ \\t]*│ > ${value} {${95 - value.length}}│[ \\t]*$`, 'm');
