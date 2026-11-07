@@ -2,7 +2,7 @@
 
 [English](web-shell-pinned-turn-prompt.md) | [简体中文](web-shell-pinned-turn-prompt.zh-CN.md)
 
-Status: implemented first cut for #15683. Date: 2026-11-01.
+Status: implemented first cut for #15683. Date: 2026-11-01. Extended to Split View panes on 2026-11-08 (the `ChatPane` call site also opts in).
 
 ## Problem and scope
 
@@ -10,7 +10,7 @@ Long turns push the prompt far above the fold. The turn navigation rail shows a 
 
 This change adds a compact overlay at the top of the transcript viewport. It shows the prompt of the turn being read, clamped to two lines, or one line on short viewports. All changes stay inside `packages/web-shell`. There is no daemon protocol change and there are no new strings.
 
-Out of scope for this cut: an opt-out setting, a fallback for `legacy` and `degraded` navigation modes, Split View, and click-to-jump.
+Out of scope for this cut: an opt-out setting, a fallback for `legacy` and `degraded` navigation modes, and click-to-jump.
 
 ## Which turn and which label
 
@@ -42,7 +42,7 @@ These constraints come from the defects listed in #15426 for the earlier `Sticky
 
 Click-to-jump is a follow-up, although `viewport.selectOrdinal` would make the click itself small. The overlay is not inside the scroller, so a clickable overlay would catch wheel and touch input that must scroll the transcript. Forwarding that input is more than a small addition.
 
-The overlay is an opt-in prop on `TranscriptViewport`, set by the main transcript in `App.tsx`. `ChatPane` also passes `hideSessionTimeline`, so that prop cannot separate Split View panes from full-width mode.
+The overlay is an opt-in prop on `TranscriptViewport`. It is set by the main transcript in `App.tsx` and by the Split View panes in `ChatPane.tsx`. Both call sites pass `hideSessionTimeline`, so that prop cannot separate them; the opt-in prop alone enables the overlay.
 
 ## Limits
 
@@ -52,6 +52,7 @@ The overlay is an opt-in prop on `TranscriptViewport`, set by the main transcrip
 ## Validation and acceptance criteria
 
 - Unit tests in `TranscriptViewport.pinned.test.tsx` cover label choice, hiding, the collapse row, the unmounted prompt row, provisional turns, a missing label, unsupported modes, and panes without the prop.
+- `ChatPane.test.tsx` asserts that the pane's transcript viewport receives the prop.
 - `web-shell.pinned-prompt.spec.ts` covers positioning, label changes, the unmounted prompt row, row sizing, wheel input over the overlay, agreement with the rail, and a 900x480 viewport.
 - The existing `web-shell.turn-navigation-scroll-follow.spec.ts` and the `TranscriptViewport` unit tests still pass.
 
@@ -60,4 +61,3 @@ The overlay is an opt-in prop on `TranscriptViewport`, set by the main transcrip
 - Click-to-jump.
 - A label for sessions in `legacy` or `degraded` mode.
 - Loading the index page for the current turn while the rail is hidden.
-- Split View, if narrow panes turn out to need it.

@@ -2,7 +2,7 @@
 
 [English](web-shell-pinned-turn-prompt.md) | [简体中文](web-shell-pinned-turn-prompt.zh-CN.md)
 
-状态：已实现 #15683 的首版。日期：2026-11-01。
+状态：已实现 #15683 的首版。日期：2026-11-01。2026-11-08 扩展到 Split View 面板（`ChatPane` 的调用点同样显式开启）。
 
 ## 问题与范围
 
@@ -10,7 +10,7 @@
 
 本次改动在转录视口顶部增加一个紧凑的浮层。它显示正在阅读的轮次的提示，最多两行，在矮视口上最多一行。所有改动都在 `packages/web-shell` 内。没有 daemon 协议改动，也没有新增文案。
 
-本次不包含：关闭该功能的设置项、针对 `legacy` 和 `degraded` 导航模式的回退、Split View、点击跳转。
+本次不包含：关闭该功能的设置项、针对 `legacy` 和 `degraded` 导航模式的回退、点击跳转。
 
 ## 取哪一轮、用哪个标签
 
@@ -42,7 +42,7 @@
 
 点击跳转留作后续工作，尽管有了 `viewport.selectOrdinal`，点击本身的改动很小。浮层不在滚动容器内，可点击的浮层会截获本应滚动转录内容的滚轮和触摸输入。转发这些输入已经不算小改动。
 
-浮层是 `TranscriptViewport` 上需要显式开启的属性，由 `App.tsx` 中的主转录设置。`ChatPane` 同样传入 `hideSessionTimeline`，因此该属性无法区分 Split View 面板和全宽模式。
+浮层是 `TranscriptViewport` 上需要显式开启的属性，由 `App.tsx` 中的主转录和 `ChatPane.tsx` 中的 Split View 面板设置。两个调用点都传入 `hideSessionTimeline`，因此该属性无法区分两者；单独靠 opt-in 属性启用浮层。
 
 ## 限制
 
@@ -52,6 +52,7 @@
 ## 验证与验收标准
 
 - `TranscriptViewport.pinned.test.tsx` 中的单元测试覆盖标签选择、隐藏、折叠行、已卸载的提示行、临时轮次、缺失标签、不支持的模式，以及没有该属性的面板。
+- `ChatPane.test.tsx` 断言面板的转录视口收到了该属性。
 - `web-shell.pinned-prompt.spec.ts` 覆盖定位、标签切换、已卸载的提示行、行尺寸、浮层上的滚轮输入、与导航条一致，以及 900x480 视口。
 - 现有的 `web-shell.turn-navigation-scroll-follow.spec.ts` 和 `TranscriptViewport` 单元测试仍然通过。
 
@@ -60,4 +61,3 @@
 - 点击跳转。
 - 为 `legacy` 或 `degraded` 模式的会话提供标签。
 - 导航条隐藏时加载当前轮次所在的索引页。
-- Split View（如果窄面板确实需要）。
