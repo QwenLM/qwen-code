@@ -156,9 +156,12 @@ because their inputs cannot carry a newline; this one cannot, and the difference
 is deliberate.
 
 **Every page must be an array, and the merge de-duplicates.** A page body
-without a `workflow_runs` array reads as a short final page, which would stamp a
-truncated enumeration complete — the fail-open the completeness gate exists to
-prevent — so an unexpected shape voids the sample. And because a run can leave
+without a `workflow_runs` array has no length at all, and an empty page is now
+the sole terminator, so an unvalidated `length` of 0 would be read AS that
+terminator and stamp the enumeration complete at whatever had been read so far —
+the fail-open the completeness gate exists to prevent. The guard is therefore
+more load-bearing than it was before this change, not less: an unexpected shape
+voids the sample. And because a run can leave
 the already-read range between two page requests, the merge applies
 `unique_by(.id)`. It repairs **one direction only**: an arrival between two
 page requests duplicates the boundary run, inflating every count and the stored
