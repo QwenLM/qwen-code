@@ -30,6 +30,7 @@ import {
   type DaemonScheduledTaskRun,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
+  DaemonChannelDelivery,
   DaemonExtensionEntry,
   DaemonWorkspaceCapability,
   DaemonWorkspaceMcpServerStatus,
@@ -46,6 +47,10 @@ import { cssUrlValue } from '../../utils/cssUrlVar';
 import { getModelDisplayName } from '../../utils/modelDisplay';
 import { workspaceLabel, workspaceLabelForCwd } from '../../utils/workspace';
 import { DialogShell } from './DialogShell';
+import {
+  ScheduledTaskDeliveryFields,
+  sameDelivery,
+} from './ScheduledTaskDeliveryFields';
 import {
   buildCron,
   describeCron,
@@ -188,6 +193,8 @@ interface ScheduledTasksDialogProps {
    * command and the request carries it. An older daemon would drop the field
    * silently, so it is never sent without the capability. */
   gateAvailable?: boolean;
+  deliveryAvailable?: boolean;
+  observedContactsAvailable?: boolean;
   /** The daemon advertises `autofix_pr_watches`: the card of an
    * `/autofix-pr` watch's task shows the watch's state, and can stop it. */
   autofixPrWatchesAvailable?: boolean;
@@ -645,6 +652,8 @@ export function ScheduledTasksDialog({
   currentSession,
   currentSessionSchedulingAvailable,
   gateAvailable,
+  deliveryAvailable = false,
+  observedContactsAvailable = false,
   autofixPrWatchesAvailable = false,
   onError,
 }: ScheduledTasksDialogProps) {
@@ -728,6 +737,9 @@ export function ScheduledTasksDialog({
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
   const [gate, setGate] = useState('');
+  const [delivery, setDelivery] = useState<DaemonChannelDelivery | null>(null);
+  const [editedDelivery, setEditedDelivery] =
+    useState<DaemonChannelDelivery | null>(null);
   // The edited task's gate and recurrence as loaded: a save sends `gate` only
   // when the field changed it, and a one-shot (which refuses a gate) never
   // shows the field.
@@ -1189,6 +1201,8 @@ export function ScheduledTasksDialog({
     setPrompt('');
     setGate('');
     setEditedGate('');
+    setDelivery(null);
+    setEditedDelivery(null);
     setEditedRecurring(true);
     setRunDestination('per_run');
     setModelServiceId('');
@@ -1202,6 +1216,18 @@ export function ScheduledTasksDialog({
     resetReferenceState();
   }, [lockedWorkspaceId, resetReferenceState]);
 
+  const workspaceIdentity = JSON.stringify([
+    lockedWorkspace?.cwd,
+    workspaceList.find((workspace) => workspace.primary)?.cwd,
+  ]);
+  const previousWorkspaceIdentity = useRef(workspaceIdentity);
+  useEffect(() => {
+    if (previousWorkspaceIdentity.current !== workspaceIdentity) {
+      previousWorkspaceIdentity.current = workspaceIdentity;
+      resetForm();
+    }
+  }, [workspaceIdentity, resetForm]);
+
   const openCreate = useCallback(() => {
     setEditingId(null);
     // Default to the locked workspace, or primary when the page is unlocked.
@@ -1211,6 +1237,8 @@ export function ScheduledTasksDialog({
     setPrompt('');
     setGate('');
     setEditedGate('');
+    setDelivery(null);
+    setEditedDelivery(null);
     setEditedRecurring(true);
     setRunDestination('per_run');
     setModelServiceId('');
@@ -1232,6 +1260,8 @@ export function ScheduledTasksDialog({
       setPrompt(task.prompt);
       setGate(task.gate ?? '');
       setEditedGate(task.gate ?? '');
+      setDelivery(task.delivery ?? null);
+      setEditedDelivery(task.delivery ?? null);
       setEditedRecurring(task.recurring);
       setRunDestination(
         task.sessionMode === 'per_run' ? 'per_run' : 'dedicated',
@@ -1250,8 +1280,26 @@ export function ScheduledTasksDialog({
   );
 
   const handleSubmit = useCallback(async () => {
-    if (formWorkspaceMissing) {
+    if (
+      formWorkspaceMissing ||
+      previousWorkspaceIdentity.current !== workspaceIdentity
+    ) {
       setFormError(t('scheduledTasks.error.workspaceUnavailable'));
+      return;
+    }
+    if (!deliveryAvailable && !sameDelivery(delivery, editedDelivery)) {
+      setFormError(t('scheduledTasks.delivery.unavailable'));
+      return;
+    }
+    if (delivery && runDestination === 'per_run') {
+      setFormError(t('scheduledTasks.delivery.perRun'));
+      return;
+    }
+    if (
+      delivery &&
+      (!delivery.target.channelName || !delivery.target.id.trim())
+    ) {
+      setFormError(t('scheduledTasks.delivery.required'));
       return;
     }
     const cron = buildCron(builder);
@@ -1321,6 +1369,9 @@ export function ScheduledTasksDialog({
             cron,
             prompt: prompt.trim(),
             name: name.trim() || null,
+            ...(deliveryAvailable && !sameDelivery(delivery, editedDelivery)
+              ? { delivery }
+              : {}),
             sessionMode:
               runDestination === 'per_run' ? 'per_run' : 'persistent',
             modelServiceId:
@@ -1347,6 +1398,7 @@ export function ScheduledTasksDialog({
             name: name.trim() || null,
             recurring: true,
             enabled: true,
+            ...(deliveryAvailable && delivery ? { delivery } : {}),
             sessionMode:
               runDestination === 'per_run' ? 'per_run' : 'persistent',
             ...(runDestination === 'per_run' && modelServiceId
@@ -1378,9 +1430,13 @@ export function ScheduledTasksDialog({
     currentSession,
     currentSessionDisabledReason,
     editingId,
+    delivery,
+    editedDelivery,
+    deliveryAvailable,
     formWorkspaceCwd,
     formWorkspaceId,
     formWorkspaceMissing,
+    workspaceIdentity,
     editedGate,
     editedRecurring,
     gate,
@@ -1662,6 +1718,8 @@ export function ScheduledTasksDialog({
                   }
                   onChange={(e) => {
                     setFormWorkspaceId(e.target.value || undefined);
+                    setDelivery(null);
+                    setEditedDelivery(null);
                     setModelServiceId('');
                     setGroupChoice('');
                     setNewGroupName('');
@@ -1806,6 +1864,21 @@ export function ScheduledTasksDialog({
                     )}
               </span>
             </label>
+
+            {(deliveryAvailable || delivery || editedDelivery) && (
+              <ScheduledTaskDeliveryFields
+                key={`${formWorkspaceId ?? ''}:${formWorkspaceCwd ?? ''}`}
+                delivery={delivery}
+                onChange={setDelivery}
+                available={deliveryAvailable}
+                observedContactsAvailable={observedContactsAvailable}
+                workspaceId={formWorkspaceId}
+                workspaceCwd={formWorkspaceCwd}
+                workspaceMissing={formWorkspaceMissing}
+                perRun={runDestination === 'per_run'}
+                disabled={submitting}
+              />
+            )}
 
             {runDestination === 'per_run' && (
               <div className={styles.routingFields}>
@@ -2095,6 +2168,9 @@ export function ScheduledTasksDialog({
       <div className={styles.list}>
         {(tasks ?? []).map((task) => {
           const title = task.name || task.prompt;
+          const deliveryLabel = task.delivery
+            ? `${t('scheduledTasks.delivery.cardPrefix')} ${task.delivery.target.channelName} · ${t(`scheduledTasks.delivery.${task.delivery.target.type}`)} · ${task.delivery.target.id}`
+            : t('scheduledTasks.delivery.off');
           const busy = busyId === taskKey(task);
           return (
             <div
@@ -2159,6 +2235,9 @@ export function ScheduledTasksDialog({
                   {task.prompt}
                 </div>
               )}
+              <div className={styles.cardPrompt} title={deliveryLabel}>
+                {deliveryLabel}
+              </div>
               {task.gate && (
                 <div className={styles.cardPrompt} title={task.gate}>
                   {t('scheduledTasks.gate.cardPrefix')} {task.gate}

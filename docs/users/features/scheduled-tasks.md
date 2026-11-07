@@ -10,6 +10,16 @@ Messaging channels use a separate persistent scheduler so results can be pushed 
 
 > **Tip:** Scheduled tasks are enabled by default. To disable them, set `experimental.cron: false` in your [settings](../configuration/settings.md), or set `QWEN_CODE_DISABLE_CRON=1` in your environment.
 
+## Deliver Web Shell task results to a Channel
+
+In `qwen serve`, open **Scheduled Tasks** and create or edit a task in its workspace. Choose a persistent run destination (a dedicated session, or the current session when available), then choose a **Delivery Channel**, a user or chat destination type, and a destination ID. Recent observed contacts are optional suggestions; check the Channel name, type, and raw ID before selecting one. You can also enter an ID directly. The configured Channel must support sending to that destination.
+
+Delivery is off by default. Configuring a Channel alone does not enable delivery for any task. When enabled, a successfully completed scheduled run's final response is sent through the selected Channel; this does not guarantee receipt or add durable retries or failure alerts. The task card displays its saved destination.
+
+To remove delivery, edit the task and select **Delivery off** under **Delivery Channel**. Editing other fields preserves the saved target, including a target no longer found in recent contacts. Loading failures or missing Channels do not clear it. Changing the workspace while creating a task resets the draft destination; an existing task remains in its original workspace.
+
+Tasks that create a fresh session for each run (`per_run`) do not support delivery. Switching to that mode keeps your draft destination visible and asks you to explicitly turn delivery off or return to a persistent mode before saving. Delivery controls require the daemon's `channel_delivery` capability; existing destinations remain visible with older daemons, but cannot be changed there.
+
 ## Schedule a recurring prompt with /loop
 
 The `/loop` [bundled skill](skills.md) is the quickest way to schedule a recurring prompt. Pass an optional interval and a prompt, and Qwen Code sets up a cron job that fires in the background while the session stays open.

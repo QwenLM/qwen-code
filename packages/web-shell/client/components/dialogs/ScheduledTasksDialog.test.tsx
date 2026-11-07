@@ -5,7 +5,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { DaemonChannelDelivery } from '@qwen-code/sdk/daemon';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
@@ -33,6 +34,7 @@ interface MockTask {
   sessionMode?: 'persistent' | 'per_run';
   modelServiceId: string | null;
   groupId: string | null;
+  delivery?: DaemonChannelDelivery | null;
   gate?: string | null;
   gateStatus?: {
     lastAt: number;
@@ -51,9 +53,11 @@ interface MockTask {
   }>;
 }
 
-const { actions } = vi.hoisted(() => ({
+const { actions, useDaemonChannels } = vi.hoisted(() => ({
+  useDaemonChannels: vi.fn(),
   actions: {
     listScheduledTasks: vi.fn(),
+    listChannelObservedContacts: vi.fn(),
     createScheduledTask: vi.fn(),
     updateScheduledTask: vi.fn(),
     runScheduledTask: vi.fn(),
@@ -70,6 +74,7 @@ const { actions } = vi.hoisted(() => ({
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspaceActions: () => actions,
+  useChannels: useDaemonChannels,
 }));
 
 const { ScheduledTasksDialog } = await import('./ScheduledTasksDialog');
@@ -100,6 +105,8 @@ async function mount(
     };
     currentSessionSchedulingAvailable?: boolean;
     gateAvailable?: boolean;
+    deliveryAvailable?: boolean;
+    observedContactsAvailable?: boolean;
     autofixPrWatchesAvailable?: boolean;
     workspaces?: Array<{
       id: string;
@@ -152,6 +159,8 @@ async function mount(
                 nextOpts.currentSessionSchedulingAvailable
               }
               gateAvailable={nextOpts.gateAvailable}
+              deliveryAvailable={nextOpts.deliveryAvailable}
+              observedContactsAvailable={nextOpts.observedContactsAvailable}
               autofixPrWatchesAvailable={nextOpts.autofixPrWatchesAvailable}
               workspaces={nextOpts.workspaces}
               lockedWorkspace={nextOpts.lockedWorkspace}
@@ -2666,5 +2675,411 @@ describe('ScheduledTasksDialog autofix-pr watches', () => {
     expect(
       document.querySelector('[data-testid="autofix-pr-watch"]'),
     ).toBeNull();
+  });
+});
+
+describe('ScheduledTasksDialog Channel delivery', () => {
+  const workspaces = [
+    {
+      id: 'id-main',
+      cwd: '/repo/main',
+      primary: true,
+      trusted: true,
+      kind: 'ordinary' as const,
+    },
+    {
+      id: 'id-other',
+      cwd: '/repo/other',
+      primary: false,
+      trusted: true,
+      kind: 'ordinary' as const,
+    },
+  ];
+  const options = {
+    workspaces: [workspaces[0]!],
+    deliveryAvailable: true,
+    observedContactsAvailable: true,
+  };
+  const delivery: DaemonChannelDelivery = {
+    kind: 'channel',
+    target: { channelName: 'team-bot', type: 'chat', id: 'group-1' },
+  };
+  const contacts = {
+    users: [
+      {
+        channelName: 'team-bot',
+        id: 'user-1',
+        label: 'Alex',
+        lastObservedAt: '2026-11-07T00:00:00Z',
+      },
+    ],
+    groups: [
+      {
+        channelName: 'team-bot',
+        id: 'group-1',
+        label: 'Alex',
+        lastObservedAt: '2026-11-07T00:00:00Z',
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    useDaemonChannels.mockReturnValue({
+      channels: { 'team-bot': {} },
+      loading: false,
+      error: undefined,
+      reload: vi.fn(),
+    });
+    actions.listChannelObservedContacts.mockResolvedValue(contacts);
+    actions.createScheduledTask.mockResolvedValue(baseTask({}));
+  });
+
+  const channelSelect = () =>
+    document.querySelector<HTMLSelectElement>(
+      '#scheduled-task-delivery-channel',
+    )!;
+  const targetInput = () =>
+    document.querySelector<HTMLInputElement>('#scheduled-task-delivery-id')!;
+  const suggestionSelect = () =>
+    document.querySelector<HTMLSelectElement>(
+      '#scheduled-task-delivery-suggestion',
+    )!;
+
+  function select(element: HTMLSelectElement, value: string) {
+    expect(element).not.toBeNull();
+    act(() => {
+      element.value = value;
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  }
+
+  function enterPrompt() {
+    const editor = document.querySelector<HTMLElement>('[role="textbox"]')!;
+    act(() => {
+      editor.textContent = 'Summarize the project';
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    });
+  }
+
+  async function openCreate() {
+    click(findButton('New scheduled task'));
+    await flush();
+    enterPrompt();
+  }
+
+  it('keeps delivery off by default even with configured Channels', async () => {
+    await mount([], options);
+    await openCreate();
+    expect(channelSelect().value).toBe('');
+    click(findButton('Create'));
+    await flush();
+    expect(actions.createScheduledTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      'delivery',
+    );
+  });
+
+  it('hides delivery for a daemon without the capability', async () => {
+    await mount([], { ...options, deliveryAvailable: false });
+    await openCreate();
+    expect(channelSelect()).toBeNull();
+    expect(actions.listChannelObservedContacts).not.toHaveBeenCalled();
+    click(findButton('Create'));
+    await flush();
+    expect(actions.createScheduledTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      'delivery',
+    );
+  });
+
+  it('creates a persistent task with an observed target and identifiable suggestions', async () => {
+    await mount([], options);
+    await openCreate();
+    select(findSessionModeSelect()!, 'dedicated');
+    select(channelSelect(), 'team-bot');
+    await flush();
+    const suggestions = suggestionSelect();
+    expect(suggestions.textContent).toContain('Alex');
+    expect(suggestions.textContent).toContain('team-bot');
+    expect(suggestions.textContent).toContain('user-1');
+    expect(suggestions.textContent).toContain('group-1');
+    select(suggestions, JSON.stringify(delivery.target));
+    click(findButton('Create'));
+    await flush();
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionMode: 'persistent', delivery }),
+      undefined,
+    );
+    expect(actions.listChannelObservedContacts).toHaveBeenCalledWith(undefined);
+    expect(useDaemonChannels).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceCwd: '/repo/main', enabled: true }),
+    );
+  });
+
+  it('permits a manual target without observed-contact capability', async () => {
+    await mount([], { ...options, observedContactsAvailable: false });
+    await openCreate();
+    select(findSessionModeSelect()!, 'dedicated');
+    select(channelSelect(), 'team-bot');
+    select(
+      document.querySelector<HTMLSelectElement>(
+        '#scheduled-task-delivery-type',
+      )!,
+      'user',
+    );
+    input(targetInput(), 'manual-user');
+    click(findButton('Create'));
+    await flush();
+    expect(actions.listChannelObservedContacts).not.toHaveBeenCalled();
+    expect(actions.createScheduledTask.mock.calls[0]?.[0]).toMatchObject({
+      delivery: {
+        kind: 'channel',
+        target: { channelName: 'team-bot', type: 'user', id: 'manual-user' },
+      },
+    });
+  });
+
+  it('allows delivery to a persistent current conversation', async () => {
+    const currentSession = {
+      sessionId: '10000000-0000-4000-8000-000000000001',
+      workspaceCwd: '/repo/main',
+      sourceType: 'default',
+    };
+    await mount([], {
+      ...options,
+      currentSession,
+      currentSessionSchedulingAvailable: true,
+    });
+    await openCreate();
+    select(findSessionModeSelect()!, 'current');
+    select(channelSelect(), 'team-bot');
+    input(targetInput(), 'manual-user');
+    click(findButton('Create'));
+    await flush();
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionMode: 'persistent',
+        sessionId: currentSession.sessionId,
+        delivery: expect.objectContaining({
+          target: expect.objectContaining({ id: 'manual-user' }),
+        }),
+      }),
+      undefined,
+    );
+  });
+
+  it('explains an empty Channel list without opting the task into delivery', async () => {
+    useDaemonChannels.mockReturnValue({
+      channels: {},
+      loading: false,
+      error: undefined,
+      reload: vi.fn(),
+    });
+    await mount([], options);
+    await openCreate();
+    expect(channelSelect().options).toHaveLength(1);
+    expect(document.body.textContent).toContain('No Channels');
+    click(findButton('Create'));
+    await flush();
+    expect(actions.createScheduledTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      'delivery',
+    );
+  });
+
+  it('round-trips a saved target absent from discovery and omits unchanged delivery', async () => {
+    const saved = {
+      ...delivery,
+      target: { ...delivery.target, id: 'old-group' },
+    };
+    await mount([baseTask({ delivery: saved })], options);
+    expect(container?.textContent).toContain('team-bot');
+    expect(container?.textContent).toContain('old-group');
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+    expect(channelSelect().value).toBe('team-bot');
+    expect(targetInput().value).toBe('old-group');
+    input(
+      document.querySelector<HTMLInputElement>('input[maxlength="200"]')!,
+      'New name',
+    );
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
+      'delivery',
+    );
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+    expect(targetInput().value).toBe('old-group');
+  });
+
+  it('updates a saved target and explicitly clears delivery with null', async () => {
+    await mount([baseTask({ delivery })], options);
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+    input(targetInput(), 'group-2');
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask).toHaveBeenLastCalledWith(
+      't1',
+      expect.objectContaining({
+        delivery: {
+          ...delivery,
+          target: { ...delivery.target, id: 'group-2' },
+        },
+      }),
+      undefined,
+    );
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+    select(channelSelect(), '');
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask).toHaveBeenLastCalledWith(
+      't1',
+      expect.objectContaining({ delivery: null }),
+      undefined,
+    );
+  });
+
+  it('preserves saved delivery without capability and offers no discovery', async () => {
+    await mount([baseTask({ delivery })], {
+      ...options,
+      deliveryAvailable: false,
+    });
+    expect(container?.textContent).toContain('group-1');
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+    expect(actions.listChannelObservedContacts).not.toHaveBeenCalled();
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
+      'delivery',
+    );
+  });
+
+  it.each(['change', 'clear'])(
+    'blocks a %s to delivery when its capability disappears',
+    async (operation) => {
+      const { rerender } = await mount([baseTask({ delivery })], options);
+      click(document.querySelector('[aria-label="Edit"]'));
+      await flush();
+      if (operation === 'clear') select(channelSelect(), '');
+      else input(targetInput(), 'group-2');
+      await rerender({ ...options, deliveryAvailable: false });
+      click(findButton('Save'));
+      await flush();
+      expect(actions.updateScheduledTask).not.toHaveBeenCalled();
+      expect(document.body.textContent).toContain(
+        'does not support Channel delivery changes',
+      );
+      expect(document.body.textContent).toContain('delivery');
+    },
+  );
+
+  it('keeps the chosen per-run mode and destination until the user explicitly clears delivery', async () => {
+    await mount([baseTask({ delivery })], options);
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+    select(findSessionModeSelect()!, 'per_run');
+    expect(findSessionModeSelect()?.value).toBe('per_run');
+    expect(targetInput().value).toBe('group-1');
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask).not.toHaveBeenCalled();
+    select(channelSelect(), '');
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({ sessionMode: 'per_run', delivery: null }),
+      undefined,
+    );
+  });
+
+  it('clears a draft target on workspace switch and ignores old contact responses', async () => {
+    const oldContacts = deferred<typeof contacts>();
+    actions.listChannelObservedContacts.mockImplementation(
+      (workspaceId?: string) =>
+        workspaceId === undefined
+          ? oldContacts.promise
+          : Promise.resolve({ users: [], groups: [] }),
+    );
+    await mount([], { ...options, workspaces });
+    await openCreate();
+    select(findSessionModeSelect()!, 'dedicated');
+    select(channelSelect(), 'team-bot');
+    input(targetInput(), 'old-group');
+    const workspaceSelect = Array.from(
+      document.querySelectorAll('select'),
+    ).find((element) => element.querySelector('option[value="id-other"]'))!;
+    select(workspaceSelect, 'id-other');
+    await flush();
+    expect(channelSelect().value).toBe('');
+    await act(async () => oldContacts.resolve(contacts));
+    await flush();
+    select(channelSelect(), 'team-bot');
+    expect(suggestionSelect()?.textContent ?? '').not.toContain('group-1');
+    select(channelSelect(), '');
+    click(findButton('Create'));
+    await flush();
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: 'Summarize the project' }),
+      'id-other',
+    );
+    expect(actions.createScheduledTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      'delivery',
+    );
+    expect(actions.listChannelObservedContacts).toHaveBeenCalledWith(
+      'id-other',
+    );
+    expect(useDaemonChannels).toHaveBeenLastCalledWith(
+      expect.objectContaining({ workspaceCwd: '/repo/other' }),
+    );
+  });
+
+  it('closes an open delivery draft when the locked workspace changes', async () => {
+    const { rerender } = await mount([], {
+      ...options,
+      workspaces,
+      lockedWorkspace: workspaces[0],
+    });
+    await openCreate();
+    select(findSessionModeSelect()!, 'dedicated');
+    select(channelSelect(), 'team-bot');
+    input(targetInput(), 'old-group');
+    await rerender({ ...options, workspaces, lockedWorkspace: workspaces[1] });
+    expect(channelSelect()).toBeNull();
+    expect(actions.createScheduledTask).not.toHaveBeenCalled();
+    await openCreate();
+    expect(channelSelect().value).toBe('');
+    click(findButton('Create'));
+    await flush();
+    expect(actions.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: 'Summarize the project' }),
+      'id-other',
+    );
+    expect(actions.createScheduledTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      'delivery',
+    );
+  });
+
+  it('keeps existing configuration when Channels and contact discovery fail', async () => {
+    useDaemonChannels.mockReturnValue({
+      channels: {},
+      loading: false,
+      error: new Error('Channels unavailable'),
+      reload: vi.fn(),
+    });
+    actions.listChannelObservedContacts.mockRejectedValue(
+      new Error('Contacts unavailable'),
+    );
+    await mount([baseTask({ delivery })], options);
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+    expect(targetInput().value).toBe('group-1');
+    expect(document.body.textContent).toContain('unavailable');
+    click(findButton('Save'));
+    await flush();
+    expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
+      'delivery',
+    );
   });
 });

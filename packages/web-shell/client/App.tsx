@@ -23839,6 +23839,12 @@ export function App({
                       gateAvailable={workspace.capabilities?.features?.includes(
                         'scheduled_task_gate',
                       )}
+                      deliveryAvailable={workspace.capabilities?.features?.includes(
+                        'channel_delivery',
+                      )}
+                      observedContactsAvailable={workspace.capabilities?.features?.includes(
+                        'workspace_channel_observed_contacts',
+                      )}
                       autofixPrWatchesAvailable={prWatchesAvailable}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
