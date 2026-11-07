@@ -39,7 +39,9 @@ import {
   type HookInput,
 } from '@qwen-code/qwen-code-core/hooks/types.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
+import type { HostedModelConfigReader } from './hosted-model-config.js';
 import { loadSettings } from '../config/settings.js';
+import { getSeparatedHookSettings } from '../config/hook-approvals.js';
 import { applyHostedModelPin } from './hosted-harness-model.js';
 import type { HostedAgentDefinition } from './hosted-agent-definition.js';
 import type { HostedModelSelection } from './hosted-model-selection.js';
@@ -73,6 +75,7 @@ interface CompressionOptions {
   session: ManagedSession;
   cwd: string;
   agentDefinition?: HostedAgentDefinition;
+  modelConfig?: HostedModelConfigReader;
   instructions: () => Promise<string>;
   busy: () => boolean;
   hasPendingHooks: () => boolean;
@@ -349,25 +352,39 @@ export class HostedContextCompression {
       sessionId:
         this.options.session.authority.sessionHeader.sessionKey.sessionId,
     } as CliArgs;
+    const sessionModelConfig = await this.options.modelConfig?.();
+    if (
+      sessionModelConfig &&
+      intent.modelSelection &&
+      sessionModelConfig.model !== intent.modelSelection.modelId
+    ) {
+      throw new Error('Session model configuration conflicts.');
+    }
     const config = await loadCliConfig(
       settings.merged,
       argv,
       this.options.cwd,
       undefined,
-      undefined,
+      getSeparatedHookSettings(settings),
       undefined,
       undefined,
       undefined,
       true,
-      { toolInvocationGuard: () => ({ allowed: false }) },
+      {
+        toolInvocationGuard: () => ({ allowed: false }),
+        ...(sessionModelConfig
+          ? { modelConfiguration: sessionModelConfig }
+          : {}),
+      },
     );
     try {
-      await applyHostedModelPin(
-        config,
-        intent.modelSelection
-          ? { id: intent.modelSelection.modelId }
-          : this.options.agentDefinition?.model,
-      );
+      if (!sessionModelConfig)
+        await applyHostedModelPin(
+          config,
+          intent.modelSelection
+            ? { id: intent.modelSelection.modelId }
+            : this.options.agentDefinition?.model,
+        );
       config.setUserMemory(instructions);
       await config.initialize({
         skipHooks: true,

@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import {
   WEB_SHELL_LANGUAGES,
   getTranslator,
@@ -17,7 +18,85 @@ const FOLLOWUP_SETTING_KEYS = [
   'settings.description.ui.enableFollowupSuggestions',
 ] as const;
 
+const BROWSER_NOTIFICATION_KEYS = [
+  'label',
+  'description',
+  'prompt',
+  'reply',
+  'completed',
+  'failed',
+  'ended',
+  'approval',
+  'question',
+  'allow',
+  'enable',
+  'helpEnabled',
+  'helpWaiting',
+  'helpWhen',
+  'helpSystem',
+  'helpMac',
+  'helpWindows',
+  'enabled',
+  'disabled',
+  'waiting',
+  'denied',
+  'unavailable',
+  'requesting',
+  'error',
+  'temporary',
+].map((suffix) => `browserNotifications.${suffix}`);
+
 describe('web-shell i18n catalog', () => {
+  it('keeps every browser notification translation in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    for (const key of BROWSER_NOTIFICATION_KEYS) {
+      const english = en(key, { text: 'Task' });
+      const chinese = zh(key, { text: 'Task' });
+      expect(english).not.toBe(key);
+      expect(chinese).not.toBe(key);
+      expect(chinese).not.toBe(english);
+    }
+    expect(en('browserNotifications.prompt', { text: 'Task' })).toBe(
+      'Prompt: Task',
+    );
+    expect(zh('browserNotifications.reply', { text: 'Task' })).toBe(
+      '回复：Task',
+    );
+  });
+
+  it.each([
+    [
+      'en',
+      "You've used up your weekly credits. Your credits are expected to reset in 2 days and 1 hour. Please try again after the reset.",
+    ],
+    ['zh-CN', '周额度已用完，预计将于2天 1小时后恢复，请在额度恢复后重试。'],
+    [
+      'ru',
+      "You've used up your weekly credits. Your credits are expected to reset in 2 days and 1 hour. Please try again after the reset.",
+    ],
+  ] as const)(
+    'formats quota data through the %s catalog',
+    (language, expected) => {
+      const now = Date.parse('2026-11-04T00:00:00Z');
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+      try {
+        expect(
+          formatSubscriptionQuotaDisplay(
+            {
+              type: 'subscription_quota',
+              memberType: 'pro',
+              resetAt: now / 1000 + 49 * 3600,
+            },
+            getTranslator(language),
+          ),
+        ).toBe(expected);
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
+
   it('explains missing rewind identities in both locales', () => {
     expect(getTranslator('en')('rewind.identityUnavailable')).toContain(
       'no prompt identity',
@@ -49,6 +128,7 @@ describe('web-shell i18n catalog', () => {
       '已选 2 组',
     );
   });
+
   it('keeps the waiting minigame copy available in both locales', () => {
     for (const language of ['en', 'zh-CN'] as const) {
       const t = getTranslator(language);
@@ -224,6 +304,7 @@ describe('web-shell ru locale', () => {
       const t = getTranslator(language);
       expect(t('language.invalid')).toContain('en, zh-CN, ru');
       expect(t('language.usage')).toContain('en|zh-CN|ru');
+      expect(t('language.usage')).toContain('[--project|--global]');
     }
   });
 

@@ -59,7 +59,8 @@ class SessionCreationCommandContractTest {
         assertThat(command.extensionPins()).isNull();
         assertThat(command.extensionLifecycleProfiles()).isEqualTo(Set.of());
         assertThat(command.worktree()).isNull();
-        assertThat(SessionCreationCommand.class.getRecordComponents()).hasSize(20);
+        assertThat(command.modelConfig()).isNull();
+        assertThat(SessionCreationCommand.class.getRecordComponents()).hasSize(21);
     }
 
     @Test

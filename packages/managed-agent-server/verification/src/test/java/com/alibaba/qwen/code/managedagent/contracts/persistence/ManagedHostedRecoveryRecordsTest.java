@@ -77,7 +77,85 @@ class ManagedHostedRecoveryRecordsTest {
     }
 
     @Test
-    void sharesClosureMemoAcrossRootsAndStillRejectsConflictingMetadata() {
+    void acceptsLegacyQuestionsAndLocalQuestionProviderPins() {
+        ObjectNode body = nativeContinuation("ask_user_question");
+        assertThatCode(() -> validateNativeContinuation(body)).doesNotThrowAnyException();
+        ((ObjectNode) body.get("runtime")).put("provisionerKind", "local-process");
+        assertThatCode(() -> validateNativeContinuation(body)).doesNotThrowAnyException();
+        assertThatCode(() -> validateNativeContinuation(nativeContinuation("read_file"))).doesNotThrowAnyException();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ssh-process", "external-workspace", "static", "", "local-process-extra"})
+    void rejectsUnsupportedNativeQuestionProviders(String provider) {
+        ObjectNode body = nativeContinuation("ask_user_question");
+        ((ObjectNode) body.get("runtime")).put("provisionerKind", provider);
+        assertThatThrownBy(() -> validateNativeContinuation(body)).isInstanceOf(RuntimeException.class);
+    }
+
+    @Test
+    void requiresProviderPinsToNameOnlyOneNativeQuestion() {
+        ObjectNode invalidType = nativeContinuation("ask_user_question");
+        ObjectNode runtime = (ObjectNode) invalidType.get("runtime");
+        runtime.putNull("provisionerKind");
+        assertThatThrownBy(() -> validateNativeContinuation(invalidType)).isInstanceOf(RuntimeException.class);
+        runtime.put("provisionerKind", true);
+        assertThatThrownBy(() -> validateNativeContinuation(invalidType)).isInstanceOf(RuntimeException.class);
+        runtime.put("provisionerKind", "local-process").put("unexpected", true);
+        assertThatThrownBy(() -> validateNativeContinuation(invalidType)).isInstanceOf(RuntimeException.class);
+
+        ObjectNode ordinary = nativeContinuation("read_file");
+        ((ObjectNode) ordinary.get("runtime")).put("provisionerKind", "local-process");
+        assertThatThrownBy(() -> validateNativeContinuation(ordinary)).isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("Native Runtime provider pin requires a single question.");
+
+        ObjectNode mixed = nativeContinuation("ask_user_question");
+        ((ObjectNode) mixed.get("runtime")).put("provisionerKind", "local-process");
+        ((com.fasterxml.jackson.databind.node.ArrayNode) mixed.get("calls"))
+                .add(nativeContinuation("read_file").get("calls").get(0));
+        assertThatThrownBy(() -> validateNativeContinuation(mixed)).isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("Native Runtime provider pin requires a single question.");
+
+        ObjectNode command = nativeContinuation("ask_user_question");
+        ((ObjectNode) command.get("runtime")).put("provisionerKind", "local-process");
+        command.putObject("commandStep").put("toolStageId", "stage").put("toolName", "shell")
+                .put("configRevision", 1).set("inputRef", reference(stored("command", "managed-extension-command-input", json.createObjectNode())));
+        assertThatThrownBy(() -> validateNativeContinuation(command)).isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("Native Runtime provider pin requires a single question.");
+    }
+
+    private ObjectNode nativeContinuation(String toolName) {
+        ObjectNode body = json.createObjectNode().put("v", 1).put("promptId", "prompt")
+                .put("batchId", "batch").put("model", "model").put("round", 0).put("stage", "approval")
+                .put("approvalOrdinal", 0).put("actionId", "action");
+        body.set("sessionKey", cleanup().get("sessionKey"));
+        body.putObject("sourceActivation").put("activationId", "activation").put("epoch", 1);
+        body.putObject("runtime").put("runtimeSessionId", "prompt").put("bindingId", "binding")
+                .put("generation", "1").put("workspaceGeneration", "1");
+        body.set("definitionRef", reference(stored("definition", "managed-definition", json.createObjectNode())));
+        body.set("rootSnapshotRef", reference(stored("root", "managed-root", json.createObjectNode())));
+        body.set("assistantRef", reference(stored("assistant", "managed-message", json.createObjectNode())));
+        ObjectNode call = body.putArray("calls").addObject().put("runtimeCallId", "call")
+                .put("requestDigest", "sha256:" + "a".repeat(64)).put("argsDigest", "sha256:" + "b".repeat(64))
+                .put("prepareKey", "prompt:call").put("partIndex", 0).putNull("refusal").put("actionId", "action");
+        call.putObject("call").put("name", toolName).put("callId", "call").put("prompt_id", "prompt");
+        call.putObject("prepareReference").put("sessionId", "prompt").put("promptId", "prompt")
+                .put("callId", "call").put("argsDigest", "sha256:" + "a".repeat(64));
+        call.set("inputRef", reference(stored("input", "managed-tool-input", json.createObjectNode())));
+        call.set("definitionRef", reference(stored("tool", "managed-tool-definition", json.createObjectNode())));
+        return body;
+    }
+
+    private void validateNativeContinuation(ObjectNode body) {
+        var kinds = java.util.Map.of("definition", "managed-definition", "root", "managed-root",
+                "assistant", "managed-message", "input", "managed-tool-input", "tool", "managed-tool-definition");
+        ManagedHostedRecoveryRecords.validateResource(stored("continuation", "hosted-approval-continuation", body),
+                "tenant", "workspace", "session", id -> stored(id, kinds.get(id), json.createObjectNode()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {3, 4})
+    void sharesClosureMemoAcrossRootsAndStillRejectsConflictingMetadata(int version) {
         byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);
         var nested = new ManagedSessionStoreModels.StoredResource("shared", "managed-definition", 1,
                 bytes.length, "a".repeat(64), bytes);
@@ -90,7 +168,7 @@ class ManagedHostedRecoveryRecordsTest {
             return nested;
         };
         for (int i = 0; i < 12; i++) {
-            byte[] root = json.createObjectNode().put("v", 3).set("definitionRef", ref).toString().getBytes(StandardCharsets.UTF_8);
+            byte[] root = json.createObjectNode().put("v", version).set("definitionRef", ref).toString().getBytes(StandardCharsets.UTF_8);
             ManagedHostedRecoveryRecords.validateResource(new ManagedSessionStoreModels.StoredResource(
                     "root-" + i, "managed-action-options", 1, root.length, "b".repeat(64), root),
                     "tenant", "workspace", "session", reader, seen);

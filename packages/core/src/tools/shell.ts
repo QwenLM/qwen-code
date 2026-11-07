@@ -107,6 +107,8 @@ import {
 } from '../utils/sedEditParser.js';
 import {
   detectLineEnding,
+  ensureCrlfLineEndings,
+  needsCrlfLineEndings,
   type ReadTextFileResponse,
 } from '../services/fileSystemService.js';
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
@@ -687,8 +689,8 @@ const COMMIT_RECOGNITION_LEADING_NOISE: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The program recogniser shared by `gitCommitContext` and
- * `findAttributableCommitSegment` (#12514): skip leading
+ * The program recogniser shared by `gitCommitContext`,
+ * `findAttributableCommitSegment` and `isAmendCommit` (#12514): skip leading
  * control-flow/noise keywords and match the program on its
  * basename (see `programBasename`), so `then git commit`,
  * `time git commit`, `! git commit` and `/usr/bin/git commit` all
@@ -936,13 +938,19 @@ function cdTargetMayChangeRepo(tokens: string[], cwd: string): boolean {
  * shell tool counts. `git -C ../other commit --amend && git commit -m x`
  * must not flip the diff range for the second (fresh) commit, since
  * `preHead` would be the inner repo's SHA there, not ours.
+ *
+ * Recognition matches the other commit walks: leading shell
+ * control-flow/noise keywords are skipped and the program is matched on
+ * its basename, so a loose spelling still gets the amend-range diff.
  */
 function isAmendCommit(command: string, cwd: string): boolean {
   let cwdShifted = false;
   for (const sub of splitCommands(command)) {
-    const tokens = tokeniseSegment(sub);
-    if (!tokens || tokens.length === 0) continue;
-    const program = tokens[0]!;
+    const rawTokens = tokeniseSegment(sub);
+    if (!rawTokens || rawTokens.length === 0) continue;
+    const tokens = skipCommitRecognitionNoise(rawTokens);
+    if (!tokens) continue;
+    const program = programBasename(tokens[0]!);
     if (program === 'cd' || program === 'pushd') {
       if (!cwdShifted && cdTargetMayChangeRepo(tokens, cwd)) cwdShifted = true;
       continue;
@@ -1921,9 +1929,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
       );
     }
     await this.checkSedPriorRead(filePath);
-    const { content, _meta } = await this.config
-      .getFileSystemService()
-      .readTextFile({ path: filePath });
+    const fileSystemService = this.config.getFileSystemService();
+    const { content, _meta } = await fileSystemService.readTextFile({
+      path: filePath,
+    });
     let newContent: string;
     try {
       newContent = applySedSubstitution(content, sedInfo);
@@ -1931,15 +1940,34 @@ export class ShellToolInvocation extends BaseToolInvocation<
       throw new SedEditSimulationError(getErrorMessage(err));
     }
 
+    const meta = {
+      ..._meta,
+      lineEnding: _meta?.lineEnding ?? detectLineEnding(content),
+    };
+    // Judge the edit by the content a read-back would return, not by the
+    // substitution string: the local writer re-applies CRLF for
+    // `lineEnding: 'crlf'` (and for Windows command scripts), so a substitution
+    // whose only effect is consuming the trailing `\r` (e.g. `s/.$//` on a CRLF
+    // file) would otherwise report an applied edit whose bytes never change.
+    // Comparing strings also keeps a BOM or a non-UTF-8 encoding from making
+    // the comparison false on a file that did not change. The prediction
+    // always assumes the normalization: a write capability says a client *can*
+    // write, not how it stores the content, and the in-repo `qwen serve` writer
+    // re-applies CRLF, so assuming verbatim would report a false success there.
+    const restored =
+      meta.lineEnding === 'crlf' || needsCrlfLineEndings(filePath);
+    if (
+      (restored ? ensureCrlfLineEndings(newContent) : newContent) === content
+    ) {
+      newContent = content;
+    }
+
     return {
       filePath,
       fileName: path.basename(filePath),
       originalContent: content,
       newContent,
-      meta: {
-        ..._meta,
-        lineEnding: _meta?.lineEnding ?? detectLineEnding(content),
-      },
+      meta,
     };
   }
 
@@ -3431,6 +3459,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       },
       ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
       ...(outputBudgetApplied ? { outputBudgetApplied } : {}),
+      // A user cancel kills the process group but returns a normal result, so
+      // tell the scheduler its work did not finish.
+      ...(result.aborted && !wasTimeout && !wasPromoteRefused
+        ? { interruptedBeforeCompletion: true }
+        : {}),
       ...executionError,
     };
   }
