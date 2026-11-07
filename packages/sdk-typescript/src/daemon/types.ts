@@ -1934,6 +1934,8 @@ export type DaemonSessionGroupFilter =
   | (string & {});
 
 export interface DaemonSessionListPageOptions {
+  /** Descending order; question sort requires session_last_user_prompt_sort. Unknown times sort last. */
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   pageSize?: number;
   cursor?: string;
   archiveState?: DaemonSessionArchiveState;

@@ -8,7 +8,7 @@ Clients need the recorded time of the latest genuine human question to show “a
 
 For example, the user asks A at 10:00 and B at 10:05, then A continues output at 10:10. Activity ordering puts A first; question-time ordering must keep B first. Both are valid product views and require distinct facts.
 
-This PR supplies optional `lastUserPromptAt` consistently on workspace session-list pages, batch catalog rows, standalone SDK summaries and loaded-session status. It does not implement a sort selector or change existing ordering/cursors. A future question-time sort must operate on the complete eligible candidate set before pagination, with a deterministic tie-break and explicit unknown handling. Sorting one returned page does not implement global sorting.
+This PR supplies optional `lastUserPromptAt` consistently on workspace session-list pages, batch catalog rows, standalone SDK summaries and loaded-session status. It also includes the optional server and WebShell [question-time sort](session-question-time-sort.md), which processes the complete eligible candidate set before pagination. Default ordering remains compatible.
 
 ## Timestamp semantics
 
@@ -20,8 +20,8 @@ The original scalar cache used JSONL identity, size and mtime. Assistant appends
 
 ## Cold recovery and hot updates
 
-- On a cold metadata miss, reconstruct the effective persisted transcript using the canonical reader. Enrich only returned rows, at most two concurrently per page; concurrent reads share the same initialization. The scalar cache is bounded to 512 entries and survives the separate catalog TTL and dense-index eviction.
-- For warm metadata, inspect file identity/size/mtime without reading transcript content. Ordinary append growth retains the scalar. Replacement, truncation or same-size rewrite is an explicit recovery condition. On filesystems reporting no verifiable inode, a changed warm snapshot omits the optional value without rescanning until a human notification or cold recovery re-establishes it. A cold miss above the canonical 256 MiB index ceiling omits metadata without scanning.
+- On a cold metadata miss, reconstruct the effective persisted transcript using the canonical reader. Enrich returned rows for default reads, or the complete eligible set before question sorting, at most two concurrently; concurrent reads share the same initialization. The scalar cache retains complete scopes within 100,000 entries and 64 scopes and survives the separate catalog TTL and dense-index eviction.
+- For warm default metadata reads, inspect file identity/size/mtime without reading transcript content. Ordinary append growth retains the scalar. Replacement, truncation or same-size rewrite is an explicit recovery condition. On filesystems reporting no verifiable inode, a changed warm snapshot omits the optional value without rescanning until a human notification or cold recovery re-establishes it. A cold miss above the canonical 256 MiB index ceiling omits metadata without scanning.
 - After a qualifying human record is successfully persisted, the recorder sends its actual recorded timestamp through the existing owner-scoped ACP notification transport. The daemon installs that scalar in the same runtime/workspace cache used by list, catalog and status, then advances the catalog version. No full transcript scan is required for this update. A hot known timestamp can still be served for a transcript above the cold-scan ceiling.
 - Assistant/tool/automatic activity does not send a prompt-time update and append growth does not invalidate hot metadata. No new HTTP endpoint, client request, polling loop or background timer is added.
 - Persisted rewind and message-group deletion invalidate the scalar; the next read recovers the effective branch once. A newly registered owner also invalidates older process-local metadata, so a restore/replacement recovers any changes made while no live owner was present. Restart naturally starts cold.
@@ -30,7 +30,7 @@ This metadata is authoritative for this daemon's observed writer. Unobserved ext
 
 ## Ownership and consumers
 
-The persisted metadata is workspace/runtime scoped. Resolve the runtime first, use its storage root and canonical workspace, and validate cold snapshot ownership. The cache key includes both the resolved transcript path and workspace. Warm file replacement invalidates the old snapshot. ACP notifications are accepted only for the session owned by the sending channel; unknown/foreign owners do not update memory. Do not fall back to the primary runtime.
+The persisted metadata is workspace/runtime scoped. Resolve the runtime first, use its storage root and canonical workspace, and validate cold snapshot ownership. The cache key includes both the resolved transcript path and workspace. Default reads detect file replacement; warm question sorting uses the observed writer cache until explicit recovery. ACP notifications are accepted only for the session owned by the sending channel; unknown/foreign owners do not update memory. Do not fall back to the primary runtime.
 
 Workspace session-list and batch catalog share one enrichment producer. Status resolves its live owner and uses the same cache. SDK list/catalog/standalone/status preserve the optional wire value. Memory-only live-state keeps its existing shape and performs no transcript enrichment. Native CLI columns/JSON and ACP listing are unchanged.
 

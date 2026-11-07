@@ -475,6 +475,7 @@ interface RestoreProjectionReadOptions {
 }
 
 interface LastUserPromptReadOptions {
+  preferCache?: boolean;
   validateFirstRecord?: (
     record: Pick<ChatRecord, 'sessionId' | 'cwd'>,
   ) => boolean | Promise<boolean>;
@@ -674,9 +675,36 @@ interface LastUserPromptCacheEntry {
   snapshot: Promise<LastUserPromptSnapshot>;
 }
 
-const lastUserPromptCache = new Map<string, LastUserPromptCacheEntry>();
+const lastUserPromptScopes = new Map<
+  string,
+  Map<string, LastUserPromptCacheEntry>
+>();
 const lastUserPromptUpdates = new Map<string, object>();
-const LAST_USER_PROMPT_CACHE_MAX_ENTRIES = 512;
+const LAST_USER_PROMPT_CACHE_MAX_ENTRIES = 100_000;
+
+function promptTimeScope(filePath: string, workspaceCwd: string) {
+  const key = JSON.stringify([path.dirname(filePath), workspaceCwd]);
+  let entries = lastUserPromptScopes.get(key);
+  if (!entries) entries = new Map();
+  lastUserPromptScopes.delete(key);
+  lastUserPromptScopes.set(key, entries);
+  while (lastUserPromptScopes.size > 64) {
+    lastUserPromptScopes.delete(lastUserPromptScopes.keys().next().value!);
+  }
+  return entries;
+}
+
+function trimPromptTimeScopes(): void {
+  let count = [...lastUserPromptScopes.values()].reduce(
+    (sum, entries) => sum + entries.size,
+    0,
+  );
+  while (count > LAST_USER_PROMPT_CACHE_MAX_ENTRIES) {
+    const oldest = lastUserPromptScopes.keys().next().value!;
+    count -= lastUserPromptScopes.get(oldest)!.size;
+    lastUserPromptScopes.delete(oldest);
+  }
+}
 // Per-workspace HMAC signing keys are cached for the daemon's lifetime (keyed by
 // key-file path). Rotating a key file externally therefore requires a daemon
 // restart to take effect — the only in-process invalidation is the corrupt
@@ -2972,10 +3000,25 @@ export class SessionTranscriptReader {
     readOptions: LastUserPromptReadOptions = {},
   ): Promise<string | undefined> {
     const filePath = this.getSessionFilePath(sessionId, archiveState);
+    let lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+    const key = JSON.stringify([filePath, this.workspaceCwd]);
+    const warm = readOptions.preferCache
+      ? lastUserPromptCache.get(key)
+      : undefined;
+    if (warm) {
+      let snapshot = await warm.snapshot;
+      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
+      if (current && current !== warm) snapshot = await current.snapshot;
+      return readOptions.validateFirstRecord &&
+        (!snapshot.firstRecordOwner ||
+          !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
+        ? undefined
+        : snapshot.lastUserPromptAt;
+    }
     const stats = await fsp.stat(filePath);
+    lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
     const fileIdentity = fileIdentityFromStats(stats);
     const lastUpdated = new Date(stats.mtimeMs).toISOString();
-    const key = JSON.stringify([filePath, this.workspaceCwd]);
     const cached = lastUserPromptCache.get(key);
     if (
       cached &&
@@ -2993,7 +3036,7 @@ export class SessionTranscriptReader {
       lastUserPromptCache.delete(key);
       lastUserPromptCache.set(key, cached);
       let snapshot = await cached.snapshot;
-      const current = lastUserPromptCache.get(key);
+      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
       if (current && current !== cached) snapshot = await current.snapshot;
       cached.size = stats.size;
       cached.lastUpdated = lastUpdated;
@@ -3065,17 +3108,15 @@ export class SessionTranscriptReader {
       snapshot: pending,
     };
     lastUserPromptCache.set(key, entry);
-    while (lastUserPromptCache.size > LAST_USER_PROMPT_CACHE_MAX_ENTRIES) {
-      lastUserPromptCache.delete(lastUserPromptCache.keys().next().value!);
-    }
+    trimPromptTimeScopes();
     let snapshot: LastUserPromptSnapshot;
     try {
       snapshot = await pending;
-      const current = lastUserPromptCache.get(key);
+      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
       if (current && current !== entry) snapshot = await current.snapshot;
     } catch (error) {
-      if (lastUserPromptCache.get(key) === entry)
-        lastUserPromptCache.delete(key);
+      const currentScope = promptTimeScope(filePath, this.workspaceCwd);
+      if (currentScope.get(key) === entry) currentScope.delete(key);
       throw error;
     }
     return readOptions.validateFirstRecord &&
@@ -3085,15 +3126,24 @@ export class SessionTranscriptReader {
       : snapshot.lastUserPromptAt;
   }
 
+  invalidateLastUserPromptAt(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      const filePath = this.getSessionFilePath(sessionId, state);
+      const key = JSON.stringify([filePath, this.workspaceCwd]);
+      lastUserPromptUpdates.delete(key);
+      promptTimeScope(filePath, this.workspaceCwd).delete(key);
+    }
+  }
+
   async setLastUserPromptAt(
     sessionId: string,
     timestamp: string | undefined,
   ): Promise<void> {
     const filePath = this.getSessionFilePath(sessionId);
+    let lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
     const key = JSON.stringify([filePath, this.workspaceCwd]);
     if (timestamp === undefined) {
-      lastUserPromptUpdates.delete(key);
-      lastUserPromptCache.delete(key);
+      this.invalidateLastUserPromptAt(sessionId);
       return;
     }
     const update = {};
@@ -3101,6 +3151,7 @@ export class SessionTranscriptReader {
     try {
       const stats = await fsp.stat(filePath);
       if (lastUserPromptUpdates.get(key) !== update) return;
+      lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
       lastUserPromptCache.delete(key);
       lastUserPromptCache.set(key, {
         fileIdentity: fileIdentityFromStats(stats),
@@ -3111,12 +3162,10 @@ export class SessionTranscriptReader {
           firstRecordOwner: { sessionId, cwd: this.workspaceCwd },
         }),
       });
-      while (lastUserPromptCache.size > LAST_USER_PROMPT_CACHE_MAX_ENTRIES) {
-        lastUserPromptCache.delete(lastUserPromptCache.keys().next().value!);
-      }
+      trimPromptTimeScopes();
     } catch (error) {
       if (lastUserPromptUpdates.get(key) === update)
-        lastUserPromptCache.delete(key);
+        promptTimeScope(filePath, this.workspaceCwd).delete(key);
       throw error;
     } finally {
       if (lastUserPromptUpdates.get(key) === update)
@@ -4365,7 +4414,7 @@ export class SessionTranscriptReader {
 }
 
 export function resetSessionTranscriptIndexCacheForTest(): void {
-  lastUserPromptCache.clear();
+  lastUserPromptScopes.clear();
   lastUserPromptUpdates.clear();
   indexCache.clear();
   cursorHmacKeys.clear();

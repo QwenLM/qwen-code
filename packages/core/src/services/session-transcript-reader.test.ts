@@ -809,6 +809,99 @@ describe('SessionTranscriptReader', () => {
       ).toBe(legacy.timestamp);
     });
 
+    it('retains a full question index beyond 512 rows and reads warm scalars without filesystem work', async () => {
+      const first = record('u1', null, 'first');
+      const file = await writeRecords([first]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(first.timestamp);
+      const stat = await fs.stat(file);
+      const statSpy = vi.spyOn(fs, 'stat').mockResolvedValue(stat);
+      for (let i = 0; i < 600; i++)
+        await reader.setLastUserPromptAt(
+          `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+          first.timestamp,
+        );
+      statSpy.mockClear();
+      expect(
+        await reader.getLastUserPromptAt(sessionId, 'active', {
+          preferCache: true,
+        }),
+      ).toBe(first.timestamp);
+      for (let i = 0; i < 600; i++)
+        expect(
+          await reader.getLastUserPromptAt(
+            `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+            'active',
+            {
+              preferCache: true,
+            },
+          ),
+        ).toBe(first.timestamp);
+      expect(statSpy).not.toHaveBeenCalled();
+      statSpy.mockRestore();
+      const next = record('u2', first.uuid, 'new question');
+      await appendRecords(file, next);
+      await reader.setLastUserPromptAt(sessionId, next.timestamp);
+      expect(
+        await reader.getLastUserPromptAt(sessionId, 'active', {
+          preferCache: true,
+        }),
+      ).toBe(next.timestamp);
+    });
+
+    it('keeps a notified question when scope eviction overlaps cold initialization', async () => {
+      const first = record('u1', null, 'first');
+      const next = record('u2', first.uuid, 'new question');
+      const file = await writeRecords([first]);
+      const reader = newReader();
+      setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+        if (builtPath !== file) return;
+        setSessionTranscriptIndexBuildCompleteHookForTest(() => {});
+        for (let i = 0; i < 64; i++) {
+          await new SessionTranscriptReader(
+            path.join(runtimeDir, `other-${i}`),
+            undefined,
+            runtimeDir,
+          )
+            .getLastUserPromptAt(sessionId)
+            .catch(() => undefined);
+        }
+        await appendRecords(file, next);
+        await reader.setLastUserPromptAt(sessionId, next.timestamp);
+      });
+      expect(await reader.getLastUserPromptAt(sessionId)).toBe(next.timestamp);
+    });
+
+    it('refreshes archived metadata after unarchive, another question and rearchive', async () => {
+      const first = record('u1', null, 'first');
+      const next = record('u2', first.uuid, 'new question');
+      const file = await writeRecords([first]);
+      const service = svc();
+      const reader = newReader();
+      expect((await service.archiveSessions([sessionId])).errors).toEqual([]);
+      expect(
+        await reader.getLastUserPromptAt(sessionId, 'archived', {
+          preferCache: true,
+        }),
+      ).toBe(first.timestamp);
+      expect((await service.unarchiveSessions([sessionId])).errors).toEqual([]);
+      await appendRecords(file, next);
+      await service.setLastUserPromptAt(sessionId, next.timestamp);
+      expect((await service.archiveSessions([sessionId])).errors).toEqual([]);
+      expect(
+        await reader.getLastUserPromptAt(sessionId, 'archived', {
+          preferCache: true,
+        }),
+      ).toBe(next.timestamp);
+      expect((await service.removeSessions([sessionId])).errors).toEqual([]);
+      await writeRecords([first]);
+      expect(
+        await reader.getLastUserPromptAt(sessionId, 'active', {
+          preferCache: true,
+        }),
+      ).toBe(first.timestamp);
+    });
+
     it('keeps hot metadata across assistant appends and updates persisted human input without scanning', async () => {
       const first = record('u1', null, 'first');
       const file = await writeRecords([first]);

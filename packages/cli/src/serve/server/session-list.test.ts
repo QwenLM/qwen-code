@@ -79,6 +79,88 @@ describe('merged session catalog pagination', () => {
     };
   }
 
+  it.each([undefined, 'organized'] as const)(
+    'sorts the complete set by question time before paging (%s)',
+    async (view) => {
+      for (let index = 0; index < 4; index++) await persist(summary(index));
+      const { bridge } = bridgeFor([
+        { ...summary(0), updatedAt: summary(20).createdAt },
+      ]);
+      const options = {
+        size: 2,
+        sortBy: 'lastUserPromptAt' as const,
+        ...(view ? { view } : {}),
+      };
+      const first = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        options,
+        { runtimeBaseDir, paginateMerged: true },
+      );
+      expect(first.sessions.map((row) => row.sessionId)).toEqual([
+        summary(3).sessionId,
+        summary(2).sessionId,
+      ]);
+      const next = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { ...options, cursor: first.nextCursor },
+        { runtimeBaseDir, paginateMerged: true },
+      );
+      expect(next.sessions.map((row) => row.sessionId)).toEqual([
+        summary(1).sessionId,
+        summary(0).sessionId,
+      ]);
+      await expect(
+        listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          {
+            ...options,
+            sortBy: 'updatedAt',
+            cursor: first.nextCursor,
+          },
+          { runtimeBaseDir, paginateMerged: true },
+        ),
+      ).rejects.toThrow();
+    },
+  );
+
+  it('places unknown question times last with stable ties and preserves organized pins', async () => {
+    const { bridge } = bridgeFor([summary(0), summary(1), summary(2)]);
+    vi.spyOn(
+      SessionService.prototype,
+      'getLastUserPromptAt',
+    ).mockImplementation(async (id) =>
+      id === summary(0).sessionId ? undefined : summary(1).createdAt,
+    );
+    const options = { size: 10, sortBy: 'lastUserPromptAt' as const };
+    const page = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      options,
+      { runtimeBaseDir },
+    );
+    expect(page.sessions.map((row) => row.sessionId)).toEqual([
+      summary(1).sessionId,
+      summary(2).sessionId,
+      summary(0).sessionId,
+    ]);
+    await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, () =>
+      new SessionOrganizationService(workspaceCwd).updateSessionOrganization(
+        summary(0).sessionId,
+        { isPinned: true },
+      ),
+    );
+    const pinned = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      { ...options, view: 'organized' },
+      { runtimeBaseDir },
+    );
+    expect(pinned.sessions[0]?.sessionId).toBe(summary(0).sessionId);
+  });
+
   it('enriches only returned rows with the recorded user time, independent of live activity', async () => {
     await persist(summary(0));
     await persist(summary(1));

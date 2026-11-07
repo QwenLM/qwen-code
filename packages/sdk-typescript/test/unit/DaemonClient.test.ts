@@ -697,6 +697,57 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('question-time sorting', () => {
+    it('forwards sorting to legacy, qualified and batch routes after capability discovery', async () => {
+      const { fetch, calls } = recordingFetch(({ url }) =>
+        jsonResponse(
+          200,
+          url.endsWith('/capabilities')
+            ? {
+                features: [
+                  'session_last_user_prompt_sort',
+                  'standalone_sessions_v1',
+                ],
+              }
+            : { sessions: [], workspaces: [] },
+        ),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const options = { sortBy: 'lastUserPromptAt' as const };
+      await client.listWorkspaceSessionsPage('/a', options);
+      await client.workspaceByCwd('/a').listWorkspaceSessionsPage(options);
+      await client.listStandaloneSessionsPage(options);
+      await client.listSessionsCatalog({ workspaces: 'all', options });
+      expect(
+        calls.filter(({ url }) => url.includes('/sessions?')),
+      ).toHaveLength(3);
+      expect(
+        calls
+          .filter(({ url }) => url.includes('/sessions?'))
+          .every(
+            ({ url }) =>
+              new URL(url).searchParams.get('sortBy') === 'lastUserPromptAt',
+          ),
+      ).toBe(true);
+      expect(
+        calls.filter(({ url }) => url.endsWith('/capabilities')),
+      ).toHaveLength(2);
+      expect(JSON.parse(String(calls.at(-1)?.body)).options.sortBy).toBe(
+        'lastUserPromptAt',
+      );
+    });
+    it('rejects unsupported sorting before sending a request to an older daemon', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { features: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.listWorkspaceSessionsPage('/a', { sortBy: 'lastUserPromptAt' }),
+      ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+      expect(calls).toHaveLength(1);
+    });
+  });
+
   describe('source capability preflight reuse', () => {
     const feature = 'session_source_metadata';
     afterEach(() => vi.restoreAllMocks());

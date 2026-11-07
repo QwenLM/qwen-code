@@ -163,6 +163,7 @@ import {
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
   searchWorkspaceSessionsForResponse,
+  type ListWorkspaceSessionsOptions,
 } from '../server/session-list.js';
 import {
   archiveDaemonSessions,
@@ -10046,6 +10047,18 @@ export function registerSessionRoutes(
             ? req.query['cursor']
             : undefined;
         const size = parseSessionPageSizeQuery(req.query['size']);
+        const sortBy = req.query['sortBy'];
+        if (
+          sortBy !== undefined &&
+          sortBy !== 'updatedAt' &&
+          sortBy !== 'lastUserPromptAt'
+        ) {
+          res.status(400).json({
+            error: '`sortBy` must be "updatedAt" or "lastUserPromptAt"',
+            code: 'invalid_session_sort',
+          });
+          return;
+        }
         const rawView = req.query['view'];
         let view: 'organized' | undefined;
         if (rawView !== undefined) {
@@ -10117,7 +10130,8 @@ export function registerSessionRoutes(
           });
           return;
         }
-        const options = {
+        const options: ListWorkspaceSessionsOptions = {
+          ...(sortBy !== undefined ? { sortBy } : {}),
           ...(cursor !== undefined ? { cursor } : {}),
           ...(size !== undefined ? { size } : {}),
           ...(archiveState !== undefined ? { archiveState } : {}),
@@ -10149,6 +10163,7 @@ export function registerSessionRoutes(
             readOnlySecondary ||
             runtime.primary ||
             view === 'organized' ||
+            sortBy === 'lastUserPromptAt' ||
             archiveState === 'archived' ||
             parentSessionId !== undefined ||
             parsedSource.sourceType !== undefined ||

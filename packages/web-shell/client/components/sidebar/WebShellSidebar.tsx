@@ -1,3 +1,9 @@
+import {
+  SessionSortMenu,
+  readSessionSort,
+  writeSessionSort,
+  type SessionSort,
+} from './SessionSortMenu';
 import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import {
   Fragment,
@@ -1316,6 +1322,24 @@ export function WebShellSidebar({
     sessionContent === undefined &&
       connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE),
   );
+  const questionSortSupported =
+    connection.capabilities?.features?.includes(
+      'session_last_user_prompt_sort',
+    ) === true;
+  const sortHost = focusedHostOrigin.replace(/\/+$/, '');
+  const [sortPreference, setSortPreference] = useState(() => ({
+    host: sortHost,
+    value: readSessionSort(sortHost),
+  }));
+  const sessionSort = questionSortSupported
+    ? sortPreference.host === sortHost
+      ? sortPreference.value
+      : readSessionSort(sortHost)
+    : 'updatedAt';
+  const changeSessionSort = (value: SessionSort) => {
+    writeSessionSort(sortHost, value);
+    setSortPreference({ host: sortHost, value });
+  };
   const sourceMetadataEnabled = Boolean(
     connection.capabilities?.features?.includes('session_source_metadata'),
   );
@@ -1560,6 +1584,7 @@ export function WebShellSidebar({
     enabled: includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'active',
+    ...(questionSortSupported ? { sortBy: sessionSort } : {}),
     ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
@@ -1657,6 +1682,7 @@ export function WebShellSidebar({
       includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
+    ...(questionSortSupported ? { sortBy: sessionSort } : {}),
     ...(archiveSourceType ? { sourceType: archiveSourceType } : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
@@ -2192,13 +2218,20 @@ export function WebShellSidebar({
         options: {
           pageSize: SESSION_LIST_PAGE_SIZE,
           archiveState: 'archived',
+          ...(questionSortSupported ? { sortBy: sessionSort } : {}),
           ...(archiveSourceType ? { sourceType: archiveSourceType } : {}),
           ...(organizationEnabled
             ? { view: 'organized' as const, group: 'all' }
             : {}),
         },
       })),
-    [organizationEnabled, secondaryWorkspaceCwds, archiveSourceType],
+    [
+      organizationEnabled,
+      secondaryWorkspaceCwds,
+      archiveSourceType,
+      questionSortSupported,
+      sessionSort,
+    ],
   );
   const secondaryArchivedSnapshots = useSessionCatalogQueries(
     workspace.client,
@@ -4594,7 +4627,7 @@ export function WebShellSidebar({
               !session.isPinned || searchGhostIds.has(session.sessionId),
           );
     const nextSessions = unpinnedSessions.slice();
-    if (organizationEnabled) {
+    if (organizationEnabled || sessionSort === 'lastUserPromptAt') {
       return nextSessions;
     }
     const createdTimeById = new Map(
@@ -4609,6 +4642,7 @@ export function WebShellSidebar({
         (createdTimeById.get(a.sessionId) ?? 0),
     );
   }, [
+    sessionSort,
     organizationEnabled,
     searchGhostIds,
     searchedSessions,
@@ -6259,6 +6293,7 @@ export function WebShellSidebar({
           onLoadStandaloneSession &&
           onStandaloneNotice && (
             <StandaloneRecents
+              sortBy={questionSortSupported ? sessionSort : undefined}
               archiveState="archived"
               currentSessionId={connection.sessionId}
               currentSessionReady={
@@ -6313,6 +6348,8 @@ export function WebShellSidebar({
       archivedSessionsTarget,
     );
   }, [
+    questionSortSupported,
+    sessionSort,
     archivedSessionsTarget,
     archivedWorkspaceGroups,
     archiveSessionSource,
@@ -7447,6 +7484,14 @@ export function WebShellSidebar({
                         )}
                       </button>
                     )}
+                  {questionSortSupported &&
+                    sessionContent === undefined &&
+                    (!collapsed || mobileOpen) && (
+                      <SessionSortMenu
+                        value={sessionSort}
+                        onChange={changeSessionSort}
+                      />
+                    )}
                   {topRowSearchVisible &&
                     renderSearchToggle(styles.searchToggle)}
                 </div>
@@ -7617,6 +7662,7 @@ export function WebShellSidebar({
                 (!liveNavigationEnabled || liveView) &&
                 liveWorkspaces.map((ws) => (
                   <WorkspaceSection
+                    sortBy={questionSortSupported ? sessionSort : undefined}
                     key={ws.id}
                     workspace={ws}
                     hideHeader={liveView}
@@ -7801,6 +7847,9 @@ export function WebShellSidebar({
                       {orderedProjectWorkspaces.map((ws) => (
                         <Fragment key={ws.id}>
                           <WorkspaceSection
+                            sortBy={
+                              questionSortSupported ? sessionSort : undefined
+                            }
                             workspace={ws}
                             executionLabel={
                               managedWorkspaces !== undefined
@@ -8213,6 +8262,7 @@ export function WebShellSidebar({
                 onLoadStandaloneSession &&
                 onStandaloneNotice && (
                   <StandaloneRecents
+                    sortBy={questionSortSupported ? sessionSort : undefined}
                     archiveState="active"
                     currentSessionId={connection.sessionId}
                     currentSessionReady={
@@ -8257,6 +8307,7 @@ export function WebShellSidebar({
                 !hideProjectHeader &&
                 workspaceQualifiedRestCoreEnabled && (
                   <RecentSessions
+                    sortBy={questionSortSupported ? sessionSort : undefined}
                     client={workspace.client}
                     onVisibleRowsChange={setVisibleRecentRows}
                     onNewSession={() => handleNewSession(undefined, true)}

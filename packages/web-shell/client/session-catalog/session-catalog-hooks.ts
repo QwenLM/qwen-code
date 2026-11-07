@@ -40,6 +40,7 @@ interface SessionCatalogHookOptions {
 }
 
 export interface WebShellSessionsOptions extends SessionCatalogHookOptions {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   pageSize?: number;
   cursor?: string;
   archiveState?: DaemonSessionArchiveState;
@@ -511,6 +512,7 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
     enabled = true,
     maxAgeMs,
     pollIntervalMs,
+    sortBy,
     pageSize,
     cursor,
     archiveState,
@@ -536,6 +538,7 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
   const workspaceCwd = workspace.workspaceCwd;
   const listOptions = useMemo<DaemonSessionListPageOptions>(
     () => ({
+      ...(sortBy !== undefined ? { sortBy } : {}),
       ...(pageSize !== undefined ? { pageSize } : {}),
       ...(cursor !== undefined ? { cursor } : {}),
       ...(archiveState !== undefined ? { archiveState } : {}),
@@ -546,6 +549,7 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
     }),
     [
+      sortBy,
       archiveState,
       cursor,
       group,

@@ -38,6 +38,7 @@ import sidebarStyles from './WebShellSidebar.module.css';
 import workspaceStyles from './WorkspaceSection.module.css';
 
 interface StandaloneRecentsProps {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   archiveState: DaemonSessionArchiveState;
   currentSessionId?: string;
   currentSessionReady?: boolean;
@@ -116,6 +117,7 @@ function downloadExport(result: {
 }
 
 export function StandaloneRecents({
+  sortBy,
   archiveState,
   currentSessionId,
   currentSessionReady = false,
@@ -183,6 +185,7 @@ export function StandaloneRecents({
         const targetCount = preservePages ? sessionsRef.current.length : 0;
         let page = await workspace.client.listStandaloneSessionsPage({
           archiveState,
+          ...(sortBy !== undefined ? { sortBy } : {}),
           pageSize: PAGE_SIZE,
         });
         if (loadGenerationRef.current !== generation) return;
@@ -190,6 +193,7 @@ export function StandaloneRecents({
         while (page.nextCursor && loaded.length < targetCount) {
           page = await workspace.client.listStandaloneSessionsPage({
             archiveState,
+            ...(sortBy !== undefined ? { sortBy } : {}),
             cursor: page.nextCursor,
             pageSize: PAGE_SIZE,
           });
@@ -208,7 +212,7 @@ export function StandaloneRecents({
         if (loadGenerationRef.current === generation) setLoading(false);
       }
     },
-    [archiveState, supported, workspace.client],
+    [archiveState, sortBy, supported, workspace.client],
   );
 
   useEffect(() => {
@@ -229,11 +233,16 @@ export function StandaloneRecents({
     }
   }, [currentSessionId, currentSessionReady]);
 
+  const previousSortRef = useRef(sortBy);
   useEffect(() => {
     const refreshRequested = previousRefreshKeyRef.current !== refreshKey;
     previousRefreshKeyRef.current = refreshKey;
-    if (!loadedRef.current || refreshRequested) void load(true);
-  }, [load, refreshKey]);
+    const sortChanged = previousSortRef.current !== sortBy;
+    previousSortRef.current = sortBy;
+    if (sortChanged) setShowAll(false);
+    if (!loadedRef.current || refreshRequested || sortChanged)
+      void load(!sortChanged);
+  }, [load, refreshKey, sortBy]);
 
   useEffect(() => {
     const previous = previousStreamingStateRef.current;
@@ -263,6 +272,7 @@ export function StandaloneRecents({
     try {
       const page = await workspace.client.listStandaloneSessionsPage({
         archiveState,
+        ...(sortBy !== undefined ? { sortBy } : {}),
         cursor,
         pageSize: PAGE_SIZE,
       });
@@ -280,7 +290,7 @@ export function StandaloneRecents({
     } finally {
       if (loadGenerationRef.current === generation) setLoadingMore(false);
     }
-  }, [archiveState, cursor, loadingMore, workspace.client]);
+  }, [archiveState, sortBy, cursor, loadingMore, workspace.client]);
 
   const run = useCallback(
     async (
