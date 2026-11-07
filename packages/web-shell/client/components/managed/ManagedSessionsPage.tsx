@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
@@ -87,6 +88,7 @@ import { ManagedChildSessionView } from './ManagedChildSessionView';
 import { useManagedTaskCancel } from './use-managed-task-cancel';
 import { TodoFullList } from '../messages/TodoView';
 import { getLatestSuccessfulTodos } from '../../utils/todos';
+import { getShadowAwareActiveElement } from '../../utils/dom';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
@@ -203,6 +205,8 @@ export function ManagedSessionsPage({
   navigationTarget,
   archivedNavigationTarget,
   onArchivedSessionsStatusChange,
+  renderNavigation,
+  renderArchivedNavigation,
   interactive = true,
   creationSkills,
   navigationActive = interactive,
@@ -232,6 +236,9 @@ export function ManagedSessionsPage({
   onArchivedSessionsStatusChange?: (
     status: ManagedArchivedSessionsStatus,
   ) => void;
+  /** Wraps the portaled Session list so a host slot outside the shell keeps scoped CSS. */
+  renderNavigation?: (navigation: ReactNode) => ReactNode;
+  renderArchivedNavigation?: (archived: ReactNode) => ReactNode;
   interactive?: boolean;
   creationSkills?: ManagedCreationSkillsSource;
   navigationActive?: boolean;
@@ -261,6 +268,8 @@ export function ManagedSessionsPage({
         navigationTarget={navigationTarget}
         archivedNavigationTarget={archivedNavigationTarget}
         onArchivedSessionsStatusChange={onArchivedSessionsStatusChange}
+        renderNavigation={renderNavigation}
+        renderArchivedNavigation={renderArchivedNavigation}
         interactive={interactive}
         creationSkills={creationSkills}
         navigationActive={navigationActive}
@@ -330,6 +339,8 @@ function ManagedSessionsContent({
   navigationTarget,
   archivedNavigationTarget,
   onArchivedSessionsStatusChange,
+  renderNavigation,
+  renderArchivedNavigation,
   interactive,
   creationSkills,
   navigationActive,
@@ -359,6 +370,8 @@ function ManagedSessionsContent({
   onArchivedSessionsStatusChange?: (
     status: ManagedArchivedSessionsStatus,
   ) => void;
+  renderNavigation?: (navigation: ReactNode) => ReactNode;
+  renderArchivedNavigation?: (archived: ReactNode) => ReactNode;
   interactive: boolean;
   creationSkills?: ManagedCreationSkillsSource;
   navigationActive: boolean;
@@ -582,6 +595,10 @@ function ManagedSessionsContent({
   const focusComposer = useRef<{ sessionId: string | undefined } | undefined>(
     undefined,
   );
+  // The element a discard parked focus on. Comparing against that node — not
+  // against the page wrapper itself — keeps the latch dead for a user who
+  // clicked any other element inside that pane.
+  const discardParked = useRef<HTMLElement | null>(null);
   const composerRef = useRef<EditorHandle | null>(null);
   const composerContainerRef = useRef<HTMLDivElement | null>(null);
   const composerCommit = useRef<ComposerSubmitCommit | undefined>(undefined);
@@ -846,8 +863,21 @@ function ManagedSessionsContent({
     const composer = composerContainerRef.current?.querySelector(
       '[contenteditable="true"], textarea:not([disabled])',
     );
-    const parked = document.activeElement;
-    const ours = parked === document.body || parked === sessionsNavRef.current;
+    // document.activeElement retargets to the shadow host in portal mode; read
+    // the focused node from the page wrapper's own root instead.
+    const parked = getShadowAwareActiveElement(pageRef.current);
+    // A shadow root with nothing focused reports null here, not body, so a
+    // shadow-root mount whose discard dropped focus to the outer document
+    // body must still be recognised as unclaimed.
+    const unclaimed = parked === null || parked === document.body;
+    // hostSessionOnly renders no list, so the fallback below parks focus on the
+    // page wrapper; the latch accepts the node it parked on itself, so a user
+    // who merely clicked inside that pane is still recognised as having moved
+    // on.
+    const ours =
+      unclaimed ||
+      parked === sessionsNavRef.current ||
+      (discardParked.current !== null && parked === discardParked.current);
     if (composer) {
       focusComposer.current = undefined;
       if (ours) composerRef.current?.focus();
@@ -857,7 +887,8 @@ function ManagedSessionsContent({
       focusComposer.current = undefined;
       return;
     }
-    sessionsNavRef.current?.focus();
+    discardParked.current = sessionsNavRef.current ?? pageRef.current;
+    discardParked.current?.focus();
     // detail.summary is the re-arm trigger: a poll or clean pass lifts the
     // disablement by delivering a new summary without touching the record.
   }, [pending, sessionId, detail.summary, interactive]);
@@ -1106,7 +1137,7 @@ function ManagedSessionsContent({
         text: submittedText,
         draftText: composerRef.current?.getText(),
         sessionId,
-        workspaceId: detail.summary?.workspace?.workspaceId,
+        workspaceId: summary?.workspace?.workspaceId,
         ...(input.some(
           (block) =>
             block.type !== 'input_text' || block.text !== submittedText,
@@ -1628,6 +1659,11 @@ function ManagedSessionsContent({
   return (
     <div
       ref={pageRef}
+      tabIndex={-1}
+      // A non-interactive focus parking spot (discard/task-panel fallback):
+      // the composer's global keydown gate treats focus here like body focus
+      // so "type anywhere" keeps working after a click inside the pane.
+      data-web-shell-focus-region
       className={`flex h-full min-h-0 flex-col ${home ? '' : 'gap-3'}`}
     >
       {/* The uncertain-request row unmounts on the Discard click itself, so
@@ -1639,20 +1675,24 @@ function ManagedSessionsContent({
         home &&
         provider.lifecycle &&
         archivedNavigationTarget &&
-        createPortal(
-          <ManagedArchivedSessions
-            key={listRevision}
-            provider={provider}
-            clientId={clientId}
-            sessionId={sessionId}
-            active={navigationActive}
-            onSelectSession={openSession}
-            renderSessionActions={sessionActions}
-            onSessionsChange={setArchivedSummaries}
-            onStatusChange={onArchivedSessionsStatusChange}
-          />,
-          archivedNavigationTarget,
-        )}
+        (() => {
+          const archived = (
+            <ManagedArchivedSessions
+              key={listRevision}
+              provider={provider}
+              clientId={clientId}
+              sessionId={sessionId}
+              active={navigationActive}
+              onSelectSession={openSession}
+              renderSessionActions={sessionActions}
+              onSessionsChange={setArchivedSummaries}
+              onStatusChange={onArchivedSessionsStatusChange}
+            />
+          );
+          return renderArchivedNavigation
+            ? renderArchivedNavigation(archived)
+            : createPortal(archived, archivedNavigationTarget);
+        })()}
       {confirmation && (
         <ManagedLifecycleConfirmation
           {...confirmation}
@@ -1752,14 +1792,22 @@ function ManagedSessionsContent({
           ? null
           : home
             ? navigationTarget
-              ? createPortal(navigation, navigationTarget)
+              ? renderNavigation
+                ? renderNavigation(navigation)
+                : createPortal(navigation, navigationTarget)
               : null
             : navigation}
         <section
           className={`${shellStyles.chatPane} ${home ? '' : 'gap-3'}`}
           data-managed-home={home || undefined}
           data-managed-empty={
-            home && messages.length === 0 && !summary?.failure
+            home &&
+            messages.length === 0 &&
+            !detail.loading &&
+            // A failed restore keeps `busy` until the user discards, and the
+            // pane is still empty then (the base marker ignored `busy`).
+            (!busy || pendingRestoreFailed) &&
+            !summary?.failure
               ? true
               : undefined
           }
@@ -2085,8 +2133,9 @@ function ManagedSessionsContent({
                     // paginated, or host-mode empty) page, so prefer the
                     // workspace captured when the request was submitted.
                     pending?.workspaceId ??
-                      sessions.find((item) => item.sessionId === owner)
-                        ?.workspace?.workspaceId,
+                      lifecycleSummaries.find(
+                        (session) => session.sessionId === owner,
+                      )?.workspace?.workspaceId,
                   );
                 }}
               >
@@ -2874,7 +2923,7 @@ function ManagedSessionsContent({
                 clientId,
                 root: sessionId,
                 child,
-                trigger: document.activeElement,
+                trigger: getShadowAwareActiveElement(pageRef.current),
               })
             }
             cancel={taskCancel}
@@ -2892,7 +2941,7 @@ function ManagedSessionsContent({
             restoreFocus={() => {
               if (taskTriggerRef.current?.isConnected)
                 taskTriggerRef.current.focus();
-              else sessionsNavRef.current?.focus();
+              else (sessionsNavRef.current ?? pageRef.current)?.focus();
             }}
           />
         )}
