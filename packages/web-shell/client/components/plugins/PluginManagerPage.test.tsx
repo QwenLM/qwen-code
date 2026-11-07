@@ -159,6 +159,124 @@ it('keeps Managed Extensions separate from the daemon before Session selection',
   );
 });
 
+it('opens Managed Skills with immutable static-source labels instead of the daemon Skills editor', async () => {
+  const provider = {
+    storageKey: 'managed',
+    extensions: {
+      list: vi.fn(async () => ({ supported: true, extensions: [] })),
+      query: vi.fn(async () => ({
+        sessionId: 'session',
+        supported: true,
+        revision: 0,
+        extensions: [],
+        requestedExtensions: [],
+      })),
+    },
+    skills: {
+      list: vi.fn(async () => ({
+        skills: [{ name: 'base-skill', description: 'Fixed instructions' }],
+      })),
+    },
+  } as unknown as ManagedAgentProvider;
+  await act(async () =>
+    root.render(
+      <I18nProvider language="en">
+        <PluginManagerPage
+          onClose={vi.fn()}
+          onUseSkill={vi.fn()}
+          initialTab="skills"
+          managedSkills
+          managedExtensions={{
+            provider,
+            workspaceId: 'workspace',
+            sessionId: 'session',
+          }}
+        />
+      </I18nProvider>,
+    ),
+  );
+  expect(container.querySelector('h2')?.textContent).toBe('Managed Skills');
+  expect(container.textContent).toContain('base-skill');
+  expect(container.textContent).toContain('Static session snapshot');
+  expect(
+    [...container.querySelectorAll('button')].some(
+      (button) => button.textContent === 'open skill',
+    ),
+  ).toBe(false);
+});
+
+it('navigates composite MCP edits to the Managed Extensions tab', async () => {
+  const pin = {
+    extensionId: 'ext_00000000-0000-4000-8000-000000000001',
+    packageRevision: 1,
+    packageDigest: 'a'.repeat(64),
+  };
+  const manifest = {
+    schemaVersion: 1,
+    compilerVersion: 1,
+    name: 'composite',
+    version: '1',
+    target: { platform: 'linux', arch: 'x64' },
+    components: ['skills', 'mcp'],
+  };
+  const provider = {
+    storageKey: 'managed',
+    extensions: {
+      list: vi.fn(async () => ({
+        supported: true,
+        extensions: [{ pin, manifest }],
+        selfService: { supported: true, canPublish: true },
+      })),
+      query: vi.fn(async () => ({
+        sessionId: 'session',
+        supported: true,
+        revision: 0,
+        extensions: [pin],
+        requestedExtensions: [pin],
+        selfService: { supported: true, canApply: true },
+      })),
+      inspect: vi.fn(async () => ({
+        manifest,
+        mcpServers: [
+          { name: 'first', recipe: {}, redacted: false },
+          { name: 'second', recipe: {}, redacted: false },
+        ],
+        skills: [],
+        files: [],
+        fileCount: 0,
+        truncated: false,
+        settings: [],
+      })),
+    },
+  } as unknown as ManagedAgentProvider;
+  await act(async () =>
+    root.render(
+      <I18nProvider language="en">
+        <PluginManagerPage
+          onClose={vi.fn()}
+          onUseSkill={vi.fn()}
+          initialTab="mcp"
+          managedExtensions={{
+            provider,
+            workspaceId: 'workspace',
+            sessionId: 'session',
+          }}
+          managedMcp={{
+            provider,
+            workspaceId: 'workspace',
+            sessionId: 'session',
+          }}
+        />
+      </I18nProvider>,
+    ),
+  );
+  const edit = [
+    ...container.querySelectorAll<HTMLButtonElement>('button'),
+  ].find((button) => button.textContent === 'Edit connection configuration')!;
+  await act(async () => edit.click());
+  expect(container.querySelector('h2')?.textContent).toBe('Managed extensions');
+});
+
 it('queries the selected Managed Extension Workspace and Session and follows selection changes', async () => {
   const list = vi.fn(async () => ({ supported: true, extensions: [] }));
   const query = vi.fn(async (sessionId: string) => ({

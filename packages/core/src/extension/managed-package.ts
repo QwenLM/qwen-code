@@ -15,7 +15,10 @@ import {
   parseMarkdownCommand,
   MarkdownCommandDefSchema,
 } from '../utils/markdown-command.js';
-import { parseSkillContent } from '../skills/skill-load.js';
+import {
+  ManagedSkillCompatibilityError,
+  parseManagedSkillContent,
+} from './managed-skill-content.js';
 import { qualifySkillName } from '../skills/types.js';
 import { resolveBuiltinToolName } from '../tools/tool-names.js';
 import {
@@ -35,6 +38,7 @@ import {
   MAX_ARCHIVE_EXPANDED_BYTES,
 } from './archive-safety.js';
 import type { ExtensionInstallMetadata } from '../config/config.js';
+import { parseManagedMcpRecipe } from './managed-mcp-recipe.js';
 
 export const MANAGED_PACKAGE_COMPILER_VERSION = 1;
 export const MANAGED_PACKAGE_MAX_ARCHIVE_BYTES = 100 * 1024 * 1024;
@@ -51,8 +55,8 @@ export interface ManagedPackageTarget {
   arch: 'arm64' | 'x64' | 'any';
 }
 export interface ManagedPackageManifest {
-  schemaVersion: 1;
-  compilerVersion: 1;
+  schemaVersion: 1 | 2;
+  compilerVersion: 1 | 2;
   name: string;
   version: string;
   target: ManagedPackageTarget;
@@ -175,7 +179,7 @@ const PRIVATE_FILES = new Set([
   '.qwen-extension-install.json',
 ]);
 
-async function filesUnder(
+export async function listManagedPackageFiles(
   root: string,
   excludePrivate = false,
 ): Promise<string[]> {
@@ -348,7 +352,7 @@ export async function compileManagedExtensionPackage(
     resolveRecipes?: boolean;
   },
 ): Promise<CompiledManagedPackage> {
-  const files = await filesUnder(root);
+  const files = await listManagedPackageFiles(root);
   if (
     files.some((file) =>
       file
@@ -402,24 +406,16 @@ export async function compileManagedExtensionPackage(
     resourceRoots(config, 'skills', 'skills'),
   ).filter((file) => file.endsWith('/SKILL.md'))) {
     const content = await readText(root, file);
-    const { metadata } = frontmatter(content);
-    rejectFields(
-      metadata,
-      [
-        'allowedTools',
-        'allowed-tools',
-        'hooks',
-        'paths',
-        'arguments',
-        'args-file',
-      ],
-      file,
-    );
-    if (metadata['model'] !== undefined && metadata['model'] !== 'inherit')
-      throw new ManagedPackageCompatibilityError([
-        `${file}.model: unsupported`,
-      ]);
-    const skill = parseSkillContent(content, file);
+    let skill: ReturnType<typeof parseManagedSkillContent>;
+    try {
+      skill = parseManagedSkillContent(content, file);
+    } catch (error) {
+      if (error instanceof ManagedSkillCompatibilityError)
+        throw new ManagedPackageCompatibilityError([
+          `${file}: ${error.message}`,
+        ]);
+      throw error;
+    }
     contributions.skills.push({
       name: qualifySkillName(name, skill.name),
       description: skill.description,
@@ -533,7 +529,13 @@ export async function compileManagedExtensionPackage(
     const loaded = await readObject(root, 'mcp.json');
     mcp = loaded['mcpServers'] ?? loaded['servers'] ?? loaded;
   }
-  if (mcp !== undefined) contributions.mcpServers = object(mcp, 'mcpServers');
+  if (mcp !== undefined)
+    contributions.mcpServers = Object.fromEntries(
+      Object.entries(object(mcp, 'mcpServers')).map(([name, recipe]) => [
+        name,
+        parseManagedMcpRecipe(recipe, { allowPlaceholders: true }),
+      ]),
+    );
   let hooks = config['hooks'];
   if (typeof hooks === 'string')
     hooks = await readObject(root, managedPackageRelativePath(hooks));
@@ -596,10 +598,11 @@ export async function compileManagedExtensionPackage(
         );
       return value;
     };
-    contributions.mcpServers = hydrate(contributions.mcpServers) as Record<
-      string,
-      unknown
-    >;
+    contributions.mcpServers = Object.fromEntries(
+      Object.entries(
+        hydrate(contributions.mcpServers) as Record<string, unknown>,
+      ).map(([name, recipe]) => [name, parseManagedMcpRecipe(recipe)]),
+    );
     contributions.hooks = hydrate(contributions.hooks) as Record<
       string,
       unknown
@@ -617,7 +620,8 @@ export async function compileManagedExtensionPackage(
   }
   if (
     contributions.skills.length > 256 ||
-    Object.keys(contributions.mcpServers).length > 16
+    Object.keys(contributions.mcpServers).length > 16 ||
+    contributions.settings.length > 128
   )
     throw new ManagedPackageCompatibilityError([
       'component catalog limit exceeded',
@@ -630,10 +634,15 @@ export async function compileManagedExtensionPackage(
   if (Object.keys(contributions.mcpServers).length) components.push('mcp');
   if (Object.keys(contributions.hooks).length) components.push('hooks');
   if (contributions.settings.length) components.push('settings');
+  const hasOAuth = Object.values(contributions.mcpServers).some(
+    (recipe) =>
+      parseManagedMcpRecipe(recipe, { allowPlaceholders: true }).auth !==
+      undefined,
+  );
   return {
     manifest: {
-      schemaVersion: 1,
-      compilerVersion: MANAGED_PACKAGE_COMPILER_VERSION,
+      schemaVersion: hasOAuth ? 2 : 1,
+      compilerVersion: hasOAuth ? 2 : MANAGED_PACKAGE_COMPILER_VERSION,
       name,
       version: text(config['version'] ?? '1.0.0', 'version', 128),
       target: packageTarget,
@@ -720,7 +729,7 @@ export async function prepareManagedExtensionPackage(
         enforceResourceLimits: true,
       });
     else {
-      const files = await filesUnder(source.source, true);
+      const files = await listManagedPackageFiles(source.source, true);
       for (const file of files) {
         const destination = path.join(root, file);
         await fs.mkdir(path.dirname(destination), { recursive: true });
@@ -739,7 +748,7 @@ export async function prepareManagedExtensionPackage(
       }
     };
     await scrub(root);
-    let files = await filesUnder(root);
+    let files = await listManagedPackageFiles(root);
     const config = await rawConfig(root, files);
     config['managedTarget'] = options.target;
     config['managedSource'] = {
@@ -756,13 +765,18 @@ export async function prepareManagedExtensionPackage(
       path.join(root, 'qwen-extension.json'),
       JSON.stringify(config),
     );
-    files = await filesUnder(root);
+    files = await listManagedPackageFiles(root);
     const compiled = await compileManagedExtensionPackage(root, {
       target: options.target,
       resolveRecipes: false,
     });
     await fs.mkdir(options.destination, { recursive: true });
     const archivePath = path.join(options.destination, 'package.tar.gz');
+    for (const file of files) {
+      const absolute = path.join(root, file);
+      const mode = (await fs.stat(absolute)).mode;
+      await fs.chmod(absolute, mode & 0o111 ? 0o755 : 0o644);
+    }
     await tar.create(
       {
         cwd: root,

@@ -18,6 +18,9 @@ import java.util.Set;
  * MCP and extension configuration.
  */
 public interface SessionPolicyStore {
+    public default boolean supportsPersonalMcpExecution() { return false; }
+    public default void requirePersonalMcpActor(String tenant, String session, String actor) { }
+    public default void requirePersonalMcpUnattended(String tenant, String session) { }
     public default Map<String, WebShellModelContext> findModelContexts(
             String tenantId, List<String> sessionIds) {
         return Map.of();
@@ -52,6 +55,8 @@ public interface SessionPolicyStore {
     public default SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
         throw new UnsupportedOperationException("Extension management is unavailable");
     }
+
+    public default boolean canApplyExtensions(SessionRecord session) { return false; }
 
     public default void requireConfigurationCommit(String tenantId, String workspaceId, String sessionId, JsonNode body) {
         throw new UnsupportedOperationException("Extension management is unavailable");

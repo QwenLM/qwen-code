@@ -133,7 +133,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
 import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
-import type { Application, Request, Response } from 'express';
+import type { Application, Request, RequestHandler, Response } from 'express';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { parseBridgeManagedSessionStore } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
@@ -3593,6 +3593,21 @@ async function executeHostedTurn(
   workflowLaunch?: HostedWorkflowLaunch,
 ): Promise<ChatRecord> {
   const authority = session.managed.authority;
+  const personalMcp =
+    (session.extensionBundle?.mcpAuthBindings?.length ?? 0) > 0;
+  if (
+    personalMcp &&
+    (workflowLaunch !== undefined ||
+      isWakeInputSource(
+        pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        ).find((input) => input.turnId === promptId)?.source ?? '',
+      ))
+  ) {
+    throw new Error(
+      'Personal MCP authorization does not support unattended or delegated execution.',
+    );
+  }
   const promptInput = workflowLaunch
     ? { text, parts: [{ text }], attachments: [] }
     : await readHostedInput(session.managed, promptId, text);
@@ -3972,18 +3987,22 @@ async function executeHostedTurn(
                         packages: session.extensionBundle.packages,
                       }
                     : undefined,
-                  extensionAgents: extensionAgentsOf(session),
+                  extensionAgents: personalMcp
+                    ? undefined
+                    : extensionAgentsOf(session),
                   allowedToolNames: session.extensionAgentTools,
                   profile: session.toolProfile,
                   foregroundOnly: session.foregroundOnly,
                   context: workspaceContext,
-                  childRuns: session.childRuns,
-                  monitors: session.monitors,
-                  backgroundLane: session.backgroundLane,
-                  childAgents: childAgentsOf(session),
+                  childRuns: personalMcp ? undefined : session.childRuns,
+                  monitors: personalMcp ? undefined : session.monitors,
+                  backgroundLane: personalMcp
+                    ? undefined
+                    : session.backgroundLane,
+                  childAgents: personalMcp ? undefined : childAgentsOf(session),
                   childDepth: session.childDepth,
-                  messages: session.messages,
-                  teams: session.teams,
+                  messages: personalMcp ? undefined : session.messages,
+                  teams: personalMcp ? undefined : session.teams,
                   commands: session.commands,
                   memberPlanMode: await ensureMemberPlanMode(session),
                   publicPlanMode:
@@ -4325,7 +4344,11 @@ export function registerHostedHarnessSessionRoutes(
   contract: HostedHarnessContract,
   cwd: string,
   brokerOptions?: HostedWorkspaceBrokerOptions,
-): { owns: (id: string) => boolean } {
+): {
+  owns: (id: string) => boolean;
+  accepting: () => boolean;
+  track?: RequestHandler;
+} {
   // The owed mount handbacks of recovery-blocked turns (#13800) outlive
   // their Session, whose close never frees a parked turn's mount; the
   // daemon owns them and stops them at shutdown.
@@ -6808,6 +6831,8 @@ export function registerHostedHarnessSessionRoutes(
           source === SESSION_MESSAGE_INPUT_SOURCE;
         session.monitorWake = new HostedMonitorWakeScheduler({
           next: async () => {
+            if ((session.extensionBundle?.mcpAuthBindings?.length ?? 0) > 0)
+              return undefined;
             // The whole committed prefix, not a bounded page: a notification
             // input lands late in the log, and a default-sized read would
             // hide every one of them once the Session passes that page.
@@ -9299,6 +9324,167 @@ export function registerHostedHarnessSessionRoutes(
       .catch(() => error(res, 409, 'hosted_extension_management_unavailable'));
   });
 
+  function skillBroker(
+    session: HostedSession,
+    owner?: { bindingId: string; generation: string },
+  ) {
+    if (
+      !brokerOptions ||
+      session.foregroundOnly ||
+      (session.childDepth ?? 0) !== 0 ||
+      !['hosted-workspace-shell/1', HOSTED_MCP_PROFILE].includes(
+        session.toolProfile ?? '',
+      ) ||
+      !contract.lifecycleV2Profiles?.includes(session.toolProfile!)
+    )
+      throw new Error('hosted_skill_import_unsupported');
+    const broker = new HostedWorkspaceBroker(
+      { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
+      session.managed.authority.sessionHeader.sessionKey,
+      'skill-management',
+    );
+    if (owner)
+      broker.expectExtensionRuntime({
+        runtimeBindingId: owner.bindingId,
+        generation: owner.generation,
+      });
+    return broker;
+  }
+
+  function skillOwner(value: unknown): {
+    bindingId: string;
+    generation: string;
+  } {
+    const owner = object(value);
+    if (
+      !owner ||
+      Object.keys(owner).sort().join(',') !== 'bindingId,generation' ||
+      typeof owner['bindingId'] !== 'string' ||
+      !/^[A-Za-z0-9._:-]{1,128}$/u.test(owner['bindingId']) ||
+      typeof owner['generation'] !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/u.test(owner['generation']) ||
+      BigInt(owner['generation']) > 2n ** 63n - 1n
+    )
+      throw new Error('invalid_skill_owner');
+    return { bindingId: owner['bindingId'], generation: owner['generation'] };
+  }
+
+  app.get('/session/:id/extensions/skills/candidates', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    void (async () => {
+      const broker = skillBroker(session);
+      const result = await broker.skillControl({
+        kind: 'extension-skill-candidates',
+        operationId: randomUUID(),
+      });
+      if (!broker.runtime || !Array.isArray(result['candidates']))
+        throw new Error('Invalid Skill response.');
+      res.json({
+        sessionId: session.managed.authority.sessionHeader.sessionKey.sessionId,
+        owner: {
+          bindingId: broker.runtime.bindingId,
+          generation: broker.runtime.generation,
+        },
+        candidates: result['candidates'],
+      });
+    })().catch(() => error(res, 409, 'hosted_skill_source_unavailable'));
+  });
+
+  app.post('/session/:id/extensions/skills/snapshot', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (
+      session.active ||
+      session.hooksBusy ||
+      session.mcpBusy ||
+      session.mcpRecovering ||
+      session.blocked
+    )
+      return error(res, 409, 'hosted_turn_active');
+    const body = object(req.body);
+    if (
+      !body ||
+      Object.keys(body).sort().join(',') !== 'digest,operationId,owner,path' ||
+      typeof body['operationId'] !== 'string' ||
+      !HOSTED_UUID.test(body['operationId']) ||
+      typeof body['path'] !== 'string' ||
+      typeof body['digest'] !== 'string'
+    )
+      return error(res, 400, 'invalid_skill_snapshot');
+    let owner: { bindingId: string; generation: string };
+    try {
+      owner = skillOwner(body['owner']);
+    } catch {
+      return error(res, 400, 'invalid_skill_snapshot');
+    }
+    session.mcpBusy = true;
+    void (async () => {
+      const broker = skillBroker(session, owner);
+      const result = await broker.skillControl({
+        kind: 'extension-skill-snapshot',
+        operationId: body['operationId'] as string,
+        path: body['path'] as string,
+        digest: body['digest'] as string,
+      });
+      res.json({
+        sessionId: session.managed.authority.sessionHeader.sessionKey.sessionId,
+        owner,
+        ...result,
+      });
+    })()
+      .catch((cause) =>
+        error(
+          res,
+          409,
+          cause instanceof HostedWorkspaceBrokerRejection &&
+            typeof cause.code === 'string'
+            ? cause.code
+            : 'hosted_skill_source_unavailable',
+        ),
+      )
+      .finally(() => {
+        session.mcpBusy = false;
+      });
+  });
+
+  app.get(
+    '/session/:id/extensions/skills/archives/:preparationId',
+    (req, res) => {
+      const session = identity(req, sessions);
+      if (!session) return error(res, 404, 'hosted_session_not_found');
+      void (async () => {
+        const owner = skillOwner({
+          bindingId: req.query['bindingId'],
+          generation: req.query['generation'],
+        });
+        const operationId = req.query['operationId'];
+        const offset = req.query['offset'];
+        if (
+          typeof operationId !== 'string' ||
+          !HOSTED_UUID.test(operationId) ||
+          typeof offset !== 'string' ||
+          !/^(?:0|[1-9][0-9]*)$/u.test(offset) ||
+          !Number.isSafeInteger(Number(offset))
+        )
+          throw new Error('Invalid Skill chunk request.');
+        const broker = skillBroker(session, owner);
+        const result = await broker.skillControl({
+          kind: 'extension-skill-archive',
+          operationId,
+          preparationId: String(req.params['preparationId']),
+          offset: Number(offset),
+        });
+        res.json({
+          sessionId:
+            session.managed.authority.sessionHeader.sessionKey.sessionId,
+          owner,
+          ...result,
+        });
+      })().catch(() => error(res, 409, 'hosted_skill_snapshot_unavailable'));
+    },
+  );
+
   app.get(
     '/session/:id/extensions/management/operations/:operationId',
     (req, res) => {
@@ -9940,6 +10126,13 @@ export function registerHostedHarnessSessionRoutes(
       const operationId = body?.['operationId'];
       const childRunId = body?.['childRunId'];
       const kind = body?.['kind'];
+      if (
+        (session.extensionBundle?.mcpAuthBindings?.length ?? 0) > 0 &&
+        ['dispatch_started', 'attach', 'accept', 'mark_accepted'].includes(
+          String(kind),
+        )
+      )
+        return error(res, 409, 'personal_mcp_delegation_unsupported');
       if (
         typeof operationId !== 'string' ||
         !HOSTED_UUID.test(operationId) ||
@@ -10691,6 +10884,13 @@ export function registerHostedHarnessSessionRoutes(
       kind === 'settle_delivery' &&
       body?.['outcome'] === 'unknown' &&
       /^channel-reconcile:[0-9a-f]{64}$/.test(operationId);
+    if (
+      (session.extensionBundle?.mcpAuthBindings?.length ?? 0) > 0 &&
+      ['submit_input', 'claim_delivery', 'resend_delivery'].includes(
+        String(kind),
+      )
+    )
+      return error(res, 409, 'personal_mcp_delegation_unsupported');
     if (
       typeof operationId !== 'string' ||
       (!HOSTED_UUID.test(operationId) && !reconciliation)
@@ -13082,6 +13282,11 @@ export function registerHostedHarnessSessionRoutes(
     const kind = body?.['kind'];
     const scheduleId = body?.['scheduleId'];
     if (
+      (session.extensionBundle?.mcpAuthBindings?.length ?? 0) > 0 &&
+      ['define_schedule', 'fire_run'].includes(String(kind))
+    )
+      return error(res, 409, 'personal_mcp_delegation_unsupported');
+    if (
       typeof operationId !== 'string' ||
       !HOSTED_UUID.test(operationId) ||
       !isAutomationScheduleId(scheduleId)
@@ -13386,6 +13591,8 @@ export function registerHostedHarnessSessionRoutes(
     void close(req, res, true);
   });
   return {
+    accepting: acceptingWork,
+    track: instance?.track,
     owns: (id) =>
       [...sessions.keys(), ...opening].some(
         (candidate) => candidate.toLowerCase() === id.toLowerCase(),

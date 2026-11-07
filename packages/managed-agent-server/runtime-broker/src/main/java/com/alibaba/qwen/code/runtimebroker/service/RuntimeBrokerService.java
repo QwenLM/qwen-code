@@ -80,11 +80,13 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.n
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.referenceString;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.renewalDelayMillis;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireSameSession;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sameReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sshNoStartReceipt;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unavailable;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.unwrap;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.workerRefusedRelease;
 
 /** Repository-backed orchestration for the private Managed Runtime contract. */
 public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerOperations {
@@ -104,6 +106,18 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     private final HarnessSessionResolver sessionResolver;
     private RuntimeExtensionCommandVerifier extensionCommandVerifier;
+    private volatile com.alibaba.qwen.code.runtimebroker.RuntimeMcpTokenIssuer mcpTokenIssuer;
+
+    public void configureMcpTokenIssuer(com.alibaba.qwen.code.runtimebroker.RuntimeMcpTokenIssuer issuer) {
+        mcpTokenIssuer = java.util.Objects.requireNonNull(issuer);
+    }
+
+    public Map<String, Object> personalMcpToken(String leaseId, String token, Map<String, Object> body) {
+        requireOpen(closed);
+        return RuntimeMcpTokenRequests.issue(bindingRepository, sessionRepository,
+                provisioner, mcpTokenIssuer, leaseId, token, body);
+    }
+
     private final RuntimeProvisioner provisioner;
     private final RuntimeTransport transport;
     private final RuntimeBindingRepository bindingRepository;
@@ -644,13 +658,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         });
     }
 
-    private static boolean workerRefusedRelease(Throwable error) {
-        Throwable cause = unwrap(error);
-        return cause instanceof RuntimeBrokerException failure
-                && ("managed_runtime_owner_hold_pending".equals(failure.getCode())
-                        || "managed_runtime_release_timeout".equals(failure.getCode()));
-    }
-
     /**
      * Clears durable Workspace ownership for Sessions this drain has retired.
      * Their worker is stopped and their rows are released, so no writer can
@@ -947,7 +954,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         Map<String, Object> immutable = immutableMap(operation, "extension operation");
         ManagedExtensionProtocol.validateOperation(immutable);
         boolean recovery = ManagedExtensionProtocol.isRecovery(immutable);
-        boolean status = "extension-status".equals(immutable.get("kind"));
+        boolean status = "extension-status".equals(immutable.get("kind")) || "extension-skill-candidates".equals(immutable.get("kind"));
         if ((expectedBindingId == null) != (expectedGeneration == null) || expectedBindingId == null && !status) {
             throw invalid("runtime_control_operation_invalid", "Extension mutations require the original Runtime identity.");
         }
@@ -2694,17 +2701,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             // such as one without a storage ID, rather than fall back.
             throw new RuntimeBrokerException(400, "runtime_placement_invalid",
                     "Runtime placement is invalid", false, exception);
-        }
-    }
-
-    private static void requireSameSession(RuntimeSession actual,
-            RuntimeSession requested) {
-        if (!actual.getHarnessSessionId().equals(
-                requested.getHarnessSessionId())
-                || !actual.getTurnKind().equals(requested.getTurnKind())
-                || !actual.getScope().equals(requested.getScope())) {
-            throw conflict("runtime_session_conflict",
-                    "runtimeSessionId belongs to another Session identity");
         }
     }
 

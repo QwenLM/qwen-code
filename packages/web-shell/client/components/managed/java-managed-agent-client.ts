@@ -6,9 +6,21 @@ import type {
   ManagedExtensionSettings,
   ManagedExtensionSnapshot,
   ManagedExtensionSelection,
+  ManagedExtensionImportMetadata,
+  ManagedExtensionInspection,
+  ManagedRuntimeSkillCandidates,
+  ManagedRuntimeSkillSnapshot,
+  ManagedRuntimeSkillImport,
+  ManagedRuntimeSkillOwner,
 } from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
+import type {
+  ManagedMcpOAuthAttempt,
+  ManagedMcpOAuthSnapshot,
+  ManagedMcpOAuthRevocation,
+  ManagedMcpOAuthStart,
+} from './managed-mcp-oauth-types';
 import type {
   ManagedWorkspaceFileQueryRequest,
   ManagedWorkspaceFileReadRequest,
@@ -556,6 +568,141 @@ export class JavaManagedAgentClient {
     );
   }
 
+  async importExtensionPackage(
+    workspaceId: string,
+    extensionId: string | undefined,
+    metadata: ManagedExtensionImportMetadata,
+    source: Blob,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<ManagedExtensionPackageOperation> {
+    if (source.size > 100 * 1024 * 1024)
+      throw new Error('Managed package exceeds 100 MiB');
+    const query = new URLSearchParams({
+      workspaceId,
+      metadata: JSON.stringify(metadata),
+    });
+    if (extensionId) query.set('extensionId', extensionId);
+    const headers = new Headers(await this.options.getHeaders?.());
+    headers.set('Content-Type', 'application/octet-stream');
+    headers.set('Idempotency-Key', idempotencyKey);
+    const response = await this.fetchImpl(
+      `${this.baseUrl}${API_PREFIX}/workspace-extensions/imports?${query}`,
+      {
+        method: 'POST',
+        headers,
+        body: source,
+        credentials: this.credentials,
+        signal,
+      },
+    );
+    if (!response.ok) throw await toHttpError(response);
+    return response.json();
+  }
+
+  inspectExtensionPackage(
+    workspaceId: string,
+    pin: ManagedExtensionPin,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionInspection>(
+      '/workspace-extensions/inspection/query',
+      { workspaceId, pin },
+      signal,
+    );
+  }
+
+  async previewExtensionPackage(
+    workspaceId: string,
+    metadata: ManagedExtensionImportMetadata,
+    source: Blob,
+    signal?: AbortSignal,
+  ): Promise<ManagedExtensionInspection> {
+    if (source.size > 100 * 1024 * 1024)
+      throw new Error('Managed package exceeds 100 MiB');
+    const query = new URLSearchParams({
+      workspaceId,
+      metadata: JSON.stringify(metadata),
+    });
+    const headers = new Headers(await this.options.getHeaders?.());
+    headers.set('Content-Type', 'application/octet-stream');
+    const response = await this.fetchImpl(
+      `${this.baseUrl}${API_PREFIX}/workspace-extensions/imports/preview?${query}`,
+      {
+        method: 'POST',
+        headers,
+        body: source,
+        credentials: this.credentials,
+        signal,
+      },
+    );
+    if (!response.ok) throw await toHttpError(response);
+    return response.json();
+  }
+
+  lookupExtensionPackageOperation(
+    workspaceId: string,
+    kind: 'publish' | 'settings',
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionPackageOperation>(
+      '/workspace-extensions/operations/lookup',
+      { workspaceId, kind, idempotencyKey },
+      signal,
+    );
+  }
+
+  lookupExtensionApplyOperation(
+    sessionId: string,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionSnapshot>(
+      '/session-extensions/operations/lookup',
+      { sessionId, idempotencyKey },
+      signal,
+    );
+  }
+
+  getRuntimeSkillCandidates(sessionId: string, signal?: AbortSignal) {
+    return this.post<ManagedRuntimeSkillCandidates>(
+      '/session-extensions/skills/candidates/query',
+      { sessionId },
+      signal,
+    );
+  }
+
+  snapshotRuntimeSkill(
+    sessionId: string,
+    input: {
+      owner: ManagedRuntimeSkillOwner;
+      path: string;
+      digest: string;
+      target: ManagedExtensionImportMetadata['target'];
+    },
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedRuntimeSkillSnapshot>(
+      '/session-extensions/skills/snapshot',
+      { sessionId, ...input },
+      signal,
+    );
+  }
+
+  importRuntimeSkill(
+    sessionId: string,
+    input: ManagedRuntimeSkillImport & { extensionId?: string },
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionPackageOperation>(
+      '/session-extensions/skills/imports',
+      { ...input, sessionId, idempotencyKey },
+      signal,
+    );
+  }
+
   saveExtensionSettings(
     workspaceId: string,
     extensionId: string,
@@ -628,6 +775,71 @@ export class JavaManagedAgentClient {
     return this.post<ManagedMcpManagementSnapshot>(
       '/session-mcp/management/query',
       request,
+      signal,
+    );
+  }
+
+  queryMcpOAuth(
+    sessionId: string,
+    extensions: ManagedExtensionPin[] | undefined,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpOAuthSnapshot>(
+      '/session-mcp-oauth/query',
+      { sessionId, ...(extensions ? { extensions } : {}) },
+      signal,
+    );
+  }
+
+  startMcpOAuth(
+    sessionId: string,
+    input: {
+      serverId: string;
+      browserNonce: string;
+      pin?: ManagedExtensionPin;
+    },
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpOAuthStart>(
+      '/session-mcp-oauth/start',
+      { sessionId, ...input, idempotencyKey },
+      signal,
+    );
+  }
+
+  getMcpOAuthStatus(
+    sessionId: string,
+    attemptId: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpOAuthAttempt>(
+      '/session-mcp-oauth/status',
+      { sessionId, attemptId },
+      signal,
+    );
+  }
+
+  completeMcpOAuth(
+    sessionId: string,
+    input: { attemptId: string; browserNonce: string },
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpOAuthAttempt>(
+      '/session-mcp-oauth/complete',
+      { sessionId, ...input },
+      signal,
+    );
+  }
+
+  revokeMcpOAuth(
+    sessionId: string,
+    input: { credentialId: string; expectedGeneration: number },
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedMcpOAuthRevocation>(
+      '/session-mcp-oauth/revoke',
+      { sessionId, ...input },
       signal,
     );
   }

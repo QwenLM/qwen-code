@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionP
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SettingsCommand;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Target;
+import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
@@ -35,6 +36,8 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -64,6 +67,7 @@ class ManagedExtensionPackageServiceTest {
                 + " config_ref, policy_ref, state) VALUES ('tenant', 'workspace', 1, 'storage', 'Workspace', 'config', 'policy', 'ACTIVE')");
         properties = new ManagedAgentProperties();
         properties.getExtensions().setEnabled(true);
+        properties.getExtensions().setSelfServiceEnabled(true);
         properties.getExtensions().setArtifactDirectory(directory.toString());
         properties.getExtensions().setAllowedActors(List.of("operator"));
         workspaces = mock(ManagedWorkspaceRegistry.class);
@@ -74,6 +78,43 @@ class ManagedExtensionPackageServiceTest {
         beans = new DefaultListableBeanFactory();
         beans.registerSingleton("secrets", new AesGcmSecretProtector("key", new byte[32]));
         service = service();
+    }
+
+    @Test
+    void importsWithoutSessionAndLooksUpTheSameDurableReceipt() throws Exception {
+        var harness = mock(HarnessConnector.class);
+        when(harness.supportsPackagePreparation()).thenReturn(true);
+        String digest = DigestUtils.sha256Hex(bytes);
+        when(harness.preparePackage(anyMap(), any())).thenAnswer(call -> new HarnessConnector.PreparedPackage(
+                Map.of("manifest", json.convertValue(manifest, Map.class), "packageDigest", digest), new ByteArrayInputStream(bytes)));
+        service.configurePreparation(harness);
+        String metadata = "{\"sourceKind\":\"skill\",\"target\":{\"platform\":\"linux\",\"arch\":\"any\"},"
+                + "\"sourceDigest\":\"" + digest + "\",\"compilerVersion\":1}";
+        var imported = service.importPackage("tenant", "operator", "workspace", null, "install", metadata,
+                new ByteArrayInputStream(bytes), bytes.length);
+        assertThat(service.lookup("tenant", "operator", "workspace", "publish", "install")).isEqualTo(imported);
+        assertThat(service.importPackage("tenant", "operator", "workspace", null, "install", metadata,
+                new ByteArrayInputStream(bytes), bytes.length)).isEqualTo(imported);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_package", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class)).isZero();
+        assertThat(service.list("tenant", "operator", "workspace").selfService().canPublish()).isTrue();
+        assertThat(service.list("tenant", "reader", "workspace").selfService().canPublish()).isFalse();
+        assertThatThrownBy(() -> service.lookup("tenant", "reader", "workspace", "publish", "install"))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getStatus()).isEqualTo(404));
+    }
+
+    @Test
+    void rejectsUntrustedImportMetadataAndDoesNotConsumeDeniedInput() {
+        assertThatThrownBy(() -> service.decodeImportMetadata("{\"sourceKind\":null}"))
+                .isInstanceOf(ManagedAgentException.class);
+        String metadata = "{\"sourceKind\":\"skill\",\"target\":{\"platform\":\"linux\",\"arch\":\"any\"},"
+                + "\"sourceDigest\":\"" + "a".repeat(64) + "\",\"compilerVersion\":1,\"actorKey\":\"forged\"}";
+        assertThatThrownBy(() -> service.decodeImportMetadata(metadata)).isInstanceOf(ManagedAgentException.class);
+        var input = new ByteArrayInputStream(bytes);
+        assertThatThrownBy(() -> service.importPackage("tenant", "reader", "workspace", null, "install", metadata,
+                input, bytes.length)).isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getStatus()).isEqualTo(403));
+        assertThat(input.available()).isEqualTo(bytes.length);
     }
 
     @Test
@@ -192,6 +233,12 @@ class ManagedExtensionPackageServiceTest {
     void validatesManifestWithoutResolvingHostEnvironment() throws Exception {
         String encoded = Base64.getUrlEncoder().withoutPadding().encodeToString(json.writeValueAsBytes(manifest));
         assertThat(service.decodeManifest(encoded)).isEqualTo(manifest);
+        var oauthManifest = new Manifest(2, 2, "oauth", "1.0.0", new Target("linux", "any"), List.of("mcp"));
+        assertThat(service.decodeManifest(Base64.getUrlEncoder().withoutPadding().encodeToString(json.writeValueAsBytes(oauthManifest))))
+                .isEqualTo(oauthManifest);
+        var mixedVersion = new Manifest(1, 2, "mixed", "1.0.0", new Target("linux", "any"), List.of("mcp"));
+        assertThatThrownBy(() -> service.decodeManifest(Base64.getUrlEncoder().withoutPadding().encodeToString(json.writeValueAsBytes(mixedVersion))))
+                .isInstanceOf(ManagedAgentException.class);
         String invalid = Base64.getUrlEncoder().withoutPadding().encodeToString(json.writeValueAsBytes(Map.of(
                 "schemaVersion", 1, "compilerVersion", 1, "name", "complete", "version", "1.0",
                 "target", Map.of("platform", "windows", "arch", "x64"), "components", List.of("skills"))));

@@ -30,6 +30,49 @@ class RuntimeExtensionMetadataControlTest {
             ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST, "session");
 
     @Test
+    void runtimeTokenProxyAuthenticatesOriginalLeaseAndRechecksAfterIssuance() {
+        try (var fixture = new Fixture(true)) {
+            AtomicInteger issued = new AtomicInteger();
+            fixture.broker.configureMcpTokenIssuer((scope, harness, request) -> {
+                assertEquals(SCOPE, scope);
+                assertEquals("harness", harness);
+                assertEquals(2L, request.get("configRevision"));
+                issued.incrementAndGet();
+                return "test-access-token";
+            });
+            var original = fixture.original;
+            var lease = original.getLease();
+            Map<String, Object> body = new java.util.LinkedHashMap<>();
+            body.put("protocolVersion", 1);
+            body.put("bindingId", original.getBindingId());
+            body.put("generation", Long.toString(original.getGeneration()));
+            body.put("epoch", lease.getEpoch());
+            body.put("harnessSessionId", "harness");
+            body.put("configRevision", 2);
+            body.put("serverId", "extension:api");
+            body.put("credentialId", "credential-1");
+            body.put("credentialGeneration", 1);
+            body.put("executionActorKey", "a".repeat(64));
+            body.put("resourceUri", "https://resource.example/mcp");
+            assertEquals(401, assertThrows(RuntimeBrokerException.class,
+                    () -> fixture.broker.personalMcpToken(lease.getLeaseId(), "wrong-token", body)).getStatusCode());
+            assertEquals(0, issued.get());
+            assertEquals("test-access-token", fixture.broker.personalMcpToken(lease.getLeaseId(), lease.getToken(), body).get("accessToken"));
+            assertEquals(0, fixture.sessions.countActiveByBinding(original.getBindingId(), original.getGeneration()));
+            body.put("harnessSessionId", "another-harness");
+            assertThrows(RuntimeBrokerException.class, () -> fixture.broker.personalMcpToken(lease.getLeaseId(), lease.getToken(), body));
+            assertEquals(1, issued.get());
+            body.put("harnessSessionId", "harness");
+            fixture.broker.configureMcpTokenIssuer((scope, harness, request) -> {
+                fixture.bindings.compareAndSet(original, original.withState(RuntimeBindingRecord.State.DRAINING, lease, NOW).withDrainRequested(true, NOW));
+                return "must-not-be-returned";
+            });
+            assertEquals(401, assertThrows(RuntimeBrokerException.class,
+                    () -> fixture.broker.personalMcpToken(lease.getLeaseId(), lease.getToken(), body)).getStatusCode());
+        }
+    }
+
+    @Test
     void aStatusProbeDoesNotCreateAPlacementOrToolSession() {
         try (var fixture = new Fixture(false)) {
             assertEquals("managed_extension_owner_unavailable", failure(fixture.broker.extensionControl("harness", null, null, status())).getCode());

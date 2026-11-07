@@ -89,6 +89,94 @@ class ManagedExtensionsClientTest {
     }
 
     @Test
+    void importsSignTheFrozenInputDigestAndKeepVersionedSelections() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        List<String> paths = new CopyOnWriteArrayList<>();
+        List<Map<String, Object>> metadata = new CopyOnWriteArrayList<>();
+        List<Map<String, Object>> commands = new CopyOnWriteArrayList<>();
+        List<Throwable> errors = new CopyOnWriteArrayList<>();
+        server.createContext("/v1/agents/", exchange -> {
+            try {
+                byte[] bytes = exchange.getRequestBody().readAllBytes();
+                paths.add(exchange.getRequestURI().getPath());
+                String query = exchange.getRequestURI().getRawQuery();
+                if (query != null && query.startsWith("metadata=")) {
+                    String encoded = query.substring("metadata=".length()).split("&")[0];
+                    var input = JsonSupport.parseObject(java.net.URLDecoder.decode(encoded, StandardCharsets.UTF_8), "import metadata");
+                    assertEquals(hex(MessageDigest.getInstance("SHA-256").digest(bytes)), input.get("sourceDigest"));
+                    metadata.add(input);
+                } else if (bytes.length > 0) {
+                    commands.add(JsonSupport.parseObject(new String(bytes, StandardCharsets.UTF_8), "command"));
+                }
+            } catch (Throwable error) { errors.add(error); }
+            byte[] result = "{\"operationId\":\"saved\"}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, result.length);
+            exchange.getResponseBody().write(result);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var client = new ManagedExtensionsClient(URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                    "tenant", "actor", new byte[] {1});
+            Path input = directory.resolve("skill.zip");
+            Files.writeString(input, "frozen input");
+            var spec = Map.<String, Object>of("sourceKind", "skill", "compilerVersion", 1,
+                    "target", Map.of("platform", "linux", "arch", "any"));
+            client.previewImport("workspace", input, spec);
+            client.importPackage("workspace", null, input, spec, "publish-key");
+            client.lookupPackageOperation("workspace", "publish", "publish-key");
+            client.lookupConfigurationOperation("session", "apply-key");
+            client.apply("session", 2, List.of(), List.of(), "apply-key");
+            assertEquals(metadata.get(0), metadata.get(1));
+            assertEquals(2, commands.get(2).get("selectionVersion"));
+            assertTrue(paths.get(0).endsWith("/imports/preview"));
+            assertTrue(paths.get(1).endsWith("/imports"));
+            assertTrue(errors.isEmpty(), errors.toString());
+        } finally { server.stop(0); }
+    }
+
+    @Test
+    void omitsOptionalOAuthPinsWithoutReplacingThemWithEmptySelections() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        List<String> paths = new CopyOnWriteArrayList<>();
+        List<Map<String, Object>> bodies = new CopyOnWriteArrayList<>();
+        List<Throwable> errors = new CopyOnWriteArrayList<>();
+        server.createContext("/v1/agents/", exchange -> {
+            try {
+                paths.add(exchange.getRequestMethod() + " " + exchange.getRequestURI().getPath());
+                bodies.add(JsonSupport.parseObject(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8), "OAuth body"));
+            } catch (Throwable error) {
+                errors.add(error);
+            }
+            byte[] result = "{}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, result.length);
+            exchange.getResponseBody().write(result);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var client = new ManagedExtensionsClient(URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                    "tenant", "actor", new byte[] {1});
+            Map<String, Object> pin = Map.of("extensionId", "ext_00000000-0000-4000-8000-000000000001",
+                    "packageRevision", 1, "packageDigest", "a".repeat(64));
+            client.queryMcpOAuth("session", null);
+            client.queryMcpOAuth("session", List.of());
+            client.startMcpOAuth("session", "tools", null, "nonce", "key");
+            client.startMcpOAuth("session", "tools", pin, "nonce", "key");
+            assertTrue(errors.isEmpty(), errors.toString());
+            assertEquals(List.of(Map.of(), Map.of("extensions", List.of()),
+                    Map.of("serverId", "tools", "browserNonce", "nonce", "idempotencyKey", "key"),
+                    Map.of("serverId", "tools", "pin", pin, "browserNonce", "nonce", "idempotencyKey", "key")), bodies);
+            assertEquals(List.of("POST /v1/agents/sessions/session/mcp-oauth/query",
+                    "POST /v1/agents/sessions/session/mcp-oauth/query",
+                    "POST /v1/agents/sessions/session/mcp-oauth/start",
+                    "POST /v1/agents/sessions/session/mcp-oauth/start"), paths);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void refusesOversizedArchivesBeforeMakingAnyRequest() throws Exception {
         Path archive = directory.resolve("large");
         try (var file = new java.io.RandomAccessFile(archive.toFile(), "rw")) {

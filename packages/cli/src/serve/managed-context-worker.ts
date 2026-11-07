@@ -97,6 +97,11 @@ import {
   loadManagedMcpManifest,
 } from './managed-mcp-runtime.js';
 import {
+  createManagedMcpLeaseTokenProvider,
+  parseManagedMcpTokenAuthority,
+  type ManagedMcpTokenAuthority,
+} from './managed-mcp-oauth.js';
+import {
   MANAGED_MCP_WORKER_ROUTE,
   MANAGED_MCP_DEFINITIONS_WORKER_ROUTE,
   registerManagedMcpRoutes,
@@ -430,6 +435,7 @@ export function registerManagedContextRoutes(
     handleManagedRuntimeJsonError,
   );
 
+  const mcpTokenAuthorities = new Map<string, ManagedMcpTokenAuthority>();
   const mcp = foregroundOnly
     ? undefined
     : new ManagedMcpRuntime(
@@ -457,6 +463,9 @@ export function registerManagedContextRoutes(
           resident ? undefined : process.env['QWEN_MANAGED_MCP_CONFIG'],
         ),
         extensionProcesses,
+        createManagedMcpLeaseTokenProvider(boot, (sessionId) =>
+          mcpTokenAuthorities.get(sessionId),
+        ),
       );
   if (mcp) registerManagedMcpRoutes(app, boot, mcp);
   const hooks = foregroundOnly
@@ -730,6 +739,12 @@ export function registerManagedContextRoutes(
           throw new Error('Extension context changed.');
         contexts.set(sessionId, { ...binding });
       },
+      bindMcpTokenAuthority: (sessionId, value) => {
+        mcpTokenAuthorities.set(
+          sessionId,
+          parseManagedMcpTokenAuthority(value, boot.leaseId),
+        );
+      },
       admitted: async (sessionId) => {
         const binding = contexts.get(sessionId);
         return (
@@ -744,6 +759,29 @@ export function registerManagedContextRoutes(
         executor.isSessionConfigurationIdle(
           extensionRuntime?.runtimeSessionId(sessionId) ?? sessionId,
         ),
+      skillSource: async (sessionId) => {
+        const binding = contexts.get(sessionId);
+        const directory = binding && (await mount.resolve(binding.cwdRelative));
+        if (!binding || !directory || !admissionOpen())
+          throw new Error('skill_source_unavailable');
+        const real = await fs.realpath(directory);
+        return {
+          directory: real,
+          origin: {
+            workspaceId: boot.workspaceId,
+            workspaceGeneration: boot.workspaceGeneration,
+            cwdRelative: binding.cwdRelative,
+          },
+          admits: async (file) =>
+            admissionOpen() &&
+            (await mount.resolve(binding.cwdRelative)) === directory &&
+            executor.admitsProjectSkillPath(
+              extensionRuntime?.runtimeSessionId(sessionId) ?? sessionId,
+              file,
+              real,
+            ),
+        };
+      },
       compile: async (
         directory,
         _pin,
@@ -813,6 +851,9 @@ export function registerManagedContextRoutes(
           packages,
           ...base,
           mcp,
+          oauthAvailable:
+            boot.isolationClass === 'session' &&
+            mcpTokenAuthorities.has(sessionId),
           hooks,
           hydrated: (directory) => {
             const value = hydrated.get(directory);
@@ -871,6 +912,7 @@ export function registerManagedContextRoutes(
         const receipts = await extensionProcesses.stopAll();
         if (receipts.some((entry) => entry.state !== 'stopped'))
           throw new Error('Original extension owners are not stopped.');
+        await extensionRuntime?.closeSkillSnapshots();
       },
     });
     app.post(

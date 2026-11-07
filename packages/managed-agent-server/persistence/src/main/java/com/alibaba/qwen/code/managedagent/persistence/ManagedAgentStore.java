@@ -51,7 +51,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Lazy;
@@ -60,10 +59,8 @@ import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -120,18 +117,7 @@ public class ManagedAgentStore implements AgentStateStore {
         String agentRevision = properties.getAgentRevision();
         List<String> definitionToolProfiles = properties.getDefinitionToolProfiles();
         List<String> definitionModels = properties.getDefinitionModels();
-        var modelIds = new HashSet<String>();
-        List<WebShellModelOption> modelCatalog = properties.getModelCatalog().stream().map(option -> {
-            String id = option.getModelId();
-            String label = option.getLabel() == null ? id : option.getLabel();
-            if (StringUtils.isBlank(id) || id.getBytes(StandardCharsets.UTF_8).length > 512
-                    || id.chars().anyMatch(Character::isISOControl) || !modelIds.add(id)
-                    || StringUtils.isBlank(label) || label.length() > 512
-                    || label.chars().anyMatch(Character::isISOControl)) {
-                throw new IllegalArgumentException("Invalid or duplicate Managed model catalog entry");
-            }
-            return new WebShellModelOption(id, label);
-        }).toList();
+        List<WebShellModelOption> modelCatalog = ManagedSessionModelConfigs.catalog(properties);
         boolean journalEventTransportEnabled = properties.getEventTransport().isEnabled();
         boolean workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         boolean workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
@@ -141,12 +127,7 @@ public class ManagedAgentStore implements AgentStateStore {
         List<? extends ManagedAgentSettings.RuntimeBroker.WorkspaceMount> workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
         ResidentWorkspaces residentWorkspaces = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
         WorkspaceCreationRoots createdRoots = new WorkspaceCreationRoots(jdbc, properties);
-        if (StringUtils.isBlank(agentRevision)
-                || agentRevision.length() > 128) {
-            throw new IllegalArgumentException(
-                    "qwen.managed-agent.agent-revision must contain 1-128"
-                            + " characters");
-        }
+        AgentSessionPolicies.requireAgentRevision(agentRevision);
 
         AgentStoreRows storeRows = new AgentStoreRows(harnessRules, jdbc, objectMapper);
         this.eventJournal = new AgentEventJournal(storeRows, jdbc, clock, eventPublisher);
@@ -311,6 +292,9 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
         return sessionPolicies.requireExtensionManagement(tenantId, actorId, sessionId, operationId, mutation);
     }
+
+    @Override
+    public boolean canApplyExtensions(SessionRecord session) { return sessionPolicies.canApplyExtensions(session); }
 
     @Override
     @Transactional(propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)
@@ -644,6 +628,19 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean hasExecutionRegistryFacts(String tenantId,
             String sessionId) {
         return sessionQueries.hasExecutionRegistryFacts(tenantId, sessionId);
+    }
+
+    @Override
+    public boolean supportsPersonalMcpExecution() { return true; }
+
+    @Override
+    public void requirePersonalMcpActor(String tenant, String session, String actor) {
+        sessionPolicies.requirePersonalMcpActor(tenant, session, actor);
+    }
+
+    @Override
+    public void requirePersonalMcpUnattended(String tenant, String session) {
+        sessionPolicies.requirePersonalMcpUnattended(tenant, session);
     }
 
     @Override

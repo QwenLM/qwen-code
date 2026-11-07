@@ -49,6 +49,7 @@ import type {
   ManagedMonitorOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
 import type { ManagedExtensionRuntimeControl } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js';
+import type { ManagedRuntimeSkillControl } from './managed-runtime-skill-source.js';
 import {
   MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
   MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
@@ -773,6 +774,18 @@ export class HostedWorkspaceBroker {
 
   async extensionControl(
     operation: ManagedExtensionRuntimeControl,
+  ): Promise<Record<string, unknown>> {
+    return this.runtimeMetadataControl(operation);
+  }
+
+  async skillControl(
+    operation: ManagedRuntimeSkillControl,
+  ): Promise<Record<string, unknown>> {
+    return this.runtimeMetadataControl(operation);
+  }
+
+  private async runtimeMetadataControl(
+    operation: ManagedExtensionRuntimeControl | ManagedRuntimeSkillControl,
   ): Promise<Record<string, unknown>> {
     const envelope = await this.request(
       `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/extensions/control`,

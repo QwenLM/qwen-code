@@ -114,10 +114,21 @@ public final class ManagedExtensionCommandVerifier implements RuntimeExtensionCo
                     && configuration.get("configRevision").equals(operation.get("revision")));
             JsonNode bundle = records.readRecordResource(tenant, harness, configuration.get("bundleRef"));
             check("managed-extension-config-bundle".equals(bundle.path("kind").asText())
-                    && bundle.path("formatVersion").asInt() == 1 && bundle.get("configRevision").equals(operation.get("revision"))
+                    && bundle.path("formatVersion").isIntegralNumber()
+                    && bundle.path("formatVersion").canConvertToInt()
+                    && Set.of(1, 2).contains(bundle.path("formatVersion").asInt())
+                    && bundle.get("configRevision").equals(operation.get("revision"))
                     && bundle.path("packages").isArray()
                     && java.util.stream.StreamSupport.stream(bundle.get("packages").spliterator(), false)
                     .anyMatch(entry -> operation.get("extensionId").equals(entry.path("pin").get("extensionId"))));
+            if (bundle.path("formatVersion").asInt() == 2) {
+                JsonNode bindings = bundle.path("mcpAuthBindings");
+                ManagedConfigInstall.authBindings(bindings);
+                JsonNode actor = bundle.path("executionActorKey");
+                check(bindings.isEmpty() ? actor.isNull() : actor.isTextual()
+                        && actor.asText().matches("[a-f0-9]{64}")
+                        && actor.asText().equals(ManagedMcpOAuthAdmission.actor(jdbc, tenant, harness)));
+            }
         }
     }
 
