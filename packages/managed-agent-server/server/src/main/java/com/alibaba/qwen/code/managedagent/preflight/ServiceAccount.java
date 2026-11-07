@@ -27,7 +27,7 @@ import java.util.stream.Collectors;
 final class ServiceAccount {
     private static final long LOOKUP_TIMEOUT_SECONDS = 5;
     // Linux's limit on symbolic links followed in one path lookup.
-    private static final int MAX_SYMBOLIC_LINKS = 40;
+    static final int MAX_SYMBOLIC_LINKS = 40;
 
     private final String name;
     private final Set<String> groups;
@@ -88,6 +88,18 @@ final class ServiceAccount {
      * way to a symbolic link as well as those on the link's target.
      */
     boolean canRead(Path file) throws IOException {
+        return can(file, true);
+    }
+
+    /**
+     * Whether the account can enter the directory, to look a name up in it,
+     * as it must to read a file there.
+     */
+    boolean canEnter(Path directory) throws IOException {
+        return can(directory, false);
+    }
+
+    private boolean can(Path file, boolean read) throws IOException {
         Path absolute = file.toAbsolutePath();
         Path current = Objects.requireNonNull(absolute.getRoot(), "an absolute path has a root");
         Deque<Path> names = new ArrayDeque<>();
@@ -124,7 +136,7 @@ final class ServiceAccount {
                 names.addFirst(targetNames.get(index));
             }
         }
-        return allows(Files.readAttributes(current, PosixFileAttributes.class), true);
+        return allows(Files.readAttributes(current, PosixFileAttributes.class), read);
     }
 
     // As the kernel does: the owner bits apply to the owner alone, then the

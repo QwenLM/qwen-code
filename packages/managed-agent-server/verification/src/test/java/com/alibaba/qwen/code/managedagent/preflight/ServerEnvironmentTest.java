@@ -15,9 +15,11 @@ import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -434,6 +436,105 @@ class ServerEnvironmentTest {
                 environment, file -> true, file -> true, directory).detail());
     }
 
+    @Test
+    void namesADirectoryItCannotLookInRatherThanNoFile() throws IOException {
+        assumeOthersCanSearchTheDirectory();
+        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwxr-xr-x"));
+        // The bootstrap's config/, root:qwen 0750, as the operator's own
+        // login meets it: Spring skips the optional file it cannot see.
+        Path secret = write("etc/application.yml", "spring.datasource.password: s3cret\n");
+        Path etc = secret.getParent();
+        Path secrets = Files.createDirectories(etc.resolve("secrets"));
+        Path config = Files.createDirectories(directory.resolve("config/edge"));
+        // The directories the rows name, after any link, as /private/var for macOS's /var.
+        Path realEtc = etc.toRealPath();
+        Path realConfig = config.getParent().toRealPath();
+        Files.setPosixFilePermissions(secret, PosixFilePermissions.fromString("rw-r--r--"));
+        Files.setPosixFilePermissions(etc, PosixFilePermissions.fromString("---rwx---"));
+        try {
+            assumeFalse(Files.isReadable(secret), "root enters any directory");
+            String group = Files.readAttributes(etc, PosixFileAttributes.class)
+                    .group().getName();
+            String runner = System.getProperty("user.name");
+            ServiceAccount member = new ServiceAccount("qwen-preflight-member", Set.of(group));
+            ManagedAgentPreflight.Prepared prepared = prepare(
+                    named("optional:file:" + secret), new ArrayList<>());
+            assertNull(prepared.failure());
+            assertEquals(List.of(), prepared.files());
+            assertEquals(List.of(new ServerEnvironment.Hidden(realEtc, false)), prepared.hidden());
+            List<ManagedAgentPreflight.Check> rows =
+                    ManagedAgentPreflight.configChecks(prepared, member, runner);
+            assertEquals(1, rows.size(), rows.toString());
+            assertEquals(ManagedAgentPreflight.Status.FAIL, rows.get(0).status());
+            assertEquals(realEtc + " cannot be entered by " + runner + ", which runs this check,"
+                    + " and the server may read a configuration file in it", rows.get(0).detail());
+            assertEquals("run --check as qwen-preflight-member or as root", rows.get(0).fix());
+            // The directory it cannot enter, however deep the file under it.
+            assertEquals(List.of(new ServerEnvironment.Hidden(realEtc, false)), prepare(
+                    named("optional:file:" + etc.resolve("deeper/application.yml")),
+                    new ArrayList<>()).hidden());
+            // The directory a symbolic link on the way leads to, as the kernel
+            // looks the name up: the link to it, or the file linked into it.
+            Path link = Files.createSymbolicLink(directory.resolve("link"), etc);
+            Path linked = Files.createSymbolicLink(
+                    Files.createDirectories(directory.resolve("open")).resolve("application.yml"),
+                    secret);
+            for (Path through : List.of(link.resolve("application.yml"), linked)) {
+                assertEquals(List.of(new ServerEnvironment.Hidden(realEtc, false)),
+                        prepare(named("optional:file:" + through), new ArrayList<>()).hidden(),
+                        through.toString());
+            }
+            // A config tree Spring cannot see is skipped as silently.
+            ManagedAgentPreflight.Prepared tree = prepare(environment(Map.of()),
+                    new ArrayList<>(), "--spring.config.import=optional:configtree:" + secrets + "/");
+            assertNull(tree.failure());
+            assertEquals(List.of(new ServerEnvironment.Hidden(realEtc, false)), tree.hidden());
+            // Entering it is all the account needs to look a name up there.
+            Files.setPosixFilePermissions(etc, PosixFilePermissions.fromString("-----x---"));
+            assertEquals(ManagedAgentPreflight.Status.FAIL, ManagedAgentPreflight.hiddenCheck(
+                    prepared.hidden().get(0), member, runner).status());
+            Files.setPosixFilePermissions(etc, PosixFilePermissions.fromString("---rwx---"));
+            // An account that cannot enter it either reads no file there; nor
+            // does this process, which stands in for a service account unset
+            // or its own.
+            for (ServiceAccount account : Arrays.asList(
+                    new ServiceAccount("qwen-preflight-stranger", Set.of()), null)) {
+                rows = ManagedAgentPreflight.configChecks(prepared, account, runner);
+                assertEquals(1, rows.size(), rows.toString());
+                assertEquals("no configuration file; packaged defaults and the"
+                        + " environment only", rows.get(0).detail());
+            }
+            // A file it does see is still judged beside the directory it cannot.
+            Path seen = write("seen.yml", "server.port: 9090\n");
+            prepared = prepare(named("file:" + seen + ",optional:file:" + secret),
+                    new ArrayList<>());
+            rows = ManagedAgentPreflight.configChecks(prepared, member, runner);
+            assertEquals(List.of(ManagedAgentPreflight.Status.PASS,
+                    ManagedAgentPreflight.Status.FAIL),
+                    rows.stream().map(ManagedAgentPreflight.Check::status).toList(),
+                    rows.toString());
+            assertEquals(seen.toString(), rows.get(0).detail());
+            // config/*/ lists config/, which this process may enter, not list.
+            Files.setPosixFilePermissions(config.getParent(),
+                    PosixFilePermissions.fromString("--xr-x---"));
+            List<ServerEnvironment.Hidden> hidden =
+                    ServerEnvironment.hidden(environment(Map.of()), directory);
+            assertEquals(List.of(new ServerEnvironment.Hidden(realConfig, true)), hidden);
+            assertEquals(realConfig + " cannot be listed by " + runner
+                    + ", which runs this check, and the server may read a configuration"
+                    + " file in it", ManagedAgentPreflight.hiddenCheck(hidden.get(0), member,
+                            runner).detail());
+            // An account that may enter it but not list it finds none there.
+            Files.setPosixFilePermissions(config.getParent(),
+                    PosixFilePermissions.fromString("--x--x---"));
+            assertNull(ManagedAgentPreflight.hiddenCheck(hidden.get(0), member, runner));
+        } finally {
+            Files.setPosixFilePermissions(etc, PosixFilePermissions.fromString("rwx------"));
+            Files.setPosixFilePermissions(config.getParent(),
+                    PosixFilePermissions.fromString("rwx------"));
+        }
+    }
+
     /** Spring's error for a file this process cannot read. */
     private static RuntimeException cannotRead(String file) {
         return new IllegalStateException(new java.io.FileNotFoundException(
@@ -685,9 +786,17 @@ class ServerEnvironmentTest {
                 + "<properties><entry key=\"server.port\">9090</entry>\n"
                 + "<!-- <entry key=\"spring.datasource.password\">s3cret</entry> -->\n"
                 + "</properties>\n");
+        // A YAML comment after a value is a comment too; in .properties the
+        // rest of the line is the value.
+        Path inline = write("conf/inline.yml",
+                "server:\n  port: 8080 # spring.datasource.password: s3cret\n");
+        Path inlineProperties = write("conf/inline.properties",
+                "server.port=8080 # spring.datasource.password: s3cret\n");
+        Path inlineLater = write("conf/inline-later.yml",
+                "motd: \"a #b\" # note # spring.datasource.password: s3cret\n");
         Map<Path, ManagedAgentPreflight.Status> verdicts = new HashMap<>();
         for (Path file : List.of(spelled, keyStore, cased, jdbc, userInfo, inactive,
-                commentedXml)) {
+                commentedXml, inline, inlineProperties, inlineLater)) {
             Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
             verdicts.put(file, ManagedAgentPreflight.configFileCheck(file, null).status());
         }
@@ -698,7 +807,10 @@ class ServerEnvironmentTest {
                 jdbc, ManagedAgentPreflight.Status.WARN,
                 userInfo, ManagedAgentPreflight.Status.WARN,
                 inactive, ManagedAgentPreflight.Status.WARN,
-                commentedXml, ManagedAgentPreflight.Status.WARN), verdicts);
+                commentedXml, ManagedAgentPreflight.Status.WARN,
+                inline, ManagedAgentPreflight.Status.WARN,
+                inlineProperties, ManagedAgentPreflight.Status.PASS,
+                inlineLater, ManagedAgentPreflight.Status.WARN), verdicts);
     }
 
     @Test
@@ -757,6 +869,39 @@ class ServerEnvironmentTest {
         assertEquals("s3cret", prepared.environment().getProperty("spring.datasource.password"));
         assertEquals(List.of(hinted), prepared.files());
         assertEquals(ManagedAgentPreflight.Status.WARN, rows(prepared).get(0).status());
+        // It is a value file too, of a property named app.conf, under a config
+        // tree imported over its directory; its keys still tell.
+        prepared = prepare(named("file:" + hinted + "[.properties]"), new ArrayList<>(),
+                "--spring.config.import=optional:configtree:" + hinted.getParent() + "/");
+        assertEquals("app.conf", prepared.values().get(hinted));
+        assertEquals(Set.of(hinted), prepared.configurations());
+        rows = rows(prepared);
+        assertEquals(1, rows.size(), rows.toString());
+        assertEquals(ManagedAgentPreflight.Status.WARN, rows.get(0).status(), rows.toString());
+        assertEquals("chmod 600 " + hinted, rows.get(0).fix());
+        // A value file Spring reads as no configuration file holds its value
+        // alone, however its value reads.
+        Path label = write("tree/qwen.managed-agent.label", "spring.datasource.password=s3cret");
+        Files.setPosixFilePermissions(label, PosixFilePermissions.fromString("rw-r--r--"));
+        prepared = prepare(environment(Map.of()), new ArrayList<>(),
+                "--spring.config.import=optional:configtree:" + label.getParent() + "/");
+        assertEquals("qwen.managed-agent.label", prepared.values().get(label));
+        assertEquals(Set.of(), prepared.configurations());
+        rows = rows(prepared);
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                rows.stream().filter(row -> row.detail().startsWith(label.toString()))
+                        .findFirst().orElseThrow().status(), rows.toString());
+        // Nor does a configuration file's name make it one, outside the
+        // locations Spring reads configuration files at.
+        Path notes = write("tree/application.yml", "spring.datasource.password: s3cret\n");
+        Files.setPosixFilePermissions(notes, PosixFilePermissions.fromString("rw-r--r--"));
+        prepared = prepare(environment(Map.of()), new ArrayList<>(),
+                "--spring.config.import=optional:configtree:" + notes.getParent() + "/");
+        assertEquals("application.yml", prepared.values().get(notes));
+        rows = rows(prepared);
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                rows.stream().filter(row -> row.detail().startsWith(notes.toString()))
+                        .findFirst().orElseThrow().status(), rows.toString());
     }
 
     @Test

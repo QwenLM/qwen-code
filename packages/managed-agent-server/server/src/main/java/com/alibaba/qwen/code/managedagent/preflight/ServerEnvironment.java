@@ -32,12 +32,17 @@ import org.yaml.snakeyaml.error.MarkedYAMLException;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -108,9 +113,31 @@ final class ServerEnvironment {
 
     /** As above, with the working directory the default locations are in. */
     static List<Path> files(ConfigurableEnvironment environment, Path workingDirectory) {
+        return files(environment, workingDirectory, true);
+    }
+
+    /**
+     * The files among {@link #files} that Spring reads as configuration
+     * files, by their extension or the one a location hints: all but a
+     * config tree's value files, though a path can be both, as
+     * application.yml is under a config tree imported over config/.
+     */
+    static Set<Path> configurationFiles(ConfigurableEnvironment environment) {
+        return configurationFiles(environment, Path.of(""));
+    }
+
+    /** As above, with the working directory the default locations are in. */
+    static Set<Path> configurationFiles(ConfigurableEnvironment environment,
+            Path workingDirectory) {
+        return new LinkedHashSet<>(files(environment, workingDirectory, false));
+    }
+
+    private static List<Path> files(ConfigurableEnvironment environment, Path workingDirectory,
+            boolean values) {
         Set<Path> files = new LinkedHashSet<>();
         for (PropertySource<?> source : environment.getPropertySources()) {
-            if (!(source instanceof EnumerablePropertySource<?> enumerable)) {
+            if (!(source instanceof EnumerablePropertySource<?> enumerable)
+                    || !values && source instanceof ConfigTreePropertySource) {
                 continue;
             }
             for (String name : enumerable.getPropertyNames()) {
@@ -120,15 +147,134 @@ final class ServerEnvironment {
                 }
             }
         }
-        String[] active = environment.getActiveProfiles();
-        List<String> profiles = List.of(active.length > 0 ? active
-                : environment.getDefaultProfiles());
-        for (Path file : locationFiles(environment, workingDirectory, profiles).keySet()) {
+        for (Path file : locationFiles(environment, workingDirectory, profiles(environment),
+                new LinkedHashSet<>()).keySet()) {
             if (Files.isRegularFile(file)) {
                 files.add(file.toAbsolutePath().normalize());
             }
         }
         return new ArrayList<>(files);
+    }
+
+    private static List<String> profiles(ConfigurableEnvironment environment) {
+        String[] active = environment.getActiveProfiles();
+        return List.of(active.length > 0 ? active : environment.getDefaultProfiles());
+    }
+
+    /**
+     * A directory the server looks in for its configuration files that this
+     * process cannot: Spring skips an optional file it cannot see, so it
+     * would read none there, though the service account may. Listed when
+     * Spring lists it rather than looks a name up in it, as it lists config/
+     * for the wildcard location under it.
+     */
+    record Hidden(Path directory, boolean listed) {
+    }
+
+    /** The directories of {@link #files} this process cannot look in. */
+    static List<Hidden> hidden(ConfigurableEnvironment environment) {
+        return hidden(environment, Path.of(""));
+    }
+
+    /** As above, with the working directory the default locations are in. */
+    static List<Hidden> hidden(ConfigurableEnvironment environment, Path workingDirectory) {
+        Set<Path> unlisted = new LinkedHashSet<>();
+        List<Path> paths = new ArrayList<>(locationFiles(environment, workingDirectory,
+                profiles(environment), unlisted).keySet());
+        // A config tree Spring cannot see is skipped as an optional file is.
+        for (Location named : named(environment, workingDirectory)) {
+            if (named.tree()) {
+                paths.addAll(expand(named.path(), unlisted));
+            }
+        }
+        // Each directory, with whether only listing it is denied.
+        Map<Path, Boolean> hidden = new LinkedHashMap<>();
+        for (Path path : paths) {
+            Path barrier = barrier(path);
+            if (barrier != null) {
+                hidden.put(barrier, false);
+            }
+        }
+        for (Path directory : unlisted) {
+            Path barrier = barrier(directory);
+            if (barrier != null) {
+                hidden.put(barrier, false);
+            } else {
+                hidden.putIfAbsent(realPath(directory), true);
+            }
+        }
+        List<Hidden> directories = new ArrayList<>();
+        hidden.forEach((directory, listed) -> directories.add(new Hidden(directory, listed)));
+        return directories;
+    }
+
+    // A directory it can reach, named as barrier names one, after its links.
+    private static Path realPath(Path directory) {
+        try {
+            return directory.toRealPath();
+        } catch (IOException error) {
+            return directory.toAbsolutePath().normalize();
+        }
+    }
+
+    /**
+     * The directory this process cannot enter on the way to a path, or null
+     * where it can look the path up, whether or not anything is there. It
+     * looks each name up as the kernel does, in the directory a symbolic link
+     * on the way leads to, as ServiceAccount does for the service account.
+     */
+    private static Path barrier(Path path) {
+        Path absolute = path.toAbsolutePath();
+        Path current = Objects.requireNonNull(absolute.getRoot(), "an absolute path has a root");
+        Deque<Path> names = new ArrayDeque<>();
+        absolute.forEach(names::addLast);
+        int links = 0;
+        while (!names.isEmpty()) {
+            Path name = names.removeFirst();
+            if (name.toString().equals(".")) {
+                continue;
+            }
+            if (name.toString().equals("..")) {
+                // The current directory is already resolved, so this is its real parent.
+                current = current.getParent() == null ? current : current.getParent();
+                continue;
+            }
+            Path next = current.resolve(name);
+            BasicFileAttributes attributes;
+            try {
+                attributes = Files.readAttributes(next, BasicFileAttributes.class,
+                        LinkOption.NOFOLLOW_LINKS);
+            } catch (AccessDeniedException denied) {
+                return current;
+            } catch (IOException absent) {
+                // Not there, or no directory on the way: Spring sees none either.
+                return null;
+            }
+            if (!attributes.isSymbolicLink()) {
+                current = next;
+                continue;
+            }
+            Path target;
+            try {
+                target = ++links > ServiceAccount.MAX_SYMBOLIC_LINKS ? null
+                        : Files.readSymbolicLink(next);
+            } catch (IOException unreadable) {
+                target = null;
+            }
+            if (target == null) {
+                // A loop, which Spring cannot follow either.
+                return null;
+            }
+            if (target.isAbsolute()) {
+                current = Objects.requireNonNull(target.getRoot(), "an absolute path has a root");
+            }
+            List<Path> targetNames = new ArrayList<>();
+            target.forEach(targetNames::add);
+            for (int index = targetNames.size() - 1; index >= 0; index--) {
+                names.addFirst(targetNames.get(index));
+            }
+        }
+        return null;
     }
 
     /**
@@ -151,8 +297,11 @@ final class ServerEnvironment {
         return values;
     }
 
-    /** A file system location, which names a directory when it ends in a slash. */
-    private record Location(Path path, boolean directory) {
+    /**
+     * A file system location, which names a directory when it ends in a
+     * slash, or a config tree's directory.
+     */
+    private record Location(Path path, boolean directory, boolean tree) {
     }
 
     /**
@@ -203,15 +352,18 @@ final class ServerEnvironment {
         for (String location : value.split("[,;]")) {
             String path = location.strip().replaceFirst("^optional:", "");
             Path relativeTo = base;
-            if (path.startsWith("file:")) {
-                // A colon after it is part of the path.
-                path = path.substring("file:".length());
+            boolean tree = path.startsWith("configtree:");
+            if (tree || path.startsWith("file:")) {
+                // A colon after it is part of the path; Spring reads a config
+                // tree in the working directory too.
+                path = path.substring(path.indexOf(':') + 1);
                 relativeTo = workingDirectory;
             } else if (SCHEME.matcher(path).lookingAt()) {
                 continue;
             }
             if (!path.isEmpty()) {
-                named.add(new Location(relativeTo.resolve(path), path.endsWith("/")));
+                named.add(new Location(relativeTo.resolve(path), tree || path.endsWith("/"),
+                        tree));
             }
         }
     }
@@ -242,10 +394,11 @@ final class ServerEnvironment {
      * the working directory: each location's files, then their variants for
      * these profiles, or for any profile when profiles is null. Where Spring
      * refused to start, the files it read are not known, so neither is a
-     * location one of them imports.
+     * location one of them imports. Adds to unlisted each directory a
+     * wildcard names whose directories this process may not list.
      */
     private static Map<Path, String> locationFiles(ConfigurableEnvironment environment,
-            Path workingDirectory, List<String> profiles) {
+            Path workingDirectory, List<String> profiles, Set<Path> unlisted) {
         List<String> names = new ArrayList<>();
         for (String name : topLevel(environment, "spring.config.name")) {
             if (!name.isBlank()) {
@@ -258,6 +411,10 @@ final class ServerEnvironment {
         List<Path> directories = new ArrayList<>();
         Set<Path> files = new LinkedHashSet<>();
         for (Location named : named(environment, workingDirectory)) {
+            if (named.tree()) {
+                // Its files are values, which files() finds in their source.
+                continue;
+            }
             if (named.directory()) {
                 directories.add(named.path());
             } else {
@@ -270,7 +427,7 @@ final class ServerEnvironment {
             }
         }
         for (Path location : directories) {
-            for (Path directory : expand(location)) {
+            for (Path directory : expand(location, unlisted)) {
                 for (String name : names) {
                     for (String extension : EXTENSIONS) {
                         files.add(directory.resolve(name + "." + extension));
@@ -289,8 +446,11 @@ final class ServerEnvironment {
         return located;
     }
 
-    /** The directory, or for a last name of *, each directory in its parent. */
-    private static List<Path> expand(Path location) {
+    /**
+     * The directory, or for a last name of *, each directory in its parent,
+     * which goes to unlisted when this process may not list it.
+     */
+    private static List<Path> expand(Path location, Set<Path> unlisted) {
         Path name = location.getFileName();
         if (name == null || !name.toString().equals("*")) {
             return List.of(location);
@@ -299,8 +459,10 @@ final class ServerEnvironment {
         Path parent = location.getParent() == null ? Path.of("") : location.getParent();
         try (DirectoryStream<Path> nested = Files.newDirectoryStream(parent, Files::isDirectory)) {
             nested.forEach(directories::add);
+        } catch (AccessDeniedException denied) {
+            unlisted.add(parent);
         } catch (IOException error) {
-            // No such directory, or none to read.
+            // No such directory: Spring finds none either.
         }
         directories.sort(null);
         return directories;
@@ -412,7 +574,8 @@ final class ServerEnvironment {
             return new Failure((file == null ? notFound.getReferenceDescription() : file)
                     + " does not exist", "create it, or correct the location that names it");
         }
-        Map<Path, String> located = locationFiles(environment, workingDirectory, null);
+        Map<Path, String> located = locationFiles(environment, workingDirectory, null,
+                new LinkedHashSet<>());
         Set<Path> candidates = located.keySet();
         IOException io = cause(error, IOException.class);
         if (io != null) {
