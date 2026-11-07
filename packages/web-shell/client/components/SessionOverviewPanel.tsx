@@ -313,6 +313,7 @@ function SessionOverviewPanelInner({
   includeOtherWorkspaces,
   workspaceCwd,
   manageLiveState,
+  onLiveStateWorkspaceCwdsChange,
 }: {
   onOpenSession: (
     sessionId: string,
@@ -326,6 +327,7 @@ function SessionOverviewPanelInner({
   includeOtherWorkspaces: boolean;
   workspaceCwd?: string;
   manageLiveState: boolean;
+  onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
 }) {
   const { t } = useI18n();
   const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
@@ -402,6 +404,15 @@ function SessionOverviewPanelInner({
     workspaceCatalogAdvertised,
     workspaceCwd,
   ]);
+  // Report the displayed set so the app-level sidebarless poller covers
+  // exactly these workspaces (#16355).
+  useEffect(() => {
+    onLiveStateWorkspaceCwdsChange?.(liveStateWorkspaceCwds);
+  }, [onLiveStateWorkspaceCwdsChange, liveStateWorkspaceCwds]);
+  useEffect(
+    () => () => onLiveStateWorkspaceCwdsChange?.([]),
+    [onLiveStateWorkspaceCwdsChange],
+  );
   const liveStateEnabled =
     (connection.capabilities?.features?.includes(SESSION_LIVE_STATE_FEATURE) ??
       false) &&
@@ -2191,6 +2202,7 @@ export function SessionOverviewPanel({
   includeOtherWorkspaces = true,
   workspaceCwd,
   manageLiveState = true,
+  onLiveStateWorkspaceCwdsChange,
 }: {
   onOpenSession: (
     sessionId: string,
@@ -2204,6 +2216,7 @@ export function SessionOverviewPanel({
   includeOtherWorkspaces?: boolean;
   workspaceCwd?: string;
   manageLiveState?: boolean;
+  onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
 }) {
   const { t } = useI18n();
   return (
@@ -2224,6 +2237,7 @@ export function SessionOverviewPanel({
         includeOtherWorkspaces={includeOtherWorkspaces}
         workspaceCwd={workspaceCwd}
         manageLiveState={manageLiveState}
+        onLiveStateWorkspaceCwdsChange={onLiveStateWorkspaceCwdsChange}
       />
     </ErrorBoundary>
   );

@@ -343,6 +343,7 @@ function render(
     }) => Promise<boolean | void> | boolean | void;
     manageLiveState?: boolean;
     workspaceCwd?: string;
+    onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
   } = {},
 ): void {
   container = document.createElement('div');
@@ -368,6 +369,7 @@ function rerender(
     }) => Promise<boolean | void> | boolean | void;
     manageLiveState?: boolean;
     workspaceCwd?: string;
+    onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
   } = {},
 ): void {
   act(() =>
@@ -3944,6 +3946,55 @@ describe('SessionOverviewPanel polling', () => {
     };
     render({ workspaceCwd: '/wsB' });
     expect(workspaceLiveStateOptions.workspaceCwds).toEqual(['/wsB']);
+  });
+
+  it('reports its displayed live-state workspace set and clears it on unmount (#16355)', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    const onLiveStateWorkspaceCwdsChange = vi.fn();
+    render({ onLiveStateWorkspaceCwdsChange });
+
+    // The reported set is the panel's own displayed set: the same cwds it
+    // would poll when it owns the channel.
+    expect(workspaceLiveStateOptions.workspaceCwds).toEqual(['/w', '/wsB']);
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith([
+      '/w',
+      '/wsB',
+    ]);
+
+    act(() => root?.unmount());
+    root = null;
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith([]);
+  });
+
+  it('reports live-state workspace set changes to the host poller', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [{ id: 'w0', cwd: '/w', primary: true, trusted: true }],
+    };
+    const onLiveStateWorkspaceCwdsChange = vi.fn();
+    render({ onLiveStateWorkspaceCwdsChange });
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith(['/w']);
+
+    connectionState.capabilities = {
+      ...connectionState.capabilities,
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    rerender({ onLiveStateWorkspaceCwdsChange });
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith([
+      '/w',
+      '/wsB',
+    ]);
   });
 
   it('falls back to the catalog poll without live-state', () => {
