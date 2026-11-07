@@ -2558,29 +2558,30 @@ test('start and verify reach the listeners the server resolves', async (t) => {
   ]);
 
   // --server-url names the control plane, and the Harness stays where the
-  // configuration puts it. An @ in its path is path text, not user information.
+  // configuration puts it. An @ its path holds is written %40, since a bare
+  // one cannot be told from the rest of a password, and is dialled as given.
   await host.stop();
   host.connections = [];
   host.requests = [];
-  host.responses['GET /prefix@acme/actuator/health'] = { status: 'UP' };
+  host.responses['GET /prefix%40acme/actuator/health'] = { status: 'UP' };
   assert.equal(
     await host.upgrade(
       'start',
       '--server-url',
-      'http://proxy.test:8443/prefix@acme/',
+      'http://proxy.test:8443/prefix%40acme/',
     ),
     0,
   );
   assert.deepEqual([...new Set(host.connections)], ['127.0.0.1:4171']);
   assert.deepEqual(urls(), [
-    'http://proxy.test:8443/prefix@acme/actuator/health',
+    'http://proxy.test:8443/prefix%40acme/actuator/health',
   ]);
   host.requests = [];
-  host.responses['GET /prefix@acme/v1/agents/sessions'] = {
+  host.responses['GET /prefix%40acme/v1/agents/sessions'] = {
     data: [{ id: 's1' }],
   };
-  host.responses['GET /prefix@acme/v1/agents/sessions/s1'] = { id: 's1' };
-  host.responses['GET /prefix@acme/v1/agents/sessions/s1/items'] = {
+  host.responses['GET /prefix%40acme/v1/agents/sessions/s1'] = { id: 's1' };
+  host.responses['GET /prefix%40acme/v1/agents/sessions/s1/items'] = {
     data: [],
   };
   assert.equal(
@@ -2589,15 +2590,15 @@ test('start and verify reach the listeners the server resolves', async (t) => {
       '--tenant',
       'acme',
       '--server-url',
-      'http://proxy.test:8443/prefix@acme',
+      'http://proxy.test:8443/prefix%40acme',
     ),
     0,
   );
   assert.deepEqual(urls(), [
-    'http://proxy.test:8443/prefix@acme/actuator/health',
-    'http://proxy.test:8443/prefix@acme/v1/agents/sessions?limit=1',
-    'http://proxy.test:8443/prefix@acme/v1/agents/sessions/s1',
-    'http://proxy.test:8443/prefix@acme/v1/agents/sessions/s1/items?limit=20',
+    'http://proxy.test:8443/prefix%40acme/actuator/health',
+    'http://proxy.test:8443/prefix%40acme/v1/agents/sessions?limit=1',
+    'http://proxy.test:8443/prefix%40acme/v1/agents/sessions/s1',
+    'http://proxy.test:8443/prefix%40acme/v1/agents/sessions/s1/items?limit=20',
   ]);
 });
 
@@ -2685,7 +2686,11 @@ test('start and verify use server.env when the configuration does not resolve', 
   for (const harnessUrl of [
     'http://127.0.0.1:4172/@acme/harness',
     'http://gateway.example.com/@acme/harness',
+    // An escape, an IPv6 address, and a label that starts with a digit
+    // before the last one.
     'http://127.0.0.1:4172/a%20b',
+    'http://[::1]:4172',
+    'http://1st.harness.internal:4172/',
   ]) {
     await writeFile(
       env,
@@ -2869,9 +2874,14 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     'http:/\t/\t@127.0.0.1:4170',
     'http://h\\@x',
     'http:/@127.0.0.1:4170',
-    // A space and a malformed percent escape java.net.URI refuses in a path.
+    // A space java.net.URI refuses in a path, and a malformed escape.
     'http://127.0.0.1:4170/a b',
     'http://127.0.0.1:4170/a%zz',
+    // Hosts java.net.URI reads no host in: an empty label, a label that
+    // ends in a hyphen, and a last label that starts with a digit.
+    'http://harness..internal:4170',
+    'http://harness-.internal:4170',
+    'http://1.2.3:4170',
   ]) {
     host.resolved = { harnessBaseUrl, harnessOrigin: undefined };
     assert.equal(
@@ -3340,12 +3350,11 @@ test('no report prints a password a URL carries', async (t) => {
     rowsOf(host.output).health,
     'FAIL http://***@b/actuator/health is not UP: HTTP 200, status DOWN',
   );
-  // This digit-led password shape is also a valid URL with an @ in its path.
-  // The phases still use it, but no report exposes the text before the @.
+  // A --server-url with an @ left after the URL parser has read no user
+  // information is the rest of a password that starts with digits: the
+  // parser reads host svc, port 12, so the phase would dial the wrong host
+  // and print the password. Each phase refuses it before it dials.
   host.resolved = {};
-  host.responses['GET /s3cret@cp.example.com:8443/actuator/health'] = {
-    status: 'UP',
-  };
   for (const phase of ['verify', 'start']) {
     if (phase === 'start') {
       await host.upgrade('stop');
@@ -3356,23 +3365,17 @@ test('no report prints a password a URL carries', async (t) => {
         '--server-url',
         'https://svc:12/s3cret@cp.example.com:8443',
       ),
-      0,
-      phase,
+      1,
     );
-    assert.ok(
-      host.requests.some(
-        ({ url }) =>
-          url === 'https://svc:12/s3cret@cp.example.com:8443/actuator/health',
-      ),
-      phase,
-    );
-    assert.ok(
-      host.output.some((line) =>
-        line.includes('https://***@cp.example.com:8443/actuator/health'),
-      ),
-      phase,
+    assert.equal(
+      host.output.at(-1),
+      `${phase} refused: --server-url "https://***@cp.example.com:8443" carries an @, as a user name or password would before its host.`,
     );
     assert.ok(!host.output.join('\n').includes('s3cret'), phase);
+    assert.equal(
+      host.requests.filter((request) => request.url.includes('svc')).length,
+      0,
+    );
   }
 });
 
@@ -3381,7 +3384,7 @@ test('check judges the --server-url its plan repeats', async (t) => {
   assert.equal(await host.upgrade('--help'), 0);
   assert.match(
     host.output.join('\n'),
-    /--server-url <url>\s+check, start, verify: control-plane URL/,
+    /--server-url <url>\s+start, verify: control-plane URL \(default: the listener\s+the server's configuration resolves to\); check refuses\s+a URL they would refuse, as its plan repeats it/,
   );
   for (const [serverUrl, shown, reason] of [
     [
@@ -3389,6 +3392,13 @@ test('check judges the --server-url its plan repeats', async (t) => {
       'https://***@cp.example.com/',
       'carries a user name or password, so fetch refuses it',
     ],
+    [
+      'https://svc:12/s3cret@cp.example.com',
+      'https://***@cp.example.com',
+      'carries an @, as a user name or password would before its host',
+    ],
+    // What --server-url "https://$HOST" leaves with HOST unset, which the
+    // option parser strips to https:, though https:/actuator/health parses.
     ['https://', 'https:', 'is not a URL'],
   ]) {
     assert.equal(await host.check('--server-url', serverUrl), 1);
@@ -3398,26 +3408,31 @@ test('check judges the --server-url its plan repeats', async (t) => {
     );
     assert.ok(!host.output.join('\n').includes('s3cret'), serverUrl);
   }
-  for (const [serverUrl, planWord] of [
-    ['https://cp.example.com:8443', 'https://cp.example.com:8443'],
-    ['https://svc:12/s3cret@cp.example.com', "'https://***@cp.example.com'"],
-  ]) {
-    assert.equal(await host.check('--server-url', serverUrl), 0);
-    const plan = host.output.slice(host.output.indexOf('Plan:')).join('\n');
-    assert.ok(plan.includes(` start --server-url ${planWord}\n`), plan);
-    assert.ok(!host.output.join('\n').includes('s3cret'), serverUrl);
-  }
   assert.equal(
-    await host.check('--server-url', 'https://cp.example.com/x\u001b[2K'),
+    await host.check('--server-url', 'https://cp.example.com:8443'),
     0,
   );
   const plan = host.output.slice(host.output.indexOf('Plan:')).join('\n');
-  assert.ok(plan.includes('https://cp.example.com/x\uFFFD[2K'), plan);
   assert.ok(
-    // eslint-disable-next-line no-control-regex -- detecting surviving control bytes is the assertion
-    !host.output.some((line) => /[\u0000-\u001F\u007F-\u009F]/.test(line)),
-    JSON.stringify(host.output),
+    plan.includes(' start --server-url https://cp.example.com:8443\n'),
+    plan,
   );
+  // A control character in a value the plan repeats reaches the terminal as
+  // an escape, which the shell reads back as the value.
+  const releases = `${host.root}/rel\u001b[2K'\u009b\\x`;
+  assert.equal(await host.check('--releases', releases), 0);
+  const printed = host.output.slice(host.output.indexOf('Plan:')).join('\n');
+  assert.ok(
+    // eslint-disable-next-line no-control-regex -- matching control bytes is the point
+    !/[\u0000-\u0009\u000B-\u001F\u007F-\u009F]/.test(printed),
+    printed,
+  );
+  const word = printed.match(/ stop --releases (\S+)/)[1];
+  assert.equal(word, `$'${host.root}/rel\\x1b[2K\\'\\xc2\\x9b\\\\x'`);
+  const echoed = spawnSync('bash', ['-c', `printf %s ${word}`], {
+    encoding: 'utf8',
+  });
+  assert.equal(echoed.stdout, releases);
 });
 
 test('verify sanitizes a malicious health body over a real socket', async (t) => {

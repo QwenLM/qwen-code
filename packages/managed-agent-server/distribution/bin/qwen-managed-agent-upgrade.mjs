@@ -106,8 +106,9 @@ Options:
   --skip-database          check, backup: the database is backed up another way
   --runtime-state <dir>    check, backup: the Runtime state directory, or none,
                            instead of the one the server's configuration resolves to
-  --server-url <url>       check, start, verify: control-plane URL (default: the
-                           listener the server's configuration resolves to)
+  --server-url <url>       start, verify: control-plane URL (default: the listener
+                           the server's configuration resolves to); check refuses
+                           a URL they would refuse, as its plan repeats it
   --timeout <seconds>      stop, start, verify: how long to wait
   --actor <id>             verify: read Sessions as this actor, through the server's
                            trusted actor header
@@ -552,8 +553,10 @@ export function withoutCredentials(url) {
   // Such a value does not parse, unless the password starts with digits, as
   // in http://svc:2024#Secret@harness:4170, which the parser and
   // java.net.URI both read as port 2024 with the rest of the password in
-  // the fragment. So everything up to the last @ shows as ***, including in
-  // a path that the command dials: the text alone cannot distinguish them.
+  // the fragment. So everything up to the last @ shows as ***: of a URL
+  // dialled with an @ in its path, as a base path the configuration sets
+  // may give one, the host and port too, which could as well be the front
+  // of such a password.
   return shown.replace(
     /^([a-zA-Z][a-zA-Z0-9+.-]*:(?:\/\/)?|\/\/)?[\s\S]*@/,
     '$1***@',
@@ -1795,9 +1798,26 @@ async function backupRows(system, deployment, options) {
 }
 
 function shellWord(word) {
-  return /^[\w@%+=:,./-]+$/.test(word)
-    ? word
-    : `'${word.replaceAll("'", `'\\''`)}'`;
+  if (/^[\w@%+=:,./-]+$/.test(word)) {
+    return word;
+  }
+  // Quoted, a control character would still reach the terminal; $'...'
+  // spells each as the escapes of its UTF-8 bytes, which any bash turns
+  // back into it.
+  // eslint-disable-next-line no-control-regex -- matching control bytes is the point
+  if (/[\u0000-\u001F\u007F-\u009F]/.test(word)) {
+    return `$'${word.replace(
+      // eslint-disable-next-line no-control-regex -- as above
+      /[\\'\u0000-\u001F\u007F-\u009F]/g,
+      (character) =>
+        character === '\\' || character === "'"
+          ? `\\${character}`
+          : [...Buffer.from(character)]
+              .map((byte) => `\\x${byte.toString(16).padStart(2, '0')}`)
+              .join(''),
+    )}'`;
+  }
+  return `'${word.replaceAll("'", `'\\''`)}'`;
 }
 
 /** The options a phase was given that the printed plan must repeat. */
@@ -1812,8 +1832,8 @@ function planFlags(options, names) {
       options.mysqldump !== 'mysqldump' ? options.mysqldump : undefined,
     'skip-database': options.skipDatabase || undefined,
     'runtime-state': options.runtimeState,
-    // The plan masks credentials and control bytes like every other URL row.
-    'server-url': options.serverUrl && shown(options.serverUrl),
+    // check has refused a --server-url that would print a password.
+    'server-url': options.serverUrl,
   };
   return names
     .filter((name) => flags[name] !== undefined)
@@ -2666,15 +2686,24 @@ async function listeners(
  * information, so a ? or # starts a query or a fragment, which would take in
  * the paths appended to the URL: http://proxy.test/?a probes
  * /?a/actuator/health, and fetch drops a fragment with the path after it.
- * An @ in the path remains valid path text; every printed URL masks up to it.
+ * An @ left after that can be the rest of a password that starts with
+ * digits, as in https://svc:12/s3cret@cp.example.com, which the parser reads
+ * as host svc and port 12: dialling it would reach the wrong host, and
+ * naming it would print the password. Such an @ cannot be told from one a
+ * path holds, which the operator writes as %40.
  */
 function refuseServerUrl(serverUrl) {
+  // The value itself first: https:, which --server-url "https://$HOST"
+  // leaves with HOST unset, is no URL, though https:/actuator/health is one,
+  // of host actuator.
   const reason =
     fetchRefusal(serverUrl) ??
     fetchRefusal(`${serverUrl}/actuator/health`) ??
     (/[?#]/.test(serverUrl)
       ? 'carries a query or a fragment, where the /actuator/health and API paths appended to it would land'
-      : undefined);
+      : serverUrl.includes('@')
+        ? 'carries an @, as a user name or password would before its host'
+        : undefined);
   if (reason) {
     throw new Refusal(
       `--server-url ${quoted(withoutCredentials(serverUrl))} ${reason}.`,
@@ -2840,12 +2869,28 @@ function harnessUrlReason(text, url) {
 }
 
 // The Harness base URLs start takes when the server gives no verdict: an
-// http(s) URL whose authority is a host name, an IPv4 or bracketed IPv6
-// address and an optional port, and whose path holds only the characters a
-// URI path may, untrimmed. It is narrower than the server's rule, never
-// wider.
-const PLAIN_HTTP_URL =
-  /^https?:\/\/(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?(?:\/(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9\-._~!$&'()*+,;=:@/])*)?$/i;
+// http(s) URL whose authority is a host name as java.net.URI reads one,
+// labels of letters, digits and inner hyphens whose last starts with a
+// letter, a dotted-quad IPv4 address or a bracketed IPv6 address without an
+// embedded IPv4 one, and an optional port, and whose path holds only the
+// characters a URI path may, untrimmed, a % only as the start of an escape.
+// It is narrower than the server's rule, never wider.
+const LABEL = '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?';
+const OCTET = '(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])';
+const H16 = '[0-9A-Fa-f]{1,4}';
+const IPV6 = [
+  `(?:${H16}:){7}${H16}`,
+  `(?:${H16}:){1,7}:`,
+  ...[1, 2, 3, 4, 5, 6].map(
+    (tail) => `(?:${H16}:){1,${7 - tail}}(?::${H16}){1,${tail}}`,
+  ),
+  `:(?::${H16}){1,7}`,
+  '::',
+].join('|');
+const PLAIN_HTTP_URL = new RegExp(
+  `^https?://(?:(?:${LABEL}\\.)*[A-Za-z](?:[A-Za-z0-9-]*[A-Za-z0-9])?|${OCTET}(?:\\.${OCTET}){3}|\\[(?:${IPV6})\\])(?::[0-9]{1,5})?(?:/(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9\\-._~!$&'()*+,;=:@/])*)?$`,
+  'i',
+);
 
 async function phaseStart(system, deployment, options) {
   refuseUnless(deployment);
