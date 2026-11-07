@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { Content } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { mockDebugLogger, mockAddDaemonRequestAttribute, statFault } =
@@ -688,6 +689,41 @@ describe('SessionTranscriptReader', () => {
       );
     },
   );
+
+  it('replays the saved startup prelude in both legacy and projection paths', async () => {
+    const preludeMessage = {
+      role: 'user' as const,
+      parts: [{ text: '<system-reminder>\nprelude\n</system-reminder>' }],
+    };
+    const prelude = {
+      ...record('p1', null, ''),
+      type: 'system' as const,
+      subtype: 'startup_context' as const,
+      message: preludeMessage,
+    };
+    const hello = record('u1', 'p1', 'hello');
+    const reply = record('a1', 'u1', 'hi');
+    await writeRecords([prelude, hello, reply]);
+
+    const service = svc();
+    const loaded = await service.loadSession(sessionId);
+    const legacy = buildApiHistoryFromConversation(loaded!.conversation);
+    const shape = (history: readonly Content[]) =>
+      history.map(({ role, parts }) => ({ role, parts }));
+    expect(shape(legacy)).toEqual(
+      shape([preludeMessage, hello.message, reply.message]),
+    );
+
+    for (const options of [NONE, all(false)]) {
+      const projection = await service.readRestoreProjection(
+        sessionId,
+        options,
+      );
+      expect(shape(projection?.runtime.apiHistory ?? [])).toEqual(
+        shape(legacy),
+      );
+    }
+  });
 
   it.each(['user', 'mid-turn'] as const)(
     'keeps directory context non-interrupting after saving and reloading a checkpoint (%s)',

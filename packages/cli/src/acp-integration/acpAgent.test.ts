@@ -9625,6 +9625,40 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('skips the post-activation prelude refresh for a restored standalone session', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const { innerConfig } = await setupSourceMocks(sessionId);
+    innerConfig.getSessionSourceType = vi.fn().mockReturnValue('standalone');
+    (
+      innerConfig as unknown as {
+        getSessionRestoreRuntime: () => unknown;
+      }
+    ).getSessionRestoreRuntime = vi.fn().mockReturnValue({});
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+    try {
+      await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: {
+          [SESSION_SOURCE_META_KEY]: {
+            sourceType: 'standalone',
+            [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+          },
+        },
+      });
+      await lastSessionMock!.installManagedConversationActivation.mock.calls[0]![0]();
+      expect(
+        innerConfig.getLlmClient().refreshStartupContextReminder,
+      ).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('keeps source identity on the bound workspace after a live cwd change', async () => {
     const sessionId = '11111111-1111-4111-8111-111111111111';
     const { innerConfig } = await setupSourceMocks(sessionId);

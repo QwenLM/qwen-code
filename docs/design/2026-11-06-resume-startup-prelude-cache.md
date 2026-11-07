@@ -62,7 +62,12 @@ request actually used.
   current rebuild behavior.
 - MCP/skills/deferred-tool lists in the saved prelude can be stale. A later
   change can append deltas at the request tail; this proposal deliberately
-  does not touch the prefix.
+  does not touch the prefix. The skill-reminder dedup is seeded from the saved
+  `<available_skills>` block, so a resume does not re-announce the whole
+  listing. Deferred-tool and MCP-instruction bookkeeping is still seeded from
+  the live registry, so entries added or removed between sessions are not
+  announced as a tail delta; seeding those from the saved prelude is a
+  follow-up.
 - This is separate from the request-tail memory catalog (#14203) and image
   payload eviction (#15495). A session that already hit those rewrites still
   needs its own fix.
@@ -71,9 +76,15 @@ request actually used.
 
 - Recovering a conversation with a `startup_context` record produces exactly
   one API-history prelude, and the latest record wins.
+- The selective restore projection replays the saved prelude exactly like the
+  legacy full-history path.
 - `getInitialChatHistory()` with a saved prelude returns the same first entry
   and length; it does not rebuild the date/git snapshot.
 - A generated prelude is recorded once; a replayed prelude is not re-recorded.
+- A resumed deferred/standalone session does not rebuild its prelude after
+  activation.
+- A resumed session seeds skill-reminder dedup from the saved listing, so its
+  first turn does not re-announce every available skill/command.
 - Recording a startup prelude alone does not create a transcript; the prelude
   is written ahead of the first real record.
 - Existing image, compression, date-reminder, and rewind tests stay green.

@@ -187,6 +187,7 @@ import {
   getInitialChatHistory,
   getStartupContextLength,
   isSystemReminderContent,
+  parseAvailableSkillsFromPrelude,
   wrapSystemReminder,
   type AgentAvailabilityEntry,
 } from './environmentContext.js';
@@ -711,6 +712,12 @@ export class LlmClient {
       snapshotEntries.map(LlmClient.skillEntryKey),
     );
     this.skillRemindersInitialized = true;
+  }
+
+  private seedSkillReminderDedupFromPrelude(prelude: Content): void {
+    this.seedSkillReminderDedupFromSnapshot(
+      parseAvailableSkillsFromPrelude(prelude),
+    );
   }
 
   private async seedAgentReminderDedupFromCurrent(): Promise<void> {
@@ -3044,7 +3051,14 @@ export class LlmClient {
           collectResidentMemoryBodies(history),
         );
       profiler.timeSync('skill_reminder_seed', () => {
-        this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
+        // A replayed prelude is the listing the model actually saw; seed from
+        // that block rather than re-announcing every currently available
+        // skill/command on the first turn.
+        if (storedPrelude && extraHistory?.[0]) {
+          this.seedSkillReminderDedupFromPrelude(extraHistory[0]);
+        } else {
+          this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
+        }
       });
       await profiler.time('agent_reminder_seed', () =>
         this.seedAgentReminderDedupFromCurrent(),

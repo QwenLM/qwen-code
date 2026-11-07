@@ -1809,6 +1809,41 @@ describe('Gemini Client (client.ts)', () => {
       expect(recorder.recordStartupContext).not.toHaveBeenCalled();
     });
 
+    it('seeds skill dedup from a stored prelude listing', async () => {
+      const stored: Content = {
+        role: 'user',
+        parts: [
+          { text: '<system-reminder>\nstored prelude\n</system-reminder>' },
+          {
+            text: [
+              '<system-reminder>',
+              'The following skills are available for use with the Skill tool.',
+              '<available_skills>',
+              '<skill>',
+              '<name>',
+              'existing',
+              '</name>',
+              '<location>',
+              'project',
+              '</location>',
+              '</skill>',
+              '</available_skills>',
+              '</system-reminder>',
+            ].join('\n'),
+          },
+        ],
+      };
+      const resumed = [stored, userText('resumed')];
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([resumed, []]);
+
+      await client.startChat(resumed, SessionStartSource.Resume);
+
+      expect(
+        (client as unknown as { announcedSkillReminderKeys: Set<string> })
+          .announcedSkillReminderKeys,
+      ).toEqual(new Set(['skill:existing']));
+    });
+
     it('clears trusted user answers when a chat is rebuilt', async () => {
       client.recordTrustedUserAnswers('ask-1', [{ question: 'Continue?' }], {
         '0': 'No',
@@ -16028,6 +16063,7 @@ Other open files:
         seedSkillReminderDedupFromSnapshot(
           entries: AvailableSkillEntry[],
         ): void;
+        seedSkillReminderDedupFromPrelude(prelude: Content): void;
       };
 
     async function drain() {
@@ -16088,6 +16124,37 @@ Other open files:
       await drainWith(makeEntries(['skill-a', 'skill-b']));
 
       expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('seeds from a replayed prelude listing instead of re-announcing it', async () => {
+      priv().seedSkillReminderDedupFromPrelude({
+        role: 'user',
+        parts: [
+          {
+            text: [
+              '<system-reminder>',
+              'The following skills are available for use with the Skill tool.',
+              '<available_skills>',
+              '<skill>',
+              '<name>',
+              'skill-a',
+              '</name>',
+              '<location>',
+              'project',
+              '</location>',
+              '</skill>',
+              '</available_skills>',
+              '</system-reminder>',
+            ].join('\n'),
+          },
+        ],
+      });
+
+      await drainWith(makeEntries(['skill-a', 'skill-b']));
+
+      expect(mockChat.addHistory).toHaveBeenCalledTimes(1);
+      expect(addedText()).toContain('skill-b');
+      expect(addedText()).not.toContain('desc-skill-a');
     });
 
     it('drain with a genuinely new skill emits a reminder', async () => {

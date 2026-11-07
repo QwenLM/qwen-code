@@ -14,7 +14,7 @@ import type {
 } from '../tools/tool-registry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
-import { escapeSystemReminderTags } from '../utils/xml.js';
+import { escapeSystemReminderTags, unescapeXml } from '../utils/xml.js';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
@@ -541,6 +541,49 @@ export async function buildAvailableSkillsReminder(
     reminder: wrapSystemReminder(body),
     renderedEntries: trimmed,
   };
+}
+
+/**
+ * Reconstructs the skill/command entries a stored startup prelude listed, so a
+ * resume can seed reminder dedup from what the model actually saw instead of
+ * re-announcing the whole listing on the first turn.
+ */
+export function parseAvailableSkillsFromPrelude(
+  prelude: Content,
+): AvailableSkillEntry[] {
+  // Anchor on the listing's own part, like isSkillListingReminder: MCP
+  // instructions and ordinary messages can quote the same tags.
+  const listing = (prelude.parts ?? []).find((part) =>
+    part.text?.startsWith(
+      `${SYSTEM_REMINDER_OPEN}\n${SKILLS_AVAILABLE_OPENER}`,
+    ),
+  )?.text;
+  if (listing === undefined) return [];
+
+  const block = /<available_skills>([\s\S]*?)<\/available_skills>/.exec(
+    listing,
+  );
+  if (block?.[1] === undefined) return [];
+
+  const entries: AvailableSkillEntry[] = [];
+  for (const match of block[1].matchAll(/<skill>([\s\S]*?)<\/skill>/g)) {
+    const body = match[1] ?? '';
+    const name = /<name>\s*([\s\S]*?)\s*<\/name>/.exec(body)?.[1];
+    if (name === undefined) continue;
+    const location = /<location>\s*([\s\S]*?)\s*<\/location>/.exec(body)?.[1];
+    entries.push({
+      name: unescapeXml(name.trim()),
+      description: '',
+      ...(location !== undefined
+        ? {
+            level: unescapeXml(location.trim()) as NonNullable<
+              AvailableSkillEntry['level']
+            >,
+          }
+        : {}),
+    });
+  }
+  return entries;
 }
 
 /**

@@ -53,7 +53,11 @@ user record 是真正的 prompt，**没有存 startup prelude**，所以 resume 
   就能重用。
 - Managed session 的 journal 若无法携带此 record，会退回目前的重建行为。
 - 存下来的 MCP / skills / deferred-tool 清单可能过时。后续可在 request 尾端
-  补 delta；本提案刻意不动前缀。
+  补 delta；本提案刻意不动前缀。skill reminder 去重已改为从存档的
+  `<available_skills>` block 播种，resume 的第一回合不会重播整份清单。
+  deferred tool 与 MCP instructions 的去重仍从当前 registry 播种，因此两次
+  session 之间新增或移除的条目不会以 tail delta 宣告；改从存档 prelude 播种
+  留待后续处理。
 - 这与 request-tail memory catalog（#14203）及 image payload eviction
   （#15495）是不同问题；已受那些改写影响的 session 仍需各自的修正。
 
@@ -61,9 +65,14 @@ user record 是真正的 prompt，**没有存 startup prelude**，所以 resume 
 
 - 含 `startup_context` record 的对话还原后，API history 只有一个 prelude，
   且以最新一笔为准。
+- selective restore projection 与 legacy 全量 history 路径重播同一份存档
+  prelude。
 - `getInitialChatHistory()` 收到存档 prelude 时，第一个 entry 与长度不变，
   不再重建日期/git snapshot。
 - 新生成的 prelude 只记录一次；重播的 prelude 不会再记录。
+- 已 resume 的 deferred/standalone session 在 activation 后不重建 prelude。
+- 已 resume 的 session 从存档清单播种 skill reminder 去重，第一回合不会重宣
+  告所有可用 skill/command。
 - 只记录 startup prelude 不会建立 transcript；prelude 会在第一条真实 record
   之前写入。
 - 既有 image、compression、date-reminder、rewind 测试维持绿灯。

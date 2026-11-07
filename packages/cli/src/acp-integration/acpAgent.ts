@@ -17651,8 +17651,12 @@ class QwenAgent implements Agent {
           // any provider-side prefix cache; the history-derived date reminder
           // still refreshes the date at the tail. New sessions have no
           // previous prefix to preserve, so they keep the post-activation
-          // refresh.
-          if (!sessionData) {
+          // refresh. `sessionData` is the legacy replay signal; today's
+          // projection restore reports itself through the restore runtime.
+          const resumedSession =
+            sessionData !== undefined ||
+            config.getSessionRestoreRuntime?.() !== undefined;
+          if (!resumedSession) {
             await config.getLlmClient().refreshStartupContextReminder();
           }
           session.installRewriter();
