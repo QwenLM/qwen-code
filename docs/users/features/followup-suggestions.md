@@ -115,11 +115,11 @@ The fast model is also shown in `/about` output under "Fast Model".
 
 Suggestions go through quality filters to ensure they are useful:
 
-- Must be 2-12 words (CJK: 2-30 characters), under 100 characters total
+- Must be 2-12 words (CJK: 2-30 characters), under 100 characters total. Thai, Lao, Khmer and Myanmar text written without spaces is counted by dictionary word segmentation instead (up to 12 words, or up to 60 characters on Node builds without full ICU)
 - Cannot be evaluative ("looks good", "thanks")
 - Cannot use AI voice ("Let me...", "I'll...")
 - Cannot be multiple sentences or contain formatting (markdown, newlines)
 - Cannot be meta-commentary ("nothing to suggest", "silence")
 - Cannot be error messages or prefixed labels ("Suggestion: ...")
-- Single-word suggestions are only allowed for common commands (yes, commit, push, etc.)
+- In space-delimited scripts, single-word suggestions are only allowed for common commands (yes, commit, push, etc.). A single word in Thai, Lao, Khmer or Myanmar is allowed
 - Slash commands (e.g., `/commit`) are always allowed as single-word suggestions

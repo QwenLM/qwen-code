@@ -99,6 +99,20 @@ describe('Generated UI action invalidation', () => {
       expect(onGeneratedUiInvalidated).not.toHaveBeenCalled();
     },
   );
+
+  it('releases through the workspace client when no session is connected', async () => {
+    const closeSession = vi.fn().mockResolvedValue(undefined);
+    const onGeneratedUiInvalidated = vi.fn();
+    const h = createActionsHarness({
+      getClient: () => ({ closeSession }) as unknown as DaemonClient,
+      onGeneratedUiInvalidated,
+    });
+
+    await h.actions.releaseSession('background');
+
+    expect(closeSession).toHaveBeenCalledWith('background');
+    expect(onGeneratedUiInvalidated).not.toHaveBeenCalled();
+  });
 });
 
 describe('context usage counter reconciliation', () => {
@@ -1673,6 +1687,53 @@ describe('createDaemonSessionActions', () => {
     },
   );
 
+  it('only reports a missing context session for non-silent callers', async () => {
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({ addNotice });
+
+    await expect(actions.getContext({ silent: true })).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+
+    await expect(actions.getContext()).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: 'Load context failed: Daemon session is not connected',
+      }),
+    );
+  });
+
+  it('only reports an in-flight context disconnect for non-silent callers', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('session-a');
+    session.context.mockRejectedValue(new DaemonTransportClosedError());
+    const { actions, getConnection } = createActionsHarness({
+      addNotice,
+      session,
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        workflowModeStatus: 'ready',
+      },
+    });
+
+    await expect(actions.getContext({ silent: true })).rejects.toThrow(
+      'Transport connection closed',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+    expect(getConnection().workflowModeStatus).toBe('unknown');
+
+    await expect(actions.getContext()).rejects.toThrow(
+      'Transport connection closed',
+    );
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'load_context' }),
+    );
+  });
+
   it('does not report a context usage error while the session is disconnected', async () => {
     const addNotice = vi.fn();
     const { actions } = createActionsHarness({ addNotice });
@@ -2218,6 +2279,43 @@ describe('createDaemonSessionActions', () => {
       },
       errorStatus: 503,
     });
+  });
+
+  it('marks a workspace session-limit create failure with its daemon code', async () => {
+    const addNotice = vi.fn();
+    const createDetachedSession = vi.fn(async () => {
+      throw new DaemonHttpError(
+        503,
+        {
+          error: 'Session limit reached (64)',
+          code: 'session_limit_exceeded',
+          limit: 64,
+          scope: 'workspace',
+        },
+        'Session limit reached (64)',
+      );
+    });
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        workspaceCwd: '/workspace',
+      },
+      addNotice,
+      createDetachedSession,
+    });
+
+    await expect(actions.createSession()).rejects.toBeInstanceOf(
+      DaemonHttpError,
+    );
+
+    expect(createDetachedSession).toHaveBeenCalledOnce();
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'create_session',
+        code: 'session_limit_exceeded',
+      }),
+    );
   });
 
   it('publishes standalone recovery after a workspace predecessor is cleared', async () => {

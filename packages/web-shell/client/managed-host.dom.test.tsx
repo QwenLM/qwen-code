@@ -97,7 +97,12 @@ it('accepts a real composer submission without a public durable operation ID', a
     );
     expect(editor.state.doc.toString()).toBe('');
     expect(container.querySelector('[role="alert"]')).toBeNull();
-    expect(container.textContent).not.toContain('unconfirmed');
+    // The unconfirmed-request row renders with role="status", so the alert
+    // assertion above cannot see it; match its actual copy instead of the
+    // word "unconfirmed", which no longer appears in the row.
+    expect(container.textContent).not.toContain(
+      'was not confirmed as submitted',
+    );
     expect(unsupported).not.toHaveBeenCalled();
     expect(unexpectedFetch).not.toHaveBeenCalled();
   } finally {

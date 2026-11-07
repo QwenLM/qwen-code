@@ -692,6 +692,7 @@ describe('allowOriginCors (T2.4 #4514)', () => {
     );
     expect(res.headers.get('vary')).toBe('Origin');
     expect(res.headers.get('access-control-allow-methods')).toMatch(/GET/);
+    expect(res.headers.get('access-control-allow-methods')).toMatch(/PUT/);
     expect(res.headers.get('access-control-allow-headers')).toMatch(
       /Authorization/,
     );

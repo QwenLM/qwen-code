@@ -27,6 +27,7 @@ export {
   CHANNEL_TASK_OUTPUT_META_KEY,
   CHANNEL_TASK_RESULT_META_KEY,
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
+  CHANNEL_TURN_NOTICE_META_KEY,
 } from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,

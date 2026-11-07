@@ -78,8 +78,13 @@ final class JournalWriterLifecycle {
         JournalStoreRows.validateCounter(request.expectedJournalRevision(), "expectedJournalRevision", 1);
         JournalStoreRows.validateCounter(request.expectedCommittedSequence(), "expectedCommittedSequence", 0);
         JournalStoreRows.validateDigest(request.expectedLastCommitDigest(), "expectedLastCommitDigest", true);
-        JournalFencing.lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenant, JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-        lockPublicationWriter(tenant, request.workspaceId(), session, request.writerId(), request.writerGeneration(), token);
+        // No tenant guard: the build transaction holds only this snapshot's own
+        // rows when it reaches the Session root, the read lease protects the
+        // resources it copies, and root and head serialize the writer checks.
+        // A pinned CSI Session still takes both guards behind its root in
+        // lockCsiContinuation (design 2026-11-05-managed-snapshot-writer-tenant-guards).
+        lockPublicationWriter(tenant, request.workspaceId(), session, request.writerId(), request.writerGeneration(),
+                token, false, false);
         fencing.requireOrdinaryAdmission(tenant, session);
         JournalStoreRows.HeadRow locked = storeRows.requireHeadForUpdate(tenant, session);
         RestoreHead head = storeRows.restoreHead(locked);
