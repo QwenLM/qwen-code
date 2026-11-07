@@ -2031,21 +2031,21 @@ function ManagedSessionsContent({
                   welcomeHeader={
                     messages.length === 0 &&
                     !detail.loading &&
-                    !summary?.failure ? (
-                      (() => {
-                        const welcomeProps = {
-                          version: '',
-                          cwd: '',
-                          currentModel: displayedModel,
-                          currentMode: '',
-                        };
-                        return renderWelcomeHeader ? (
-                          renderWelcomeHeader(welcomeProps)
-                        ) : (
-                          <WelcomeHeader {...welcomeProps} />
-                        );
-                      })()
-                    ) : undefined
+                    !summary?.failure
+                      ? (() => {
+                          const welcomeProps = {
+                            version: '',
+                            cwd: '',
+                            currentModel: displayedModel,
+                            currentMode: '',
+                          };
+                          return renderWelcomeHeader ? (
+                            renderWelcomeHeader(welcomeProps)
+                          ) : (
+                            <WelcomeHeader {...welcomeProps} />
+                          );
+                        })()
+                      : undefined
                   }
                 />
               </ToolDetailsContext.Provider>
@@ -2801,23 +2801,34 @@ function ManagedSessionsContent({
                 )}
               {CustomComposerFooter && (
                 <CustomComposerFooter
-                  disabled={busy || Boolean(sessionId && summary && !summary.capabilities.canSend)}
+                  disabled={
+                    busy ||
+                    Boolean(
+                      sessionId && summary && !summary.capabilities.canSend,
+                    )
+                  }
                   isRunning={Boolean(active)}
                   currentMode={summary?.approvalMode ?? 'default'}
                   currentModel={displayedModel ?? ''}
                   sessionName={summary?.title}
                 />
               )}
-              {!CustomComposerFooter && !alignManagedChatWithHost && displayedModel && !modelChange.supported && (
-                <p className="text-xs text-muted-foreground">
-                  {t('managed.modelFixed')}
-                </p>
-              )}
-              {!CustomComposerFooter && !alignManagedChatWithHost && summary?.approvalMode && !approvalChange.supported && (
-                <p className="text-xs text-muted-foreground">
-                  {t('managed.approvalFixed')}
-                </p>
-              )}
+              {!CustomComposerFooter &&
+                !alignManagedChatWithHost &&
+                displayedModel &&
+                !modelChange.supported && (
+                  <p className="text-xs text-muted-foreground">
+                    {t('managed.modelFixed')}
+                  </p>
+                )}
+              {!CustomComposerFooter &&
+                !alignManagedChatWithHost &&
+                summary?.approvalMode &&
+                !approvalChange.supported && (
+                  <p className="text-xs text-muted-foreground">
+                    {t('managed.approvalFixed')}
+                  </p>
+                )}
               {((sessionId &&
                 !active &&
                 summary &&
@@ -2828,12 +2839,11 @@ function ManagedSessionsContent({
                   {sessionId &&
                     !active &&
                     summary &&
-                    !summary.capabilities.canSend && (
-                      !alignManagedChatWithHost && (
-                        <span className="mr-auto text-sm text-muted-foreground">
-                          {t('managed.newRequired')}
-                        </span>
-                      )
+                    !summary.capabilities.canSend &&
+                    !alignManagedChatWithHost && (
+                      <span className="mr-auto text-sm text-muted-foreground">
+                        {t('managed.newRequired')}
+                      </span>
                     )}
                   {(!home || Boolean(text.trim())) && cancelButton}
                 </div>

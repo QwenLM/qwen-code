@@ -10,7 +10,10 @@ import { webcrypto } from 'node:crypto';
 import { pendingQuestion } from './managed-question.test-fixtures';
 import * as pendingStorage from './managed-pending-storage';
 import { I18nProvider } from '../../i18n';
-import { WebShellCustomizationProvider, type WebShellCustomization } from '../../customization';
+import {
+  WebShellCustomizationProvider,
+  type WebShellCustomization,
+} from '../../customization';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
@@ -307,14 +310,14 @@ describe('ManagedSessionsPage', () => {
       root.render(
         <I18nProvider language={language}>
           <WebShellCustomizationProvider value={customization}>
-          <ManagedSessionsPage
-            sessionId={sessionId}
-            onSelectSession={onSelect}
-            managedAgentProvider={managedAgentProvider ?? undefined}
-            navigationTarget={navigationTarget}
-            interactive={interactive}
-            {...extraProps}
-          />
+            <ManagedSessionsPage
+              sessionId={sessionId}
+              onSelectSession={onSelect}
+              managedAgentProvider={managedAgentProvider ?? undefined}
+              navigationTarget={navigationTarget}
+              interactive={interactive}
+              {...extraProps}
+            />
           </WebShellCustomizationProvider>
         </I18nProvider>,
       );
@@ -4252,10 +4255,21 @@ describe('ManagedSessionsPage', () => {
   );
 
   it('aligns managed composer copy with the host when asked', async () => {
-    mocks.client.getTranscript.mockResolvedValue({ events: [], lastEventId: 0 });
-    await render('s1', 'en', provider, null, true, {}, {
-      alignManagedChatWithHost: true,
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
     });
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        alignManagedChatWithHost: true,
+      },
+    );
     // 与普通会话同一个 placeholder，不再是 managed 专属文案
     const label = container
       .querySelector('textarea')
@@ -4267,7 +4281,10 @@ describe('ManagedSessionsPage', () => {
   });
 
   it('keeps managed copy by default so the standalone page is unchanged', async () => {
-    mocks.client.getTranscript.mockResolvedValue({ events: [], lastEventId: 0 });
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
     await render('s1', 'en', provider, null, true, {}, {});
     // placeholder 落在 textarea 的 aria-label（ChatEditor 的可访问性口径）
     expect(
@@ -4276,7 +4293,10 @@ describe('ManagedSessionsPage', () => {
   });
 
   it('renders the host welcome header when customization provides one', async () => {
-    mocks.client.getTranscript.mockResolvedValue({ events: [], lastEventId: 0 });
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
     const renderWelcomeHeader = vi.fn(() => <div>HOST-WELCOME</div>);
     await render('s1', 'en', provider, null, true, {}, { renderWelcomeHeader });
     expect(renderWelcomeHeader).toHaveBeenCalled();
@@ -4287,7 +4307,15 @@ describe('ManagedSessionsPage', () => {
 
   it('renders the host composer footer instead of managed fixed-model hints', async () => {
     const CustomFooter = vi.fn(() => <div>HOST-FOOTER</div>);
-    await render('s1', 'en', provider, null, true, {}, { renderComposerFooter: CustomFooter });
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      { renderComposerFooter: CustomFooter },
+    );
     expect(CustomFooter).toHaveBeenCalled();
     expect(container.textContent).toContain('HOST-FOOTER');
     // 宿主接管该区域后，托管默认「模型已固定」提示不再叠加。
@@ -4295,7 +4323,10 @@ describe('ManagedSessionsPage', () => {
   });
 
   it('falls back to the built-in welcome header without host customization', async () => {
-    mocks.client.getTranscript.mockResolvedValue({ events: [], lastEventId: 0 });
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
     await render('s1');
     expect(container.textContent).toContain('Welcome to');
   });
