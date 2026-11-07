@@ -1,0 +1,45 @@
+{
+  "name": "@qwen-code/document-generation",
+  "private": true,
+  "version": "0.25.2",
+  "description": "Local DOCX generation extension for Qwen Code",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QwenLM/qwen-code.git",
+    "directory": "packages/document-generation"
+  },
+  "scripts": {
+    "build": "esbuild src/server.ts --bundle --platform=node --target=node22 --format=esm --legal-comments=linked --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=dist/server.js && npm run generate:notices",
+    "generate:notices": "node ../vscode-ide-companion/scripts/generate-notices.js --bundled . && node -e \"require('node:fs').renameSync('NOTICES.txt', 'dist/NOTICES.txt')\"",
+    "test": "npm run build && vitest run",
+    "test:ci": "npm run build && vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "files": [
+    "dist",
+    "qwen-extension.json",
+    "skills",
+    "README.md",
+    "README.zh-CN.md"
+  ],
+  "bundledDevDependencies": [
+    "@modelcontextprotocol/sdk",
+    "docx",
+    "zod"
+  ],
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@types/node": "^22.0.0",
+    "docx": "9.12.0",
+    "esbuild": "^0.25.0",
+    "fast-xml-parser": "5.8.0",
+    "jszip": "3.10.2",
+    "typescript": "^5.4.5",
+    "vitest": "^3.2.4",
+    "zod": "3.25.76"
+  }
+}
