@@ -302,6 +302,16 @@ public interface SessionLifecycleStore {
             boolean harnessConfirmed);
 
     /**
+     * Binds the Harness boot id of a Session that has no Turn to hang
+     * {@link TurnExecutionStore#bindHarness} on — the automation verbs'
+     * create of a never-attached Session. Fills the column only when it is
+     * still empty, so a Turn that concurrently bound another generation keeps
+     * its own binding.
+     */
+    public void bindSessionHarness(String tenantId, String sessionId,
+            String harnessBootId);
+
+    /**
      * Terminates a claimed operation whose retry budget is spent, recording
      * the failure honestly: the operation row goes to FAILED with the
      * failure code kept and delivery_state CONFIRMED so no recovery path
