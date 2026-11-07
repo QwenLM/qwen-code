@@ -232,7 +232,7 @@ describe('settings presentation aliases', () => {
     // SETTING_KEYS is module-private, so this mirror pins the published
     // alias-to-key contract; the completeness assertion keeps it in sync.
     const aliasedKeys = {
-      'setting:auto-update': 'general.enableAutoUpdate',
+      'setting:auto-update': 'general.updateMode',
       'setting:session-recap': 'general.showSessionRecap',
       'setting:session-recap-away-threshold':
         'general.sessionRecapAwayThresholdMinutes',

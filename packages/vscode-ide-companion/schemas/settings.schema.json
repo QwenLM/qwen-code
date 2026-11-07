@@ -125,9 +125,18 @@
           }
         },
         "enableAutoUpdate": {
-          "description": "Enable automatic update checks and installations on startup.",
+          "description": "Deprecated — use general.updateMode. Kept for compatibility: false resolves to updateMode \"off\", true to \"auto\"; an explicit updateMode always wins.",
           "type": "boolean",
           "default": true
+        },
+        "updateMode": {
+          "description": "Controls startup update behavior. \"auto\" checks for updates on startup and installs them in the background; \"notify\" checks and shows how to update without ever installing; \"off\" skips the startup check entirely. A legacy general.enableAutoUpdate resolves automatically: false behaves as \"off\", true as \"auto\". Options: auto, notify, off",
+          "enum": [
+            "auto",
+            "notify",
+            "off"
+          ],
+          "default": "auto"
         },
         "batchAutoCollect": {
           "description": "Collect this project's /batch-api tasks in interactive sessions when their batch finishes (also at startup) and write the results. Polls the provider over HTTP; never calls the model and never retries failed items.",

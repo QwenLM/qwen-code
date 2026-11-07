@@ -2,7 +2,7 @@
 export const OUTPUT_LANGUAGE_SETTING_KEY = 'general.outputLanguage';
 
 const SETTING_KEYS = {
-  'setting:auto-update': 'general.enableAutoUpdate',
+  'setting:auto-update': 'general.updateMode',
   'setting:session-recap': 'general.showSessionRecap',
   'setting:session-recap-away-threshold':
     'general.sessionRecapAwayThresholdMinutes',

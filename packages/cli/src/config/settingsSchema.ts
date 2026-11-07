@@ -573,8 +573,23 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Enable automatic update checks and installations on startup.',
+          'Deprecated — use general.updateMode. Kept for compatibility: false resolves to updateMode "off", true to "auto"; an explicit updateMode always wins.',
+        showInDialog: false,
+      },
+      updateMode: {
+        type: 'enum',
+        label: 'Update Mode',
+        category: 'General',
+        requiresRestart: false,
+        default: 'auto',
+        description:
+          'Controls startup update behavior. "auto" checks for updates on startup and installs them in the background; "notify" checks and shows how to update without ever installing; "off" skips the startup check entirely. A legacy general.enableAutoUpdate resolves automatically: false behaves as "off", true as "auto".',
         showInDialog: true,
+        options: [
+          { value: 'auto', label: 'Auto (check + install)' },
+          { value: 'notify', label: 'Notify only (check, never install)' },
+          { value: 'off', label: 'Off (no startup check)' },
+        ],
       },
       batchAutoCollect: {
         type: 'boolean',

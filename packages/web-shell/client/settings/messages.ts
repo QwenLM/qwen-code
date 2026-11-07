@@ -222,7 +222,14 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.category.Experimental': '实验性',
   'settings.category.Advanced': '高级',
   'settings.label.general.enableAutoUpdate': '启用自动更新',
-  'settings.description.general.enableAutoUpdate': '启动时自动检查并安装更新。',
+  'settings.description.general.enableAutoUpdate':
+    '启动时自动检查并安装更新。（已弃用：请使用 general.updateMode）',
+  'settings.label.general.updateMode': '更新模式',
+  'settings.description.general.updateMode':
+    '控制启动时的更新行为："auto" 检查并自动安装；"notify" 只检查并提示更新命令、从不安装；"off" 完全跳过启动检查。旧键 enableAutoUpdate 会自动换算：false 等同 "off"，true 等同 "auto"；显式 updateMode 优先生效。',
+  'settings.option.general.updateMode.auto': '自动（检查并安装）',
+  'settings.option.general.updateMode.notify': '仅通知（检查，不安装）',
+  'settings.option.general.updateMode.off': '关闭（不做启动检查）',
   'settings.label.general.showSessionRecap': '显示会话回顾',
   'settings.description.general.showSessionRecap':
     '离开终端一段时间后返回时，自动显示一行“上次停在这里”的回顾。默认关闭。也可以随时使用 /recap 手动触发。',
