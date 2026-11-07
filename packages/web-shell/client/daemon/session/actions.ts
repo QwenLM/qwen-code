@@ -51,6 +51,7 @@ import {
   extractHttpStatus,
   isInvalidClientIdError,
   isAcpChildCapacityError,
+  isSessionLimitExceededError,
 } from './httpErrors.js';
 import {
   applyConfigOptions,
@@ -2792,6 +2793,9 @@ export function createDaemonSessionActions({
           }`,
           error,
           'create_session',
+          isSessionLimitExceededError(error)
+            ? { code: 'session_limit_exceeded' }
+            : undefined,
         );
       }
     },
@@ -2873,17 +2877,19 @@ export function createDaemonSessionActions({
 
     async releaseSession(sessionId) {
       try {
-        const session = requireSessionForAction(
-          addNotice,
-          sessionRef.current,
-          'Release session failed',
-          'release_session',
-        );
+        const session = sessionRef.current;
+        // The release dialog is reachable from the empty new-session screen,
+        // where no session client exists yet. Fall back to the workspace
+        // daemon client so the recovery action still frees the slot.
+        const client = session?.client ?? getClient?.();
+        if (!client) {
+          throw new Error('Daemon session is not connected');
+        }
         await withActionTimeout(
-          session.client.closeSession(sessionId),
+          client.closeSession(sessionId),
           'Release session timed out',
         );
-        onGeneratedUiInvalidated?.(session, 'deleted', sessionId);
+        if (session) onGeneratedUiInvalidated?.(session, 'deleted', sessionId);
       } catch (error) {
         throw dispatchActionError(
           addNotice,
