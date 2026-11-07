@@ -376,6 +376,25 @@ describe('ChatRecordingService', () => {
       expect(preludeRecord!.parentUuid).toBeNull();
       expect(userRecord!.parentUuid).toBe(preludeRecord!.uuid);
     });
+
+    it('parents the first strict record on the flushed prelude', async () => {
+      svc.recordStartupContext({
+        role: 'user',
+        parts: [{ text: '<system-reminder>\nprelude\n</system-reminder>' }],
+      });
+      await recordModel('scratch-model');
+      user('hello');
+
+      const [preludeRecord, modelRecord, userRecord] = await flushedAll();
+      expect(subtypes([preludeRecord!, modelRecord!, userRecord!])).toEqual([
+        'startup_context',
+        'session_model',
+        undefined,
+      ]);
+      expect(preludeRecord!.parentUuid).toBeNull();
+      expect(modelRecord!.parentUuid).toBe(preludeRecord!.uuid);
+      expect(userRecord!.parentUuid).toBe(modelRecord!.uuid);
+    });
   });
 
   describe('background execution recording ownership', () => {
