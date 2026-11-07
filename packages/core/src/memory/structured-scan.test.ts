@@ -17,6 +17,7 @@ import {
 } from './paths.js';
 import { getImportedProjectMemoryRoot } from './import-paths.js';
 import {
+  compareAutoMemoryDocuments,
   parseAutoMemoryTopicDocument,
   rereadAutoMemoryDocument,
   sanitizeAutoMemoryPromptField,
@@ -1457,6 +1458,58 @@ describe('auto-memory topic scanning', () => {
       ).toBe(false);
     } finally {
       readDirectory.mockRestore();
+    }
+  });
+});
+
+describe('compareAutoMemoryDocuments', () => {
+  type Doc = { relativePath: string; mtimeMs: number; filename: string };
+  const doc = (over: Partial<Doc> = {}): Doc => ({
+    relativePath: 'notes.md',
+    mtimeMs: 0,
+    filename: 'notes.md',
+    ...over,
+  });
+
+  it('orders native memory before imported regardless of mtime', () => {
+    const imported = doc({ relativePath: 'imported/notes.md', mtimeMs: 100 });
+    const native = doc({ mtimeMs: 50 });
+    expect(compareAutoMemoryDocuments(imported, native)).toBeGreaterThan(0);
+    expect(compareAutoMemoryDocuments(native, imported)).toBeLessThan(0);
+  });
+
+  it('orders newest mtime first, then filename, then relative path', () => {
+    expect(
+      compareAutoMemoryDocuments(doc({ mtimeMs: 200 }), doc({ mtimeMs: 100 })),
+    ).toBeLessThan(0);
+    expect(
+      compareAutoMemoryDocuments(
+        doc({ mtimeMs: 100, filename: 'b.md' }),
+        doc({ mtimeMs: 100, filename: 'a.md' }),
+      ),
+    ).toBeGreaterThan(0);
+    expect(
+      compareAutoMemoryDocuments(
+        doc({ mtimeMs: 100, relativePath: 'z/n.md' }),
+        doc({ mtimeMs: 100, relativePath: 'a/n.md' }),
+      ),
+    ).toBeGreaterThan(0);
+  });
+
+  it('is a consistent total order (transitive, antisymmetric, total)', () => {
+    const docs = [
+      doc({ relativePath: 'imported/b.md', mtimeMs: 300 }),
+      doc({ relativePath: 'b.md', mtimeMs: 100 }),
+      doc({ relativePath: 'a.md', mtimeMs: 300, filename: 'a.md' }),
+      doc({ relativePath: 'imported/a.md', mtimeMs: 100 }),
+    ];
+    for (const a of docs) {
+      for (const b of docs) {
+        const ab = compareAutoMemoryDocuments(a, b);
+        const ba = compareAutoMemoryDocuments(b, a);
+        expect(ab === 0).toBe(a === b);
+        if (ab !== 0) expect(Math.sign(ba)).toBe(-Math.sign(ab));
+      }
     }
   });
 });

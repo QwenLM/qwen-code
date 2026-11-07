@@ -460,6 +460,27 @@ export function isImportedMemoryDocument(
   return doc.relativePath.startsWith('imported/');
 }
 
+/**
+ * The ordering every resolution point that must agree with core's
+ * recall/forget applies to scanned documents: native memory ahead of
+ * imported, then newest mtime, then filename and relative path as
+ * deterministic tiebreaks. `sortScannedDocuments` applies it to a whole
+ * scan; callers that resolve the same relativePath against several roots
+ * (e.g. the serve auto-memory listing) must order with it before
+ * deduping, so the survivor is the document recall would inject.
+ */
+export function compareAutoMemoryDocuments(
+  a: Pick<ScannedAutoMemoryDocument, 'relativePath' | 'mtimeMs' | 'filename'>,
+  b: Pick<ScannedAutoMemoryDocument, 'relativePath' | 'mtimeMs' | 'filename'>,
+): number {
+  return (
+    Number(isImportedMemoryDocument(a)) - Number(isImportedMemoryDocument(b)) ||
+    b.mtimeMs - a.mtimeMs ||
+    a.filename.localeCompare(b.filename) ||
+    a.relativePath.localeCompare(b.relativePath)
+  );
+}
+
 function sortScannedDocuments(
   docs: ScannedAutoMemoryDocument[],
   deterministic?: boolean,
@@ -472,14 +493,7 @@ function sortScannedDocuments(
             ? 1
             : 0,
       )
-    : docs.sort(
-        (a, b) =>
-          Number(isImportedMemoryDocument(a)) -
-            Number(isImportedMemoryDocument(b)) ||
-          b.mtimeMs - a.mtimeMs ||
-          a.filename.localeCompare(b.filename) ||
-          a.relativePath.localeCompare(b.relativePath),
-      );
+    : docs.sort((a, b) => compareAutoMemoryDocuments(a, b));
 }
 
 async function scanAutoMemoryDocumentsFromRootWithStatus(

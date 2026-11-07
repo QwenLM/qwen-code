@@ -79,10 +79,19 @@ export function MemoryMessage({
   const handledAddSignalRef = useRef(0);
   // The file whose text `content`/`draft` hold (`scope\0path`).
   const loadedKeyRef = useRef<string | null>(null);
+  // The file tab the user was on before the Auto tab. The capability-loss
+  // fallback returns there (never a hardcoded file tab), so it reloads the
+  // file that owns any unsaved draft instead of wiping it.
+  const lastFileTabRef = useRef<MemoryScope>('workspace');
+  useEffect(() => {
+    if (selectedTab !== 'auto') lastFileTabRef.current = selectedTab;
+  }, [selectedTab]);
   // The gate holds at both ends: when the tag goes away (e.g. while
   // capabilities refetch) the Auto tab is not rendered, nor is its panel.
   const activeTab: MemoryTab =
-    selectedTab === 'auto' && !autoMemoryAvailable ? 'workspace' : selectedTab;
+    selectedTab === 'auto' && !autoMemoryAvailable
+      ? lastFileTabRef.current
+      : selectedTab;
 
   const entries = useMemo<MemoryEntry[]>(() => {
     const globalFile = fileForScope(files, 'global');

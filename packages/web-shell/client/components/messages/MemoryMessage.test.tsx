@@ -431,6 +431,50 @@ describe('MemoryMessage auto tab', () => {
     expect(active.map((item) => item.textContent)).toEqual(['Workspace']);
   });
 
+  // The capability-loss fallback must return to the tab the user was on,
+  // not a hardcoded 'workspace': a dirty draft in that other file tab
+  // survives the fallback instead of being wiped by the fallback tab's
+  // reload.
+  it('keeps a dirty User-tab draft when the tag goes away on the Auto tab', async () => {
+    autoMemory.status = AUTO_STATUS;
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'global text\n',
+      truncated: false,
+    });
+
+    mountDialog();
+    await flush();
+    act(() => button('User').click());
+    await flush();
+    act(() => button('Edit').click());
+    await flush();
+    const editor = container.querySelector('textarea')!;
+    expect(editor.value).toBe('global text\n');
+    type(editor, 'global text\nmy typed line\n');
+
+    act(() => button('Auto memory').click());
+    await flush();
+
+    // Capabilities refetch without the tag.
+    connectionState.capabilities.features = [];
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MemoryMessage />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const active = Array.from(container.querySelectorAll('nav button')).filter(
+      (item) => item.className.includes('memoryCardActive'),
+    );
+    expect(active.map((item) => item.textContent)).toEqual(['User']);
+    expect(container.querySelector('textarea')?.value).toBe(
+      'global text\nmy typed line\n',
+    );
+  });
+
   it('keeps an unsaved edit across a round trip through the Auto tab', async () => {
     autoMemory.status = AUTO_STATUS;
     memory.files = [

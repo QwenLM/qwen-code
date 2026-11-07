@@ -18,6 +18,7 @@ import {
   runWithMemoryProjectScope,
 } from '@qwen-code/qwen-code-core/memory/paths.js';
 import { sanitizeIndexField } from '@qwen-code/qwen-code-core/memory/indexer.js';
+import { compareAutoMemoryDocuments } from '@qwen-code/qwen-code-core/memory/structured-scan.js';
 import { resolveTrustedMemoryRoot } from '@qwen-code/qwen-code-core/memory/trusted-memory-filesystem.js';
 import { detectBOM } from '@qwen-code/qwen-code-core/utils/fileUtils.js';
 import { parse as parseYaml } from '@qwen-code/qwen-code-core/utils/yaml-parser.js';
@@ -62,8 +63,9 @@ import type {
  * The project scope walks core's trusted project root SET
  * (`getProjectAutoMemoryRoots`): the configured root plus, for a trusted
  * workspace, the repo-local `.qwen/memory` — the same universe recall
- * and forget scan, with the same first-root-wins precedence for a
- * relative path present in several roots and the same exclusion of the
+ * and forget scan, with the same newest-mtime precedence for a relative
+ * path present in several roots (core's scan comparator, shared via
+ * `compareAutoMemoryDocuments`) and the same exclusion of the
  * `MEMORY.md` index. A PROJECT root is admitted only through core's
  * whole-chain check (`resolveTrustedMemoryRoot`): a symlinked root or a
  * symlinked ancestor inside its trusted anchor (a repo-tracked
@@ -449,55 +451,44 @@ export async function collectWorkspaceAutoMemoryStatus(
     );
   };
 
-  const listRoot = async (
+  const buildEntry = async (
     scope: ServeAutoMemoryScope,
-    root: string,
-    seen?: Set<string>,
+    file: ScannedFile,
   ): Promise<void> => {
-    const files: ScannedFile[] = [];
-    await collectFilesIn(root, root, files, errors);
-    files.sort((a, b) =>
-      a.relativePath < b.relativePath
-        ? -1
-        : a.relativePath > b.relativePath
-          ? 1
-          : 0,
-    );
-    for (const file of files) {
-      // Core's cross-root precedence: the first root holding a relative
-      // path wins, so a copy in a later root is not a second memory.
-      if (seen) {
-        if (seen.has(file.relativePath)) continue;
-        seen.add(file.relativePath);
-      }
-      const meta = await probeFrontmatter(file.absolutePath);
-      // Collaborator-authored frontmatter is hostile input: core's index
-      // sanitizer strips control/zero-width/bidi chars, collapses
-      // whitespace and caps the length, so a repo-tracked file cannot
-      // reorder rendered text or overflow the row (same contract core
-      // applies before embedding the fields in the committed index).
-      const title =
-        meta['name'] ?? meta['title'] ?? titleFromFilename(file.absolutePath);
-      const entry: ServeAutoMemoryFile = {
-        kind: 'auto_memory_file',
-        scope,
-        path: file.absolutePath,
-        title: sanitizeIndexField(title),
-        bytes: file.bytes,
-        modifiedAt: new Date(file.mtimeMs).toISOString(),
-      };
-      if (meta['description']) {
-        entry.description = sanitizeIndexField(meta['description']);
-      }
-      if (meta['type']) entry.type = meta['type'];
-      if (meta['category']) entry.category = meta['category'];
-      entries.push(entry);
+    const meta = await probeFrontmatter(file.absolutePath);
+    // Collaborator-authored frontmatter is hostile input: core's index
+    // sanitizer strips control/zero-width/bidi chars, collapses
+    // whitespace and caps the length, so a repo-tracked file cannot
+    // reorder rendered text or overflow the row (same contract core
+    // applies before embedding the fields in the committed index).
+    const title =
+      meta['name'] ?? meta['title'] ?? titleFromFilename(file.absolutePath);
+    const entry: ServeAutoMemoryFile = {
+      kind: 'auto_memory_file',
+      scope,
+      path: file.absolutePath,
+      title: sanitizeIndexField(title),
+      bytes: file.bytes,
+      modifiedAt: new Date(file.mtimeMs).toISOString(),
+    };
+    if (meta['description']) {
+      entry.description = sanitizeIndexField(meta['description']);
     }
+    if (meta['type']) entry.type = meta['type'];
+    if (meta['category']) entry.category = meta['category'];
+    entries.push(entry);
   };
+
+  const byRelativePath = (a: ScannedFile, b: ScannedFile) =>
+    a.relativePath < b.relativePath
+      ? -1
+      : a.relativePath > b.relativePath
+        ? 1
+        : 0;
 
   let projectExists = false;
   const projectDirs: string[] = [];
-  const seenProjectPaths = new Set<string>();
+  const projectFiles: ScannedFile[] = [];
   for (const root of projectRoots) {
     const admission = await admitAutoMemoryProjectRoot(root);
     if (admission.state === 'absent') continue;
@@ -515,7 +506,36 @@ export async function collectWorkspaceAutoMemoryStatus(
       continue;
     }
     projectDirs.push(root);
-    await listRoot('project', root, seenProjectPaths);
+    await collectFilesIn(root, root, projectFiles, errors);
+  }
+  // Cross-root collision: one relativePath can exist in several walked
+  // roots. Core's recall/forget resolve it by ordering the documents
+  // with core's scan comparator (native before imported, newest mtime
+  // first) and keeping the first per relativePath — the listing applies
+  // that same resolution so it reports the document recall would
+  // inject, not whichever root was walked first.
+  const projectWinners = new Map<string, ScannedFile>();
+  const orderedProjectFiles = [...projectFiles].sort((a, b) =>
+    compareAutoMemoryDocuments(
+      {
+        relativePath: a.relativePath,
+        mtimeMs: a.mtimeMs,
+        filename: path.basename(a.absolutePath),
+      },
+      {
+        relativePath: b.relativePath,
+        mtimeMs: b.mtimeMs,
+        filename: path.basename(b.absolutePath),
+      },
+    ),
+  );
+  for (const file of orderedProjectFiles) {
+    if (!projectWinners.has(file.relativePath)) {
+      projectWinners.set(file.relativePath, file);
+    }
+  }
+  for (const file of [...projectWinners.values()].sort(byRelativePath)) {
+    await buildEntry('project', file);
   }
 
   // The user root is deliberately symlink-tolerant (dotfiles layout).
@@ -526,7 +546,11 @@ export async function collectWorkspaceAutoMemoryStatus(
     if (userStat.isDirectory()) {
       userExists = true;
       userDirExists = true;
-      await listRoot('user', userDir);
+      const userFiles: ScannedFile[] = [];
+      await collectFilesIn(userDir, userDir, userFiles, errors);
+      for (const file of userFiles.sort(byRelativePath)) {
+        await buildEntry('user', file);
+      }
     }
   } catch (err) {
     if (!isEnoent(err)) {

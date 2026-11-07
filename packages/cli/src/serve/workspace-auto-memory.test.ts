@@ -378,22 +378,54 @@ describe('collectWorkspaceAutoMemoryStatus', () => {
     ).rejects.toMatchObject({ code: 'outside' });
   });
 
-  it('publishes a relative path present in both project roots once, first root wins', async () => {
-    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
-    clearAutoMemoryRootCache();
-    const configuredRoot = getAutoMemoryRoot(workspace);
-    await writeFile(configuredRoot, 'shared.md', 'configured copy\n');
-    await writeFile(projectDir, 'shared.md', 'repo copy, longer\n');
+  // A relativePath present in several walked project roots must resolve
+  // the way core's recall/forget do (newest mtime wins, via core's scan
+  // comparator) — not "first root wins": otherwise the listing could
+  // show a copy recall never injects.
+  describe('cross-root relativePath collision', () => {
+    const OLDER = new Date('2026-11-01T00:00:00Z');
+    const NEWER = new Date('2026-11-02T00:00:00Z');
 
-    const status = await collectWorkspaceAutoMemoryStatus(workspace, {
-      trusted: true,
+    async function twoRootsWithShared(relative: string) {
+      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      clearAutoMemoryRootCache();
+      const configuredRoot = getAutoMemoryRoot(workspace);
+      await writeFile(configuredRoot, relative, 'configured copy\n');
+      await writeFile(projectDir, relative, 'repo copy, longer\n');
+      return configuredRoot;
+    }
+
+    it('reports the newer copy when the repo-local root is newer', async () => {
+      const configuredRoot = await twoRootsWithShared('shared.md');
+      await fs.utimes(path.join(configuredRoot, 'shared.md'), OLDER, OLDER);
+      await fs.utimes(path.join(projectDir, 'shared.md'), NEWER, NEWER);
+
+      const status = await collectWorkspaceAutoMemoryStatus(workspace, {
+        trusted: true,
+      });
+
+      expect(status.entries.map((entry) => entry.path)).toEqual([
+        path.join(projectDir, 'shared.md'),
+      ]);
+      expect(status.fileCount).toBe(1);
+      expect(status.totalBytes).toBe('repo copy, longer\n'.length);
     });
 
-    expect(status.entries.map((entry) => entry.path)).toEqual([
-      path.join(configuredRoot, 'shared.md'),
-    ]);
-    expect(status.fileCount).toBe(1);
-    expect(status.totalBytes).toBe('configured copy\n'.length);
+    it('reports the newer copy when the configured root is newer', async () => {
+      const configuredRoot = await twoRootsWithShared('shared.md');
+      await fs.utimes(path.join(configuredRoot, 'shared.md'), NEWER, NEWER);
+      await fs.utimes(path.join(projectDir, 'shared.md'), OLDER, OLDER);
+
+      const status = await collectWorkspaceAutoMemoryStatus(workspace, {
+        trusted: true,
+      });
+
+      expect(status.entries.map((entry) => entry.path)).toEqual([
+        path.join(configuredRoot, 'shared.md'),
+      ]);
+      expect(status.fileCount).toBe(1);
+      expect(status.totalBytes).toBe('configured copy\n'.length);
+    });
   });
 
   it('never lists the MEMORY.md index, at any depth', async () => {
