@@ -241,7 +241,8 @@ export function registerMcpHotReload(
 > **Admission stance decision (deliberate)**: hot-reload makes **current settings win _within_ the
 > startup `--allowed-mcp-server-names` bound** — a runtime edit to `mcp.allowed` / `mcp.excluded` in
 > `settings.json` takes effect immediately, but **only narrows admission, never widens it beyond the
-> launch flag** (see Part F for the upper-bound rule and the `mcp.allowed: []` semantics). If no
+> launch flag** (see Part F for the upper-bound rule and the `mcp.allowed: []` semantics). Names passed
+> via `--disable-mcp-server` stay excluded across every reload. If no
 > `--allowed-mcp-server-names` flag was passed, settings fully drive admission. **The pending-approval
 > gate (#4615) never yields** regardless: a gated server must always be approved first (Part A item 4).
 >
@@ -494,6 +495,13 @@ allow-list to it:
 So a runtime edit can only ever narrow MCP admission below the launch flag, never widen past it.
 `mcp.excluded` still narrows further at discovery time, consistent with "only stricter, never looser".
 
+The `--disable-mcp-server` names are the deny-side counterpart: captured on `Config`
+(`cliExcludedMcpServerNames` → `getCliExcludedMcpServerNames()`) and unioned into the settings-derived
+`mcp.excluded` by `recomputeMcpGating` on every runtime recompute (settings hot-reload and ACP
+`workspaceMcpReload`; bare/safe mode via `bareSafeMcpGating`). A settings edit can exclude more servers
+but never re-enable a flag-disabled one, and a gated server the effective exclusion list already rules out
+is not offered for approval.
+
 #### H — `mcp.allowed: []` is deny-all, consistently across boot and hot-reload
 
 Boot treats an empty allow-list as deny-all (`getMcpServers()` filters whenever `allowedMcpServers`
@@ -509,13 +517,13 @@ compare equal and never reconcile. `excluded` / `pending` keep `undefined ≡ []
 configured". With admission gating it now classifies the owning server via a single core API,
 `Config.getMcpServerUnavailableReason(name)`, covering every gate:
 
-| reason             | meaning                                       | recovery the message suggests                     |
-| ------------------ | --------------------------------------------- | ------------------------------------------------- |
-| `removed`          | deleted from the merged config this session   | re-add it to settings                             |
-| `not_allowed`      | filtered out by `mcp.allowed` / the CLI bound | add it to `mcp.allowed`                           |
-| `excluded`         | listed in `mcp.excluded`                      | remove it from `mcp.excluded`                     |
-| `pending_approval` | gated server awaiting approval (#4615)        | approve it (run `/mcp`)                           |
-| _(none)_           | configured & admitted                         | genuine "tool not found" (disconnected / renamed) |
+| reason             | meaning                                           | recovery the message suggests                                   |
+| ------------------ | ------------------------------------------------- | --------------------------------------------------------------- |
+| `removed`          | deleted from the merged config this session       | re-add it to settings                                           |
+| `not_allowed`      | filtered out by `mcp.allowed` / the CLI bound     | add it to `mcp.allowed`                                         |
+| `excluded`         | listed in `mcp.excluded` / `--disable-mcp-server` | remove it from `mcp.excluded`; a flag exclusion needs a restart |
+| `pending_approval` | gated server awaiting approval (#4615)            | approve it (run `/mcp`)                                         |
+| _(none)_           | configured & admitted                             | genuine "tool not found" (disconnected / renamed)               |
 
 Two supporting changes: a private `getMergedMcpServers()` (the merge **without** the allow-list
 filter) so "configured" can be told apart from "filtered out"; and removal tracking now diffs that
@@ -526,12 +534,14 @@ longer mis-reported as `removed` (it's `not_allowed`). That also lets the
 
 #### Key files (Part F)
 
-| File                                                  | Change                                                                                                                                                                                                                                                                                                                    |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/cli/src/config/config.ts` (`loadCliConfig`) | pass the `--allowed-mcp-server-names` flag value alone as `cliAllowedMcpServerNames`                                                                                                                                                                                                                                      |
-| `packages/core/src/config/config.ts`                  | `cliAllowedMcpServerNames` field + `getCliAllowedMcpServerNames()` (K); `getMergedMcpServers()` (unfiltered) + `getMcpServerNames()`; `McpServerUnavailableReason` + `getMcpServerUnavailableReason()` (B); removal tracking diffs the merged map and `reinitializeMcpServers` drops the `prevEffectiveServerNames` param |
-| `packages/cli/src/config/hot-reload.ts`               | `recomputeMcpGating` caps `allowed` to the boot bound (K) and preserves `[]` (H); `mcpGatingEqual` makes `allowed` absent ≠ `[]` (H)                                                                                                                                                                                      |
-| `packages/core/src/core/coreToolScheduler.ts`         | `getMcpToolUnavailableMessage` routes per `getMcpServerUnavailableReason` (B)                                                                                                                                                                                                                                             |
+| File                                                  | Change                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/cli/src/config/config.ts` (`loadCliConfig`) | pass the `--allowed-mcp-server-names` flag value alone as `cliAllowedMcpServerNames`; pass the de-duplicated `--disable-mcp-server` names as `cliExcludedMcpServerNames` (`nargs: 1`, so a trailing prompt is not read as a server name)                                                                                                                                                        |
+| `packages/core/src/config/config.ts`                  | `cliAllowedMcpServerNames` field + `getCliAllowedMcpServerNames()` (K); `cliExcludedMcpServerNames` field + `getCliExcludedMcpServerNames()`; `getMergedMcpServers()` (unfiltered) + `getMcpServerNames()`; `McpServerUnavailableReason` + `getMcpServerUnavailableReason()` (B); removal tracking diffs the merged map and `reinitializeMcpServers` drops the `prevEffectiveServerNames` param |
+| `packages/cli/src/config/hot-reload.ts`               | `recomputeMcpGating` caps `allowed` to the boot bound (K) and preserves `[]` (H), and unions the launch-flag names (`bootExcluded`) into `excluded`; `bareSafeMcpGating` applies the same bounds in bare/safe mode; `mcpGatingEqual` makes `allowed` absent ≠ `[]` (H)                                                                                                                          |
+| `packages/cli/src/acp-integration/acpAgent.ts`        | `workspaceMcpReload` passes each live Config's boot bounds (allowed and excluded) to the gating recompute, in normal and safe mode                                                                                                                                                                                                                                                              |
+| `packages/cli/src/ui/hooks/useMcpApproval.ts`         | `computePending` skips servers the effective exclusion list rules out, so a flag-disabled server is not offered for approval                                                                                                                                                                                                                                                                    |
+| `packages/core/src/core/coreToolScheduler.ts`         | `getMcpToolUnavailableMessage` routes per `getMcpServerUnavailableReason` (B)                                                                                                                                                                                                                                                                                                                   |
 
 #### Verification (Part F)
 
@@ -539,6 +549,13 @@ longer mis-reported as `removed` (it's `not_allowed`). That also lets the
   full; a settings allow-list is capped to the flag (cannot widen) and may narrow within it; without
   the flag, settings win unbounded. **H** — `mcp.allowed: []` is pushed through as deny-all;
   `mcpGatingEqual` treats `allowed` absent vs `[]` as different (but `excluded` undefined ≡ `[]`).
+  **Launch-flag exclusions** — a reload unions `--disable-mcp-server` names with `mcp.excluded` and
+  dropping `mcp.excluded` never re-enables a flagged server; a name in both lists is de-duplicated and
+  does not reconcile; bare and safe mode keep the exclusions and the launch allow bound.
+- `useMcpApproval.test.ts`: a gated server the effective exclusion list rules out is not offered for
+  approval; one that is not excluded still is.
+- `acpAgent.test.ts`: `workspaceMcpReload` keeps the launch bounds on the agent Config and the
+  workspace discovery Config, in normal and safe mode.
 - `config.test.ts`: `getMcpServerUnavailableReason` returns `not_allowed` / `excluded` /
   `pending_approval` / `removed` for each gate, and `undefined` for a configured-admitted or
   never-configured server.
