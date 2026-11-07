@@ -61,13 +61,30 @@ function mockGhSuccess(payload: unknown, expectArgs?: string[]) {
   mockStdout(JSON.stringify(payload), expectArgs);
 }
 
-/** Fails with Error(`message`) plus `fields`, passing its stderr through. */
+/**
+ * Fails the way execFile's callback does: an Error(`message`) carrying
+ * `code`, `signal` and `killed` — by default those of a plain `exit 1` — and
+ * the stderr only as the callback's third argument, since execFile's error
+ * has no `stderr` property of its own.
+ */
 function mockExecError(
   message: string,
-  fields: { code?: string; stderr?: string; killed?: boolean } = {},
+  {
+    stderr = '',
+    ...fields
+  }: {
+    code?: string | number | null;
+    signal?: string | null;
+    stderr?: string;
+    killed?: boolean;
+  } = {},
 ) {
-  const error = Object.assign(new Error(message), fields);
-  mockExec((cb) => cb(error, '', error.stderr ?? ''));
+  const error = Object.assign(
+    new Error(message),
+    { code: 1, signal: null, killed: false },
+    fields,
+  );
+  mockExec((cb) => cb(error, '', stderr));
 }
 
 /** Gives each test a fresh temp dir (and, by default, reset mocks). */
@@ -349,7 +366,8 @@ describe('fetchGitHubPullRequests', () => {
   it('names the timeout when gh is killed after the deadline', async () => {
     mockExecError('Command failed: gh pr list --state open', {
       killed: true,
-      stderr: '',
+      code: null,
+      signal: 'SIGTERM',
     });
     const result = await fetchGitHubPullRequests(tmp.repo());
     expect(result).toMatchObject({
@@ -366,6 +384,37 @@ describe('fetchGitHubPullRequests', () => {
       kind: 'failed',
       message: 'gh: not logged in Run gh auth login',
       gitRoot: tmp.dir,
+    });
+  });
+
+  it('names the exit, not the argv, when gh fails with nothing on stderr', async () => {
+    const dir = tmp.repo();
+    mockExecError('Command failed: gh pr list --state open --limit 100', {
+      code: 1,
+    });
+    expect(await fetchGitHubPullRequests(dir)).toMatchObject({
+      kind: 'failed',
+      message: 'gh pr list exited with code 1',
+    });
+
+    mockExecError('Command failed: gh pr list --state open --limit 100', {
+      code: null,
+      signal: 'SIGKILL',
+    });
+    expect(await fetchGitHubPullRequests(dir)).toMatchObject({
+      kind: 'failed',
+      message: 'gh pr list was killed by SIGKILL',
+    });
+  });
+
+  it("keeps Node's message for its own failures even when gh wrote stderr", async () => {
+    mockExecError('stdout maxBuffer length exceeded', {
+      code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+      stderr: 'some progress output\n',
+    });
+    expect(await fetchGitHubPullRequests(tmp.repo())).toMatchObject({
+      kind: 'failed',
+      message: 'stdout maxBuffer length exceeded',
     });
   });
 
@@ -513,6 +562,9 @@ describe('parseGhPrView', () => {
         },
         { __typename: 'CheckRun', name: 'e2e', conclusion: null },
         { __typename: 'CheckRun', conclusion: 'FAILURE' },
+        // Failing but nameless: they count towards `checks`, unnamed.
+        { __typename: 'CheckRun', name: '', conclusion: 'FAILURE' },
+        { __typename: 'StatusContext', context: '', state: 'FAILURE' },
         {
           __typename: 'CheckRun',
           name: 'alpha',
@@ -531,6 +583,21 @@ describe('parseGhPrView', () => {
       'Nightly / zeta',
       'alpha',
     ]);
+
+    // Nameless failures alone still fail the head, with nothing to name.
+    for (const entry of [
+      { __typename: 'CheckRun', name: '', conclusion: 'FAILURE' },
+      { __typename: 'StatusContext', context: '', state: 'FAILURE' },
+    ]) {
+      const nameless = parse({
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' },
+          entry,
+        ],
+      });
+      expect(nameless.checks).toBe('failing');
+      expect(nameless.failingChecks).toEqual([]);
+    }
 
     const many = parse({
       statusCheckRollup: Array.from({ length: 30 }, (_, i) => ({
@@ -750,7 +817,11 @@ describe('fetchGitHubPullRequestView', () => {
       message: 'GraphQL: Could not resolve to a PullRequest',
     });
 
-    mockExecError('Command failed: gh pr view', { killed: true });
+    mockExecError('Command failed: gh pr view', {
+      killed: true,
+      code: null,
+      signal: 'SIGTERM',
+    });
     expect(await fetchGitHubPullRequestView(url, tmp.dir, env)).toEqual({
       kind: 'failed',
       reason: 'timed_out',
@@ -861,6 +932,40 @@ describe('createGitHubPullRequest', () => {
     expect(seen.env).toBeDefined();
     expect(seen.env?.['GH_TOKEN']).toBe('ws-token');
     expect(seen.env).not.toHaveProperty('GH_REPO');
+  });
+
+  it("reports gh's stderr, not Node's argv, when gh pr create fails", async () => {
+    const dir = tmp.repo();
+    mockExecError('Command failed: gh pr create --title My PR --body draft', {
+      stderr: 'pull request create failed: No commits between main and x\n',
+    });
+
+    const result = await createGitHubPullRequest(dir, {
+      title: 'My PR',
+      body: 'draft',
+    });
+
+    expect(result).toMatchObject({
+      kind: 'failed',
+      message: 'pull request create failed: No commits between main and x',
+    });
+  });
+
+  it('does not report the PR title and body when gh pr create fails silently', async () => {
+    const dir = tmp.repo();
+    mockExecError('Command failed: gh pr create --title My PR --body secret', {
+      code: 1,
+    });
+
+    const result = await createGitHubPullRequest(dir, {
+      title: 'My PR',
+      body: 'secret',
+    });
+
+    expect(result).toMatchObject({
+      kind: 'failed',
+      message: 'gh pr create exited with code 1',
+    });
   });
 
   it('uses XDG gh credentials without exposing XDG git config to subprocesses', async () => {
@@ -1190,7 +1295,11 @@ describe('fetchCurrentBranchPullRequest', () => {
     // Timeouts, rate limits, and auth failures prove nothing about the
     // branch's PRs; the attribution gate must decline on them instead of
     // reading them as "no prior PR".
-    mockExecError('network timeout', { killed: true });
+    mockExecError('network timeout', {
+      killed: true,
+      code: null,
+      signal: 'SIGTERM',
+    });
     expect(await fetchCurrentBranchPullRequest(tmp.repo())).toEqual({
       status: 'error',
     });
@@ -1276,7 +1385,11 @@ describe('fetchAttributionRepoKeys', () => {
     // An unresolvable pre-run identity must decline attribution, not read
     // as "any repo may bind".
     const dir = tmp.repo();
-    mockExecError('network timeout', { killed: true });
+    mockExecError('network timeout', {
+      killed: true,
+      code: null,
+      signal: 'SIGTERM',
+    });
     expect(await fetchAttributionRepoKeys(dir)).toEqual({});
 
     mockStdout('not json');

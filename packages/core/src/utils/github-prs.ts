@@ -373,8 +373,11 @@ function runGhPrList(
         encoding: 'utf8',
         env: childEnv,
       },
-      (error, stdout) => {
-        if (error) reject(error);
+      (error, stdout, stderr) => {
+        // execFile's error carries no stderr of its own (only the promisified
+        // form attaches it); ghErrorMessage reports gh's diagnostic from it
+        // instead of Node's "Command failed: <argv>" message.
+        if (error) reject(Object.assign(error, { stderr }));
         else resolve(stdout);
       },
     );
@@ -387,18 +390,34 @@ export function ghErrorMessage(
   commandLabel = 'gh pr list',
   timeoutMs = GH_TIMEOUT_MS,
 ): string {
+  const failure = error as {
+    killed?: unknown;
+    code?: unknown;
+    signal?: unknown;
+    stderr?: unknown;
+  } | null;
   // A timeout kill carries an empty stderr and a "Command failed: gh pr
   // list …" message; name the timeout instead of dumping the argv.
-  if ((error as { killed?: unknown } | null)?.killed === true) {
+  if (failure?.killed === true) {
     return `${commandLabel} timed out after ${timeoutMs / 1000}s`;
   }
-  const stderr = (error as { stderr?: unknown } | null)?.stderr;
-  const raw =
-    typeof stderr === 'string' && stderr.trim()
-      ? stderr
-      : error instanceof Error
-        ? error.message
-        : String(error);
+  // A string code is Node's own failure (a spawn error, an invalid
+  // argument, an overflowing buffer), whose message says what went wrong;
+  // anything gh wrote is incidental. Otherwise gh's stderr is the diagnostic, and without one
+  // execFile's message is just "Command failed: <argv>" — for a create, the
+  // PR title and body — so name the exit instead.
+  let raw: string;
+  if (typeof failure?.code === 'string') {
+    raw = error instanceof Error ? error.message : String(error);
+  } else if (typeof failure?.stderr === 'string' && failure.stderr.trim()) {
+    raw = failure.stderr;
+  } else if (typeof failure?.code === 'number') {
+    raw = `${commandLabel} exited with code ${failure.code}`;
+  } else if (typeof failure?.signal === 'string' && failure.signal !== '') {
+    raw = `${commandLabel} was killed by ${failure.signal}`;
+  } else {
+    raw = error instanceof Error ? error.message : String(error);
+  }
   return raw.replace(/\s+/g, ' ').trim().slice(0, GH_ERROR_RAW_MAX);
 }
 
@@ -652,8 +671,11 @@ function runGhPrView(
         encoding: 'utf8',
         env: childEnv,
       },
-      (error, stdout) => {
-        if (error) reject(error);
+      (error, stdout, stderr) => {
+        // execFile's error carries no stderr of its own (only the promisified
+        // form attaches it); ghErrorMessage reports gh's diagnostic from it
+        // instead of Node's "Command failed: <argv>" message.
+        if (error) reject(Object.assign(error, { stderr }));
         else resolve(stdout);
       },
     );
@@ -776,8 +798,11 @@ function runGhPrCreate(
         encoding: 'utf8',
         env: childEnv,
       },
-      (error, stdout) => {
-        if (error) reject(error);
+      (error, stdout, stderr) => {
+        // execFile's error carries no stderr of its own (only the promisified
+        // form attaches it); ghErrorMessage reports gh's diagnostic from it
+        // instead of Node's "Command failed: <argv>" message.
+        if (error) reject(Object.assign(error, { stderr }));
         else resolve(stdout);
       },
     );
