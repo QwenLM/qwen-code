@@ -2741,6 +2741,65 @@ describe('SessionTranscriptReader', () => {
       });
     });
 
+    it('reads a record the window cuts through in full', async () => {
+      const parts = ['part one', 'part two', 'part three'];
+      await writeOverCap(
+        [
+          ...parts.map((text) => record('u1', null, text)),
+          record('a1', 'u1', 'reply'),
+        ],
+        3,
+      );
+      const page = await readPage();
+      expect(uuids(page.records)).toEqual(['u1', 'a1']);
+      expect(page.records[0]?.message?.parts).toEqual(
+        parts.map((text) => ({ text })),
+      );
+      expect(page.gaps).toEqual([]);
+    });
+
+    it('rejects a prefix line longer than the cap without reading it whole', async () => {
+      await writeOverCap(
+        [
+          record('u1', null, 'x'.repeat(4096)),
+          record('a1', 'u1', 'reply one'),
+          record('u2', 'a1', 'two'),
+          record('a2', 'u2', 'reply two'),
+        ],
+        2,
+      );
+      await expect(readPage()).rejects.toMatchObject({
+        name: 'SessionTranscriptTooLargeError',
+      });
+    });
+
+    it('keeps only the metadata of a first record restore does not need', async () => {
+      await writeOverCap(
+        [
+          record('u1', null, 'x'.repeat(2000)),
+          record('a1', 'u1', 'reply one'),
+          ...Array.from({ length: 20 }, (_, index) =>
+            record(`u${index + 2}`, index ? `u${index + 1}` : 'a1', 'turn'),
+          ),
+        ],
+        20,
+      );
+      const validated: ChatRecord[] = [];
+      await newReader().readRestoreProjection(sessionId, NONE, {
+        validateFirstRecord: (first) => {
+          validated.push(first);
+          return true;
+        },
+      });
+      expect(validated).toHaveLength(1);
+      expect(validated[0]).toMatchObject({
+        uuid: 'u1',
+        sessionId,
+        cwd: workspaceDir,
+      });
+      expect(validated[0]?.message).toBeUndefined();
+    });
+
     it('still rejects a window that holds no conversation', async () => {
       await writeOverCap(
         [

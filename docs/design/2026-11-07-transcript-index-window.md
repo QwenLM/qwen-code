@@ -68,8 +68,8 @@ work unchanged. The window never exceeds the cap, so index memory stays bounded
 as before.
 
 The index still refuses with `SessionTranscriptTooLargeError` when no line
-starts within the window, when the window holds no conversation record, or when
-the log is Managed.
+starts within the window, when the window holds no conversation record, when a
+line before the window is longer than the cap, or when the log is Managed.
 
 ### B. Prefix scan
 
@@ -80,7 +80,8 @@ the whole file, and a record from another session still makes the snapshot
 unavailable. The scan keeps only:
 
 - the first record of the file, which proves which project the session belongs
-  to and supplies the restore start time;
+  to and supplies the restore start time; its message, tool result and payload
+  are dropped unless it is also one of the records below;
 - the last record of each session-level kind: `parent_session`,
   `session_source`, the last valid `session_model`, `session_approval_mode` and
   `session_workflow_mode`, the last `session_sources_snapshot` and the last
@@ -89,6 +90,14 @@ unavailable. The scan keeps only:
 
 These records are stored on the index as `window.retainedRecords` and served by
 uuid when the index has no entry for them.
+
+A record written as several lines with one uuid can start before the window.
+The scan records where its earlier lines are and puts them in front of the
+window entry's segments, so the record still reads whole.
+
+A prefix line is never read past the cap: the scan stops as soon as a line
+exceeds it and the index refuses, so no line larger than the cap is parsed, as
+before this change.
 
 ### C. Gap reason
 
@@ -122,9 +131,11 @@ catalogs, which translate the existing notice, translate the new one too.
 - **One scan of the prefix, no index entries.** The prefix still costs a parse,
   but not memory beyond the few retained records.
 - **Prefix settings in file order.** The prefix is not indexed, so it has no
-  chain to walk. For a setting the window does not record again, the last one in
-  file order can differ from the active-chain one only when it sits on a branch
-  abandoned by rewind before the window.
+  chain to walk. `ChatRecordingService.rewindRecording` appends the current
+  model, approval mode and workflow mode again after its rewind marker, so for
+  those the last record in file order is the active one. The last assistant
+  model and the attribution snapshot are not re-appended and can come from a
+  branch abandoned before the window.
 - **Fork is unchanged.** `SessionService.forkSession` does not use the index: it
   reads the whole source file and copies its active branch, so it keeps working
   for over-cap sessions. An earlier sketch proposed refusing fork from a
@@ -152,15 +163,16 @@ catalogs, which translate the existing notice, translate the new one too.
   Earlier UI telemetry, goal records, artifacts and file history are not
   restored, and the window gap marks the session as partial.
 - The model history starts at the window, or at the last compression inside it.
-- A record written as several lines with one uuid keeps only the lines inside
-  the window when the window starts between them.
+- Memory while scanning the prefix is bounded by the cap for a single line,
+  which is the same bound a file under the cap has today.
 
 ## Validation plan
 
 - Reader tests with a test-only cap: the window and its gap, a parent missing
   from the whole file, settings recorded only before the window, a setting the
-  window records again, a window without conversation and a window with no line
-  start.
+  window records again, a window without conversation, a window with no line
+  start, a record the window cuts through, a prefix line longer than the cap,
+  and a first record kept as metadata only.
 - Mutation checks that turn those tests red: window start off by one byte, the
   reason never or always set, no prefix fallback, prefix records read after the
   window, and the first record not taken from the prefix.
