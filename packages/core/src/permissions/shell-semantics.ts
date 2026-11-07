@@ -2634,6 +2634,48 @@ const AMEND_REDIRECT_TOKEN = /^\d*(?:>>?|>\||<<?|<>|<<<|>&|<&|&>|&>>)/;
  */
 const AMEND_EXPANSION_WORD = /\$[A-Za-z0-9_{(@*#?$!-]|`|\{[^{}]*,/;
 
+/** Whether the command assigns `IFS` outside quotes — the assignment decides
+ * how an unquoted expansion word-splits (#16075 review, R1-1/R12-1). */
+function hasUnquotedIfsAssignment(command: string): boolean {
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote !== null) {
+      if (ch === '\\' && quote === '"') i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (!command.startsWith('IFS=', i)) continue;
+    const before = i === 0 ? ' ' : command[i - 1]!;
+    if (/[\s;|&()]/.test(before)) return true;
+  }
+  return false;
+}
+
+/** The text left when every expansion is read as empty, which is what bash
+ * does for an unset name or an empty substitution (#16075 review, R1-1). */
+function stripExpansionSyntax(text: string): string {
+  return text
+    .replace(/\$\([^()]*\)/g, '')
+    .replace(/`[^`]*`/g, '')
+    .replace(/\$\{[^}]*\}/g, '')
+    .replace(/\$[A-Za-z_][A-Za-z0-9_]*/g, '')
+    .replace(/\$[0-9@*#?$!-]/g, '');
+}
+
+/** A word carrying an unquoted pathname-expansion metacharacter. bash expands
+ * these before it decides which program or flag the word names, so a glob in a
+ * decisive word makes the invocation unprovable (#16075 review, R1-1). */
+const AMEND_GLOB_WORD = /[*?[\]]/;
+
 /** xargs short letters whose value is required: attached to the cluster, or
  * the next word when the cluster ends there. `-L` is one of them — GNU xargs
  * declares `L:`, so `xargs -L 5 rm` runs `rm`. Treating it as optional made
@@ -2822,6 +2864,11 @@ function skipAmendPrefixes(tokens: string[]): string[] {
 
 function isGitAmendInvocationAt(tokens: string[], start: number): boolean {
   if (amendExecutableBasename(tokens[start] ?? '') !== 'git') return false;
+  // Pathname expansion can turn either decisive word into another one:
+  // `git commi? --amend` and `git commit --?mend` become the amend only after
+  // bash globs them. The model does not evaluate globs, so a glob in a word
+  // that decides the invocation fails closed (#16075 review, R1-1).
+  if (AMEND_GLOB_WORD.test(tokens[start]!)) return true;
 
   let index = start + 1;
   while (index < tokens.length) {
@@ -2856,11 +2903,17 @@ function isGitAmendInvocationAt(tokens: string[], start: number): boolean {
         : 1;
   }
 
+  // A glob in the subcommand word expands to `commit` or to something else,
+  // and neither reading is provable (#16075 review, R1-1).
+  if (AMEND_GLOB_WORD.test(tokens[index] ?? '')) return true;
   if (tokens[index] !== 'commit') return false;
 
   for (index++; index < tokens.length; index++) {
     const token = tokens[index]!;
     if (token === '--') return false;
+    // A glob in a flag word (`--?mend`) can expand to `--amend`; argument
+    // words stay data (#16075 review, R1-1).
+    if (token.startsWith('-') && AMEND_GLOB_WORD.test(token)) return true;
     // A word boundary ends the flag, so `--amend` stays an amend when bash
     // glues a redirect (`--amend>log`), a parameter expansion (`--amend$(…)`)
     // or a brace range (`--amend{,}`) onto it. `--amendx` / `--amend-foo` are
@@ -2953,6 +3006,15 @@ function shellDashCPayload(tokens: string[], index: number): string | null {
       : /[oO]/;
   for (let inner = index + 1; inner < tokens.length; inner++) {
     const token = tokens[inner]!;
+    // A redirection between the shell and its `-c` is neither an option nor
+    // the payload: `bash 2>/dev/null -c '…'` still runs that payload, so skip
+    // the operator and its target instead of ending the scan (#16075 review,
+    // R1-1).
+    if (AMEND_REDIRECT_TOKEN.test(token)) {
+      inner +=
+        AMEND_REDIRECT_WORD.test(token) && inner + 1 < tokens.length ? 1 : 0;
+      continue;
+    }
     // `+o` turns an option off and is read like `-o`; a word that is neither a
     // `-` nor a `+` option ends the option scan (#16075 review, R1-1).
     if (token === '-' || (!token.startsWith('-') && !token.startsWith('+'))) {
@@ -3007,7 +3069,14 @@ function shellDashCPayload(tokens: string[], index: number): string | null {
     // letters consumes nothing; any unknown letter leaves the payload position
     // unlocatable (`script -I /dev/null -c '…'`), so fail closed rather than
     // answer "no -c" (#16075 review, R1-1).
-    if (shortValueLetters.test(letters)) {
+    const valueAt = [...letters].findIndex((letter) =>
+      shortValueLetters.test(letter),
+    );
+    if (valueAt !== -1) {
+      // An attached tail IS the value and the next word is not consumed:
+      // `script -t/dev/null -c '…'` still carries that `-c` payload
+      // (#16075 review, R1-1).
+      if (valueAt + 1 < letters.length) continue;
       inner++;
       continue;
     }
@@ -3132,11 +3201,44 @@ function collectAssignments(
   };
   // Split compound segments first: the word tokenizer breaks on whitespace
   // only, so `X=git; $X …` would otherwise glue the `;` into the value.
+  // Names written by constructs other than `NAME=value` are not static: a
+  // `read`, `mapfile`, `printf -v` or `getopts` in the same command overwrites
+  // the literal the scanner saw (#16075 review, R12-1).
+  const writtenElsewhere = (tokens: string[]): void => {
+    for (let i = 0; i < tokens.length; i++) {
+      const base = amendExecutableBasename(tokens[i]!);
+      if (base === 'read' || base === 'mapfile' || base === 'readarray') {
+        for (let j = i + 1; j < tokens.length; j++) {
+          const arg = tokens[j]!;
+          if (arg.startsWith('-') || arg.startsWith('<')) continue;
+          if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(arg)) write(arg, null);
+        }
+        continue;
+      }
+      if (base === 'printf') {
+        const v = tokens.indexOf('-v', i + 1);
+        const name = v === -1 ? undefined : tokens[v + 1];
+        if (name !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+          write(name, null);
+        }
+        continue;
+      }
+      if (base === 'getopts') {
+        const name = tokens[i + 2];
+        if (name !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+          write(name, null);
+        }
+      }
+    }
+  };
   for (const { command: segment } of splitCompoundCommandSegments(command)) {
     const tokens = tokenize(segment);
-    for (let i = 0; i < tokens.length; i++) {
+    // Assignment words bind only in command position: `X=ls; $X` sets X, while
+    // `echo X=ls; $X` prints text and sets nothing (#16075 review, R12-1).
+    let i = 0;
+    while (i < tokens.length && readArgument(tokens[i]!, false)) i++;
+    for (; i < tokens.length; i++) {
       const token = tokens[i]!;
-      if (readArgument(token, false)) continue;
       if (/^(?:export|declare|typeset)$/.test(amendExecutableBasename(token))) {
         for (let j = i + 1; j < tokens.length; j++) {
           const arg = tokens[j]!;
@@ -3145,6 +3247,7 @@ function collectAssignments(
         }
       }
     }
+    writtenElsewhere(tokens);
   }
   return values ?? inherited;
 }
@@ -3202,7 +3305,21 @@ function programExpansionCouldAmend(
     if (!/[$`]/.test(basename) && amendExecutableBasename(basename) !== 'git') {
       return false;
     }
-    return isGitAmendInvocationAt(['git', ...rest], 0);
+    if (isGitAmendInvocationAt(['git', ...rest], 0)) return true;
+    // An unset or empty expansion expands to NOTHING, gluing the surrounding
+    // text into the decisive words: `A='git commit'; $A$UNSET_VAR --amend`
+    // runs `git commit --amend`. Read that second reading too
+    // (#16075 review, R1-1).
+    const dropped = stripExpansionSyntax(resolved);
+    const droppedTokens = [...tokenize(dropped), ...rest];
+    if (isGitAmendInvocationAt(skipAmendPrefixes(droppedTokens), 0)) {
+      return true;
+    }
+    for (let offset = 1; offset < droppedTokens.length; offset++) {
+      if (amendExecutableBasename(droppedTokens[offset]!) !== 'git') continue;
+      if (isGitAmendInvocationAt(droppedTokens, offset)) return true;
+    }
+    return false;
   }
   // The program word resolved to static text. bash word-splits an unquoted
   // expansion, so read the invocation the value forms together with the
@@ -3267,7 +3384,12 @@ function nestedAmendPayloads(
 
   for (let index = 0; index < tokens.length; index++) {
     if (index > prefixLength && !wrapperOffsets?.has(index)) continue;
-    const program = amendExecutableBasename(tokens[index]!);
+    // A redirection glued to the program word (`bash<<'X' -c '…'`) hides the
+    // shell behind `<`, so read the program before the operator
+    // (#16075 review, R1-1).
+    const program = amendExecutableBasename(
+      amendProgramBeforeRedirect(tokens[index]!),
+    );
 
     if (program === 'env') {
       // env's own options come first, then assignments, then the program.
@@ -3600,11 +3722,24 @@ function tokensContainGitAmend(
     // (`bash -c git\ commit\ --amend`), so unescape what decoding left —
     // ANSI-C first, or a decoded `\x3b` would lose its semicolon again
     // (#16075 review, R1-1).
-    return commandContainsGitAmendAtDepth(
-      removeShellBackslashEscapes(decodeBareAnsiCWord(unwrapped)),
-      depth + 1,
-      assignedNames,
+    // The outer shell removed the backslashes of an UNQUOTED payload
+    // (`bash -c git\ commit\ --amend`), while a QUOTED payload keeps them and
+    // hands `\x20` to a downstream `printf`, which decodes it. Neither reading
+    // is the whole truth: analyse both and deny if either fires
+    // (#16075 review, R1-1).
+    const normalised = removeShellBackslashEscapes(
+      decodeBareAnsiCWord(unwrapped),
     );
+    if (commandContainsGitAmendAtDepth(normalised, depth + 1, assignedNames)) {
+      return true;
+    }
+    if (
+      normalised !== unwrapped &&
+      commandContainsGitAmendAtDepth(unwrapped, depth + 1, assignedNames)
+    ) {
+      return true;
+    }
+    return false;
   }
 
   // Wrappers embedding the command behind a flag value (`env -S '…'`) are
@@ -3929,6 +4064,11 @@ function commandContainsGitAmendAtDepth(
 
   const code = stripHeredocBodies(command);
   const segments = splitCompoundCommandSegments(code);
+  // An `IFS` assigned in this command decides how an unquoted expansion
+  // word-splits, so a program word that comes from an expansion is no longer
+  // provable: `IFS=:; X='git:commit:--amend'; $X` runs `git commit --amend`
+  // although the glued word reads as one token (#16075 review, R1-1/R12-1).
+  const ifsSplit = hasUnquotedIfsAssignment(command);
   for (let index = 0; index < segments.length; index++) {
     const { command: segment } = segments[index]!;
     // A pipe into a stdin-reading shell hands that shell a program. The text
@@ -3957,6 +4097,28 @@ function commandContainsGitAmendAtDepth(
           const upTerminator = up > 0 ? segments[up - 1]!.terminator : '';
           if (upTerminator !== '|' && upTerminator !== '|&') break;
         }
+      }
+    }
+    if (ifsSplit) {
+      const programTokens = skipAmendPrefixes(tokenize(segment));
+      const programWord = programTokens[0];
+      if (programWord !== undefined && /[$`]/.test(programWord)) {
+        // An assigned IFS word-splits the expanded value, so read the value
+        // with that separator instead of the default whitespace. An unresolvable
+        // separator or value fails closed; a value that splits into a
+        // non-git program stays amend-free (#16075 review, R1-1/R12-1).
+        const ifsValue = names.get('IFS');
+        const name = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(programWord);
+        const expanded = name === null ? undefined : names.get(name[1]!);
+        if (typeof ifsValue !== 'string' || typeof expanded !== 'string') {
+          return true;
+        }
+        const separators = ifsValue.length > 0 ? ifsValue : ' \t\n';
+        const words = expanded
+          .split(new RegExp(`[${separators}]+`))
+          .filter(Boolean);
+        const split = [...words, ...programTokens.slice(1)];
+        if (isGitAmendInvocationAt(split, 0)) return true;
       }
     }
     if (tokensContainGitAmend(segment, depth, names)) return true;
@@ -4062,7 +4224,45 @@ function pipedProgramCandidates(producer: string): string[] {
     const decoded = args.map((arg) => decodeAnsiCWord(arg)).join(' ');
     if (decoded && decoded !== raw) candidates.push(decoded);
   }
+  if (base === 'printf') {
+    const spliced = printfFormatSplice(args);
+    if (spliced !== null && spliced !== raw && !candidates.includes(spliced)) {
+      candidates.push(spliced);
+    }
+  }
   return candidates;
+}
+
+/**
+ * What `printf` prints for a format whose only conversions are `%%` and `%s`
+ * with literal arguments — the one printf shape whose output this scan can
+ * compute. Any other conversion (`%d`, `%x`, `%b`, field widths) or a backslash
+ * escape makes the printed text unprovable, so the row is left to the
+ * fail-closed paths instead (#16075 review, R1-1:
+ * `printf 'g%s commit --amend' it | bash`).
+ */
+function printfFormatSplice(args: string[]): string | null {
+  const [format, ...values] = args;
+  if (format === undefined || format.includes('\\')) return null;
+  let out = '';
+  let next = 0;
+  for (let i = 0; i < format.length; i++) {
+    const char = format[i]!;
+    if (char !== '%') {
+      out += char;
+      continue;
+    }
+    const spec = format[i + 1];
+    if (spec === '%') {
+      out += '%';
+      i++;
+      continue;
+    }
+    if (spec !== 's') return null;
+    out += values[next++] ?? '';
+    i++;
+  }
+  return out;
 }
 
 /**
@@ -4298,6 +4498,20 @@ export function commandContainsGitAmend(command: string): boolean {
   );
 }
 
+/** git subcommands that can move HEAD before a later `--amend` reads it, so
+ * the commit the exemption certifies is no longer the one the amend rewrites
+ * (#16075 review, R14-1). */
+const AMEND_HEAD_MOVING_SUBCOMMANDS = new Set([
+  'reset',
+  'checkout',
+  'switch',
+  'rebase',
+  'merge',
+  'cherry-pick',
+  'revert',
+  'pull',
+]);
+
 /** One compound segment that directly invokes `git commit --amend`, with the
  * cwd it runs under. */
 export interface AmendSegment {
@@ -4377,8 +4591,14 @@ export function amendSegmentsForExemption(
 }
 
 /** `builtin cd` / `command cd` run the cd builtin in this shell; the query
- * forms (`command -v cd`) run nothing and must not move the cwd. */
+ * forms (`command -v cd`) run nothing and must not move the cwd. Leading
+ * assignments (`FOO=1 cd B`) are part of the same simple command and do not
+ * change which builtin runs (#16075 review, R7-2). */
 function stripCdPrefixWords(segment: string): string {
+  const assignments = /^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]*[ \t]+)*/.exec(
+    segment,
+  )![0];
+  if (assignments) segment = segment.slice(assignments.length);
   const prefix = /^(?:builtin|command)[ \t]+/.exec(segment);
   if (!prefix) return segment;
   let rest = segment.slice(prefix[0].length);
@@ -4421,6 +4641,12 @@ function walkAmendSegments(
   // A cd reached only conditionally (`false && cd A`) may never run; a later
   // segment that breaks the conditional chain runs under an ambiguous cwd.
   let conditionalCdPending = false;
+  let conditionalCdViaOr = false;
+  // A segment before the amend that can move HEAD makes the guard-time HEAD a
+  // different commit from the one the amend will rewrite (`git reset --soft
+  // HEAD~1 && git commit --amend` rewrites the user's own commit while
+  // certifying the session commit, #16075 review, R14-1).
+  let headMayMove = false;
   const amendSegments: AmendSegment[] = [];
   const poisoned = (): boolean =>
     !cwdKnown || sawSubshell || envRelocated || relocatedEnvNames.size > 0;
@@ -4484,7 +4710,14 @@ function walkAmendSegments(
     // ran, so its cwd is ambiguous: fail closed (`false && cd A; git amend`,
     // #16075 review, R7-2). A chain that stays `&&` keeps the cd and the amend
     // under the same condition, so the attribution still holds.
-    if (conditionalCdPending && prevTerminator !== '&&') {
+    if (
+      conditionalCdPending &&
+      (prevTerminator !== '&&' || conditionalCdViaOr)
+    ) {
+      // A cd reached through `||` is not guaranteed by a following `&&`:
+      // `true || cd A && git amend` parses as `(true || cd A) && git amend`,
+      // the cd is skipped, and the amend runs in the original cwd
+      // (#16075 review, R7-2).
       cwdKnown = false;
     }
 
@@ -4560,8 +4793,16 @@ function walkAmendSegments(
     // the repository independently of the cwd; `set -a` turns plain
     // assignments into exports. Track them and fail closed on an amend
     // under an active relocation (#16075 review, R7-2).
+    // `builtin export GIT_DIR=…` runs the same export: the `builtin` prefix is
+    // transparent for the relocation tracker (#16075 review, R7-2).
     const rawTokens = tokenize(stripUnquotedComments(segment));
-    if (program === 'set') {
+    const builtinStripped = /^(?:builtin|command)$/.test(program)
+      ? rawTokens.slice(1)
+      : rawTokens;
+    const trackedProgram = /^(?:builtin|command)$/.test(program)
+      ? amendExecutableBasename(builtinStripped[0] ?? '')
+      : program;
+    if (trackedProgram === 'set') {
       for (let k = 1; k < rawTokens.length; k++) {
         const t = rawTokens[k]!;
         if (t === '-o' || t === '+o') {
@@ -4573,14 +4814,15 @@ function walkAmendSegments(
         else if (/^\+[a-z]*a/.test(t)) allexport = false;
       }
     } else if (
-      program === 'export' ||
-      program === 'declare' ||
-      program === 'typeset'
+      trackedProgram === 'export' ||
+      trackedProgram === 'declare' ||
+      trackedProgram === 'typeset'
     ) {
+      const exportTokens = builtinStripped;
       const exporting =
-        program === 'export' || rawTokens.some((t) => t === '-x');
-      for (let k = 1; k < rawTokens.length; k++) {
-        const t = rawTokens[k]!;
+        trackedProgram === 'export' || exportTokens.some((t) => t === '-x');
+      for (let k = 1; k < exportTokens.length; k++) {
+        const t = exportTokens[k]!;
         if (t.startsWith('-')) {
           if (t !== '-p' && t !== '-x') envRelocated = true;
           continue;
@@ -4597,7 +4839,11 @@ function walkAmendSegments(
           relocatedEnvNames.add(name);
         }
       }
-    } else if (program === 'unset') {
+    } else if (trackedProgram === 'unset') {
+      // `unset GIT_DIR &` runs in a subshell and clears nothing in the shell
+      // that runs the amend (#16075 review, R7-2).
+      const unsetInSubshell =
+        terminator === '&' || terminator === '|' || terminator === '|&';
       for (let k = 1; k < rawTokens.length; k++) {
         const t = rawTokens[k]!;
         if (t.startsWith('-')) {
@@ -4606,7 +4852,7 @@ function walkAmendSegments(
         }
         // Unset clears only the named variable: `unset GIT_WORK_TREE` leaves an
         // exported GIT_DIR relocating the amend (#16075 review, R7-2).
-        if (t === 'GIT_DIR' || t === 'GIT_WORK_TREE') {
+        if ((t === 'GIT_DIR' || t === 'GIT_WORK_TREE') && !unsetInSubshell) {
           relocatedEnvNames.delete(t);
         }
       }
@@ -4652,13 +4898,21 @@ function walkAmendSegments(
         // segment that breaks the chain fails closed (#16075 review, R7-2).
         if (prevTerminator === '&&' || prevTerminator === '||') {
           conditionalCdPending = true;
+          conditionalCdViaOr = prevTerminator === '||';
         }
       }
       prevTerminator = terminator;
       continue;
     }
+    if (
+      tokens.length > 0 &&
+      amendExecutableBasename(tokens[0]!) === 'git' &&
+      tokens.slice(1).some((token) => AMEND_HEAD_MOVING_SUBCOMMANDS.has(token))
+    ) {
+      headMayMove = true;
+    }
     if (tokens.length > 0 && isGitAmendInvocationAt(tokens, 0)) {
-      if (poisoned()) {
+      if (poisoned() || headMayMove) {
         return { kind: 'untrackable' };
       }
       amendSegments.push({ segment, cwd: effectiveCwd });
