@@ -266,11 +266,13 @@ describe('PollingChannelBase', () => {
         makeBridge(),
       );
       poller.cursor = { ts: '2026-07-03T00:00:00.000Z', count: 3 };
+      let faults = 0;
       const realChmod = nodeFs.chmodSync;
       const spy = vi
         .spyOn(nodeFs, 'chmodSync')
         .mockImplementation((p, mode) => {
           if (String(p).endsWith('.tmp')) {
+            faults++;
             const err = new Error('EPERM: operation not permitted');
             (err as NodeJS.ErrnoException).code = 'EPERM';
             throw err;
@@ -282,6 +284,9 @@ describe('PollingChannelBase', () => {
       } finally {
         spy.mockRestore();
       }
+      // A renamed temp file or a chmod call the spy cannot see would take the
+      // success path and still publish the cursor, hiding a reverted guard.
+      expect(faults).toBeGreaterThan(0);
       expect(
         JSON.parse(
           readFileSync(
