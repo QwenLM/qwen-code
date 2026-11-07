@@ -110,10 +110,13 @@ under `stop` it says that continuing will stop the turn.
 `loop_detected` and the `StopFailure` hook keep meaning "the turn stopped". A
 new `loop_protection` event records each governed decision: `reminded`,
 `stopped`, or `observed` under `off`, with the loop type, the reason and the
-mode. `reminded` is logged when the reminder is sent, so a reminder dropped by
-a retry or cut off by a stop in the same batch is not counted; `stopped` is
-logged once per turn. Budget stops and the provider-id breaker are not
-governed and emit no decision event.
+mode. `reminded` is logged when the model accepts the request carrying the
+reminder, so a reminder dropped by a retry, cut off by a stop in the same
+batch, or carried only by a send that never reached the model is not
+counted — in that last case the warning stays eligible and is credited by
+the send that does reach the model; `stopped` is logged once per turn.
+Budget stops and the provider-id breaker are not governed and emit no
+decision event.
 
 ### Messages
 

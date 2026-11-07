@@ -100,7 +100,7 @@ final class WorkspaceRecoveryReader {
                         && row.get("object_version_id") == null && row.get("encryption_key_id") == null,
                         "resource_layout_unsupported");
                 bytes = (byte[]) row.get("inline_bytes");
-                var references = jdbc.queryForList("SELECT resource_key FROM ma_resource_ref USE INDEX (ix_ma_ref_resource)"
+                var references = jdbc.queryForList("SELECT resource_key FROM ma_resource_ref USE INDEX (idx_ma_ref_resource)"
                         + " WHERE resource_key = ? AND session_scope_key = ? AND owner_kind IN ('JOURNAL','SESSION_RECORD')"
                         + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND resource_id = ?"
                         + " AND journal_revision <= ? LIMIT 1", String.class, resourceKey, sessionScope,
@@ -298,7 +298,7 @@ final class WorkspaceRecoveryReader {
         check(rows.size() == 1, "publication_scope_conflict");
         var row = rows.getFirst();
         check(!"DELETING".equals(row.get("retention_state")), "source_drift");
-        check("REFERENCED".equals(row.get("producer_phase")) && Boolean.FALSE.equals(row.get("quarantined"))
+        check("REFERENCED".equals(row.get("producer_phase")) && Boolean.FALSE.equals(row.get("is_quarantined"))
                 && row.get("receipt_revision") instanceof Number && row.get("receipt_sequence") instanceof Number
                 && number(row, "receipt_revision") > 0 && number(row, "receipt_revision") <= head.path("journalRevision").asLong()
                 && number(row, "receipt_sequence") > 0 && number(row, "receipt_sequence") <= head.path("committedSequence").asLong(),

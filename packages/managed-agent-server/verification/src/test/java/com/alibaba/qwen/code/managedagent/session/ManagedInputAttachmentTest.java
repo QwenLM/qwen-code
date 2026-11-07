@@ -42,8 +42,8 @@ class ManagedInputAttachmentTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         ManagedSchema.initialize(source);
         var registry = mock(ManagedWorkspaceRegistry.class);
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(new ManagedSchemaJdbcTemplate(source), new ObjectMapper(),
-                Clock.systemUTC(), events -> {}, registry, new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(new ManagedSchemaJdbcTemplate(source), new ObjectMapper(),
+                Clock.systemUTC(), events -> {}, registry, new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
         service = new ManagedAgentService(store, new RequestDigests(), mock(HarnessCoordinator.class), harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());

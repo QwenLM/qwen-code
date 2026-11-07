@@ -30,6 +30,7 @@ import {
   withWatchLock,
   type AutofixPrPaths,
 } from './state.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 export interface AutofixPrFixAttempt {
   version: 1;
@@ -141,7 +142,8 @@ export function assertNoFixInFlight(
 ): void {
   const attempt = fixInFlight(paths, now);
   if (!attempt) return;
-  throw new Error(
+  throw new AutofixPrRefusal(
+    'fix_in_flight',
     `a fix agent is working in PR #${prNumber}'s worktree (attempt ` +
       `${attempt.attempt}, started ${attempt.startedAt}); its round goes on ` +
       `when it ends. In the session that runs it, /autofix-pr stop ` +
@@ -216,7 +218,8 @@ function assertRoundToFix(
     snapshot.task !== task ||
     Date.now() - stat.mtimeMs > FIX_SNAPSHOT_MAX_AGE_MS
   ) {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'no_background_fix',
       `no round of PR #${prNumber} has a fix to start: a fix runs in the ` +
         `background only after the snapshot of a round of the watch's task ` +
         `(action "fix" at the watch's head, within ` +
@@ -236,7 +239,8 @@ function assertRoundToFix(
   const readAt =
     typeof snapshot.readAt === 'string' ? Date.parse(snapshot.readAt) : NaN;
   if (!(reportedAt <= readAt) && Number.isFinite(reportedAt)) {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'no_background_fix',
       `no round of PR #${prNumber} has a fix to start: the gate reported ` +
         `more since the round's snapshot; the fix runs in the foreground.`,
     );
@@ -257,22 +261,20 @@ export function runFixStart(args: FixStartArgs): AutofixPrFixAttempt & {
     const state = requireState(paths.statePath, args.pr);
     assertWatching(state);
     if (state.inPlace) {
-      throw new Error(
+      throw new AutofixPrRefusal(
+        'no_background_fix',
         `PR #${args.pr} is an in-place watch: its fixes run in the foreground, in the user's checkout, never in the background.`,
       );
     }
     const task = state.watch?.task;
     if (!task) {
-      throw new Error(
+      throw new AutofixPrRefusal(
+        'no_background_fix',
         `PR #${args.pr} has no scheduled task: a fix runs in the background only in a watch.`,
       );
     }
-    const running = fixInFlight(paths);
-    if (running) {
-      throw new Error(
-        `attempt ${running.attempt} of PR #${args.pr}'s fix is still in flight (started ${running.startedAt}).`,
-      );
-    }
+    // With what the skill reports: how that fix ends.
+    assertNoFixInFlight(paths, args.pr);
     // Only a round's sync (or a take-over, or cleanup) removes one its
     // session left behind, and the round then discards what it made.
     if (readFixMarker(paths)) {

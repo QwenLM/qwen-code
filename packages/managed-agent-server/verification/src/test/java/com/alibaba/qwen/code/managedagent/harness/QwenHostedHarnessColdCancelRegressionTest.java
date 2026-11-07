@@ -92,8 +92,8 @@ class QwenHostedHarnessColdCancelRegressionTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
-                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var admission = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId(tenant)
                 .actorId("actor-a")
@@ -226,8 +226,8 @@ class QwenHostedHarnessColdCancelRegressionTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
-                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String session = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId(tenant)
                 .actorId("actor-a")
@@ -420,8 +420,8 @@ class QwenHostedHarnessColdCancelRegressionTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setToken("test-token");
         properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
-                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String session = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId(tenant)
                 .actorId("actor-a")

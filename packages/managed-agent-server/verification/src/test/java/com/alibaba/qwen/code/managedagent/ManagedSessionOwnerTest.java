@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -41,9 +40,9 @@ class ManagedSessionOwnerTest {
                 "actor".getBytes(StandardCharsets.UTF_8));
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(),
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(),
                 Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(source));
 

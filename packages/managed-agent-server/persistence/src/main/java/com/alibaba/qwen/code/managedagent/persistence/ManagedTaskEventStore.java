@@ -84,8 +84,8 @@ public class ManagedTaskEventStore
     public EventPage read(String tenantId, String sessionId, String taskId, long after, int limit) {
         List<TaskEvent> events = jdbc.query("SELECT sequence_id AS event_sequence, event_type,"
                         + " gmt_create AS occurred_at, schema_version, projection_version, state, runtime_state,"
-                        + " text, truncated, artifact_id, capture_id, output_stream_id AS stream_id,"
-                        + " first_ordinal, end_ordinal, archived FROM ma_public_event WHERE tenant_id = ?"
+                        + " text, is_truncated, artifact_id, capture_id, output_stream_id AS stream_id,"
+                        + " first_ordinal, end_ordinal, is_archived FROM ma_public_event WHERE tenant_id = ?"
                         + " AND session_id = ? AND stream_kind = 'TASK' AND stream_id = ?"
                         + " AND sequence_id > ? ORDER BY sequence_id LIMIT ?",
                 ManagedTaskEventStore::eventRow, tenantId, sessionId, taskId, after, limit + 1);
@@ -139,7 +139,7 @@ public class ManagedTaskEventStore
                         ranges.toString(), occurredAt, tenantId, sessionId, taskId);
             }
             jdbc.update("INSERT INTO ma_public_event (tenant_id,session_id,stream_kind,stream_id,sequence_id,"
-                            + "event_id,event_type,gmt_create,schema_version,projection_version,text,truncated,capture_id,"
+                            + "event_id,event_type,gmt_create,schema_version,projection_version,text,is_truncated,capture_id,"
                             + "output_stream_id,first_ordinal,end_ordinal) VALUES (?,?,'TASK',?,?,?,'output',?,?,?,?,?,?,?,?,?)",
                     tenantId, sessionId, taskId, sequence, eventId(tenantId, sessionId, taskId, sequence),
                     occurredAt, SCHEMA_VERSION, PROJECTION_VERSION, text, truncated,
@@ -178,9 +178,9 @@ public class ManagedTaskEventStore
     public int markOutputArchived(String tenantId, String sessionId, String taskId, long throughSequence) {
         return transaction(() -> {
             lockStream(tenantId, sessionId, taskId, 0);
-            return jdbc.update("UPDATE ma_public_event SET archived = TRUE WHERE tenant_id = ? AND session_id = ?"
+            return jdbc.update("UPDATE ma_public_event SET is_archived = TRUE WHERE tenant_id = ? AND session_id = ?"
                             + " AND stream_kind = 'TASK' AND stream_id = ? AND event_type = 'output'"
-                            + " AND archived = FALSE AND sequence_id <= ?",
+                            + " AND is_archived = FALSE AND sequence_id <= ?",
                     tenantId, sessionId, taskId, throughSequence);
         });
     }
@@ -243,7 +243,7 @@ public class ManagedTaskEventStore
 
     private Long oldestUnarchived(String tenantId, String sessionId, String taskId) {
         return jdbc.queryForObject("SELECT MIN(sequence_id) FROM ma_public_event WHERE tenant_id = ? AND session_id = ?"
-                        + " AND stream_kind = 'TASK' AND stream_id = ? AND event_type = 'output' AND archived = FALSE",
+                        + " AND stream_kind = 'TASK' AND stream_id = ? AND event_type = 'output' AND is_archived = FALSE",
                 Long.class, tenantId, sessionId, taskId);
     }
 
@@ -378,8 +378,8 @@ public class ManagedTaskEventStore
         return new TaskEvent(result.getLong("event_sequence"), result.getString("event_type"),
                 result.getLong("occurred_at"), result.getInt("schema_version"), result.getInt("projection_version"),
                 result.getString("state"), result.getString("runtime_state"), result.getString("text"),
-                result.getObject("truncated", Boolean.class), result.getString("artifact_id"),
+                result.getObject("is_truncated", Boolean.class), result.getString("artifact_id"),
                 result.getString("capture_id"), result.getString("stream_id"), result.getObject("first_ordinal", Long.class),
-                result.getObject("end_ordinal", Long.class), result.getBoolean("archived"));
+                result.getObject("end_ordinal", Long.class), result.getBoolean("is_archived"));
     }
 }
