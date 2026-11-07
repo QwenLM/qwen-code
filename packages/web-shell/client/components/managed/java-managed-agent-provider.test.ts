@@ -1989,6 +1989,7 @@ describe('createJavaManagedAgentProvider', () => {
           toolName: 'write_file',
           inputRevision: 1,
           policyRevision: 'hosted-tool-approval/1',
+          createdAt: 1,
           expiresAt: 600_001,
           ...(inputPreview ? { inputPreview } : {}),
           options: [
@@ -2131,7 +2132,7 @@ describe('createJavaManagedAgentProvider', () => {
     const pending = await provider.actions!.listPending(question.sessionId, {
       clientId: 'client',
     });
-    expect(pending).toEqual([question]);
+    expect(pending).toEqual([{ ...question, createdAt: 1 }]);
     const response = {
       kind: 'question' as const,
       answers: [
