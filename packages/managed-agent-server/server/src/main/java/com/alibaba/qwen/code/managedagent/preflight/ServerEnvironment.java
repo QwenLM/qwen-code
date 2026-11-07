@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.preflight;
 import org.springframework.boot.DefaultBootstrapContext;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.WebApplicationType;
+import org.springframework.boot.context.config.ConfigDataLocation;
 import org.springframework.boot.context.config.ConfigDataNotFoundException;
 import org.springframework.boot.context.config.ConfigDataResourceNotFoundException;
 import org.springframework.boot.context.config.StandardConfigDataResource;
@@ -25,8 +26,12 @@ import org.springframework.core.env.EnumerablePropertySource;
 import org.springframework.core.env.PropertySource;
 import org.springframework.core.env.SimpleCommandLinePropertySource;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.io.DefaultResourceLoader;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
+import org.springframework.util.ResourceUtils;
+import org.springframework.util.StringUtils;
 import org.yaml.snakeyaml.error.Mark;
 import org.yaml.snakeyaml.error.MarkedYAMLException;
 
@@ -46,10 +51,12 @@ import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Predicate;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -64,14 +71,19 @@ import java.util.regex.Pattern;
  * the server's only when it runs with the unit's working directory.
  */
 final class ServerEnvironment {
-    // Where Spring Boot looks without being told, relative to the working
-    // directory; config/*/ is a wildcard.
-    private static final List<String> DEFAULT_DIRECTORIES = List.of("", "config", "config/*");
+    // The one of Spring Boot's default locations it lists rather than looks
+    // a file up in, relative to the working directory.
+    private static final String DEFAULT_WILDCARD = "config/*";
     // Those of the property source loaders Spring Boot registers.
     private static final List<String> EXTENSIONS = List.of("yml", "yaml", "properties", "xml");
-    // A location such as classpath: or configtree:, as Spring tells one from a path.
-    private static final Pattern SCHEME = Pattern.compile("^[a-zA-Z][a-zA-Z0-9*]*?:");
+    // A location Spring reads as written rather than beside the file that
+    // imports it, as its StandardConfigDataLocationResolver tells one.
+    private static final Pattern FIXED = Pattern.compile("^[a-zA-Z][a-zA-Z0-9*]*?:");
+    // A file name with the extension it is read by, as Spring's
+    // FileExtensionHint tells one: app.conf[.properties].
+    private static final Pattern HINT = Pattern.compile("^(.*)\\[(\\.\\w+)](?!\\[)$");
     private static final String IMPORT = "spring.config.import";
+    private static final String LOOKED_UP = "qwen-managed-agent-preflight-looked-up";
 
     private ServerEnvironment() {
     }
@@ -85,6 +97,10 @@ final class ServerEnvironment {
             ConfigurableEnvironment environment) {
         SpringApplication application = new SpringApplication();
         application.setWebApplicationType(WebApplicationType.SERVLET);
+        // Kept before Spring reads a file, so a failure leaves what it looked for.
+        LookedUp lookedUp = new LookedUp();
+        environment.getPropertySources().addLast(lookedUp);
+        application.setResourceLoader(lookedUp.loader());
         environment.setConversionService(new ApplicationConversionService());
         if (args.length > 0) {
             environment.getPropertySources().addFirst(
@@ -97,6 +113,74 @@ final class ServerEnvironment {
                         environment));
         ConfigurationPropertySources.attach(environment);
         return environment;
+    }
+
+    /**
+     * The files Spring looked a configuration file up at while it prepared
+     * an environment, whether one was there or not, as its own resolver
+     * named them from a location's spelling: with the extension a location
+     * hints, the variant of each profile it activated, and relative to the
+     * working directory where the location is. It holds no property; it
+     * keeps them with the environment for {@link #files} and the rest.
+     */
+    private static final class LookedUp extends EnumerablePropertySource<Set<Path>> {
+        LookedUp() {
+            super(LOOKED_UP, new LinkedHashSet<>());
+        }
+
+        // Enumerable and empty, so a binder skips it for every name.
+        @Override
+        public String[] getPropertyNames() {
+            return new String[0];
+        }
+
+        @Override
+        public Object getProperty(String name) {
+            return null;
+        }
+
+        ResourceLoader loader() {
+            return new DefaultResourceLoader() {
+                @Override
+                public Resource getResource(String location) {
+                    Resource resource = super.getResource(location);
+                    // A directory is one Spring lists for a wildcard, or
+                    // checks is there when it found no file in it.
+                    if (!location.endsWith("/")) {
+                        Path file = path(resource);
+                        if (file != null) {
+                            getSource().add(file);
+                        }
+                    }
+                    return resource;
+                }
+            };
+        }
+    }
+
+    /** The files Spring looked up for this environment, in the working directory. */
+    private static Set<Path> lookedUp(ConfigurableEnvironment environment,
+            Path workingDirectory) {
+        Set<Path> files = new LinkedHashSet<>();
+        if (environment.getPropertySources().get(LOOKED_UP) instanceof LookedUp lookedUp) {
+            for (Path file : lookedUp.getSource()) {
+                files.add(workingDirectory.resolve(file).normalize());
+            }
+        }
+        return files;
+    }
+
+    /** The file a resource names, as relative as its location, or null for none. */
+    private static Path path(Resource resource) {
+        if (resource instanceof ClassPathResource || !resource.isFile()) {
+            return null;
+        }
+        try {
+            return resource.getFile().toPath();
+        } catch (IOException | RuntimeException error) {
+            // Nor can Spring read a file there.
+            return null;
+        }
     }
 
     /**
@@ -298,25 +382,30 @@ final class ServerEnvironment {
     }
 
     /**
-     * A file system location, which names a directory when it ends in a
-     * slash, or a config tree's directory.
+     * A location Spring reads without looking a file up: a config tree's
+     * directory, or a wildcard, whose last name is *, which Spring lists,
+     * with the name of the file it looks for in each directory of it, or
+     * null where it looks for each configuration file's.
      */
-    private record Location(Path path, boolean directory, boolean tree) {
+    private record Location(Path path, boolean tree, String file) {
     }
 
     /**
-     * The file system locations named at the top level, by the arguments or
-     * the process environment, and those imported, at the top level or by a
-     * file Spring read. Locations of another kind, such as classpath: or
-     * configtree:, are left out.
+     * The config trees and wildcards named at the top level, by the
+     * arguments or the process environment, and those imported, at the top
+     * level or by a file Spring read. Spring looks up the files of every
+     * other location, which prepare records.
      */
     private static List<Location> named(ConfigurableEnvironment environment,
             Path workingDirectory) {
         List<Location> named = new ArrayList<>();
+        Binder binder = topLevel(environment);
         for (String property : List.of("spring.config.import",
                 "spring.config.additional-location", "spring.config.location")) {
-            locations(String.join(",", topLevel(environment, property)), workingDirectory,
-                    workingDirectory, named);
+            for (String value : binder.bind(property, Bindable.listOf(String.class))
+                    .orElse(List.of())) {
+                locations(value, workingDirectory, null, named);
+            }
         }
         // Spring honours an import a file declares, and no other location a
         // file sets; it reads a bare relative one beside that file.
@@ -332,8 +421,10 @@ final class ServerEnvironment {
                 Path declaring = file(resource(tracked.getOrigin(key)));
                 if (declaring != null) {
                     // Spring resolves a placeholder in it as in any value.
-                    locations(environment.resolvePlaceholders(String.valueOf(entry.getValue())),
-                            workingDirectory, declaring.getParent(), named);
+                    for (String value : environment.resolvePlaceholders(
+                            String.valueOf(entry.getValue())).split(",")) {
+                        locations(value, workingDirectory, declaring.getParent(), named);
+                    }
                 }
             }
         }
@@ -341,39 +432,58 @@ final class ServerEnvironment {
     }
 
     /**
-     * Adds the file system locations of a value: a file: one, read in the
-     * working directory when relative, and a bare one, read in base.
+     * Adds the config trees and wildcards of one location value, which
+     * Spring splits at semicolons, read with Spring's own rules: a
+     * configtree: location, in the working directory when relative; and one
+     * whose last directory is named *, opened as Spring opens a location,
+     * beside the importing file in base when Spring reads it there.
      */
     private static void locations(String value, Path workingDirectory, Path base,
             List<Location> named) {
-        if (value == null) {
-            return;
-        }
-        for (String location : value.split("[,;]")) {
-            String path = location.strip().replaceFirst("^optional:", "");
-            Path relativeTo = base;
-            boolean tree = path.startsWith("configtree:");
-            if (tree || path.startsWith("file:")) {
-                // A colon after it is part of the path; Spring reads a config
-                // tree in the working directory too.
-                path = path.substring(path.indexOf(':') + 1);
-                relativeTo = workingDirectory;
-            } else if (SCHEME.matcher(path).lookingAt()) {
+        for (String each : value.split(";")) {
+            ConfigDataLocation location = ConfigDataLocation.of(each.strip());
+            if (location == null) {
                 continue;
             }
-            if (!path.isEmpty()) {
-                named.add(new Location(relativeTo.resolve(path), tree || path.endsWith("/"),
-                        tree));
+            if (location.hasPrefix("configtree:")) {
+                named.add(new Location(workingDirectory.resolve(
+                        location.getNonPrefixedValue("configtree:")), true, null));
+                continue;
+            }
+            // Spring takes a wildcard as the last directory, of a directory
+            // location or of a file's.
+            String resource = location.getNonPrefixedValue("resource:");
+            int slash = resource.lastIndexOf('/');
+            if (!resource.substring(0, slash + 1).endsWith("*/")) {
+                continue;
+            }
+            String file = resource.substring(slash + 1);
+            String parent = resource.substring(0, slash + 1 - "*/".length());
+            if (base != null && !parent.startsWith("/") && !FIXED.matcher(parent).lookingAt()) {
+                String directory = base.toUri().toString();
+                parent = (directory.endsWith("/") ? directory : directory + "/") + parent;
+            }
+            Path directory = path(open(parent));
+            if (directory != null) {
+                named.add(new Location(workingDirectory.resolve(directory).resolve("*"), false,
+                        file.isEmpty() ? null : file));
             }
         }
     }
 
+    // As Spring's LocationResourceLoader opens a location.
+    private static Resource open(String location) {
+        String cleaned = StringUtils.cleanPath(location);
+        return new DefaultResourceLoader().getResource(ResourceUtils.isUrl(cleaned) ? cleaned
+                : ResourceUtils.FILE_URL_PREFIX + cleaned);
+    }
+
     /**
-     * A property as Spring reads it before any file, as it reads the
-     * locations and spring.config.name: from the arguments, the process
+     * A binder over the sources Spring reads before any file, as it reads
+     * the locations and spring.config.name: the arguments, the process
      * environment and the other sources no configuration file adds.
      */
-    private static List<String> topLevel(ConfigurableEnvironment environment, String property) {
+    private static Binder topLevel(ConfigurableEnvironment environment) {
         List<PropertySource<?>> sources = new ArrayList<>();
         for (PropertySource<?> source : environment.getPropertySources()) {
             if (!(source instanceof OriginTrackedMapPropertySource)
@@ -384,63 +494,73 @@ final class ServerEnvironment {
         // from() skips the attached view of every source, files' included;
         // a placeholder resolves against the same sources, as Spring's.
         return new Binder(ConfigurationPropertySources.from(sources),
-                new PropertySourcesPlaceholdersResolver(sources))
-                .bind(property, Bindable.listOf(String.class)).orElse(List.of());
+                new PropertySourcesPlaceholdersResolver(sources));
+    }
+
+    private static List<String> topLevel(ConfigurableEnvironment environment, String property) {
+        return topLevel(environment).bind(property, Bindable.listOf(String.class))
+                .orElse(List.of());
     }
 
     /**
-     * The files Spring looks for at the locations {@link #named} finds and,
-     * unless spring.config.location replaces them, at its default ones in
-     * the working directory: each location's files, then their variants for
-     * these profiles, or for any profile when profiles is null. Where Spring
-     * refused to start, the files it read are not known, so neither is a
-     * location one of them imports. Adds to unlisted each directory a
-     * wildcard names whose directories this process may not list.
+     * The files Spring looks for: those prepare saw it look up, at a
+     * location of any spelling and for each profile it activated; then, as
+     * Spring lists a wildcard's directory itself, those in each directory a
+     * wildcard names, the default config/* among them unless
+     * spring.config.location is set: each name and extension, then its
+     * variants for these profiles, or for any profile when profiles is null,
+     * each with its profile. Adds to unlisted each directory a wildcard
+     * names whose directories this process may not list.
      */
     private static Map<Path, String> locationFiles(ConfigurableEnvironment environment,
             Path workingDirectory, List<String> profiles, Set<Path> unlisted) {
-        List<String> names = new ArrayList<>();
-        for (String name : topLevel(environment, "spring.config.name")) {
-            if (!name.isBlank()) {
-                names.add(name.strip());
-            }
+        Map<Path, String> located = new LinkedHashMap<>();
+        for (Path file : lookedUp(environment, workingDirectory)) {
+            located.put(file, null);
         }
-        if (names.isEmpty()) {
-            names.add("application");
-        }
-        List<Path> directories = new ArrayList<>();
-        Set<Path> files = new LinkedHashSet<>();
+        List<Location> wildcards = new ArrayList<>();
         for (Location named : named(environment, workingDirectory)) {
-            if (named.tree()) {
-                // Its files are values, which files() finds in their source.
-                continue;
-            }
-            if (named.directory()) {
-                directories.add(named.path());
-            } else {
-                files.add(named.path());
+            if (!named.tree()) {
+                wildcards.add(named);
             }
         }
-        if (topLevel(environment, "spring.config.location").isEmpty()) {
-            for (String directory : DEFAULT_DIRECTORIES) {
-                directories.add(workingDirectory.resolve(directory));
-            }
+        Binder binder = topLevel(environment);
+        // An empty spring.config.location replaces the defaults too.
+        if (!binder.bind("spring.config.location", Bindable.listOf(String.class)).isBound()) {
+            wildcards.add(new Location(workingDirectory.resolve(DEFAULT_WILDCARD), false, null));
         }
-        for (Path location : directories) {
-            for (Path directory : expand(location, unlisted)) {
-                for (String name : names) {
-                    for (String extension : EXTENSIONS) {
-                        files.add(directory.resolve(name + "." + extension));
+        String[] names = binder.bind("spring.config.name", String[].class)
+                .orElse(new String[] {"application"});
+        List<Named> files = new ArrayList<>();
+        for (Location wildcard : wildcards) {
+            for (Path directory : expand(wildcard.path(), unlisted)) {
+                if (wildcard.file() == null) {
+                    for (String name : names) {
+                        for (String extension : EXTENSIONS) {
+                            files.add(new Named(directory, name, "." + extension));
+                        }
+                    }
+                    continue;
+                }
+                // As Spring names it: by the first loader whose extension it
+                // ends in, in any case, with that loader's extension, or with
+                // none where a location hints it; with none, Spring reads nothing.
+                Matcher hint = HINT.matcher(wildcard.file());
+                String name = hint.matches() ? hint.group(1) + hint.group(2) : wildcard.file();
+                for (String extension : EXTENSIONS) {
+                    if (name.toLowerCase(Locale.ROOT).endsWith(extension)) {
+                        files.add(new Named(directory,
+                                name.substring(0, name.length() - extension.length() - 1),
+                                hint.matches() ? "" : "." + extension));
+                        break;
                     }
                 }
             }
         }
-        // Each file, then its variants, each with the profile it is for.
-        Map<Path, String> located = new LinkedHashMap<>();
-        for (Path file : files) {
-            located.put(file, null);
+        for (Named file : files) {
+            located.putIfAbsent(file.directory().resolve(file.root() + file.extension()), null);
         }
-        for (Path file : files) {
+        for (Named file : files) {
             variants(file, profiles).forEach(located::putIfAbsent);
         }
         return located;
@@ -457,7 +577,8 @@ final class ServerEnvironment {
         }
         List<Path> directories = new ArrayList<>();
         Path parent = location.getParent() == null ? Path.of("") : location.getParent();
-        try (DirectoryStream<Path> nested = Files.newDirectoryStream(parent, Files::isDirectory)) {
+        try (DirectoryStream<Path> nested =
+                Files.newDirectoryStream(parent, ServerEnvironment::listedDirectory)) {
             nested.forEach(directories::add);
         } catch (AccessDeniedException denied) {
             unlisted.add(parent);
@@ -469,18 +590,42 @@ final class ServerEnvironment {
     }
 
     /**
-     * The profile variants of a file, as application-edge.yml is of
-     * application.yml, each with its profile.
+     * Whether Spring reads an entry of a wildcard's directory as a directory
+     * to look in: one not named from "..", as Spring skips those. One this
+     * process cannot look at, as in a directory it may list but not enter,
+     * counts, since the service account may; hidden() then names the
+     * directory.
      */
-    private static Map<Path, String> variants(Path file, List<String> profiles) {
-        String name = file.getFileName().toString();
-        int dot = name.lastIndexOf('.');
-        if (dot <= 0) {
-            return Map.of();
+    private static boolean listedDirectory(Path entry) {
+        if (entry.getFileName().toString().startsWith("..")) {
+            return false;
         }
-        String stem = name.substring(0, dot) + "-";
-        String extension = name.substring(dot);
-        Path directory = file.getParent() == null ? Path.of("") : file.getParent();
+        try {
+            return Files.readAttributes(entry, BasicFileAttributes.class).isDirectory();
+        } catch (AccessDeniedException denied) {
+            return true;
+        } catch (IOException gone) {
+            return false;
+        }
+    }
+
+    /**
+     * A file as Spring names it: its directory, its name without the
+     * extension, which a variant's profile follows, and the extension, empty
+     * where a location hints it.
+     */
+    private record Named(Path directory, String root, String extension) {
+    }
+
+    /**
+     * The profile variants of a file, as application-edge.yml is of
+     * application.yml and app.conf-edge of app.conf[.properties], each with
+     * its profile.
+     */
+    private static Map<Path, String> variants(Named file, List<String> profiles) {
+        Path directory = file.directory();
+        String stem = file.root() + "-";
+        String extension = file.extension();
         Map<Path, String> variants = new LinkedHashMap<>();
         if (profiles != null) {
             for (String profile : profiles) {
@@ -594,14 +739,14 @@ final class ServerEnvironment {
         }
         MarkedYAMLException marked = cause(error, MarkedYAMLException.class);
         if (marked != null) {
-            // The files with the same problem at the same place: those Spring
-            // reads for certain, a base file or a variant of a profile the
-            // arguments or the environment activate, else every one, since a
-            // file may activate a profile too.
+            // The files with the same problem at the same place, each once:
+            // those Spring reads for certain, one it looked up or a variant of
+            // a profile the arguments or the environment activate, else every
+            // one, since a file may activate a profile too.
             Set<String> active = new LinkedHashSet<>(topLevel(environment, "spring.profiles.active"));
             active.addAll(topLevel(environment, "spring.profiles.include"));
-            List<String> matches = new ArrayList<>();
-            List<String> read = new ArrayList<>();
+            Set<String> matches = new LinkedHashSet<>();
+            Set<String> read = new LinkedHashSet<>();
             for (Map.Entry<Path, String> candidate : located.entrySet()) {
                 Path file = candidate.getKey();
                 if (Files.isRegularFile(file) && sameProblem(yamlError(file), marked)) {
@@ -613,7 +758,8 @@ final class ServerEnvironment {
                 }
             }
             if (matches.isEmpty()) {
-                // In a file an import names from inside another.
+                // In a file Spring found without a lookup, as an import beside
+                // a file a wildcard found.
                 return yamlFailure("a configuration file", marked);
             }
             return yamlFailure(String.join(" or ", read.isEmpty() ? matches : read), marked);

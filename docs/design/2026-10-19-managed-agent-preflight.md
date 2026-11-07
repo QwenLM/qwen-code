@@ -91,10 +91,20 @@ environment post-processor on the class path through
 no context, and `ResolvedConfiguration`, which the upgrade command reads its
 settings through, prepares the same environment. The `config` rows name the
 files the prepared property sources came from, then the files Spring read at a
-location without finding a setting. When the preparation throws, the row
-names what Spring refused: the file, read as missing or unreadable, or the
-YAML error's file and line, found among the files Spring looks for, since
-Spring's error names neither: each file whose own error is Spring's, the same
+location without finding a setting. The check does not read a location's
+spelling itself: it records each file Spring's own resolver looks a
+configuration file up at, there or not, so a scheme in another case, a
+`resource:` prefix, an extension hint, a bare name with a colon, an empty
+`spring.config.location` or `spring.config.name`, and each variant of a profile
+Spring activates come out as Spring reads them. Spring opens a config tree and
+lists a wildcard's directories without such a lookup, so those two come from the
+location values, read with Spring's location rules: a wildcard's directories,
+but none whose name starts with `..`, as Spring skips those, and in each, the
+files of a directory location or the one name of a file's wildcard. A directory
+there that this process cannot list or enter is named as one it cannot look in.
+When the preparation throws, the row names what Spring refused: the file, read
+as missing or unreadable, or the YAML error's file and line, found among the
+files Spring looked for before it refused, since Spring's error names neither: each file whose own error is Spring's, the same
 problem at the same place, unless a profile the arguments or the environment
 activate tells which one Spring read; a file this process cannot read names the
 service account when that cannot read it either, and otherwise says to run the
@@ -106,11 +116,13 @@ no default, that row fails with Spring's reason and the others still print.
 Spring skips an optional file it cannot see, so where this process cannot enter
 a directory the server looks in for a configuration file or a config tree, or
 list one it lists, as it lists `config/` for `config/*/`, a `config` row names
-that directory and says to run the check as the service account or as root. When
-that account cannot look in it either, Spring reads nothing there, and the
-directory gets no row; nor does it without a service account, or when the check
-runs as that account, as this process then stands in for the server's, as it
-does for every file row.
+that directory and says to run the check as the service account or as root, or
+as root alone when that is the service account. When that account cannot look
+in it either, Spring reads nothing there, and the directory gets no row; nor
+does it without a service account, or when the check runs as that account, as
+this process then stands in for the server's, as it does for every file row. A
+service account of root reads and enters whatever the modes say, as the kernel
+lets it.
 
 A file holds a secret by one rule, the configuration reference's: a key named as
 a password, token, key or secret, or a map of keys, in any spelling Spring
@@ -119,14 +131,15 @@ key a file holds: those of each document, including one no profile activates,
 those in a comment, a commented-out line or, in a file that may be YAML, the
 comment after a value, the property a config tree value file holds, and a
 parameter of a value, such as a JDBC URL's `?password=`, or the password of a
-URL's user information. A path can be a configuration file and a config tree
-value file at once, as `config/application.yml` is under a config tree imported
-over `config/`, and so is a file whose extension a location hints, as
-`file:app.conf[.properties]` does, under one imported over its directory; it is
-then judged both ways. A value file Spring reads as no configuration file holds
-its value alone, whatever its name. `Binder` produces `ManagedAgentProperties`,
-the Harness probe uses the JDK HTTP client, and the database probe uses JDBC
-with a five-second connect and socket timeout.
+URL's user information. A UTF-8 byte order mark, which YAML drops, does not hide
+a commented-out key on the first line. A path can be a configuration file and a
+config tree value file at once, as `config/application.yml` is under a config
+tree imported over `config/`, and so is a file whose extension a location hints,
+as `file:app.conf[.properties]` does, under one imported over its directory; it
+is then judged both ways. A value file Spring reads as no configuration file
+holds its value alone, whatever its name. `Binder` produces
+`ManagedAgentProperties`, the Harness probe uses the JDK HTTP client, and the
+database probe uses JDBC with a five-second connect and socket timeout.
 
 ## Acceptance
 

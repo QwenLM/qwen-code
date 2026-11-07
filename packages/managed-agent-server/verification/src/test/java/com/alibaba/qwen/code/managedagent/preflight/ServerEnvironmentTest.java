@@ -96,6 +96,19 @@ class ServerEnvironmentTest {
         return rows.get(0);
     }
 
+    /**
+     * An environment Spring has prepared, or failed to, which keeps the
+     * files it looked for, as the one a failure is read from does.
+     */
+    private static ConfigurableEnvironment looked(ConfigurableEnvironment environment) {
+        try {
+            ServerEnvironment.prepare(new String[0], environment);
+        } catch (RuntimeException refused) {
+            // Spring looked before it refused.
+        }
+        return environment;
+    }
+
     /** What Spring throws for a file, as the server would meet it. */
     private static RuntimeException thrown(ConfigurableEnvironment environment) {
         return assertThrows(RuntimeException.class,
@@ -247,10 +260,11 @@ class ServerEnvironmentTest {
         assertEquals(broken + ", line 2, column 1: expected the node content,"
                 + " but found '<stream end>'", yaml.detail());
         assertEquals("fix the YAML syntax", yaml.fix());
-        // In a file an import names from inside another, it says what it can.
+        // As in a file an import names from inside another, which Spring
+        // looked up as any other.
         Path importer = write("importer.yml",
                 "spring.config.import: file:" + broken + "\n");
-        assertEquals("a configuration file, line 2, column 1: expected the node"
+        assertEquals(broken + ", line 2, column 1: expected the node"
                 + " content, but found '<stream end>'",
                 refused(named("file:" + importer)).detail());
     }
@@ -504,6 +518,39 @@ class ServerEnvironmentTest {
                 assertEquals("no configuration file; packaged defaults and the"
                         + " environment only", rows.get(0).detail());
             }
+            // Root enters it whatever its modes.
+            rows = ManagedAgentPreflight.configChecks(prepared,
+                    new ServiceAccount("root", Set.of("root")), runner);
+            assertEquals(1, rows.size(), rows.toString());
+            assertEquals(ManagedAgentPreflight.Status.FAIL, rows.get(0).status());
+            assertEquals("run --check as root", rows.get(0).fix());
+            // A wildcard's directory it may list but not enter hides the
+            // directories in it, which Spring then finds none of.
+            Path wild = Files.createDirectories(directory.resolve("wild/edge")).getParent();
+            Path realWild = wild.toRealPath();
+            Files.setPosixFilePermissions(wild, PosixFilePermissions.fromString("r--r-xr--"));
+            try {
+                ManagedAgentPreflight.Prepared listed = prepare(
+                        named("optional:file:" + wild + "/*/"), new ArrayList<>());
+                assertEquals(List.of(new ServerEnvironment.Hidden(realWild, false)),
+                        listed.hidden());
+                assertEquals(ManagedAgentPreflight.Status.FAIL, ManagedAgentPreflight.hiddenCheck(
+                        listed.hidden().get(0), member, runner).status());
+            } finally {
+                Files.setPosixFilePermissions(wild, PosixFilePermissions.fromString("rwxr-xr-x"));
+            }
+            // As does one it may not list for a file's wildcard.
+            assertEquals(List.of(new ServerEnvironment.Hidden(realEtc, true)), prepare(
+                    named("optional:file:" + etc + "/*/application.yml"),
+                    new ArrayList<>()).hidden());
+            // However Spring is told of a file there: a scheme in another
+            // case, a resource: prefix or an extension hint.
+            for (String location : List.of("optional:File:" + etc + "/",
+                    "optional:resource:file:" + secret,
+                    "optional:file:" + etc.resolve("app.conf") + "[.properties]")) {
+                assertEquals(List.of(new ServerEnvironment.Hidden(realEtc, false)),
+                        prepare(named(location), new ArrayList<>()).hidden(), location);
+            }
             // A file it does see is still judged beside the directory it cannot.
             Path seen = write("seen.yml", "server.port: 9090\n");
             prepared = prepare(named("file:" + seen + ",optional:file:" + secret),
@@ -548,25 +595,33 @@ class ServerEnvironmentTest {
         Path locked = write("dist/config/application.yml", "server.port: 9091\n");
         String user = System.getProperty("user.name");
         ServerEnvironment.Failure failure = ServerEnvironment.failure(cannotRead("x"),
-                named("file:" + fine + ",optional:file:" + locked.getParent() + "/"),
+                looked(named("file:" + fine + ",optional:file:" + locked.getParent() + "/")),
                 file -> !file.toAbsolutePath().normalize().equals(locked),
                 file -> false, directory);
         assertEquals(locked + " is not readable by " + user, failure.detail());
         assertEquals(locked, failure.unreadable());
         // A file it reads and that parses is no culprit.
         assertEquals("x (Permission denied)", ServerEnvironment.failure(cannotRead("x"),
-                named("file:" + fine), file -> true, file -> false, directory).detail());
+                looked(named("file:" + fine)), file -> true, file -> false, directory).detail());
         // Nor is one it cannot read when Spring failed on no read.
         assertEquals("bad value", ServerEnvironment.failure(
                 new IllegalStateException("bad value"),
-                named("file:" + fine + ",optional:file:" + locked.getParent() + "/"),
+                looked(named("file:" + fine + ",optional:file:" + locked.getParent() + "/")),
                 file -> !file.toAbsolutePath().normalize().equals(locked),
                 file -> false, directory).detail());
-        // A profile variant may be what Spring could not read.
+        // A variant of a profile Spring activated may be what it could not read.
         Path variant = write("dist/config/application-edge.yml", "server.port: 9092\n");
+        Map<String, Object> edge = new HashMap<>();
+        edge.put("SPRING_CONFIG_ADDITIONAL_LOCATION",
+                "file:" + fine + ",optional:file:" + locked.getParent() + "/");
+        edge.put("SPRING_PROFILES_ACTIVE", "edge");
         assertEquals(variant + " is not readable by " + user, ServerEnvironment.failure(
-                cannotRead("x"),
-                named("file:" + fine + ",optional:file:" + locked.getParent() + "/"),
+                cannotRead("x"), looked(environment(edge)),
+                file -> !file.toAbsolutePath().normalize().equals(variant),
+                file -> false, directory).detail());
+        // Not that of a profile it did not.
+        assertEquals("x (Permission denied)", ServerEnvironment.failure(cannotRead("x"),
+                looked(named("file:" + fine + ",optional:file:" + locked.getParent() + "/")),
                 file -> !file.toAbsolutePath().normalize().equals(variant),
                 file -> false, directory).detail());
     }
@@ -578,12 +633,12 @@ class ServerEnvironmentTest {
         Path config = write("config/application.yml", "server:\n  port: [\n");
         RuntimeException error = thrown(named("file:" + config));
         ServerEnvironment.Failure failure = ServerEnvironment.failure(error,
-                environment(Map.of()), file -> true, file -> false, directory);
+                looked(environment(Map.of())), file -> true, file -> false, directory);
         assertEquals(config + ", line 3, column 1: expected the node content,"
                 + " but found '<stream end>'", failure.detail());
         // Unless spring.config.location replaces them.
         ServerEnvironment.Failure replaced = ServerEnvironment.failure(error,
-                environment(Map.of("SPRING_CONFIG_LOCATION", "optional:classpath:/")),
+                looked(environment(Map.of("SPRING_CONFIG_LOCATION", "optional:classpath:/"))),
                 file -> true, file -> false, directory);
         assertEquals("a configuration file, line 3, column 1: expected the node content,"
                 + " but found '<stream end>'", replaced.detail());
@@ -598,14 +653,25 @@ class ServerEnvironmentTest {
         // A location named relative to the working directory is read there.
         Path relative = write("etc/relative.yml", "server.port: 9094\n");
         assertEquals(relative + " is not readable by " + System.getProperty("user.name"),
-                ServerEnvironment.failure(cannotRead("x"), named("file:etc/relative.yml"),
+                ServerEnvironment.failure(cannotRead("x"),
+                        looked(named("file:etc/relative.yml")),
                         file -> !file.toAbsolutePath().normalize().equals(relative),
                         file -> false, directory).detail());
+        // A file both a location and config/*/ name is named once, though
+        // one names it from a relative working directory, as the server's is.
+        Files.writeString(nested, "server: [\n");
+        RuntimeException twice = thrown(named("optional:file:" + nested.getParent() + "/"));
+        assertEquals(nested + ", line 2, column 1: expected the node content, but found"
+                + " '<stream end>'", ServerEnvironment.failure(twice,
+                        looked(named("optional:file:" + nested.getParent() + "/")),
+                        file -> true, file -> false,
+                        Path.of("").toAbsolutePath().relativize(directory)).detail());
+        Files.writeString(nested, "server.port: 9091\n");
         // So is spring.config.name's.
         Path renamed = write("config/server.yml", "server.port: 9093\n");
         assertEquals(renamed + " is not readable by " + System.getProperty("user.name"),
                 ServerEnvironment.failure(cannotRead("x"),
-                        environment(Map.of("SPRING_CONFIG_NAME", "server")),
+                        looked(environment(Map.of("SPRING_CONFIG_NAME", "server"))),
                         file -> !file.toAbsolutePath().normalize().equals(renamed),
                         file -> false, directory).detail());
     }
@@ -643,6 +709,75 @@ class ServerEnvironmentTest {
         prepared = prepare(environment(Map.of("SPRING_CONFIG_LOCATION", "file:" + named)),
                 new ArrayList<>());
         assertEquals(List.of(named), ServerEnvironment.files(prepared.environment(), directory));
+    }
+
+    // The files, each once, in no order: those of locations that hold no
+    // setting have no precedence to keep.
+    private static void assertSameFiles(Set<Path> expected, List<Path> files) {
+        assertEquals(expected, Set.copyOf(files), files.toString());
+        assertEquals(expected.size(), files.size(), files.toString());
+    }
+
+    @Test
+    void findsTheFilesSpringLooksForHoweverALocationIsSpelled() throws IOException {
+        // Each holds no setting, so only where Spring looked finds it: a
+        // scheme in another case, a resource: prefix, and a name with a
+        // colon, which Spring reads as a file in the working directory.
+        Path upper = write("upper/application.yml", "# spring.datasource.password: x\n");
+        Path resource = write("resource/application.yml", "# server.port: 9090\n");
+        Path colon = write("foo:bar.yml", "# server.port: 9090\n");
+        ManagedAgentPreflight.Prepared prepared = prepare(named("optional:File:"
+                + upper.getParent() + "/,optional:resource:file:" + resource.getParent()
+                + "/,optional:foo:bar.yml"), new ArrayList<>());
+        assertNull(prepared.failure());
+        assertSameFiles(Set.of(colon, resource, upper),
+                ServerEnvironment.files(prepared.environment(), directory));
+        // A wildcard, which Spring lists rather than looks a file up in,
+        // named so or imported beside the file that imports it.
+        Path listed = write("listed/edge/application.yml", "# server.port: 9090\n");
+        Path importer = write("importer/application.yml",
+                "spring.config.import: optional:conf.d/*/\n");
+        Path imported = write("importer/conf.d/edge/application.yml", "# server.port: 9091\n");
+        prepared = prepare(named("optional:File:" + directory.resolve("listed") + "/*/,optional:file:"
+                + importer.getParent() + "/"), new ArrayList<>());
+        assertNull(prepared.failure());
+        assertSameFiles(Set.of(importer, listed, imported),
+                ServerEnvironment.files(prepared.environment(), directory));
+        // A file's wildcard: Spring looks for the one name in each directory,
+        // and for the variant of each profile, named as for a hinted file.
+        Path wild = write("fw/b/application.yml", "# server.port: 9090\n");
+        Path hinted = write("fn/a/notes.conf", "qwen.preflight.probe=hinted\n");
+        Path variant = write("fn/a/notes.conf-edge", "# server.port: 9091\n");
+        prepared = prepare(named("optional:file:" + directory.resolve("fw") + "/*/application.yml"
+                + ",optional:file:" + directory.resolve("fn") + "/*/notes.conf[.properties]"),
+                new ArrayList<>(), "--spring.profiles.active=edge");
+        assertNull(prepared.failure());
+        assertEquals("hinted", prepared.environment().getProperty("qwen.preflight.probe"));
+        assertSameFiles(Set.of(wild, hinted, variant),
+                ServerEnvironment.files(prepared.environment(), directory));
+        // Spring matches the extension in any case and looks for the
+        // loader's own, and reads nothing for an extension no loader takes.
+        Path lower = write("fu/a/application.yml", "# server.port: 9090\n");
+        write("fj/a/notes.conf", "# server.port: 9090\n");
+        prepared = prepare(named("optional:file:" + directory.resolve("fu") + "/*/application.YML"
+                + ",optional:file:" + directory.resolve("fj") + "/*/notes.conf[.json]"),
+                new ArrayList<>());
+        assertNull(prepared.failure());
+        assertSameFiles(Set.of(lower), ServerEnvironment.files(prepared.environment(), directory));
+        // An empty spring.config.location or spring.config.name leaves
+        // Spring no file to look for, not its defaults.
+        Path config = write("config/application.yml", "# server.port: 9090\n");
+        write("config/edge/application.yml", "# server.port: 9091\n");
+        // Spring lists no directory named from "..", as a ConfigMap's ..data.
+        write("config/..data/application.yml", "# server.port: 9092\n");
+        assertEquals(List.of(config, directory.resolve("config/edge/application.yml")),
+                ServerEnvironment.files(prepare(environment(Map.of()), new ArrayList<>())
+                        .environment(), directory));
+        for (String property : List.of("SPRING_CONFIG_LOCATION", "SPRING_CONFIG_NAME")) {
+            assertEquals(List.of(), ServerEnvironment.files(prepare(
+                    environment(Map.of(property, "")), new ArrayList<>()).environment(),
+                    directory), property);
+        }
     }
 
     @Test
@@ -869,6 +1004,21 @@ class ServerEnvironmentTest {
         assertEquals("s3cret", prepared.environment().getProperty("spring.datasource.password"));
         assertEquals(List.of(hinted), prepared.files());
         assertEquals(ManagedAgentPreflight.Status.WARN, rows(prepared).get(0).status());
+        // Spring reads one whose lines are all comments too, though it
+        // declares no key, and the variant of a profile beside it, which
+        // Spring names after the hinted file as written.
+        Path template = write("notes/notes.conf", "# spring.datasource.password=change-me\n");
+        Path edge = write("notes/notes.conf-edge", "# spring.datasource.password=change-me\n");
+        for (Path file : List.of(template, edge)) {
+            Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
+        }
+        prepared = prepare(named("file:" + template + "[.properties]"), new ArrayList<>(),
+                "--spring.profiles.active=edge");
+        assertEquals(List.of(template, edge), prepared.files());
+        rows = rows(prepared);
+        assertEquals(List.of(ManagedAgentPreflight.Status.WARN, ManagedAgentPreflight.Status.WARN),
+                rows.stream().map(ManagedAgentPreflight.Check::status).toList(), rows.toString());
+        assertEquals("chmod 600 " + template, rows.get(0).fix());
         // It is a value file too, of a property named app.conf, under a config
         // tree imported over its directory; its keys still tell.
         prepared = prepare(named("file:" + hinted + "[.properties]"), new ArrayList<>(),
@@ -967,9 +1117,9 @@ class ServerEnvironmentTest {
         variables.put("SPRING_PROFILES_INCLUDE", "zzz");
         assertEquals(zzz + problem, refused(environment(variables)).detail());
         // The profile set in a file, which the environment Spring was given
-        // does not hold: both are named.
+        // does not hold: Spring looked up its variant alone.
         Files.writeString(config, "spring.profiles.active: zzz\n");
-        assertEquals(aaa + " or " + zzz + problem,
+        assertEquals(zzz + problem,
                 refused(named("optional:file:" + config.getParent() + "/")).detail());
         // A base file Spring reads for certain is the one, even beside a
         // variant with the same error.
@@ -1066,7 +1216,11 @@ class ServerEnvironmentTest {
         Path little = directory.resolve("config/application.yaml");
         Files.write(little, ("\ufeffspring.datasource.password: s3cret\n")
                 .getBytes(StandardCharsets.UTF_16LE));
-        for (Path file : List.of(properties, big, little)) {
+        // Or as UTF-8 after one, which it drops, as before a commented-out key.
+        Path marked = directory.resolve("config/marked.yml");
+        Files.write(marked, ("\ufeff# spring.datasource.password: s3cret\n")
+                .getBytes(StandardCharsets.UTF_8));
+        for (Path file : List.of(properties, big, little, marked)) {
             Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
             ManagedAgentPreflight.Check check = ManagedAgentPreflight.configFileCheck(file, null);
             assertEquals(ManagedAgentPreflight.Status.WARN, check.status(), check.toString());

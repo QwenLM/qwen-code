@@ -318,7 +318,13 @@ public final class ManagedAgentPreflight {
                 directory + " cannot be " + (hidden.listed() ? "listed" : "entered") + " by "
                         + runner + ", which runs this check, and the server may read a"
                         + " configuration file in it",
-                "run --check as " + account.name() + " or as root");
+                runAs(account));
+    }
+
+    // The account the check sees the server's files as.
+    private static String runAs(ServiceAccount account) {
+        return "run --check as " + account.name()
+                + (account.superuser() ? "" : " or as root");
     }
 
     /**
@@ -344,7 +350,7 @@ public final class ManagedAgentPreflight {
         return serverReads
                 ? new Check("config", Status.FAIL,
                         path + " is not readable by " + runner + ", which runs this check",
-                        "run --check as " + account.name() + " or as root")
+                        runAs(account))
                 : new Check("config", Status.FAIL,
                         path + " is not readable by " + account.name(),
                         unreadableFix(account.name(), path));
@@ -647,12 +653,17 @@ public final class ManagedAgentPreflight {
 
     // Spring reads YAML as UTF-8, or UTF-16 after a byte order mark, and
     // .properties as ISO-8859-1. A comment's key is ASCII, which ISO-8859-1,
-    // decoding any byte, reads in all but UTF-16.
+    // decoding any byte, reads in all but UTF-16. YAML drops a UTF-8 byte
+    // order mark, as an editor may write one, so its first line is read
+    // without it.
     private static String text(byte[] bytes) {
         boolean utf16 = bytes.length >= 2
                 && ((bytes[0] & 0xff) == 0xfe && (bytes[1] & 0xff) == 0xff
                         || (bytes[0] & 0xff) == 0xff && (bytes[1] & 0xff) == 0xfe);
-        return new String(bytes, utf16 ? StandardCharsets.UTF_16 : StandardCharsets.ISO_8859_1);
+        int start = !utf16 && bytes.length >= 3 && (bytes[0] & 0xff) == 0xef
+                && (bytes[1] & 0xff) == 0xbb && (bytes[2] & 0xff) == 0xbf ? 3 : 0;
+        return new String(bytes, start, bytes.length - start,
+                utf16 ? StandardCharsets.UTF_16 : StandardCharsets.ISO_8859_1);
     }
 
     static String unreadableFix(String account, String path) {
