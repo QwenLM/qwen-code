@@ -267,6 +267,9 @@ export default defineConfig(({ command }) => ({
       // Goals page (`GET /goals`). Without it the SPA fallback returns
       // index.html in dev and the page fails JSON parsing on open.
       '/goals': daemonProxy,
+      // Todos page (`GET /todos`, `POST /todos/update`). Same reason as the
+      // routes above — the SPA fallback would return index.html in dev.
+      '/todos': daemonProxy,
       // PR watches page (`GET /autofix-pr/watches`). Same reason as the routes
       // above. The workspace-qualified form is already reached by the
       // `/workspace` prefix; only the primary's unqualified route needs this.
