@@ -1,8 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.McpOAuthRepository.Attempt;
 import com.alibaba.qwen.code.managedagent.repository.McpOAuthRepository.Scope;
@@ -19,6 +16,9 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class JdbcMcpOAuthRepositoryTest {
     private final ObjectMapper json = new ObjectMapper();

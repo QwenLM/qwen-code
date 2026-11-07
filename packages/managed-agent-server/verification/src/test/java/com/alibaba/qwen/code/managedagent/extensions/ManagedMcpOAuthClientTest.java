@@ -1,9 +1,5 @@
 package com.alibaba.qwen.code.managedagent.extensions;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
-
 import com.alibaba.qwen.code.managedagent.config.ManagedMcpOAuthProperties.OAuthProvider;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,6 +13,10 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 class ManagedMcpOAuthClientTest {
     @Test
