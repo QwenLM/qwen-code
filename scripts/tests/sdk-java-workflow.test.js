@@ -1330,6 +1330,9 @@ describe('SDK Java self-hosted workflow guards', () => {
           'repository/com/alibaba/druid/1.0/third-party.jar',
         ];
         try {
+          // The Actions runner guarantees this directory before every step;
+          // the extracted seed stanza assumes its parent already exists.
+          mkdirSync(runnerTemp, { recursive: true });
           for (const path of [...metadata, ...artifacts]) {
             mkdirSync(dirname(join(host, path)), { recursive: true });
             writeFileSync(join(host, path), path);
