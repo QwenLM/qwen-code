@@ -19394,6 +19394,172 @@ describe('ChannelBase', () => {
   });
 
   describe('dispatch modes', () => {
+    describe('inject', () => {
+      function withMidTurnBridge(): ReturnType<typeof vi.fn> {
+        const enqueueMidTurnMessage = vi.fn().mockResolvedValue({
+          accepted: true,
+        });
+        bridge = Object.assign(new EventEmitter(), {
+          ...bridge,
+          enqueueMidTurnMessage,
+        }) as unknown as ChannelAgentBridge;
+        return enqueueMidTurnMessage;
+      }
+
+      it('hands a mid-turn message to the running turn without chaining a second prompt', async () => {
+        const enqueueMidTurnMessage = withMidTurnBridge();
+        let resolveMain!: (value: string) => void;
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+          new Promise<string>((resolve) => {
+            resolveMain = resolve;
+          }),
+        );
+        const ch = createChannel({ dispatchMode: 'inject' });
+
+        const main = ch.handleInbound(envelope({ text: 'main task' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+        await ch.handleInbound(envelope({ text: 'inject this' }));
+
+        expect(enqueueMidTurnMessage).toHaveBeenCalledWith(
+          's-1',
+          'inject this',
+        );
+        expect(bridge.prompt).toHaveBeenCalledOnce();
+        expect(bridge.cancelSession).not.toHaveBeenCalled();
+
+        resolveMain('main answer');
+        await main;
+      });
+
+      it('chains the message when the session went idle before delivery', async () => {
+        const enqueueMidTurnMessage = withMidTurnBridge();
+        enqueueMidTurnMessage.mockResolvedValue({ accepted: false });
+        let resolveMain!: (value: string) => void;
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+          new Promise<string>((resolve) => {
+            resolveMain = resolve;
+          }),
+        );
+        const ch = createChannel({ dispatchMode: 'inject' });
+
+        const main = ch.handleInbound(envelope({ text: 'main task' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+        const second = ch.handleInbound(envelope({ text: 'inject this' }));
+        await vi.waitFor(() =>
+          expect(enqueueMidTurnMessage).toHaveBeenCalled(),
+        );
+        resolveMain('main answer');
+        await main;
+        await second;
+
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+        expect(
+          (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[1]![1],
+        ).toBe('inject this');
+      });
+
+      it('chains the message when the bridge cannot reach a running turn', async () => {
+        let resolveMain!: (value: string) => void;
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+          new Promise<string>((resolve) => {
+            resolveMain = resolve;
+          }),
+        );
+        const ch = createChannel({ dispatchMode: 'inject' });
+
+        const main = ch.handleInbound(envelope({ text: 'main task' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+        const second = ch.handleInbound(envelope({ text: 'inject this' }));
+        resolveMain('main answer');
+        await main;
+        await second;
+
+        expect(bridge.enqueueMidTurnMessage).toBeUndefined();
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      });
+
+      it('falls back to chaining when delivery throws', async () => {
+        const enqueueMidTurnMessage = withMidTurnBridge();
+        enqueueMidTurnMessage.mockRejectedValue(new Error('transport down'));
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        let resolveMain!: (value: string) => void;
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+          new Promise<string>((resolve) => {
+            resolveMain = resolve;
+          }),
+        );
+        const ch = createChannel({ dispatchMode: 'inject' });
+        try {
+          const main = ch.handleInbound(envelope({ text: 'main task' }));
+          await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+          const second = ch.handleInbound(envelope({ text: 'inject this' }));
+          await vi.waitFor(() =>
+            expect(enqueueMidTurnMessage).toHaveBeenCalled(),
+          );
+          resolveMain('main answer');
+          await main;
+          await second;
+
+          expect(bridge.prompt).toHaveBeenCalledTimes(2);
+          const logs = stderr.mock.calls.map(([chunk]) => String(chunk));
+          expect(logs.some((line) => line.includes('inject failed'))).toBe(
+            true,
+          );
+        } finally {
+          stderr.mockRestore();
+        }
+      });
+
+      it('denies inject from an unauthorized member of a shared session', async () => {
+        const enqueueMidTurnMessage = withMidTurnBridge();
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        let resolveMain!: (value: string) => void;
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+          new Promise<string>((resolve) => {
+            resolveMain = resolve;
+          }),
+        );
+        const ch = createChannel({
+          sessionScope: 'single',
+          dispatchMode: 'inject',
+          allowedUsers: ['owner'],
+        });
+        try {
+          const main = ch.handleInbound(
+            envelope({ senderId: 'owner', text: 'main task' }),
+          );
+          await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+          const second = ch.handleInbound(
+            envelope({ senderId: 'intruder', text: 'inject this' }),
+          );
+          await vi.waitFor(() =>
+            expect(stderr.mock.calls.length).toBeGreaterThan(0),
+          );
+          resolveMain('main answer');
+          await main;
+          await second;
+
+          expect(enqueueMidTurnMessage).not.toHaveBeenCalled();
+          expect(bridge.prompt).toHaveBeenCalledTimes(2);
+          const logs = stderr.mock.calls.map(([chunk]) => String(chunk));
+          expect(logs.some((line) => line.includes('inject denied'))).toBe(
+            true,
+          );
+        } finally {
+          stderr.mockRestore();
+        }
+      });
+    });
+
     it('collect: buffers messages and coalesces into one followup prompt', async () => {
       // Make the first prompt "slow" — we control when it resolves
       let resolveFirst!: (v: string) => void;

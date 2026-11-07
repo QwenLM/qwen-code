@@ -13,7 +13,22 @@ export type PrivatePolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
 export type GroupSenderPolicy = 'open' | 'allowlist';
 /** @deprecated Use PrivatePolicy. */
 export type DmPolicy = 'disabled' | 'open';
-export type DispatchMode = 'collect' | 'steer' | 'followup';
+/**
+ * How a message that arrives while its session's turn is still running is
+ * dispatched. `inject` hands the message to the running turn instead of
+ * chaining a new one behind it, so the agent sees it before it finishes.
+ */
+export type DispatchMode = 'collect' | 'steer' | 'followup' | 'inject';
+
+/** Outcome of an `inject`-mode mid-turn delivery attempt. */
+export interface ChannelMidTurnDeliveryResult {
+  /**
+   * True when the message was queued into the running turn. False when the
+   * session had already gone idle, in which case the caller must send it as a
+   * normal prompt.
+   */
+  accepted: boolean;
+}
 export type ChannelOutputMode = 'per_task' | 'per_response' | 'per_turn';
 
 export interface ChannelIdentityConfig {

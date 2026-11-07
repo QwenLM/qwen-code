@@ -2,6 +2,7 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
+import type { ChannelMidTurnDeliveryResult } from './types.js';
 
 export const CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
@@ -324,6 +325,16 @@ export interface ChannelAgentBridge {
     question: string,
     signal?: AbortSignal,
   ): Promise<ChannelBtwResult>;
+  /**
+   * Queue a message into the session's RUNNING turn instead of chaining it
+   * behind that turn. Bridges whose agent connection cannot reach a live turn
+   * omit it; channels then fall back to chaining the message.
+   */
+  enqueueMidTurnMessage?(
+    sessionId: string,
+    message: string,
+    signal?: AbortSignal,
+  ): Promise<ChannelMidTurnDeliveryResult>;
   cancelSession(sessionId: string): Promise<void>;
   /** Release a bridge-owned session that will not be routed to a caller. */
   discardSession?(

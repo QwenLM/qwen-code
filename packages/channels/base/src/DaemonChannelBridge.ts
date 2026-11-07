@@ -31,7 +31,7 @@ import {
   selectChannelToolsForSession,
   type JsonRpcMessage,
 } from './ChannelLoopTools.js';
-import type { SessionScope } from './types.js';
+import type { ChannelMidTurnDeliveryResult, SessionScope } from './types.js';
 
 const MAX_RESPONDED_PERMISSION_REQUESTS = 256;
 
@@ -88,6 +88,10 @@ export interface DaemonChannelSessionClient {
     command: string,
     signal?: AbortSignal,
   ): Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
+  enqueueMidTurnMessage?(
+    message: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<ChannelMidTurnDeliveryResult>;
 }
 
 export interface DaemonChannelSessionFactoryRequest {
@@ -938,6 +942,24 @@ export class DaemonChannelBridge
       throw new Error('Shell command not supported by this session client');
     }
     return session.shellCommand(command, signal);
+  }
+
+  async enqueueMidTurnMessage(
+    sessionId: string,
+    message: string,
+    signal?: AbortSignal,
+  ): Promise<ChannelMidTurnDeliveryResult> {
+    const session = this.ensureSession(sessionId);
+    if (!session.enqueueMidTurnMessage) {
+      throw new Error(
+        'Mid-turn delivery is not supported by this session client',
+      );
+    }
+    const result = await session.enqueueMidTurnMessage(
+      message,
+      signal ? { signal } : undefined,
+    );
+    return { accepted: result.accepted };
   }
 
   async cancelSession(sessionId: string): Promise<void> {

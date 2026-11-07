@@ -7378,6 +7378,46 @@ export abstract class ChannelBase {
             // Chain onto the session queue (existing sequential behavior)
             break;
           }
+          case 'inject': {
+            // Deliver into the RUNNING turn instead of chaining behind it, so
+            // the agent sees the message before it finishes. Same authorization
+            // gate as steer: in a shared session an unauthorized member must not
+            // reach another operator's live turn. A refused inject falls through
+            // to normal queuing (the `break`) like a refused steer does.
+            if (!this.isAuthorizedForSharedSession(envelope)) {
+              process.stderr.write(
+                `[${this.name}] inject denied for ${envelope.senderId} in shared session (chat=${sanitizeLogText(envelope.chatId, 64)}); queuing instead\n`,
+              );
+              break;
+            }
+            if (!this.bridge.enqueueMidTurnMessage) {
+              process.stderr.write(
+                `[${this.name}] inject requested but the bridge cannot reach a running turn; queuing instead\n`,
+              );
+              break;
+            }
+            let injected = false;
+            try {
+              const result = await this.bridge.enqueueMidTurnMessage(
+                sessionId,
+                promptText,
+              );
+              injected = result.accepted;
+            } catch (err) {
+              process.stderr.write(
+                `[${this.name}] inject failed for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+              );
+            }
+            if (injected) {
+              process.stderr.write(
+                `[${this.name}] inject: delivered mid-turn message from ${envelope.senderId} into session ${sessionId}\n`,
+              );
+              return;
+            }
+            // The turn went idle before the queue accepted the message, so this
+            // is an ordinary turn now: chain it instead of dropping it.
+            break;
+          }
           default: {
             // Exhaustive check — should never happen
             const _exhaustive: never = mode;

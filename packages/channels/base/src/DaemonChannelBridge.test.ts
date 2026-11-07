@@ -168,6 +168,73 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('forwards a mid-turn message to the exact daemon session and reports acceptance', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const enqueueMidTurnMessage = vi
+      .fn()
+      .mockResolvedValue({ accepted: true, messageId: 'mid-1' });
+    (session as Partial<FakeSession>).enqueueMidTurnMessage =
+      enqueueMidTurnMessage;
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const controller = new AbortController();
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(
+      bridge.enqueueMidTurnMessage(
+        'session-1',
+        'steer left',
+        controller.signal,
+      ),
+    ).resolves.toEqual({ accepted: true });
+    expect(enqueueMidTurnMessage).toHaveBeenCalledWith('steer left', {
+      signal: controller.signal,
+    });
+    events.close();
+    bridge.stop();
+  });
+
+  it('passes an idle-session refusal through instead of hiding it', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    (session as Partial<FakeSession>).enqueueMidTurnMessage = vi
+      .fn()
+      .mockResolvedValue({ accepted: false, reason: 'session_idle' });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(
+      bridge.enqueueMidTurnMessage('session-1', 'late message'),
+    ).resolves.toEqual({ accepted: false });
+    events.close();
+    bridge.stop();
+  });
+
+  it('fails closed when the daemon session has no mid-turn delivery method', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(
+      bridge.enqueueMidTurnMessage('session-1', 'message'),
+    ).rejects.toThrow('not supported');
+    events.close();
+    bridge.stop();
+  });
+
   it('fails closed when the daemon session has no BTW method', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

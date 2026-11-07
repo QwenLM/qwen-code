@@ -1105,6 +1105,7 @@ describe('WorkspaceChannelSettingsStore', () => {
         groups: {
           '*': { requireMention: false },
           'group-1': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+          'group-2': { dispatchMode: 'inject' },
         },
         groupHistoryLimit: 25,
         identity: { id: 'ops', displayName: 'Ops' },
@@ -1131,6 +1132,7 @@ describe('WorkspaceChannelSettingsStore', () => {
       groups: {
         '*': { requireMention: false },
         'group-1': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+        'group-2': { dispatchMode: 'inject' },
       },
       groupHistoryLimit: 25,
       identity: { id: 'ops', displayName: 'Ops' },
