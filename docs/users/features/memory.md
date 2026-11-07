@@ -1,9 +1,10 @@
 # Memory
 
-Every Qwen Code session starts with a fresh context window. Two mechanisms carry knowledge across sessions so you don't have to re-explain yourself every time:
+Every Qwen Code session starts with a fresh context window. Three mechanisms carry knowledge across sessions so you don't have to re-explain yourself every time:
 
 - **QWEN.md** — instructions _you_ write once and Qwen reads every session
 - **Auto-memory** — notes Qwen writes itself based on what it learns from you
+- **External memory (`context_search`)** — an optional MCP tool Qwen calls on demand to search Mem0 or a local session index
 
 ---
 
@@ -266,6 +267,61 @@ Runs the memory cleanup now instead of waiting for the automatic schedule:
 ```
 /dream
 ```
+
+---
+
+## External Memory (`context_search`)
+
+In addition to `QWEN.md` and auto-memory, Qwen Code can query external memory services and local session indexes through the `context_search` MCP tool. Unlike `QWEN.md` and auto-memory, `context_search` is called by the model on demand — nothing is recalled or sent automatically at each turn:
+
+- **Mem0 (built-in adapter):** Configure `memory.mem0` in `~/.qwen/settings.json` to connect to Mem0 Platform V3, PolarDB, or self-hosted Mem0 OSS. See [Mem0](./mem0.md) for setup and optional write confirmation.
+- **External Context MCP Profile v1 servers:** Any stdio or HTTP MCP server implementing the `context_search({ query })` contract can be registered with `qwen mcp add` or `mcpServers` in `settings.json` (set `"includeTools": ["context_search"]` so only `context_search` is exposed for a Profile v1 server).
+
+Each entry registers its own server, and more than one can be active at once — Qwen exposes each server's `context_search` separately (for example, `mcp__external-context__context_search` and `mcp__deja-context__context_search`) and the model chooses between them, so enable only the corpus you want searched, or name the backend in your request.
+
+Whichever backend you use, the matches `context_search` returns are added to Qwen's context and sent to the model provider configured for the session, and calls are approval-gated unless you allow them — a local index keeps the search local, not the results. In Auto Mode the query and a bounded copy of the arguments also go to the classifier model.
+
+### deja-vu
+
+A local CLI and MCP server that indexes the session transcripts coding agents (Qwen Code, Claude Code, Codex, Cursor, and others) already write to disk using local BM25 search, with no model calls or API keys required to build or query the index.
+
+- **Repository:** https://github.com/vshulcz/deja-vu
+- **Cost:** Free and open source (MIT)
+- **Best for:** Searching past sessions across Qwen Code and other local coding agents on the same machine
+
+#### Available Tools
+
+- `context_search` — Search indexed local session transcripts (`deja mcp --context-search`)
+
+#### Setup
+
+1. Install the `deja` binary (for example, `brew install deja-vu`, `npm install -g @vshulcz/deja-vu`, or from the [GitHub releases](https://github.com/vshulcz/deja-vu/releases)) and build the initial index (`deja index`).
+2. Register the server using either method below:
+
+**Method 1: CLI command**
+
+```bash
+qwen mcp add deja-context deja mcp --context-search --timeout 8000 --include-tools context_search
+```
+
+**Method 2: `settings.json`**
+
+```json
+{
+  "mcpServers": {
+    "deja-context": {
+      "command": "deja",
+      "args": ["mcp", "--context-search"],
+      "timeout": 8000,
+      "includeTools": ["context_search"]
+    }
+  }
+}
+```
+
+3. Restart Qwen Code so the new MCP server is loaded at session startup, then run `/mcp` to confirm `deja-context` is connected (see [MCP Servers](./mcp.md)).
+
+To remove the server later, run `qwen mcp remove deja-context` (or delete the `deja-context` entry from `mcpServers` in `~/.qwen/settings.json`) and restart Qwen Code.
 
 ---
 
