@@ -327,12 +327,8 @@ export function ChatPane({
     askUserFreeTextLabel,
     onRefreshModels,
     allowedApprovalModes,
-    connectionOverride,
   } = useWebShellCustomization();
-  // Managed 会话经 connectionOverride 复用本组件；普通实例仍走 daemon context。
-  // hook 必须无条件调用，故先取 daemon 值再按覆盖选择。
-  const daemonConnection = useConnection();
-  const connection = connectionOverride ?? daemonConnection;
+  const connection = useConnection();
   const modelRefresh = useModelRefresh(onRefreshModels);
   const actions = useActions();
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
