@@ -2859,7 +2859,10 @@ async function verifyWorkspaceRestore(
       event.kind === 'domain.committed' &&
       ![
         'session_metadata',
-        ...(session.mcp ? ['config_install'] : []),
+        ...(session.mcp || session.extensions?.enabled
+          ? ['config_install']
+          : []),
+        ...(session.extensions?.enabled ? ['tool_stage'] : []),
         'hook_registration',
         'hook_execution',
         'file_history',
@@ -6415,7 +6418,24 @@ export function registerHostedHarnessSessionRoutes(
         (effectiveMcpServers?.length || mcpSettings.length) &&
         brokerOptions &&
         !session.mcp
-      )
+      ) {
+        // A non-terminal discard can leave drained rows under a superseded
+        // owner; now that this bundle is durably active, release them so the
+        // constructor below does not see owners.size>1 (R15-3). The active
+        // owner's own drained rows stay for the reload to re-initialize, so a
+        // failed apply that kept the previous revision active is never stranded.
+        if (extensionBundle)
+          await HostedMcpSession.releaseSupersededDrained(
+            managed,
+            `extensions-components-${createHash('sha256')
+              .update(
+                JSON.stringify([
+                  managed.authority.sessionHeader.sessionKey,
+                  extensionBundle.configRevision,
+                ]),
+              )
+              .digest('hex')}`,
+          );
         session.mcp = new HostedMcpSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
           managed,
@@ -6424,6 +6444,7 @@ export function registerHostedHarnessSessionRoutes(
           undefined,
           extensionBundle !== undefined,
         );
+      }
       if (effectiveHookCatalog && brokerOptions && !session.hooks)
         session.hooks = new HostedHookSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
@@ -6431,6 +6452,16 @@ export function registerHostedHarnessSessionRoutes(
           effectiveHookCatalog,
           session.mcp?.broker,
           () => session.lifecycleProtocolVersion === 2,
+          extensionBundle
+            ? `extensions-components-${createHash('sha256')
+                .update(
+                  JSON.stringify([
+                    session.managed.authority.sessionHeader.sessionKey,
+                    extensionBundle.configRevision,
+                  ]),
+                )
+                .digest('hex')}`
+            : undefined,
         );
       if (extensionBundle && extensionManagement)
         selectExtensionCatalog(
@@ -7075,10 +7106,37 @@ export function registerHostedHarnessSessionRoutes(
       // A bare load of a parked Session keeps refusing with 409 so it never
       // drives a Runtime by accident.
       const unsettled = unsettledPromptId(session);
+      const pendingCommandApproval =
+        session.extensions?.enabled && unsettled
+          ? await findHostedApprovalContinuation(managed, unsettled)
+          : undefined;
       // Cold loads stay inert: only an explicit takeover request may touch
       // the Broker or settle anything. A bare load of a parked Session keeps
       // refusing with 409 so it never drives a Runtime by accident.
       const takeover = !lifecycle && !session.hooks && takeoverFlags;
+      // An extensions Session that also carries a Hook catalog never satisfies
+      // `takeover` (hooks set), yet a parked command-step approval is still
+      // recoverable by an explicit takeover load. Compute it once and use it
+      // for BOTH the file-history settle exemption and the resume arm below,
+      // so a batch that owes file history while a command step parks at
+      // await_action is resumed rather than 409'd on a settle it can never
+      // produce (R8-1 / R7-2).
+      const extensionsCommandStepTakeover =
+        takeoverFlags &&
+        !lifecycle &&
+        !!session.extensions?.enabled &&
+        pendingCommandApproval?.plan.commandStep !== undefined;
+      // A parked command-step round must never be answered by a cold load:
+      // answering writes a durable tool_result for the plan's own skill call,
+      // which permanently destroys the continuation. Both answer guards below
+      // key on this one predicate. pendingCommandApproval is computed
+      // unconditionally above; resumeApproval is only assigned inside the
+      // takeover arm, so on a bare load it is undefined and cannot be the key
+      // (R9-1).
+      let resumeApproval: RestoredHostedApprovalContinuation | undefined;
+      const commandStepPark =
+        pendingCommandApproval?.plan.commandStep !== undefined ||
+        resumeApproval?.plan.commandStep !== undefined;
       // A Hooks Session recovers only through this load (it never takes
       // over), and the file-history gate below needs every call of the
       // pending round answered. The team and agent calls the dead Harness
@@ -7086,7 +7144,12 @@ export function registerHostedHarnessSessionRoutes(
       // committed, any other as never run — or the gate would refuse this
       // Session on every load. A failed answer leaves the gate's retriable
       // refusal.
-      if (session.hooks && !lifecycle && unsettled !== undefined) {
+      if (
+        session.hooks &&
+        !lifecycle &&
+        unsettled !== undefined &&
+        !commandStepPark
+      ) {
         try {
           await answerResumedTurnCalls({
             session: managed,
@@ -7150,7 +7213,8 @@ export function registerHostedHarnessSessionRoutes(
       // than by whichever conjunct of it the probe trips first.
       const settle: HostedFileHistorySettlement | null =
         !fileHistory?.pendingUndo && fileHistory?.pendingTurn && !channelParked
-          ? takeover && unsettled !== undefined
+          ? (takeover || extensionsCommandStepTakeover) &&
+            unsettled !== undefined
             ? fileHistory.pendingTurn === unsettled
               ? null
               : { blocker: 'pending_turn_mismatch' }
@@ -7299,12 +7363,20 @@ export function registerHostedHarnessSessionRoutes(
           resume = { promptId: unsettled, text, parts: [] };
         }
       }
-      let resumeApproval: RestoredHostedApprovalContinuation | undefined;
+      // The extensions arm reuses extensionsCommandStepTakeover (computed with
+      // the settle exemption above): an explicit, non-lifecycle takeover of an
+      // extensions Session's parked command-step plan, even when a Hook catalog
+      // makes `takeover` itself false. It is scoped to a command-step plan — a
+      // native approval on a hooks/MCP Session is refused by
+      // resumeSavedNativeBatch, so admitting it here would 503 the load instead
+      // of attaching (R7-2); native approvals stay on the no-hooks arm. Sharing
+      // the boolean with the settle exemption keeps a file-history-owing batch
+      // recoverable instead of 409'ing before this arm is consulted (R8-1).
       if (
-        takeover &&
         unsettled &&
         session.toolProfile &&
-        ((!session.hooks && !session.mcp) || session.extensions?.enabled) &&
+        ((takeover && !session.hooks && !session.mcp) ||
+          extensionsCommandStepTakeover) &&
         brokerOptions
       ) {
         const verdict = await managed.authority.harnessRunAuthorization();
@@ -7314,10 +7386,9 @@ export function registerHostedHarnessSessionRoutes(
             verdict.checkpoint.continuation.phase,
           )
         ) {
-          resumeApproval = await findHostedApprovalContinuation(
-            managed,
-            unsettled,
-          );
+          resumeApproval =
+            pendingCommandApproval ??
+            (await findHostedApprovalContinuation(managed, unsettled));
           if (resumeApproval) {
             const user = (await managed.sink.project()).find(
               (item) =>
@@ -7629,7 +7700,7 @@ export function registerHostedHarnessSessionRoutes(
         // before the Harness died — core's orphan repair would otherwise
         // have the model retry it — and as never run otherwise, so the
         // round the resume needs is whole.
-        if (promptId)
+        if (promptId && !commandStepPark)
           await answerResumedTurnCalls({
             session: managed,
             sessionId,
@@ -8248,16 +8319,13 @@ export function registerHostedHarnessSessionRoutes(
         });
         await session.automations?.reconcileRuns();
         if (phase === 'settle_resources') {
-          await session.hooks?.close();
-          await releaseLeaseNow(session);
-          for (const loop of session.shell?.monitorLoops?.values() ?? [])
-            await loop.stop('stop_requested');
-          for (const loop of session.backgroundLane?.monitorLoops?.values() ??
-            [])
-            await loop.stop('stop_requested');
-          await session.shell?.publisher?.close();
-          await session.backgroundLane?.publisher?.close();
-          await session.mcp?.closeResources();
+          // Drain every Runtime a turn left held ahead of the owner close that
+          // asks for the mount back (R22-1, the order the v1 close already
+          // keeps for R14-2): a Hook-configured turn's background Shell keeps
+          // the release-mount guard refusing runtime_session_busy, so a
+          // handback issued first parks the detach on recovery-required for as
+          // long as the process lives. The drain's stops also land their
+          // finalize through the still-open publisher closed below.
           if (brokerOptions)
             await retryHostedCleanup(
               session,
@@ -8269,6 +8337,18 @@ export function registerHostedHarnessSessionRoutes(
             );
           else if (hasHostedCleanupDebt(session.managed))
             throw new Error('Runtime cleanup remains owed after drain.');
+          // Only a delete is terminal; a close keeps the deterministic owner
+          // re-acquirable across the reload (R14-1).
+          await session.hooks?.close({ terminal: kind === 'delete' });
+          await releaseLeaseNow(session);
+          for (const loop of session.shell?.monitorLoops?.values() ?? [])
+            await loop.stop('stop_requested');
+          for (const loop of session.backgroundLane?.monitorLoops?.values() ??
+            [])
+            await loop.stop('stop_requested');
+          await session.shell?.publisher?.close();
+          await session.backgroundLane?.publisher?.close();
+          await session.mcp?.closeResources({ terminal: kind === 'delete' });
         }
         res.json({
           protocolVersion: 2,
@@ -9157,15 +9237,12 @@ export function registerHostedHarnessSessionRoutes(
       throw new Error('Hosted extension management is unavailable.');
     if (session.extensions) return session.extensions;
     const head = session.managed.authority.domainRecord('config_install');
-    const unified =
+    const config =
       head &&
-      isManagedExtensionConfig(
-        JSON.parse(
-          (await session.managed.resources.read(head.recordRef)).toString(
-            'utf8',
-          ),
-        ),
+      JSON.parse(
+        (await session.managed.resources.read(head.recordRef)).toString('utf8'),
       );
+    const unified = config && isManagedExtensionConfig(config);
     const legacy = unified ? [] : await readHostedMcpSettings(session.managed);
     const baseMcp = session.definition?.['mcpServers'];
     const options = {
@@ -9238,6 +9315,15 @@ export function registerHostedHarnessSessionRoutes(
                 session.managed.authority.sessionHeader.sessionKey,
                 ownerId,
               );
+            // A non-terminal discard can leave drained rows under a superseded
+            // owner; release them before constructing so a live off->on->off->on
+            // toggle does not accumulate owners.size>1 (R15-3, the live-path
+            // counterpart of the cold-load sweep). The active owner's own drained
+            // rows are untouched, so a failed apply is never stranded.
+            await HostedMcpSession.releaseSupersededDrained(
+              session.managed,
+              ownerId,
+            );
             session.mcp = new HostedMcpSession(
               options,
               session.managed,
@@ -9248,6 +9334,27 @@ export function registerHostedHarnessSessionRoutes(
             );
             if (session.hooks?.broker === broker)
               session.hooks.delegateBrokerToMcp();
+          }
+          const extensionBroker =
+            session.mcp?.broker ??
+            new HostedWorkspaceBroker(
+              options,
+              session.managed.authority.sessionHeader.sessionKey,
+              ownerId,
+            );
+          if (
+            session.hooks &&
+            session.hooks.broker.runtimeSessionId !==
+              extensionBroker.runtimeSessionId
+          ) {
+            // The owner moved (configRevision changed) while the Hook catalog
+            // pin stayed the same, so drain kept this session. Close it to
+            // release its mount claim and let the rebuild below bind the new
+            // owner. Swapping the broker under a held mount would orphan the
+            // claim, and refusing the swap would park a previously-valid apply
+            // at recovery_required.
+            await session.hooks.close();
+            session.hooks = undefined;
           }
           if (bundle.hookCatalog && !session.hooks) {
             session.hooks = new HostedHookSession(
@@ -12884,19 +12991,8 @@ export function registerHostedHarnessSessionRoutes(
         }
       }
       if (session.lifecycleProtocolVersion !== 2) {
-        await session.hooks?.close();
-        // Deferred until the close is known terminal: a Hook fence refusal
-        // above keeps the Session attached and retryable, and its wake pump
-        // with it. wakeBusy() holds mcpClosing for the whole drain, so no
-        // wake turn can start meanwhile; pending notifications settle below.
-        session.monitorWake?.close();
-        // A lease a recovery load acquired must go back with the Session, or
-        // the Workspace stays pinned after every later route is gone. The
-        // release retires a settled Turn's owed file-history marker first,
-        // ahead of the unguarded loop stop below so that a throw there
-        // cannot strand the retirement.
-        await releaseLeaseNow(session);
-        // #13856: drain every Runtime a turn left held, ahead of the loop
+        // #13856: drain every Runtime a turn left held, ahead of the owner
+        // close that asks for the mount back (R14-2) as well as the loop
         // stops and the publisher close. The drain's stops land their
         // finalize through the still-open publisher — the maintenance
         // answer rides the completion that carries the finalize — so the
@@ -12959,6 +13055,23 @@ export function registerHostedHarnessSessionRoutes(
             }
           }
         }
+        // A DELETE is terminal; a detach keeps the Session reloadable, so the
+        // deterministic config-scoped Hook owner must stay re-acquirable
+        // (R13-1) instead of being tombstoned under the id a reload recomputes.
+        // The held-Runtime drain above ran first so a turn's background run no
+        // longer fences the non-terminal mount handback (R14-2).
+        await session.hooks?.close({ terminal: req.method === 'DELETE' });
+        // Deferred until the close is known terminal: a Hook fence refusal
+        // above keeps the Session attached and retryable, and its wake pump
+        // with it. wakeBusy() holds mcpClosing for the whole drain, so no
+        // wake turn can start meanwhile; pending notifications settle below.
+        session.monitorWake?.close();
+        // A lease a recovery load acquired must go back with the Session, or
+        // the Workspace stays pinned after every later route is gone. The
+        // release retires a settled Turn's owed file-history marker first,
+        // ahead of the unguarded loop stop below so that a throw there
+        // cannot strand the retirement.
+        await releaseLeaseNow(session);
         // A registered observation loop outlives its turn: only the Session
         // close ends it. Stop every live loop here, ahead of the publisher
         // close and the log close, so its settle write can still reach the
@@ -12989,7 +13102,9 @@ export function registerHostedHarnessSessionRoutes(
         await session.shell?.publisher?.close();
         await session.backgroundLane?.publisher?.close();
         const mcpLease = session.runtimeLeaseHeld;
-        await session.mcp?.close();
+        // Only a DELETE is terminal; a detach keeps the owner re-acquirable
+        // across the reload (R14-1), matching the Hook close above.
+        await session.mcp?.close({ terminal: req.method === 'DELETE' });
         if (
           session.mcp &&
           mcpLease !== undefined &&
