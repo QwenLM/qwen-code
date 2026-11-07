@@ -566,11 +566,6 @@ cat "\${RUNNER_TEMP}/pulls.json"
       // That combination has no other writer: no rerun, no issue. The summary
       // step must still build the body, or report_pr has nothing to post and
       // the timeout disappears entirely.
-      const evaluate = (condition, needs) =>
-        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
-          needs,
-          () => true,
-        );
       const summary = jobs.analyze.steps.find((step) => step.id === 'summary');
       const evaluateSummary = (steps) =>
         new Function(
