@@ -283,8 +283,6 @@ import {
   type RequestedSessionIdReservation,
 } from '../session-id-admission.js';
 
-export { describePromptTurnFailure } from './session-prompt-admission.js';
-
 // `HEAD` is the most prominent ref name git rejects as a branch name.
 // The surrounding predicate covers the remaining reserved forms (`@`, `-`,
 // `..`, `.lock` suffixes, etc.). Compared case-insensitively because ref

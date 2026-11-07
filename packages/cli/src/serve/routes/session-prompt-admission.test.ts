@@ -22,6 +22,7 @@ import {
   registerChannelWorkerPromptAuthorization,
   revokeChannelWorkerPromptAuthorization,
 } from '../channel-worker-prompt-authorization.js';
+import { CHANNEL_DELIVERY_IPC_TIMEOUT_MS } from '../../runtime/channel-delivery-ipc.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import type { SessionArchiveCoordinator } from '../server/session-archive.js';
 import { bindSessionPrsFromPromptCommand } from './session-pr-backfill.js';
@@ -144,6 +145,40 @@ describe('classifyPromptRequest', () => {
     });
   });
 
+  it('gives a bound relay into an untrusted, non-primary workspace no classification', () => {
+    // Registered for another workspace, so only the bound-relay branch can
+    // accept the token, and it requires a primary or trusted target.
+    registerChannelWorkerPromptAuthorization('worker-token', '/elsewhere');
+    const meta = {
+      [CHANNEL_PROMPT_META_KEY]: true,
+      [CHANNEL_BOUND_RELAY_META_KEY]: true,
+      [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'worker-token',
+      [DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]: 'shown',
+    };
+    expect(
+      classifyPromptRequest(
+        { _meta: meta },
+        { workspaceCwd: '/ws', primary: false, trusted: false },
+      ).classification,
+    ).toEqual({ channelPrompt: false, requestedChannelPrompt: true });
+    // The same relay into a trusted or a primary workspace is classified.
+    for (const target of [
+      { primary: false, trusted: true },
+      { primary: true, trusted: false },
+    ]) {
+      expect(
+        classifyPromptRequest(
+          { _meta: meta },
+          { workspaceCwd: '/ws', ...target },
+        ).classification,
+      ).toEqual({
+        channelPrompt: true,
+        promptDisplayText: 'shown',
+        requestedChannelPrompt: true,
+      });
+    }
+  });
+
   it('classifies a channel prompt carrying a registered worker token', () => {
     registerChannelWorkerPromptAuthorization('worker-token', '/ws');
     const { classification } = classifyPromptRequest(
@@ -208,7 +243,7 @@ describe('admitSessionPrompt', () => {
   });
 
   it.each([false, true])(
-    "skips the backfill for a request's own channel marker (trusted: %s)",
+    "skips the backfill for a request's own channel marker (channelPrompt: %s)",
     (channelPrompt) => {
       const { runtime, calls } = fakeRuntime();
       admitSessionPrompt(deps, {
@@ -372,8 +407,11 @@ describe('admitSessionPrompt', () => {
 
       settle[0]!.resolve();
       await first.settled;
-      // The grace outlasts the 30 s delivery IPC timeout.
-      vi.advanceTimersByTime(59_999);
+      // The grace outlasts the delivery IPC timeout, so an in-flight
+      // delivery still finds its authorization.
+      vi.advanceTimersByTime(CHANNEL_DELIVERY_IPC_TIMEOUT_MS);
+      expect(authorizations.revokePrompt).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(59_999 - CHANNEL_DELIVERY_IPC_TIMEOUT_MS);
       expect(authorizations.revokePrompt).not.toHaveBeenCalled();
       vi.advanceTimersByTime(1);
       expect(authorizations.revokePrompt).toHaveBeenCalledWith(
@@ -386,30 +424,35 @@ describe('admitSessionPrompt', () => {
     }
   });
 
-  it('mints no authorization when the session is gone before the enqueue', () => {
-    const { runtime } = fakeRuntime();
-    const gone = new Error('session not found');
-    (
-      runtime.bridge as unknown as { getSessionLastEventId: () => never }
-    ).getSessionLastEventId = () => {
-      throw gone;
-    };
-    const authorizations = { authorizePrompt: vi.fn(), revokePrompt: vi.fn() };
-    expect(() =>
-      admitSessionPrompt(
-        { ...deps, channelDeliveryAuthorizations: authorizations as never },
-        {
-          runtime,
-          sessionId: freshSessionId(),
-          prompt: [{ type: 'text', text: 'hi' }],
-          request: {},
-          classification: plain,
-          delivery: { target: 'chat' } as never,
-        },
-      ),
-    ).toThrow(gone);
-    expect(authorizations.authorizePrompt).not.toHaveBeenCalled();
-  });
+  it.each(['getSessionLastEventId', 'getSessionEventEpoch'])(
+    'mints no authorization when the session is gone before the enqueue (%s throws)',
+    (getter) => {
+      const { runtime } = fakeRuntime();
+      const gone = new Error('session not found');
+      (runtime.bridge as unknown as Record<string, () => never>)[getter] =
+        () => {
+          throw gone;
+        };
+      const authorizations = {
+        authorizePrompt: vi.fn(),
+        revokePrompt: vi.fn(),
+      };
+      expect(() =>
+        admitSessionPrompt(
+          { ...deps, channelDeliveryAuthorizations: authorizations as never },
+          {
+            runtime,
+            sessionId: freshSessionId(),
+            prompt: [{ type: 'text', text: 'hi' }],
+            request: {},
+            classification: plain,
+            delivery: { target: 'chat' } as never,
+          },
+        ),
+      ).toThrow(gone);
+      expect(authorizations.authorizePrompt).not.toHaveBeenCalled();
+    },
+  );
 
   it('accepts a key at the route limit and refuses an empty or longer one before anything happens', () => {
     const { runtime, calls } = fakeRuntime();
