@@ -8,7 +8,7 @@
 // scarce pool (2026-10-31 decision, same accepted risk class as lint).
 // The association routing for DOWNSTREAM lanes lives in the `pick_runner`
 // shell step, which publishes `ubuntu_runner` (association-gated) and
-// `lint_runner` (untrusted forks default to hosted). The matrix below
+// `lint_runner` (untrusted forks use the disposable ARM64 pool). The matrix below
 // pins the gate's unconditional routing AND that ubuntu_runner keeps the
 // association gate for the test/integration lanes.
 //
@@ -123,8 +123,6 @@ function runPickRunnerOutputs({
   eventName,
   dispatch,
   fleet,
-  ephemeralEnabled,
-  ephemeralArch,
 }) {
   const tmp = mkdtempSync(join(tmpdir(), 'pick-runner-'));
   const outputFile = join(tmp, 'github_output');
@@ -135,8 +133,6 @@ function runPickRunnerOutputs({
       ECS_DISABLED: ecsDisabled ? 'true' : '',
       EVENT_NAME: eventName,
       LINUX_RUNNER_FLEET: fleet ?? '',
-      EPHEMERAL_ENABLED: ephemeralEnabled ?? '',
-      EPHEMERAL_ARCH: ephemeralArch ?? '',
       DISPATCH_LINUX_RUNNER: dispatch ?? '',
       GITHUB_OUTPUT: outputFile,
     },
@@ -314,7 +310,34 @@ describe('ci.yml lint_runner routing', () => {
   const ARM = '["self-hosted", "linux", "arm64"]';
   const lintRunner = (inputs) => runPickRunnerOutputs(inputs).lintRunner;
 
-  it('keeps untrusted fork lint hosted when the disposable switch is unset', () => {
+  // The disposable-pool config and the CI selectors are one contract: a label
+  // rename on either side leaves every fork PR queued forever with no failed
+  // check to point at. Pin them together (#16551 review).
+  it('publishes exactly the labels the disposable-pool config registers', () => {
+    const config = JSON.parse(
+      readFileSync(
+        join(
+          workflowsDir,
+          '..',
+          '..',
+          'scripts',
+          'ci',
+          'ephemeral-runner',
+          'config.example.json',
+        ),
+        'utf8',
+      ),
+    );
+    const fork = runPickRunnerOutputs({
+      eventName: 'pull_request',
+      sameRepo: false,
+      assoc: 'NONE',
+    });
+    assert.deepEqual(JSON.parse(fork.prTestRunner), config.labels);
+    assert.deepEqual(JSON.parse(fork.lintRunner), config.labels);
+  });
+
+  it('routes untrusted fork lint to the disposable pool without variables', () => {
     for (const sameRepo of [true, false]) {
       for (const assoc of ASSOCIATIONS) {
         assert.equal(
@@ -324,7 +347,9 @@ describe('ci.yml lint_runner routing', () => {
             assoc,
             eventName: 'pull_request',
           }),
-          sameRepo || TRUSTED.includes(assoc) ? ECS : HOSTED,
+          sameRepo || TRUSTED.includes(assoc)
+            ? ECS
+            : '["self-hosted", "ecs-qwen-ephemeral"]',
           `lint sameRepo=${sameRepo} assoc='${assoc}'`,
         );
       }
@@ -451,42 +476,59 @@ describe('ci.yml lint_runner routing', () => {
 });
 
 describe('ci.yml disposable runner routing', () => {
-  it('keeps all selected fork jobs hosted unless the switch is exactly true', () => {
-    for (const ephemeralEnabled of [undefined, '', 'false', 'invalid']) {
-      const out = runPickRunnerOutputs({
-        eventName: 'pull_request',
-        sameRepo: false,
-        assoc: 'NONE',
-        ephemeralEnabled,
-      });
-      assert.equal(out.prTestRunner, HOSTED);
-      assert.equal(out.lintRunner, HOSTED);
-    }
-  });
-  it('selects ARM64 only when explicitly configured', () => {
-    const inputs = {
+  it('selects the formal ARM64 pool when repository variables are empty', () => {
+    const selected = runPickRunnerOutputs({
       eventName: 'pull_request',
       sameRepo: false,
       assoc: 'NONE',
-      ephemeralEnabled: 'true',
-    };
-    const arm = '["self-hosted", "linux", "arm64", "ecs-qwen-ephemeral"]';
-    assert.equal(
-      runPickRunnerOutputs({ ...inputs, ephemeralArch: 'arm64' }).prTestRunner,
-      arm,
+    });
+    const arm = '["self-hosted", "ecs-qwen-ephemeral"]';
+    assert.equal(selected.prTestRunner, arm);
+    assert.equal(selected.lintRunner, arm);
+    assert.equal(selected.ubuntuRunner, HOSTED);
+    const genericArm = JSON.parse(
+      runPickRunnerOutputs({
+        eventName: 'workflow_dispatch',
+        dispatch: 'self-hosted-arm64',
+      }).ubuntuRunner,
     );
     assert.equal(
-      runPickRunnerOutputs({ ...inputs, ephemeralArch: 'arm64' }).lintRunner,
-      arm,
+      genericArm.every((label) => JSON.parse(arm).includes(label)),
+      false,
+      'generic ARM64 jobs must not match the disposable pool',
+    );
+    assert.equal(pickRunner.env.EPHEMERAL_ENABLED, undefined);
+    assert.equal(pickRunner.env.EPHEMERAL_ARCH, undefined);
+    assert.equal(
+      existsSync(join(workflowsDir, 'ephemeral-runner-smoke.yml')),
+      false,
     );
     assert.equal(
-      runPickRunnerOutputs({ ...inputs, ephemeralArch: 'invalid' })
-        .prTestRunner,
-      '["self-hosted", "linux", "x64", "ecs-qwen-ephemeral"]',
+      existsSync(join(workflowsDir, 'ci-runner-routing.yml')),
+      false,
+    );
+    const example = JSON.parse(
+      readFileSync(
+        join(
+          dirname(fileURLToPath(import.meta.url)),
+          '..',
+          '..',
+          'scripts',
+          'ci',
+          'ephemeral-runner',
+          'config.example.json',
+        ),
+        'utf8',
+      ),
+    );
+    assert.deepEqual(
+      example.labels,
+      JSON.parse(arm),
+      'the example runner registration must match the fork routing selector',
     );
   });
-  it('routes only untrusted fork jobs to the disposable pool when enabled', () => {
-    const ephemeral = '["self-hosted", "linux", "x64", "ecs-qwen-ephemeral"]';
+  it('routes only untrusted fork jobs to the disposable pool', () => {
+    const ephemeral = '["self-hosted", "ecs-qwen-ephemeral"]';
     for (const eventName of [
       'pull_request',
       'push',
@@ -499,10 +541,6 @@ describe('ci.yml disposable runner routing', () => {
             for (const fleet of ['', 'hosted', 'arm64']) {
               const inputs = { eventName, sameRepo, assoc, ecsDisabled, fleet };
               const baseline = runPickRunnerOutputs(inputs);
-              const enabled = runPickRunnerOutputs({
-                ...inputs,
-                ephemeralEnabled: 'true',
-              });
               const selected =
                 eventName === 'pull_request' &&
                 !sameRepo &&
@@ -510,16 +548,15 @@ describe('ci.yml disposable runner routing', () => {
                 !ecsDisabled &&
                 fleet !== 'hosted';
               assert.equal(
-                enabled.prTestRunner,
+                baseline.prTestRunner,
                 selected ? ephemeral : baseline.ubuntuRunner,
                 JSON.stringify(inputs),
               );
               assert.equal(
-                enabled.lintRunner,
-                selected ? ephemeral : baseline.lintRunner,
+                baseline.lintRunner,
+                selected ? ephemeral : baseline.ubuntuRunner,
                 JSON.stringify(inputs),
               );
-              assert.equal(enabled.ubuntuRunner, baseline.ubuntuRunner);
             }
           }
         }
