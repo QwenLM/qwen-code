@@ -463,6 +463,10 @@ cat "\${RUNNER_TEMP}/pulls.json"
       };
       expect(evaluate(String(jobs.rerun_infra.if), needs)).toBe(true);
       expect(evaluate(String(jobs.file_issue.if), needs)).toBe(false);
+      // The rerun owns the outcome, so no PR comment may claim a failure now:
+      // a green rerun is rejected by the analyze gate and there is no DELETE
+      // path, so the red comment would stay for a run whose last attempt passed.
+      expect(evaluate(String(jobs.report_pr.if), needs)).toBe(false);
     });
 
     it('files a provisional timeout instead of deferring to a rerun that never runs', () => {
