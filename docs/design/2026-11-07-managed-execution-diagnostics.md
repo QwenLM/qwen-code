@@ -51,11 +51,15 @@ Some v3 receipts commit during Worker publication, before the v4 result freezes.
 
 The Harness freezes packet bytes and the measurement command identity. On recovery it first checks committed evidence; exact replay changes no total and conflicting evidence is rejected. The event and the existing activity updates share one journal transaction and the writer/activation fences. The reducer verifies kind, version, digest, byte bounds, outcome provenance and the existing execution-to-invocation link. File measurements must match the resolved native tool. No database table or public write endpoint is added, and no tool is re-run to improve diagnostics.
 
+Large publication outcomes can have a verified object-store reference without inline bytes. The reducer never downloads that object while holding the journal transaction. An opaque receipt retains known execution and delivery observations, adds `receipt_outcome_not_inline` coverage and binds its complete outcome reference in the existing private execution link. A later measurement must match that execution's committed receipt reference, including resource ID, kind, version, length and digest; sharing only a digest is insufficient. Inline and chunked outcomes retain the existing body and invocation checks. Journal receipt references retain the original resource closure for replay and snapshots.
+
+Writer acquisition rebuilds missing projections with the same Session-scoped, verified resource resolver used by journal commits, including opaque publication metadata. It retains publication ownership, quarantine and integrity checks without downloading objects or widening the generic inline record reader.
+
 After the measurement event commits, later cancellation or delivery recovery may produce a different conversation outcome. Replaying the same frozen measurement retains the original event and outcome reference. A proven Shell completion or native-file effect remains successful execution evidence even if cancellation changes the conversation result.
 
 Aggregates are added to the existing overall tool/file metrics and three file-operation groups. Per-tool buckets retain the baseline's bounded representation; executor measurements remain available in paginated invocation details. This avoids multiplying the retained bucket payload while preserving cumulative measured totals.
 
-Measurement fields are added lazily, only when measurement evidence exists. Unmeasured activity-v1 and CSI `/3` records must preserve their previous projection bytes. Internal references and digests are not exposed in activity responses; public additions contain bounded measurements, source sequence and aggregate decimal-string counters.
+Measurement fields are added lazily, only when measurement evidence exists. Unmeasured inline activity-v1 and CSI `/3` records preserve their previous projection bytes; opaque publication receipts add only the private binding and explicit coverage gap described above. Internal references and digests are not exposed in activity responses; public additions contain bounded measurements, source sequence and aggregate decimal-string counters.
 
 ## Coverage and presentation
 
@@ -83,7 +87,7 @@ CSI `/1`, `/2` and `/3` keep their existing storage support of 1, 3 and 4. CSI `
 
 ## Verification and acceptance
 
-Shared TypeScript/Java fixtures cover integer/null/status validation and canonical digests, including UTF-8. Focused tests cover duplicate requests/results, v4 status/cancel/ACK, publication-before-measurement races, output failure after filesystem success, model/final content differences, unchanged files and legacy compatibility. Measurement binding, replay, counter replacement and snapshot closure require transactional tests.
+Shared TypeScript/Java fixtures cover integer/null/status validation and canonical digests, including UTF-8. Focused tests cover duplicate requests/results, v4 status/cancel/ACK, publication-before-measurement races, output failure after filesystem success, model/final content differences, unchanged files and legacy compatibility. Opaque receipt regressions preserve known evidence, reject missing or mismatched complete receipt references and count replayed measurements once. Measurement binding, replay, counter replacement and snapshot closure require transactional tests, including the Hosted publication drop-ACK process gate.
 
 The test engineer runs the relevant packaged Worker path and browser presentation checks using the existing test-script fallback where no public CLI command exposes an internal contract. Presentation fixtures do not replace real Worker/Broker, MySQL or recovery acceptance. Root build/typecheck/bundle, affected TypeScript tests, API/SurfaceRegistry validation and generated-type checks remain required.
 

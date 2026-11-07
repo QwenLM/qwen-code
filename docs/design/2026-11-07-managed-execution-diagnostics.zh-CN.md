@@ -51,11 +51,15 @@ flowchart LR
 
 Harness 冻结测量包字节和 command 身份；恢复时先检查已提交证据。精确重放不改变总数，证据冲突则拒绝。事件与现有 activity 更新共享 journal 原子事务和 writer/activation fence。reducer 校验 kind、version、digest、字节上限、outcome 来源和已有 execution-to-invocation 关联；文件测量必须匹配实际解析的原生工具。不增加数据库表或公开写入入口，也不为改善诊断重新执行工具。
 
+大型 publication outcome 可以只有已验证的对象存储引用，没有内联字节。reducer 不在 journal 事务持锁期间下载对象。无法内联读取的 receipt 保留已知执行与交付观察，增加 `receipt_outcome_not_inline` 覆盖缺口，并在现有私有 execution link 中绑定完整 outcome 引用。后续测量必须匹配同一 execution 已提交 receipt 的完整引用，包括 resource ID、kind、version、length 和 digest；只有 digest 相同不足以证明绑定。内联及分块 outcome 保留既有正文和调用身份校验。journal receipt 引用保留重放与快照所需的原资源闭包。
+
+writer 准入重建缺失投影时，复用 journal 提交使用的同一 Session 范围已验证资源解析器，包含无法内联读取的 publication 元数据。保留 publication 归属、隔离和完整性校验，不下载对象，也不放宽通用内联 record reader。
+
 测量事件提交后，取消或交付恢复可以产生不同的对话结果。相同冻结测量的重放保留原事件及 outcome 引用。即使取消改变对话返回，已证明完成的 Shell 或原生文件副作用仍保留成功执行证据。
 
 聚合加入现有工具/文件总览和三种文件操作分组。按工具分桶保持基线的有界表示，执行方测量仍可在分页调用详情中读取。这样保留累计测量总数，同时避免给每个保留桶扩充测量负载。
 
-仅在存在测量证据时惰性增加测量字段。未测量的 activity-v1 和 CSI `/3` 记录必须保留此前投影字节。activity 响应不公开内部引用和摘要，新增公开字段只包含有界测量、来源 sequence 和十进制字符串聚合计数。
+仅在存在测量证据时惰性增加测量字段。未测量的内联 activity-v1 和 CSI `/3` 记录保留此前投影字节；无法内联读取的 publication receipt 只增加上述私有绑定及明确覆盖缺口。activity 响应不公开内部引用和摘要，新增公开字段只包含有界测量、来源 sequence 和十进制字符串聚合计数。
 
 ## 覆盖与展示
 
@@ -83,7 +87,7 @@ CSI `/1`、`/2`、`/3` 分别保留既有 storage 1、3、4 支持。CSI `/3` �
 
 ## 验证与验收
 
-TypeScript/Java 共享 fixture 覆盖整数/null/status 校验和包含 UTF-8 的规范化摘要。定向测试覆盖重复请求/结果、v4 status/cancel/ACK、publication 先于测量完成的竞态、文件成功后的输出失败、模型/最终内容不同、无变化文件及旧版本兼容。测量绑定、重放、贡献替换和快照闭包需要事务测试。
+TypeScript/Java 共享 fixture 覆盖整数/null/status 校验和包含 UTF-8 的规范化摘要。定向测试覆盖重复请求/结果、v4 status/cancel/ACK、publication 先于测量完成的竞态、文件成功后的输出失败、模型/最终内容不同、无变化文件及旧版本兼容。无法内联读取的 receipt 回归检查保留已知证据、拒绝缺失或不匹配的完整 receipt 引用，并确保重放测量只计一次。测量绑定、重放、贡献替换和快照闭包需要事务测试，包括 Hosted publication 丢失 ACK 的真实进程门禁。
 
 test-engineer 运行相关打包 Worker 路径和浏览器展示检查；内部契约无公开 CLI 命令时采用既有 test-script 回退。展示 fixture 不替代真实 Worker/Broker、MySQL 或恢复验收。根 build/typecheck/bundle、受影响 TypeScript 测试、API/SurfaceRegistry 校验和生成类型检查继续为必需项。
 

@@ -180,11 +180,11 @@ final class ManagedActivityDiagnosticProjection {
             ManagedToolMeasurements.requireEvidence(evidence);
             require(execution.equals(evidence.path("executionCallId").asText())
                     && binding.path("invocationId").equals(evidence.path("invocationId")), "Measurement invocation binding conflicts.");
-            StoredResource outcome = resources.apply(payload.path("toolOutcomeRef").path("resourceId").asText());
-            requireReference(outcome, payload.path("toolOutcomeRef"));
-            require("managed-tool-outcome".equals(outcome.kind()) && outcome.schemaVersion() == 1, "Invalid measured outcome.");
-            JsonNode outcomeBody = readBody(outcome);
-            if (outcomeBody.has("executionCallId")) {
+            JsonNode outcomeBody = toolOutcome(payload.path("toolOutcomeRef"), resources);
+            if (outcomeBody == null) {
+                require(payload.path("toolOutcomeRef").equals(link.path("_receiptOutcomeRef")),
+                        "Measured capture has no matching committed receipt.");
+            } else if (outcomeBody.has("executionCallId")) {
                 require(outcomeBody.path("executionCallId").asText().equals(execution), "Measured outcome belongs to another execution.");
             } else if (outcomeBody.path("identity").has("executionCallId")) {
                 require(outcomeBody.path("identity").path("executionCallId").asText().equals(execution), "Measured capture belongs to another execution.");
@@ -224,19 +224,16 @@ final class ManagedActivityDiagnosticProjection {
                 JsonNode fact = link.path("observations").get(0);
                 JsonNode before = state.find(ManagedActivityDiagnostics.TOOLS, fact.path("invocationId").asText());
                 if (before != null) {
-                    StoredResource outcome = resources.apply(payload.path("toolOutcomeRef").path("resourceId").asText());
-                    requireReference(outcome, payload.path("toolOutcomeRef"));
-                    if ("managed-tool-outcome".equals(outcome.kind()) && outcome.bytes() == null
-                            && outcome.byteLength() > MAX_INLINE_RESOURCE_BYTES) {
-                        // Publication already verified the external object; do not fetch it under the Session fence.
+                    JsonNode outcomeRef = payload.path("toolOutcomeRef");
+                    JsonNode result = toolOutcome(outcomeRef, resources);
+                    require(!link.has("_receiptOutcomeRef") || outcomeRef.equals(link.path("_receiptOutcomeRef")),
+                            "Diagnostic receipt outcome changed.");
+                    if (result == null) {
+                        ObjectNode bound = link.deepCopy();
+                        bound.set("_receiptOutcomeRef", outcomeRef);
+                        state.put(ManagedActivityDiagnostics.LINKS, payload.path("executionCallId").asText(), bound, sequence, at);
                         ManagedActivityDiagnostics.gap(summary, "receipt_outcome_not_inline");
                     } else {
-                        JsonNode result = com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.toolOutcomeBody(
-                                payload.path("toolOutcomeRef"), referenced -> {
-                                    StoredResource part = resources.apply(referenced.path("resourceId").asText());
-                                    requireReference(part, referenced);
-                                    return part.bytes();
-                                });
                         JsonNode execution = result.path("envelope").has("executionStatus") ? result.path("envelope")
                                 : result.has("executionStatus") ? result : result.path("functionResponse").path("response");
                         ObjectNode observation = fact.deepCopy();
@@ -263,6 +260,24 @@ final class ManagedActivityDiagnosticProjection {
             summary.put("lastEvidenceSequence", Long.toString(sequence));
             state.put(ManagedActivityDiagnostics.STATS, "latest", summary, sequence, at);
         }
+    }
+
+    private static JsonNode toolOutcome(JsonNode ref, Function<String, StoredResource> resources) {
+        StoredResource resource = resources.apply(ref.path("resourceId").asText());
+        requireReference(resource, ref);
+        require(resource.schemaVersion() == 1
+                && List.of("managed-tool-outcome", "managed-tool-outcome-chunks").contains(resource.kind()),
+                "Invalid diagnostic outcome resource.");
+        if ("managed-tool-outcome".equals(resource.kind()) && resource.bytes() == null
+                && resource.byteLength() > MAX_INLINE_RESOURCE_BYTES) {
+            // Publication already verified the external object; do not fetch it under the Session fence.
+            return null;
+        }
+        return com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.toolOutcomeBody(ref, referenced -> {
+            StoredResource part = resources.apply(referenced.path("resourceId").asText());
+            requireReference(part, referenced);
+            return part.bytes();
+        });
     }
 
     private static JsonNode message(JsonNode ref, Function<String, StoredResource> resources) {
