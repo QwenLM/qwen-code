@@ -6561,9 +6561,14 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(scrollTop).toBe(1200);
   });
 
-  it.each(['disclosure', 'turn toggle'])(
-    'keeps following a new session after an old %s callback was queued',
-    (action) => {
+  it.each([
+    ['disclosure', 'session switch'],
+    ['disclosure', '/clear'],
+    ['turn toggle', 'session switch'],
+    ['turn toggle', '/clear'],
+  ])(
+    'keeps following after an old %s callback was queued before a %s',
+    (action, reset) => {
       vi.useFakeTimers();
       resizeObserversFireOnObserve = false;
       let scrollHeight = 1200;
@@ -6593,18 +6598,23 @@ describe('MessageList — turn collapse (DOM)', () => {
       act(() => vi.advanceTimersByTime(500));
       click(action === 'disclosure' ? disclosure(c, 't1') : toggle(c, 'u1'));
       // Reuse the user id so the new-user scroll cannot bypass the queued
-      // recheck and conceal a stale reading pause.
-      const sessionB = [userMsg('u1'), asstMsg('a2')];
+      // recheck and conceal a stale reading pause. The /clear leg keeps the
+      // session key, so only the empty-transcript effect can reset it.
+      const nextSessionKey = reset === '/clear' ? 'session-a' : 'session-b';
+      if (reset === '/clear') {
+        rerenderMessages(c, [], { sessionKey: nextSessionKey });
+      }
+      const nextTranscript = [userMsg('u1'), asstMsg('a2')];
       scrollHeight = 1800;
-      rerenderMessages(c, sessionB, { sessionKey: 'session-b' });
+      rerenderMessages(c, nextTranscript, { sessionKey: nextSessionKey });
       expect(scrollTop).toBe(1200);
 
       // Content can grow before its next render. An old animation timer
       // must not interpret that geometry as a new user reading pause.
       scrollHeight = 2400;
       act(() => vi.advanceTimersByTime(500));
-      rerenderMessages(c, [...sessionB, asstMsg('a3')], {
-        sessionKey: 'session-b',
+      rerenderMessages(c, [...nextTranscript, asstMsg('a3')], {
+        sessionKey: nextSessionKey,
       });
       act(() => vi.advanceTimersByTime(500));
       expect(scrollTop).toBe(1800);

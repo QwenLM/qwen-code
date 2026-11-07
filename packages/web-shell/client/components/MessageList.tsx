@@ -3979,7 +3979,7 @@ export const MessageList = memo(
 
     // Shipped routes either remount this list on a session change or, on the
     // managed route, render an empty transcript first so the /clear leg below
-    // also resets; three other render sites pass no `sessionKey` at all. The
+    // also resets; two other render sites pass no `sessionKey` at all. The
     // reset below is the component contract for any consumer that keeps one
     // instance mounted across a `sessionKey` change: block ids are
     // per-session ordinals, so stale keep-open and snapshot entries would
@@ -5627,9 +5627,10 @@ export const MessageList = memo(
     // against the next session.
     useEffect(() => {
       if (messages.length === 0) {
-        // Drop the in-flight pagination snapshots too: without this a stale
-        // pre-clear snapshot survives into the next session and can mislabel
-        // a complete turn as keep-open (block ids are per-session ordinals).
+        // Without this a stale pre-clear snapshot survives into the next
+        // session and can mislabel a complete turn as keep-open (block ids
+        // are per-session ordinals), and an old follow recheck or turn-layout
+        // timer reads the next transcript's geometry as a user reading pause.
         resetSessionScopedViewState();
         pendingBottomFollowAfterCooldown.current = false;
         setShouldFollow(true);
