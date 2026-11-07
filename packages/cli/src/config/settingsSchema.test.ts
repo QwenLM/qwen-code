@@ -14,6 +14,7 @@ import {
   MAX_WEB_SEARCH_MAX_PER_SESSION,
   MAX_WEB_SEARCH_TIMEOUT_MS,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  type ChatCompressionSettings,
   OutputFormat,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
@@ -298,12 +299,26 @@ describe('SettingsSchema', () => {
     });
 
     // The runtime resolves these in core's `resolveCompactionTuning` /
-    // `resolveSlimmingConfig`; declaring them keeps the settings dialog,
-    // validation and the IDE schema in step with what the runtime reads.
+    // `resolveSlimmingConfig`; declaring them keeps settings help, validation
+    // and the IDE schema in step with what the runtime reads. They are not in
+    // the settings dialog, which lists only `showInDialog` entries.
     it('should declare every model.chatCompression knob', () => {
       const properties =
         getSettingsSchema().model.properties.chatCompression.properties;
-
+      // `keyof ChatCompressionSettings` is pinned to this union: every member
+      // of the interface is optional, so a seventh field added in core does not
+      // fail to compile at any read site — it silently leaves the knob
+      // undeclared and unvalidated. Add the field here when it is added there.
+      expectTypeOf<keyof ChatCompressionSettings>().toEqualTypeOf<
+        | 'enableScreenshotTrigger'
+        | 'imagePayloadThreshold'
+        | 'imageTokenEstimate'
+        | 'maxRecentFilesToRetain'
+        | 'maxRecentImagesToRetain'
+        | 'screenshotTriggerThreshold'
+      >();
+      // The union can only drift alongside the read site; this catches a knob
+      // that is declared in core but still missing from the schema.
       expect(Object.keys(properties).sort()).toEqual(
         [
           'enableScreenshotTrigger',

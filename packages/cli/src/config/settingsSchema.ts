@@ -1977,7 +1977,8 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         // Mirrors the runtime contract in core's `resolveCompactionTuning` /
         // `resolveSlimmingConfig`: without these declarations the knobs are
-        // invisible to settings help, validation and the settings dialog.
+        // invisible to settings help, validation and the IDE schema. They stay
+        // out of the settings dialog, which lists only `showInDialog` entries.
         properties: {
           imageTokenEstimate: {
             type: 'number',
@@ -2041,7 +2042,7 @@ const SETTINGS_SCHEMA = {
             default: DEFAULT_IMAGE_PAYLOAD_THRESHOLD,
             minimum: 0,
             description:
-              'Inline image count at or above which historical image payloads are replaced with text references and only the most recent images are reattached. 0 disables eviction, keeping every image payload in history; a route whose model does not declare image support may still receive text placeholders. Env override: QWEN_IMAGE_PAYLOAD_THRESHOLD.',
+              'Inline image count at or above which historical image payloads are replaced with text references and only the most recent images are reattached. 0 disables eviction; eviction is irreversible, so a payload replaced while the threshold was enabled is not recovered by later setting 0, though the rest of history is left intact. A route whose model does not declare image support may still receive text placeholders. Env override: QWEN_IMAGE_PAYLOAD_THRESHOLD.',
             showInDialog: false,
           },
         },
