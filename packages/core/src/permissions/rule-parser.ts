@@ -488,7 +488,9 @@ export function parseRule(raw: string): PermissionRule {
   const toolPart = trimmed.substring(0, openParen).trim();
 
   if (!trimmed.endsWith(')')) {
-    // Malformed: unbalanced parentheses — mark as invalid so it never matches.
+    // Malformed: it opens a specifier and never closes it — mark as invalid so
+    // it never matches. This is the only shape flagged invalid; a stray `)`
+    // elsewhere still parses as part of the specifier (see #15780).
     return { raw: trimmed, toolName: resolveToolName(toolPart), invalid: true };
   }
 
@@ -568,41 +570,15 @@ export function parseRule(raw: string): PermissionRule {
 }
 
 /**
- * Report a rule that parsed but will never match.
- *
- * Every consumer drops `invalid` rules, so a malformed `deny` or `ask` entry
- * protects nothing: the control the operator believes exists is absent. The
- * asymmetry is what makes this worth a terminal warning — a malformed `allow`
- * rule merely fails closed. `debugLogger.warn` reaches a file that is off in
- * default runs, so the same reason `tools.eager` reports its unusable entries
- * applies here.
- */
-export function warnDroppedPermissionRule(raw: string, kind?: string): void {
-  // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where a dropped rule would otherwise be invisible
-  console.warn(
-    `[permissions] ignoring malformed ${kind ? `${kind} ` : ''}rule ` +
-      `(unbalanced parentheses): ${raw} — it matches nothing, so it ` +
-      `protects nothing. Balance the parentheses to make it take effect.`,
-  );
-}
-
-/**
  * Parse an array of raw rule strings into PermissionRule objects,
  * silently skipping any empty entries.
+ *
+ * A rule that opens a specifier and does not end with `)` comes back with
+ * `invalid: true` rather than being dropped, so the caller can report it.
+ * `PermissionManager` does that; this function does not warn.
  */
 export function parseRules(raws: string[]): PermissionRule[] {
-  return raws
-    .filter((r) => r && r.trim())
-    .map(parseRule)
-    .map((r) => {
-      if (r.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed rule (unbalanced parentheses): ${r.raw}`,
-        );
-        warnDroppedPermissionRule(r.raw);
-      }
-      return r;
-    });
+  return raws.filter((r) => r && r.trim()).map(parseRule);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

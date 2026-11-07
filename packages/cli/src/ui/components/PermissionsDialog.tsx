@@ -19,6 +19,11 @@ import { SettingScope } from '../../config/settings.js';
 import { TextInput } from './shared/TextInput.js';
 import { Colors } from '../colors.js';
 import { t } from '../../i18n/index.js';
+import {
+  permissionRuleLabel,
+  withAddedRule,
+  withoutDeletedRuleInScopes,
+} from '../utils/permission-rule-label.js';
 import type { PermissionManager } from '@qwen-code/qwen-code-core/permissions/permission-manager.js';
 import type {
   RuleWithSource,
@@ -429,7 +434,7 @@ export function PermissionsDialog({
     ];
     for (const r of filteredRules) {
       items.push({
-        label: `${r.rule.raw}`,
+        label: permissionRuleLabel(r.rule),
         value: r.rule.raw,
         key: `${r.type}-${r.scope}-${r.rule.raw}`,
       });
@@ -478,7 +483,7 @@ export function PermissionsDialog({
     if (rule.invalid) {
       setRuleInputError(
         t(
-          'Malformed rule: unbalanced parentheses. Use the format ToolName(specifier).',
+          'Malformed rule: write it as ToolName(specifier), with the "(" and ")" around the whole specifier.',
         ),
       );
       return;
@@ -502,8 +507,9 @@ export function PermissionsDialog({
         'permissions'
       ] as Record<string, string[]> | undefined;
       const currentRules = perms?.[ruleType] ?? [];
-      if (!currentRules.includes(pendingRuleText)) {
-        settings.setValue(scope, key, [...currentRules, pendingRuleText]);
+      const updated = withAddedRule(currentRules, pendingRuleText);
+      if (updated) {
+        settings.setValue(scope, key, updated);
       }
 
       // Refresh and go back
@@ -521,21 +527,23 @@ export function PermissionsDialog({
     // Remove from PermissionManager in-memory
     pm.removePersistentRule(deleteTarget.rule.raw, ruleType);
 
-    // Persist removal — find and remove from settings
-    // We try both User and Workspace scopes
-    for (const scope of [SettingScope.User, SettingScope.Workspace]) {
-      const scopeSettings = settings.forScope(scope).settings;
-      const perms = (scopeSettings as Record<string, unknown>)[
-        'permissions'
-      ] as Record<string, string[]> | undefined;
-      const scopeRules = perms?.[ruleType];
-      if (scopeRules?.includes(deleteTarget.rule.raw)) {
-        const updated = scopeRules.filter(
-          (r: string) => r !== deleteTarget.rule.raw,
-        );
-        settings.setValue(scope, `permissions.${ruleType}`, updated);
-        break;
-      }
+    // Persist removal — a rule may live in the user or the workspace scope.
+    const deleted = withoutDeletedRuleInScopes(
+      [SettingScope.User, SettingScope.Workspace],
+      (scope) => {
+        const perms = (
+          settings.forScope(scope).settings as Record<string, unknown>
+        )?.['permissions'] as Record<string, unknown[] | undefined> | undefined;
+        return perms?.[ruleType];
+      },
+      deleteTarget.rule.raw,
+    );
+    if (deleted) {
+      settings.setValue(
+        deleted.scope,
+        `permissions.${ruleType}`,
+        deleted.rules,
+      );
     }
 
     refreshRules();
