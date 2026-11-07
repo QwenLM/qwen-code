@@ -5906,7 +5906,15 @@ export function App({
           sessionId: session.sessionId,
           displayName: session.displayName,
         };
-      })().finally(() => sideTaskCreationPromisesRef.current.delete(tabId));
+      })()
+        .catch((error: unknown) => {
+          // A failed creation never reaches handleSideTaskCreated, so release
+          // the captured parent identity here or it leaks until reload. The
+          // success path keeps it: handleSideTaskCreated reads then deletes it.
+          detailsParentByTabRef.current.delete(tabId);
+          throw error;
+        })
+        .finally(() => sideTaskCreationPromisesRef.current.delete(tabId));
       sideTaskCreationPromisesRef.current.set(tabId, creation);
       return creation;
     },
@@ -5991,10 +5999,14 @@ export function App({
             : undefined) ?? detailsParentByTabRef.current.get(tabId);
         detailsParentByTabRef.current.delete(tabId);
         if (requestId && parentId) {
-          detailsChildrenRef.current = {
-            ...detailsChildrenRef.current,
-            [parentId]: { [requestId]: sessionId },
-          };
+          // Re-insert the parent so a re-recorded entry moves to the newest
+          // key slot: the writer evicts the oldest key, and a plain spread
+          // would leave a live, frequently re-recorded parent first in line
+          // (see utils/bounded-map.ts).
+          const nextParents = { ...detailsChildrenRef.current };
+          delete nextParents[parentId];
+          nextParents[parentId] = { [requestId]: sessionId };
+          detailsChildrenRef.current = nextParents;
           writeStoredDetailsChildren(
             DETAILS_CHILDREN_STORAGE_KEY,
             detailsChildrenRef.current,
@@ -12321,6 +12333,30 @@ export function App({
     },
     [pushToast, t],
   );
+  // Drop any details association pointing at one of these children. Shared by
+  // the panel archive path and the read-site check so every route that retires
+  // a child forgets it the same way; an archived child's load 409s
+  // (session_archived), so a surviving binding would trap later clicks.
+  const forgetDetailsChildren = useCallback((childIds: ReadonlySet<string>) => {
+    if (childIds.size === 0) return;
+    const next: StoredDetailsChildren = {};
+    let changed = false;
+    for (const [parentKey, entries] of Object.entries(
+      detailsChildrenRef.current,
+    )) {
+      const kept = Object.fromEntries(
+        Object.entries(entries).filter(([, childId]) => !childIds.has(childId)),
+      );
+      if (Object.keys(kept).length !== Object.keys(entries).length) {
+        changed = true;
+      }
+      if (Object.keys(kept).length > 0) next[parentKey] = kept;
+    }
+    if (changed) {
+      detailsChildrenRef.current = next;
+      writeStoredDetailsChildren(DETAILS_CHILDREN_STORAGE_KEY, next);
+    }
+  }, []);
   const archiveSideTasks = useCallback(
     async (sideTasks: readonly SideTaskListItem[]) => {
       if (!sideTaskArchiveAvailable) return;
@@ -12387,29 +12423,7 @@ export function App({
           // route 409s session_archived), so drop any details association
           // pointing at it; the next click provisions a fresh child instead
           // of reopening an unloadable one.
-          const nextDetailsChildren: StoredDetailsChildren = {};
-          let detailsChanged = false;
-          for (const [parentKey, entries] of Object.entries(
-            detailsChildrenRef.current,
-          )) {
-            const kept = Object.fromEntries(
-              Object.entries(entries).filter(
-                ([, childId]) => !archived.has(childId),
-              ),
-            );
-            if (Object.keys(kept).length !== Object.keys(entries).length) {
-              detailsChanged = true;
-            }
-            if (Object.keys(kept).length > 0)
-              nextDetailsChildren[parentKey] = kept;
-          }
-          if (detailsChanged) {
-            detailsChildrenRef.current = nextDetailsChildren;
-            writeStoredDetailsChildren(
-              DETAILS_CHILDREN_STORAGE_KEY,
-              nextDetailsChildren,
-            );
-          }
+          forgetDetailsChildren(archived);
           setSideTaskCatalogRefreshNonce((nonce) => nonce + 1);
         }
         const errorMessages = [
@@ -12438,6 +12452,7 @@ export function App({
       }
     },
     [
+      forgetDetailsChildren,
       reportError,
       removeSideTaskTabs,
       sideTaskArchiveAvailable,
@@ -20018,21 +20033,60 @@ export function App({
   // The composer is hidden while a question is pending, so the panel itself
   // offers the /btw-side escape hatch: a side task that explains the question
   // without answering it or touching the main session.
-  const handleAskUserDetails = useCallback(() => {
+  const handleAskUserDetails = useCallback(async () => {
     const request = pendingAskUserApproval;
     const parentSessionId = connection.sessionId;
+    const workspaceCwd = connection.workspaceCwd;
     if (!request || !parentSessionId) return;
     // The association outlives the details tab (and reloads): a closed tab
     // must reopen its existing child, not provision a second one.
     const existingChild =
       detailsChildrenRef.current[parentSessionId]?.[request.id];
     const questions = formatAskUserQuestions(request.rawInput);
-    createSideTask(
-      t('askUser.detailsPrompt', { questions }),
-      request.id,
-      existingChild,
-    );
-  }, [pendingAskUserApproval, connection.sessionId, createSideTask, t]);
+    const prompt = t('askUser.detailsPrompt', { questions });
+    let childToReuse: string | undefined = existingChild;
+    if (existingChild && workspaceCwd) {
+      // A child can be archived from any surface (sidebar, overview, activity
+      // catalog) or another browser tab, none of which touch this binding.
+      // Confirm it is still active before attaching: an archived child's load
+      // 409s (session_archived), which would otherwise trap every later click.
+      // On a query failure fall back to the persisted binding (no worse than
+      // trusting it outright).
+      try {
+        const page = await loadSessionCatalogOnce(
+          workspace.client,
+          {
+            routeKind: 'legacy',
+            workspaceCwd,
+            options: {
+              pageSize: SESSION_LIST_PAGE_SIZE,
+              archiveState: 'active',
+              sourceType: WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
+              sourceId: parentSessionId,
+            },
+          },
+          { fresh: true },
+        );
+        if (
+          !page.sessions.some((session) => session.sessionId === existingChild)
+        ) {
+          forgetDetailsChildren(new Set([existingChild]));
+          childToReuse = undefined;
+        }
+      } catch {
+        // Keep the persisted binding when the check cannot run.
+      }
+    }
+    createSideTask(prompt, request.id, childToReuse);
+  }, [
+    pendingAskUserApproval,
+    connection.sessionId,
+    connection.workspaceCwd,
+    createSideTask,
+    forgetDetailsChildren,
+    t,
+    workspace.client,
+  ]);
 
   // Runs once the daemon has settled the cancelled turn, so the transcript
   // holds everything the turn produced.

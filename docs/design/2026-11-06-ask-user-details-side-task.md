@@ -115,13 +115,24 @@ first committing to an answer or discarding the question.
   it to a still-empty child; and archiving a child invalidates its
   association, because the daemon's load route rejects
   archived sessions (409 `session_archived`) — the next click provisions a
-  fresh child instead of attaching an unloadable one. One entry per parent
-  supersedes the resolved question's association, keeping the store
-  bounded. The tab id stays short because the pane derives its daemon clientId
-  as `side-task:<parentSessionId>:<tabId>` and the daemon rejects client ids
-  over 128 characters; an App-level test pins that budget with uuid-length
-  inputs through the real derivation. `/btw side` keeps its unique
+  fresh child instead of attaching an unloadable one. Archive can happen from
+  any surface (the side-task panel, the sidebar session row, the overview
+  panel, the activity catalog) or another browser tab, so the binding is
+  validated at the read site: a click confirms the child is still in the
+  parent's active side-task list and forgets it otherwise, rather than trusting
+  the persisted id. One entry per parent supersedes the resolved question's
+  association, keeping the store bounded; re-recording a parent moves it to the
+  newest key slot so the oldest-first eviction never drops a live, frequently
+  used parent. The tab id stays short because the pane derives its daemon
+  clientId as `side-task:<parentSessionId>:<tabId>` and the daemon rejects
+  client ids over 128 characters; an App-level test pins that budget with
+  uuid-length inputs through the real derivation. `/btw side` keeps its unique
   per-invocation draft id.
+- **The child is named from the question.** The explanation prompt leads with
+  the question snapshot, so the pane's generic first-prompt naming (the first
+  200 code points) yields a question-derived title in the tab strip and the
+  side-task catalog, instead of the identical instruction boilerplate for every
+  details task.
 - **The snapshot carries selection semantics.** Multi-select questions are
   marked `[multiSelect]` so the explanation covers combinable options without
   relying on the inherited transcript alone.

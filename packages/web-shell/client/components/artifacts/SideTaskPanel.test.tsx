@@ -3,7 +3,7 @@
 import { act, type ComponentProps, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, expect, it, vi } from 'vitest';
-import { I18nProvider } from '../../i18n';
+import { I18nProvider, getTranslator } from '../../i18n';
 
 const {
   connection,
@@ -716,6 +716,40 @@ it.each([
     expect(sendPrompt).not.toHaveBeenCalled();
   },
 );
+
+it('names a details child from the question, not the instruction boilerplate', async () => {
+  // R1-1: the details prompt leads with the question snapshot so the generic
+  // first-prompt naming (first 200 code points) yields a question-derived title
+  // rather than the identical instruction prefix for every details task.
+  connection.sessionId = 'side-session-1';
+  connection.displayName = 'Side task';
+  connection.status = 'connected';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  const question = 'Which cache backend should the session use?';
+  const questions = `1. ${question}\n   - SQLite: local file database\n   - Redis: in-memory store`;
+  const detailsPrompt = getTranslator('en')('askUser.detailsPrompt', {
+    questions,
+  });
+
+  await act(async () => {
+    renderSideTask({
+      initialPrompt: detailsPrompt,
+      modelManagement: { allowAdd: false },
+    });
+    await Promise.resolve();
+  });
+
+  expect(sendPrompt).toHaveBeenCalledWith(
+    detailsPrompt,
+    expect.objectContaining({ onAdmitted: expect.any(Function) }),
+  );
+  const title = renameSession.mock.calls[0]?.[0] as string;
+  expect(title).toContain(question);
+  expect(title.startsWith('The main session is waiting')).toBe(false);
+});
 
 it('sends a retained initial prompt once transcript loading completes', async () => {
   connection.sessionId = 'side-session-1';

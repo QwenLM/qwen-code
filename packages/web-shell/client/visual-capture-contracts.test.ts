@@ -259,6 +259,30 @@ describe('visual capture contracts', () => {
       /@media \(hover: hover\) \{\s*\.sessionRow:has\(\.sessionBackgroundRunning:hover\) \.sessionActions \{/,
     );
   });
+
+  it('keeps the AskUser action row wrapping so the details button stays reachable', () => {
+    // The fifth action button ("Ask for details") can push the row past a
+    // 320px panel, and a flex-end row overflows to the LEFT, which scrollWidth
+    // does not report. `flex-wrap: wrap` is what keeps every button inside the
+    // panel and clickable. The only test that measures this is the visuals
+    // Playwright case, which no gating lane collects (vitest excludes e2e/**,
+    // playwright ignores **/visuals/**, and the visuals step is
+    // continue-on-error). Pin the rule here so a later refactor of `.actions`
+    // cannot drop it with every gate green.
+    const css = readFileSync(
+      join(HERE, 'components/messages/AskUserQuestion.module.css'),
+      'utf8',
+    );
+    const start = css.indexOf('.actions {');
+    expect(
+      start,
+      'AskUserQuestion.module.css must declare .actions',
+    ).toBeGreaterThan(-1);
+    const block = css.slice(start, css.indexOf('}', start));
+    expect(block, '.actions must wrap its buttons').toMatch(
+      /^\s*flex-wrap:\s*wrap;/m,
+    );
+  });
 });
 
 describe('smoke lane browser projects', () => {

@@ -1626,14 +1626,23 @@ describe('ask-for-details action', () => {
     const button = detailsButton()!;
     expect(optionButtons()).not.toContain(button);
 
+    // Move the committed answer off the default (option 0) so a leaked digit
+    // would observably rewrite it; asserting option 0 stays selected otherwise
+    // passes even when the digit leaks, because '1' maps to the default.
+    const opts = optionButtons();
+    act(() => opts[0]!.focus());
+    pressKey(opts[0]!, 'ArrowDown'); // Red -> Blue
+    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('false');
+
     act(() => button.focus());
     pressKey(button, '1', { cancelable: true });
 
     expect(onAskDetails).not.toHaveBeenCalled();
     expect(onConfirm).not.toHaveBeenCalled();
-    // The first option keeps its committed answer; the digit did not leak
-    // into the option group's shortcuts.
-    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('true');
+    // The digit did not leak into the option group's shortcuts: the committed
+    // answer is still Blue, not reset to option 0.
+    expect(optionButtons()[0]!.getAttribute('aria-checked')).toBe('false');
+    expect(optionButtons()[1]!.getAttribute('aria-checked')).toBe('true');
   });
 
   it('is disabled while a submission is in flight', async () => {
