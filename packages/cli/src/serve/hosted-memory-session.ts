@@ -6,6 +6,7 @@
 
 import type { FunctionDeclaration, Part } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { scanForSecrets } from '@qwen-code/qwen-code-core/memory/secret-scanner.js';
 import {
   ManagedSessionStoreHttpError,
   ManagedSessionStoreTransportError,
@@ -90,27 +91,31 @@ export function hostedMemoryDeclarations(): FunctionDeclaration[] {
 }
 
 export function hostedMemoryRecallQuery(text: string): string {
-  return Array.from(
-    Array.from(text)
-      .slice(0, 4096)
-      .join('')
-      .replace(/(```|~~~)[\s\S]*?\1/g, ' ')
-      .replace(/(?:```|~~~)[\s\S]*$/g, ' ')
-      .replace(
-        /(?<![A-Za-z0-9_.-])["']?(?=[A-Za-z0-9_.-]*(?:api[_-]?key|token|password|secret))[A-Za-z0-9_.-]+["']?[^\S\r\n]*[:=][^\S\r\n]*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)?/gi,
-        ' ',
-      )
-      .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, ' ')
-      .replace(
-        /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
-        ' ',
-      )
-      .replace(/\b[A-Za-z0-9_-]{32,}\b/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim(),
+  const query = Array.from(text)
+    .slice(0, 4096)
+    .join('')
+    .replace(/(```|~~~)[\s\S]*?\1/g, ' ')
+    .replace(/(?:```|~~~)[\s\S]*$/g, ' ')
+    .replace(
+      /(?<![A-Za-z0-9_.-])["']?(?=[A-Za-z0-9_.-]*(?:api[_-]?key|token|password|secret))[A-Za-z0-9_.-]+["']?[^\S\r\n]*[:=][^\S\r\n]*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)?/gi,
+      ' ',
+    )
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, ' ')
+    .replace(
+      /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+      ' ',
+    )
+    .replace(/\b[A-Za-z0-9_-]{32,}\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (
+    scanForSecrets(query).length > 0 ||
+    /\bauthorization\s*:\s*basic\s+\S+/iu.test(query) ||
+    /\b[a-z][a-z\d+.-]*:\/\/[^\s/?#@]*:[^\s/?#@]+@/iu.test(query) ||
+    /--(?:password|passwd|token|secret|api[-_]?key)\s+\S+/iu.test(query)
   )
-    .slice(0, 512)
-    .join('');
+    return '';
+  return Array.from(query).slice(0, 512).join('');
 }
 
 export function parseHostedMemoryStoreId(value: unknown): string | undefined {

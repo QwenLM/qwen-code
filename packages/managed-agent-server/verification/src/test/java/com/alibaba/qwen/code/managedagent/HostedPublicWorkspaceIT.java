@@ -184,6 +184,7 @@ class HostedPublicWorkspaceIT {
         assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
         publicChildren = true;
         publicChildQuestions = true;
+        approvals = true;
         shell = true;
         definitionApproval = true;
         shellLifecycleV2 = true;

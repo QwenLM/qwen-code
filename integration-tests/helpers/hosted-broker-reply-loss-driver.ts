@@ -409,6 +409,8 @@ try {
         assert.deepEqual(entry.fields, {
           ...original.fields,
           requestId: entry.fields['requestId'],
+          // Detach may drain the same binding while paying its cleanup debt.
+          ...(entry.fields['drain'] === true ? { drain: true } : {}),
         });
       }
     } else assert.deepEqual(cleanupRetries, []);

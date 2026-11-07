@@ -213,6 +213,7 @@ describe('Hosted Harness model boundary', () => {
       memory: { recall },
       recallUserInput: true,
       hooks: hooks.session,
+      workspaceContext: { read: () => 'workspace instructions' },
     });
     expect(recall).toHaveBeenCalledExactlyOnceWith(
       input.promptId,
@@ -221,12 +222,13 @@ describe('Hosted Harness model boundary', () => {
     );
     expect(model.requests[0][0].text).toContain('rewritten prompt');
     expect(model.requests[0][0].text).toContain('<untrusted_external_context>');
+    expect(model.setUserMemory).toHaveBeenCalledWith('workspace instructions');
     expect(model.setUserMemory.mock.calls.flat().join(' ')).not.toContain(
       'known preference',
     );
   });
 
-  it('does not automatically recall personal memory for background continuations', async () => {
+  it('does not recall personal memory without a new accepted user input', async () => {
     config([{ type: LlmEventType.Finished }]);
     const recall = vi.fn();
     await runHostedHarnessTextTurn({
@@ -236,6 +238,52 @@ describe('Hosted Harness model boundary', () => {
     });
     expect(recall).not.toHaveBeenCalled();
   });
+
+  it.each(['tool-results', 'model'] as const)(
+    'does not recall accepted input again when resuming %s',
+    async (kind) => {
+      const model = config([{ type: LlmEventType.Finished }]);
+      const recall = vi.fn().mockResolvedValue('unexpected recall');
+      const responses: Part[] = [
+        {
+          functionResponse: {
+            id: 'saved-call',
+            name: 'context_search',
+            response: { status: 'ok', items: [] },
+          },
+        },
+      ];
+      const prepared = {
+        request: { model: 'saved-model', config: {}, contents: [] },
+      } as unknown as LlmPreparedRequest;
+      const replay =
+        kind === 'model'
+          ? vi
+              .spyOn(Turn.prototype, 'run')
+              .mockImplementation(async function* () {
+                yield {
+                  type: LlmEventType.Finished,
+                  value: { reason: undefined, usageMetadata: undefined },
+                };
+              })
+          : undefined;
+      try {
+        await runHostedHarnessTextTurn({
+          ...input,
+          memory: { recall },
+          recallUserInput: true,
+          ...(kind === 'model'
+            ? { resumeModel: { round: 0, prepared } as HostedModelRequest }
+            : { resumeFromToolResults: responses }),
+        });
+        expect(recall).not.toHaveBeenCalled();
+        if (replay) expect(replay).toHaveBeenCalled();
+        else expect(model.requests[0]).toEqual(responses);
+      } finally {
+        replay?.mockRestore();
+      }
+    },
+  );
 
   it('recalls personal memory for each queued input using its accepted identity and original text', async () => {
     config([{ type: LlmEventType.Finished }]);

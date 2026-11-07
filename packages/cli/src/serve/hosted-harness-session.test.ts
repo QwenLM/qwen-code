@@ -1795,6 +1795,121 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
+  it.each(['resident-load', 'cold-load'])(
+    'resumes committed personal memory results without a Runtime on %s',
+    async (operation) => {
+      let server = await app();
+      state.memory.mockImplementation(async (query: { operation: string }) =>
+        query.operation === 'binding'
+          ? { enabled: true, memoryStoreId: 'memstore_personal' }
+          : { status: 'ok', items: [{ memoryId: 'entry', content: 'saved' }] },
+      );
+      const warm = vi.spyOn(HostedWorkspaceBroker.prototype, 'warm');
+      let committed: Part[] = [];
+      state.model.mockImplementationOnce(async (input) => {
+        await input.toolTurn!.declarations(input.signal);
+        const call = {
+          name: 'context_search',
+          callId: 'call-memory',
+          args: { query: 'preferences' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        };
+        // Durable journal parts omit in-memory provenance symbols.
+        committed = structuredClone(
+          await input.toolTurn!.execute(
+            [call],
+            [
+              {
+                functionCall: {
+                  id: call.callId,
+                  name: call.name,
+                  args: call.args,
+                },
+              },
+            ],
+            'test-model',
+            input.signal,
+          ),
+        );
+        throw new HostedToolRecoveryRequiredError(
+          'Crash after committed memory result',
+        );
+      });
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        memoryStoreId: 'memstore_personal',
+      });
+      expect(created.status).toBe(200);
+      const clientId = created.body.clientId as string;
+      const prompt = [{ type: 'text', text: 'preferences' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.recoveryBlocked).toBe(true);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      expect(committed).toEqual([
+        expect.objectContaining({
+          functionResponse: expect.objectContaining({ id: 'call-memory' }),
+        }),
+      ]);
+      if (operation === 'cold-load') {
+        await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+          .set('X-Qwen-Client-Id', clientId)
+          .expect(204);
+        server = await app();
+      }
+      state.model.mockResolvedValueOnce({
+        text: 'recovered memory result',
+        model: 'test-model',
+      });
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        memoryStoreId: 'memstore_personal',
+        driveRuntimeRecovery: true,
+      });
+      expect(loaded.status).toBe(200);
+      await vi.waitFor(
+        async () => {
+          expect(state.model).toHaveBeenCalledTimes(2);
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      expect(state.model.mock.calls[1][0].resumeFromToolResults).toEqual(
+        committed,
+      );
+      expect(
+        state.memory.mock.calls.filter(
+          ([request]) => request.operation === 'search',
+        ),
+      ).toHaveLength(1);
+      expect(warm).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
     new ManagedSessionStoreHttpError(
       503,

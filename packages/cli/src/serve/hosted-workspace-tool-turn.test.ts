@@ -13242,15 +13242,19 @@ it('withholds personal memory mutations in Plan Mode', async () => {
 
 it('replays personal memory results after losing the local tool result without repeating the provider write', async () => {
   let providerWrites = 0;
-  let remembered: Record<string, unknown> | undefined;
+  const remembered = new Map<string, Record<string, unknown>>();
   const query = vi.fn(async (request: ManagedMemoryQuery): Promise<unknown> => {
     if (request.operation === 'binding')
       return { enabled: true, memoryStoreId: 'memstore_personal' };
-    if (!remembered) {
+    expect(request.operation).toBe('remember');
+    const key = JSON.stringify([request.inputId, request.callId]);
+    let result = remembered.get(key);
+    if (!result) {
       providerWrites++;
-      remembered = { status: 'stored', memoryId: 'entry' };
+      result = { status: 'stored', memoryId: `entry-${providerWrites}` };
+      remembered.set(key, result);
     }
-    return remembered;
+    return result;
   });
   const originalCommit = commit;
   let loseResponse = true;
@@ -13286,7 +13290,18 @@ it('replays personal memory results after losing the local tool result without r
     saved.plan.calls.length,
     new AbortController().signal,
   );
-  expect(result[0].functionResponse?.response?.['memoryId']).toBe('entry');
+  expect(result[0].functionResponse?.response?.['memoryId']).toBe('entry-1');
+  expect(
+    query.mock.calls
+      .filter(([request]) => request.operation === 'remember')
+      .map(([request]) => ({
+        inputId: request.inputId,
+        callId: request.callId,
+      })),
+  ).toEqual([
+    { inputId: 'prompt', callId: call.callId },
+    { inputId: 'prompt', callId: call.callId },
+  ]);
   expect(providerWrites).toBe(1);
   expect(broker.warm).not.toHaveBeenCalled();
   expect(broker.acquire).not.toHaveBeenCalled();

@@ -26,6 +26,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -66,9 +67,11 @@ class ManagedMemoryControllerTest {
         when(repository.list("tenant", "owner")).thenReturn(List.of(new Store("memstore_owned", 123)));
         mvc.perform(post("/v1/agents/memory-stores").requestAttr(TenantContextFilter.ATTRIBUTE, owner)
                 .contentType(MediaType.APPLICATION_JSON).content("{}"))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.id").value("memstore_owned"));
+                .andExpect(status().isOk()).andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(jsonPath("$.id").value("memstore_owned"));
         mvc.perform(get("/v1/agents/memory-stores").requestAttr(TenantContextFilter.ATTRIBUTE, owner))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.data[0].created_at").value(123));
+                .andExpect(status().isOk()).andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(jsonPath("$.data[0].created_at").value(123));
         verify(repository).create("tenant", "owner");
         verify(repository).list("tenant", "owner");
     }

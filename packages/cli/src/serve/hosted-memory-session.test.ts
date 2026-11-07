@@ -80,6 +80,23 @@ describe('personal memory boundary', () => {
     );
   });
 
+  it.each([
+    'my aws key AKIAIOSFODNN7EXAMPLE keeps failing, help me',
+    'Authorization: Basic dXNlcjpwYXNzd29yZA==',
+    'mysql://admin:hunter2@db.internal:3306/app',
+    'please run with --password hunter2',
+    'please run `--password synthetic-value`',
+    'use --api-key synthetic-value',
+    `${'x '.repeat(250)}AKIAIOSFODNN7EXAMPLE`,
+  ])('withholds automatic recall containing credentials: %s', async (text) => {
+    const { session, query } = fixture();
+    expect(hostedMemoryRecallQuery(text)).toBe('');
+    await expect(session.recall('input', text, signal)).resolves.toBe('');
+    expect(query.mock.calls.map(([input]) => input.operation)).toEqual([
+      'binding',
+    ]);
+  });
+
   it('injects bounded data whose delimiters cannot escape the envelope', async () => {
     const { session } = fixture({
       status: 'ok',

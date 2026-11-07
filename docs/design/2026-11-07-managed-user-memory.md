@@ -66,7 +66,10 @@ tools without command-step or child-model execution; mixed batches retain the
 existing runtime requirements.
 
 Each fresh real user input, including queued inputs, triggers recall from the
-original submitted text. Existing query sanitization is retained, with a
+original submitted text. Existing query sanitization is retained. Before the
+query is truncated, the shared secret scanner and checks for Basic credentials,
+password-bearing URIs and credential flags suppress recall when sensitive text
+remains; the empty query never reaches the provider. Recall uses a
 512-character query, at most five results, 4,000 characters of injected context
 and a five-second provider deadline. Results are untrusted reference material.
 Recovery reuses the accepted input's saved result; tool output and background

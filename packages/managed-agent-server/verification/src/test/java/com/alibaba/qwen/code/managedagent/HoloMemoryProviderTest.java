@@ -9,6 +9,9 @@ import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -19,6 +22,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class HoloMemoryProviderTest {
     private final ObjectMapper json = new ObjectMapper();
@@ -49,6 +53,28 @@ class HoloMemoryProviderTest {
         return new Query("workspace", "writer", 1, operation, "prompt", "call",
                 "search".equals(operation) ? "preference" : null,
                 "remember".equals(operation) ? content : null, id, "forget".equals(operation) ? content : null);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"http://holo.internal", "ftp://127.0.0.1", "https:/missing-host",
+            "https://u:p@holo.internal/", "https://holo.internal/?tenant=x", "https://holo.internal/#fragment", " "})
+    void rejectsUnsafeEndpoints(String endpoint) {
+        assertThatThrownBy(() -> new HoloMemoryProvider(endpoint, "synthetic-key", json))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" ", "synthetic\rkey", "synthetic\nkey"})
+    void rejectsInvalidServiceCredentials(String key) {
+        assertThatThrownBy(() -> new HoloMemoryProvider("https://holo.internal", key, json))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"https://holo.internal", "http://localhost", "http://127.0.0.1", "http://[::1]"})
+    void acceptsHttpsAndLoopbackHttp(String endpoint) {
+        assertThat(new HoloMemoryProvider(endpoint, "synthetic-key", json)).isNotNull();
     }
 
     @Test
