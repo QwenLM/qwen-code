@@ -613,6 +613,31 @@ describe('extractShellOperations', () => {
 // R1-5 (#16540 review): `\c\` before a quote leaves the backslash free to
 // escape that quote, so the ANSI-C word stays open and the following
 // redirection is still part of the command.
+// R1-4 second round (#16540 review): the op extraction runs through the same
+// byte-exact ANSI-C decoding, so a multi-byte UTF-8 path is not U+FFFD.
+describe('ANSI-C byte decoding in op extraction', () => {
+  it.each([
+    ["(cat > $'\\xc3\\xa9')", '/repo/é'],
+    ["(cat > $'\\303\\251')", '/repo/é'],
+    ["(cat > $'\\u00e9')", '/repo/é'],
+  ])('extracts the multi-byte path for %s', (command, filePath) => {
+    expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+      { virtualTool: 'write_file', filePath },
+    ]);
+  });
+
+  // R1-11 (#16540 review): the backslash-newline before the ANSI-C opener does
+  // not stop the following write from being extracted.
+  it('keeps the redirect after a continuation before the ANSI-C opener', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        "sh -c $\\\n'--' 'cat > /etc/motd'",
+        '/repo',
+      ),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/etc/motd' }]);
+  });
+});
+
 describe('ANSI-C word boundaries with \\c\\ before a quote', () => {
   it('keeps the redirect after a \\c\\ word', () => {
     expect(

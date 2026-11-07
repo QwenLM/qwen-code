@@ -755,9 +755,21 @@ function shellWordQuoteRemoval(token: string): QuoteRemovedWord | null {
       i += 2;
       continue;
     }
-    if (ch === '$' && i + 1 < n && token[i + 1] === "'") {
+    // `$\<newline>'…'` is still an ANSI-C word: the backslash-newline is
+    // removed before the quote is read. Reading `token[i + 1]` directly missed
+    // it, so the payload stayed a plain quoted word and the op extraction saw
+    // nothing (#16540 review, R1-11).
+    let ansiCStart = i + 1;
+    while (
+      ansiCStart + 1 < n &&
+      token[ansiCStart] === '\\' &&
+      token[ansiCStart + 1] === '\n'
+    ) {
+      ansiCStart += 2;
+    }
+    if (ch === '$' && ansiCStart < n && token[ansiCStart] === "'") {
       // ANSI-C word: escapes decode; find the first UNESCAPED closing quote.
-      let j = i + 2;
+      let j = ansiCStart + 1;
       let body = '';
       while (j < n) {
         if (token[j] === '\\' && j + 1 < n) {
@@ -1478,10 +1490,18 @@ function buildMonitorSpawnOverride(
   payloadToken: string,
   rest: string,
 ): string {
+  // Normalise the payload WORD, not the joined command: with a positional
+  // argument after the payload (`bash -c "… &" arg0`) the `&` is no longer at
+  // the end of the string, and the tracked shell still backgrounds the payload
+  // (#16540 review, R1-1 second round).
   const suffix = stripTrailingBackgroundAmp(rest.replace(/^[ \t]+/, ''));
-  return stripPayloadBackgroundAmp(
-    [...wrapperTokens, payloadToken, suffix].filter(Boolean).join(' '),
-  );
+  return [
+    wrapperTokens.join(' '),
+    stripPayloadBackgroundAmp(payloadToken),
+    suffix,
+  ]
+    .filter(Boolean)
+    .join(' ');
 }
 
 /** Strip the background `&` the monitored shell would run for the payload,
@@ -1489,13 +1509,24 @@ function buildMonitorSpawnOverride(
  * $LOG &"`), glued after it (`bash -c "$X"&`), or after the whole command.
  * `&&` and `\&` stay untouched, like `stripTrailingBackgroundAmp`
  * (#16540 review, R1-1). */
-function stripPayloadBackgroundAmp(command: string): string {
-  const outer = stripTrailingBackgroundAmp(command);
-  const quoted = /^(.*?)([ \t]*)&([ \t]*)(["'])$/s.exec(outer);
-  if (quoted) {
-    return stripTrailingBackgroundAmp(`${quoted[1]}${quoted[4]}`);
+function stripPayloadBackgroundAmp(payloadToken: string): string {
+  // Strip the payload's own background `&` from its script text: spaced before
+  // the closing quote (`"… &"`) or glued after it (`"…"&`). `&&` and `\&` are
+  // not background operators, and an `&` that ends a NESTED quoted word
+  // (`"echo $X '&'"`) is script data — the trimming below only fires when the
+  // last non-space character of the script text is the bare operator
+  // (#16540 review, R1-1 second round).
+  const trimmed = payloadToken.trimEnd();
+  const quoted = /^(\$?["'])([\s\S]*)(["'])$/.exec(trimmed);
+  if (quoted !== null && quoted[1]!.slice(-1) === quoted[3]) {
+    const body = quoted[2]!.trimEnd();
+    if (body.endsWith('&') && !body.endsWith('&&') && !body.endsWith('\\&')) {
+      const script = body.replace(/[ \t]*&$/, '').trimEnd();
+      return `${quoted[1]}${script}${quoted[3]}`;
+    }
+    return trimmed;
   }
-  return outer;
+  return stripTrailingBackgroundAmp(trimmed);
 }
 
 export function hasNonFinalTopLevelBackgroundOperator(
@@ -1987,7 +2018,13 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
         // next command, which the script's positional words are not.
         innerArgsSuffix: commandToken.rest.replace(/^[ \t]+/, ''),
         ...(payloadIsAnsiC
-          ? { spawnOverride: stripPayloadBackgroundAmp(trimmed) }
+          ? {
+              spawnOverride: buildMonitorSpawnOverride(
+                wrapperTokens,
+                commandToken.token,
+                commandToken.rest,
+              ),
+            }
           : {}),
       };
     }

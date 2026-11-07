@@ -123,6 +123,24 @@ function tokenize(
   // newline rather than layout, so decoding escapes here is what keeps
   // `bash -c $'git commit --amend\ntrue'` from reading as one inert word.
   let inAnsiC = false;
+  // Bytes accumulated for the ANSI-C word being read. bash builds BYTES from
+  // `$'…'`, so decoding one escape at a time turned each byte of a multi-byte
+  // UTF-8 sequence into U+FFFD (`\xc3\xa9` became `\uFFFD\uFFFD` while
+  // `decodeAnsiCWord` decoded the whole word correctly). The word is decoded
+  // once, when its quote closes, exactly like `decodeAnsiCWord`
+  // (#16540 review, R1-4 second round).
+  let ansiCBytes: number[] | null = null;
+  const pushAnsiCBytes = (bytes: Iterable<number>) => {
+    if (ansiCBytes === null) ansiCBytes = [];
+    for (const byte of bytes) ansiCBytes.push(byte);
+  };
+  const flushAnsiC = () => {
+    if (ansiCBytes === null) return;
+    const text = Buffer.from(ansiCBytes).toString('utf8');
+    current += text;
+    bare += '0'.repeat(text.length);
+    ansiCBytes = null;
+  };
   // A NUL ends the word bash builds inside an ANSI-C quote: `$'a\0b'c` is the
   // word `ac` — the rest of the quoted segment is dropped, but a following
   // concatenation segment still appends (#16075 review, R11-2). Once set, the
@@ -149,24 +167,16 @@ function tokenize(
       if (ch === '\\') {
         const escape = decodeAnsiCEscape(command, i);
         if (!escape) {
-          current += '\\';
-          bare += '0';
+          pushAnsiCBytes(Buffer.from('\\', 'utf8'));
           continue;
         }
         if (escape.text === '\0') {
+          flushAnsiC();
           ansiCTruncated = true;
           i += escape.length - 1;
           continue;
         }
-        const escapeText = escape.bytes
-          ? Buffer.from(escape.bytes).toString('utf8')
-          : escape.text;
-        current += escapeText;
-        // `bare` is one entry per UTF-16 unit of `current`; an escape such as
-        // `\U0001F600` decodes to a two-unit astral char, so a single '0' here
-        // desynced the positional map for the rest of the word and left
-        // trailing syntax (`)`) glued to the token (#16075 review, R13-2).
-        bare += '0'.repeat(escapeText.length);
+        pushAnsiCBytes(escape.bytes ?? Buffer.from(escape.text, 'utf8'));
         // Inside `$'…'` a scanning backslash escapes only its operand, so the
         // operand of `\c` does not swallow the backslash after it: in
         // `$'a\c\''` that second backslash still escapes the quote and the word
@@ -179,11 +189,11 @@ function tokenize(
         continue;
       }
       if (ch === "'") {
+        flushAnsiC();
         inAnsiC = false;
         continue;
       }
-      current += ch;
-      bare += '0';
+      pushAnsiCBytes(Buffer.from(ch, 'utf8'));
       continue;
     }
 
@@ -214,6 +224,7 @@ function tokenize(
       const next = nextSignificantIndex(command, i + 1);
       if (command[next] === "'") {
         inAnsiC = true;
+        ansiCBytes = [];
         i = next;
         continue;
       }

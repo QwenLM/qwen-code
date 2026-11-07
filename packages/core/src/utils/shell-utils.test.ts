@@ -1068,6 +1068,31 @@ describe('normalizeMonitorCommand', () => {
     );
   });
 
+  // R1-1 second round (#16540 review): a positional argument after the payload
+  // used to leave the payload's own `&` in the spawn command.
+  it.each([
+    ['bash -c "echo $(id) &" arg0', 'bash -c "echo $(id)" arg0'],
+    ['bash -c "tail -f $LOG &" /bin/bash', 'bash -c "tail -f $LOG" /bin/bash'],
+    ["bash -c $'echo $X &' arg0", "bash -c $'echo $X' arg0"],
+  ])('strips the payload & even with trailing argv: %s', (command, want) => {
+    expect(normalizeMonitorCommand(command).spawnCommand).toBe(want);
+  });
+
+  // `&&`, an escaped `\&` and an `&` inside a nested quoted word are not the
+  // payload's background operator and survive (#16540 review, R1-1).
+  it.each([
+    ['bash -c "echo $X \\&"', 'bash -c "echo $X \\&"'],
+    [`bash -c "echo $X '&'"`, `bash -c "echo $X '&'"`],
+    ['bash -c "echo a && echo b"', 'bash -c "echo a && echo b"'],
+  ])('keeps a non-backgrounding &: %s', (command, want) => {
+    expect(normalizeMonitorCommand(command).spawnCommand).toBe(want);
+  });
+
+  // R1-11 (#16540 review): `$\<newline>'…'` is still an ANSI-C word.
+  it('unwraps an option terminator after a backslash-newline ANSI-C opener', () => {
+    expect(stripShellWrapper("sh -c $\\\n'--' 'ls -l'")).toBe('ls -l');
+  });
+
   it('strips an inner or glued payload & and reports it', () => {
     expect(normalizeMonitorCommand('bash -c "echo $(id)"&')).toEqual({
       analysisCommand: 'echo $(id)',
