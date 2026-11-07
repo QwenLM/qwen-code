@@ -149,9 +149,6 @@ jobs:
       # association gate in ubuntu_runner still governs every other Linux
       # lane; do not "simplify" the two outputs into one.
       lint_runner: '${{ steps.pick_runner.outputs.lint_runner }}'
-      # test_build's routing: ubuntu_runner, or the hosts BUILD_RUNNER_LABELS
-      # names when that is the x64 fleet.
-      build_runner: '${{ steps.pick_runner.outputs.build_runner }}'
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     steps:
       - name: 'Detect release version-sync PR'
@@ -216,9 +213,6 @@ jobs:
           LINUX_RUNNER_FLEET: '${{ vars.LINUX_RUNNER_FLEET }}'
           EVENT_NAME: '${{ github.event_name }}'
           DISPATCH_LINUX_RUNNER: '${{ github.event.inputs.linux_runner }}'
-          # Optional labels for test_build alone, e.g. the x64 fleet's labels
-          # plus "ecs-qwen-hk". Empty keeps it on ubuntu_runner.
-          BUILD_RUNNER_LABELS: '${{ vars.BUILD_RUNNER_LABELS }}'
         run: |-
           ubuntu_runner='["ubuntu-latest"]'
           trusted_author=false
@@ -256,16 +250,6 @@ jobs:
           fi
           echo "lint_runner=${lint_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected lint runner: ${lint_runner}"
-          # test_build heads the unit-test and integration lanes, and the
-          # x64 fleet's ARM64 hosts build it at about half the speed of its
-          # x64 ones. BUILD_RUNNER_LABELS narrows that one job to the hosts
-          # it names, only where ubuntu_runner already picked the x64 fleet.
-          build_runner="${ubuntu_runner}"
-          if [[ -n "${BUILD_RUNNER_LABELS}" && "${ubuntu_runner}" == '["self-hosted", "linux", "x64", "ecs-qwen"]' ]]; then
-            build_runner="${BUILD_RUNNER_LABELS}"
-          fi
-          echo "build_runner=${build_runner}" >> "${GITHUB_OUTPUT}"
-          echo "Selected build runner: ${build_runner}"
 
       # The product jobs later check out the PR head. Classify before that
       # from an explicit base-SHA checkout so no fork can replace the
@@ -439,7 +423,7 @@ jobs:
     name: 'Build unit-test tree (ubuntu-latest, Node 22.x)'
     needs: 'classify_pr'
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
-    runs-on: '${{ fromJSON(needs.classify_pr.outputs.build_runner || ''["ubuntu-latest"]'') }}'
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 45
     permissions:
       contents: 'read'

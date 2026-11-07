@@ -24,9 +24,10 @@ no-AK integration lane in the rest.
 - **Integration shards are uneven too** (median test step 425 s, 163 s,
   498 s). `mods-tool-middleware.test.ts` alone takes ~430 s, and shard 1 also
   type-checks the integration sources (~100 s) before its tests.
-- **The build lands on slow hosts half the time.** The x64 pool includes ARM64
-  hosts (hz). `test_build` took 435 s there against 206 s on the x64 (hk)
-  hosts, and every unit and integration shard waits for it.
+- **Out of scope: the build.** `test_build` took 435 s on the pool's ARM64
+  hosts against 206 s on its x64 hosts. Pinning it to x64 was considered and
+  dropped: CI is moving to aarch64 hosts (g8y, Yitian 710), so the build
+  itself is the next thing to shorten.
 
 ## Design
 
@@ -78,25 +79,14 @@ Shard 1 starts `typecheck:integration` in the background, runs its tests,
 then waits for the type-check and prints its log. The step fails if either
 fails.
 
-### Pin the build to the x64 hosts
-
-`classify_pr` publishes `build_runner`. It equals `ubuntu_runner` unless the
-repository variable `BUILD_RUNNER_LABELS` is set and `ubuntu_runner` chose the
-x64 fleet; then it takes the variable's labels. Only `test_build` reads it.
-The hk hosts need a label of their own, proposed as `ecs-qwen-hk`, because
-`runs-on` matches every listed label and cannot exclude one, and both host
-groups carry the same four. Until operators add the label and set the
-variable, nothing changes; clearing the variable reverts it.
-
 ## Decisions
 
-| Decision                                     | Rationale                                                                                                |
-| -------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| Durations checked in, not in `actions/cache` | Reviewable and deterministic; works for forks and locally; integration tests do not run on push          |
-| Per-file times from job logs, not JUnit      | Pull-request runs carry no coverage; the integration lane writes no JUnit                                |
-| Worker count fixed in the data               | Hosts differ (`maxWorkers: '25%'`); a host-dependent plan would drop or repeat files across shards       |
-| Split files in the same change               | Without it the slowest file sets the floor: the plan alone saves about 1–1.5 minutes per lane            |
-| `build_runner` gated by a variable           | The hk label does not exist yet; the change ships inert and operators can turn it on or off without a PR |
+| Decision                                     | Rationale                                                                                          |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Durations checked in, not in `actions/cache` | Reviewable and deterministic; works for forks and locally; integration tests do not run on push    |
+| Per-file times from job logs, not JUnit      | Pull-request runs carry no coverage; the integration lane writes no JUnit                          |
+| Worker count fixed in the data               | Hosts differ (`maxWorkers: '25%'`); a host-dependent plan would drop or repeat files across shards |
+| Split files in the same change               | Without it the slowest file sets the floor: the plan alone saves about 1–1.5 minutes per lane      |
 
 ## Risks
 
@@ -105,8 +95,9 @@ variable, nothing changes; clearing the variable reverts it.
   still runs in exactly one shard.
 - **The first runs use estimates** for the split files. Refresh the data from
   this change's own runs.
-- **Pinning the build to hk** queues it when those hosts are busy. Clear the
-  variable to return to the whole pool.
+- **Host migration.** The times were measured on the current mixed pool;
+  refresh them once CI runs on the aarch64 hosts, and revisit `workers` if
+  those hosts give a shard a different worker cap.
 
 ## Validation
 
@@ -116,10 +107,6 @@ variable, nothing changes; clearing the variable reverts it.
 - Against the real file lists (1463 cli, 1015 core), the eight plans cover
   every file once; their estimated finishes are 183 s for cli and 106 s for
   core. A real `vitest run --shard=1/8` in core runs exactly the planned file.
-- `.github/scripts/ci-runner-routing.test.mjs`: `build_runner` follows
-  `ubuntu_runner` while the variable is empty. With the variable set, it
-  narrows only the x64-fleet routing, leaving forks, the kill-switch and the
-  hosted and ARM64 selectors alone. Only `test_build` reads it.
 - `no-ak-integration-ci`: the new integration file is listed, and the gate
   waits for the type-check and fails with it.
 
@@ -129,5 +116,4 @@ variable, nothing changes; clearing the variable reverts it.
   every pull request, once.
 - The slowest Linux unit shard's test step drops below 8 minutes (median of
   20 runs).
-- The required-path median drops below 17 minutes over 20 runs, and below 15
-  once `BUILD_RUNNER_LABELS` is set.
+- The required-path median drops below 17 minutes over 20 runs.
