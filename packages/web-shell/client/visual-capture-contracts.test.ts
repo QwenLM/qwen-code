@@ -259,6 +259,54 @@ describe('visual capture contracts', () => {
       /@media \(hover: hover\) \{\s*\.sessionRow:has\(\.sessionBackgroundRunning:hover\) \.sessionActions \{/,
     );
   });
+
+  it('keeps the AskUser action row wrapping so the details button stays reachable', () => {
+    // The fifth action button ("Ask for details") can push the row past a
+    // 320px panel, and a flex-end row overflows to the LEFT, which scrollWidth
+    // does not report. `flex-wrap: wrap` is what keeps every button inside the
+    // panel and clickable. The only test that measures this is the visuals
+    // Playwright case, which no gating lane collects (vitest excludes e2e/**,
+    // playwright ignores **/visuals/**, and the visuals step is
+    // continue-on-error). Pin the rule here so a later refactor of `.actions`
+    // cannot drop it with every gate green.
+    const css = readFileSync(
+      join(HERE, 'components/messages/AskUserQuestion.module.css'),
+      'utf8',
+    ).replace(/\/\*[\s\S]*?\*\//g, '');
+    // The base rule must wrap, and no later override (e.g. a narrow-width
+    // @container form) may turn wrapping off for the same selector. Matching
+    // each `.actions { … }` block rather than only the first one keeps a later
+    // override from slipping through green.
+    const actionBlocks = [...css.matchAll(/\.actions\s*\{([^}]*)\}/g)].map(
+      (m) => m[1],
+    );
+    expect(
+      actionBlocks.length,
+      'AskUserQuestion.module.css must declare .actions',
+    ).toBeGreaterThan(0);
+    expect(actionBlocks[0], '.actions must wrap its buttons').toMatch(
+      /flex-wrap:\s*wrap;/,
+    );
+    for (const block of actionBlocks) {
+      expect(block, 'no .actions override may disable wrapping').not.toMatch(
+        /flex-wrap:\s*nowrap;/,
+      );
+    }
+    // Markup half: the wrap rule only protects the details button if that
+    // button is rendered inside the .actions row. Pin that it appears in the
+    // row region of the component, not orphaned by a markup-only refactor.
+    const tsx = readFileSync(
+      join(HERE, 'components/messages/AskUserQuestion.tsx'),
+      'utf8',
+    );
+    const rowAt = tsx.indexOf('className={styles.actions}');
+    expect(rowAt, 'the actions row must be rendered').toBeGreaterThan(-1);
+    const buttonAt = tsx.indexOf('className={styles.detailsButton}');
+    expect(
+      buttonAt,
+      'the details button must be rendered in the actions row',
+    ).toBeGreaterThan(rowAt);
+  });
 });
 
 describe('smoke lane browser projects', () => {
