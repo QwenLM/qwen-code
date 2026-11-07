@@ -28,7 +28,10 @@ Persist the exact prelude and replay it.
 
 1. When `startChat()` generates a startup prelude, record it as a `system`
    record with `subtype: 'startup_context'` and `message` set to the prelude
-   `Content`.
+   `Content`. The record is held in memory until the transcript's first real
+   record arrives: writing it eagerly would create a transcript for a session
+   that never sent a turn, and the session list would then treat that empty
+   session as a conversation.
 2. Recovery (`SessionApiHistoryAccumulator`) keeps the latest such record and
    prepends it to the reconstructed API history. It is never replayed as a
    user turn and never counted as a prompt.
@@ -71,6 +74,8 @@ request actually used.
 - `getInitialChatHistory()` with a saved prelude returns the same first entry
   and length; it does not rebuild the date/git snapshot.
 - A generated prelude is recorded once; a replayed prelude is not re-recorded.
+- Recording a startup prelude alone does not create a transcript; the prelude
+  is written ahead of the first real record.
 - Existing image, compression, date-reminder, and rewind tests stay green.
 
 ## Alternatives considered

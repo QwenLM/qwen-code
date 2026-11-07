@@ -337,6 +337,7 @@ describe('ChatRecordingService', () => {
       };
 
       svc.recordStartupContext(prelude);
+      user('hello');
       const record = await flushed();
 
       expect(record).toMatchObject({
@@ -345,6 +346,23 @@ describe('ChatRecordingService', () => {
         message: prelude,
       });
       expect(record.message).not.toBe(prelude);
+    });
+
+    it('does not create a transcript for a session with no turns', async () => {
+      svc.recordStartupContext({
+        role: 'user',
+        parts: [{ text: '<system-reminder>\nprelude\n</system-reminder>' }],
+      });
+      await svc.flush();
+
+      expect(writes()).toHaveLength(0);
+
+      user('hello');
+
+      expect(subtypes(await flushedAll())).toEqual([
+        'startup_context',
+        undefined,
+      ]);
     });
   });
 

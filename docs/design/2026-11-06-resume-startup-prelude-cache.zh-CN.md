@@ -25,7 +25,10 @@ user record 是真正的 prompt，**没有存 startup prelude**，所以 resume 
 把 prelude 存下来并重播。
 
 1. `startChat()` 生成 startup prelude 时，将它写成 `system` record：
-   `subtype: 'startup_context'`，`message` 为该 prelude `Content`。
+   `subtype: 'startup_context'`，`message` 为该 prelude `Content`。此 record
+   会先留在内存，等 transcript 的第一条真实 record 到来时才写入：若立刻落盘，
+   一个从未送出 turn 的 session 也会产生 transcript，session 列表便会把这个
+   空 session 当成真实对话。
 2. 还原时（`SessionApiHistoryAccumulator`）保留**最新**的
    `startup_context` record，并将它放到重建后 API history 的最前面。它不会被
    当成 user turn，也不会被算成 prompt。
@@ -61,6 +64,8 @@ user record 是真正的 prompt，**没有存 startup prelude**，所以 resume 
 - `getInitialChatHistory()` 收到存档 prelude 时，第一个 entry 与长度不变，
   不再重建日期/git snapshot。
 - 新生成的 prelude 只记录一次；重播的 prelude 不会再记录。
+- 只记录 startup prelude 不会建立 transcript；prelude 会在第一条真实 record
+  之前写入。
 - 既有 image、compression、date-reminder、rewind 测试维持绿灯。
 
 ## 其他方案
