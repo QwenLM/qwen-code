@@ -879,6 +879,133 @@ describe('KeypressContext - Kitty Protocol', () => {
     });
   });
 
+  describe('Exclusive subscriptions', () => {
+    it('routes keys to the exclusive handler only while it is subscribed', () => {
+      const ordinary = vi.fn();
+      const exclusive = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: false }),
+      });
+
+      act(() => {
+        result.current.subscribe(ordinary);
+      });
+
+      // Before any exclusive subscription, ordinary handlers receive keys.
+      act(() => {
+        stdin.pressKey({
+          name: 'return',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: '\r',
+        });
+      });
+      expect(ordinary).toHaveBeenCalledTimes(1);
+
+      // While an exclusive handler is subscribed, ordinary handlers see
+      // nothing — this is the open right-click menu owning the keyboard.
+      act(() => {
+        result.current.subscribe(exclusive, { exclusive: true });
+      });
+      act(() => {
+        stdin.pressKey({
+          name: 'down',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: '\x1b[B',
+        });
+      });
+      expect(exclusive).toHaveBeenCalledTimes(1);
+      expect(ordinary).toHaveBeenCalledTimes(1);
+
+      // After unsubscribe, ordinary handlers receive keys again.
+      act(() => {
+        result.current.unsubscribe(exclusive);
+      });
+      act(() => {
+        stdin.pressKey({
+          name: 'down',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: '\x1b[B',
+        });
+      });
+      expect(ordinary).toHaveBeenCalledTimes(2);
+    });
+
+    it('lets a declining exclusive handler pass the key to ordinary handlers', () => {
+      const ordinary = vi.fn();
+      // Returns false: the menu dismissed itself on this key and the key
+      // must keep flowing (e.g. a printable character that should be typed).
+      const exclusive = vi.fn().mockReturnValue(false);
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: false }),
+      });
+
+      act(() => {
+        result.current.subscribe(ordinary);
+        result.current.subscribe(exclusive, { exclusive: true });
+      });
+
+      act(() => {
+        stdin.pressKey({
+          name: 'x',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: 'x',
+        });
+      });
+
+      expect(exclusive).toHaveBeenCalledTimes(1);
+      expect(ordinary).toHaveBeenCalledTimes(1);
+      expect(ordinary).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'x' }),
+      );
+    });
+
+    it('swallows the key for ordinary handlers when the exclusive handler consumes it', () => {
+      const ordinary = vi.fn();
+      // Returns true (handled): up/down/return/escape on the open menu.
+      const exclusive = vi.fn().mockReturnValue(true);
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: false }),
+      });
+
+      act(() => {
+        result.current.subscribe(ordinary);
+        result.current.subscribe(exclusive, { exclusive: true });
+      });
+
+      act(() => {
+        stdin.pressKey({
+          name: 'escape',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: '\x1b',
+        });
+      });
+
+      expect(exclusive).toHaveBeenCalledTimes(1);
+      expect(ordinary).not.toHaveBeenCalled();
+    });
+  });
+
   describe('Escape key handling', () => {
     it('should recognize escape key (keycode 27) in kitty protocol', async () => {
       const keyHandler = vi.fn();
