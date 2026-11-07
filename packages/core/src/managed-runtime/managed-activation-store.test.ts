@@ -15,12 +15,51 @@ import {
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   FileManagedActivationStore,
   ManagedActivationStaleLeaseError,
   type ManagedActivationDescriptor,
 } from './managed-activation-store.js';
+import { MANAGED_JOURNAL_COMPACT_BYTES } from './managed-journal-snapshot.js';
+
+// Journal fault injection for the persist tail-repair: a failed append whose
+// repair succeeds is transient; one whose repair fails is fatal.
+const fsFault = vi.hoisted(() => ({
+  failAppends: 0,
+  failTruncates: 0,
+  tornWrite: false,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...original,
+    appendFile: async (...args: Parameters<typeof original.appendFile>) => {
+      if (fsFault.failAppends > 0) {
+        fsFault.failAppends--;
+        if (fsFault.tornWrite) {
+          const [file, data] = args;
+          const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
+          await original.appendFile(
+            file,
+            bytes.subarray(0, Math.max(1, Math.floor(bytes.byteLength / 2))),
+            { flush: true },
+          );
+        }
+        throw new Error('disk busy');
+      }
+      return original.appendFile(...args);
+    },
+    truncate: async (...args: Parameters<typeof original.truncate>) => {
+      if (fsFault.failTruncates > 0) {
+        fsFault.failTruncates--;
+        throw new Error('repair failed');
+      }
+      return original.truncate(...args);
+    },
+  };
+});
 
 const limits = { maxQueued: 10, maxQueuedPerTenant: 5 };
 
@@ -54,6 +93,9 @@ describe('FileManagedActivationStore', () => {
   });
 
   afterEach(async () => {
+    fsFault.failAppends = 0;
+    fsFault.failTruncates = 0;
+    fsFault.tornWrite = false;
     await rm(root, { recursive: true, force: true });
   });
 
@@ -188,6 +230,130 @@ describe('FileManagedActivationStore', () => {
     expect(await readFile(filePath, 'utf8')).not.toContain('"sequence":2\n{');
   });
 
+  // Regression for issue #13182 finding 5's store half: a failed append that
+  // leaves the journal intact — or with a torn tail the repair truncates —
+  // is transient, and the store stays usable instead of halting forever.
+  it('repairs a torn journal tail and keeps serving after a transient write failure', async () => {
+    const store = await openStore();
+    await store.enqueue(activation('a1'), limits);
+
+    fsFault.failAppends = 1;
+    fsFault.tornWrite = true;
+    await expect(
+      store.claim(activation('a1'), 'worker-a', 60_000),
+    ).rejects.toThrow('disk busy');
+    expect(store.haltedError).toBeUndefined();
+
+    // The torn tail was truncated back to the last complete event, so the
+    // retry writes the same sequence cleanly.
+    const lease = await store.claim(activation('a1'), 'worker-a', 60_000);
+    expect(lease?.epoch).toBe(1);
+
+    const reopened = await openStore();
+    expect(reopened.get(activation('a1'))).toMatchObject({
+      status: 'assigned',
+      lease: { workerId: 'worker-a' },
+    });
+  });
+
+  // Only a failed repair leaves the journal's state unknown — the store
+  // still fails closed then, with the repair failure on the causal chain.
+  // The torn write forces a real repair: an intact journal needs no
+  // truncate at all (the next case).
+  it('halts when a failed write cannot be repaired', async () => {
+    const store = await openStore();
+    await store.enqueue(activation('a1'), limits);
+
+    fsFault.failAppends = 1;
+    fsFault.tornWrite = true;
+    fsFault.failTruncates = 1;
+    await expect(
+      store.claim(activation('a1'), 'worker-a', 60_000),
+    ).rejects.toThrow('disk busy');
+    expect(store.haltedError?.message).toBe('disk busy');
+    expect(store.haltedError?.cause).toBeInstanceOf(Error);
+    expect((store.haltedError?.cause as Error).message).toBe('repair failed');
+    await expect(
+      store.claim(activation('a1'), 'worker-a', 60_000),
+    ).rejects.toThrow('disk busy');
+  });
+
+  // Regression for review round 9 (R9-5): a failed append that left the
+  // journal intact needs no repair, so a truncate the filesystem would have
+  // refused is never attempted — the failure stays transient and the store
+  // keeps serving.
+  it('stays transient when an intact journal needs no repair', async () => {
+    const store = await openStore();
+    await store.enqueue(activation('a1'), limits);
+
+    fsFault.failAppends = 1;
+    fsFault.failTruncates = 1;
+    await expect(
+      store.claim(activation('a1'), 'worker-a', 60_000),
+    ).rejects.toThrow('disk busy');
+    expect(store.haltedError).toBeUndefined();
+
+    const lease = await store.claim(activation('a1'), 'worker-a', 60_000);
+    expect(lease?.epoch).toBe(1);
+  });
+
+  // A first-ever write that fails before the journal file exists (the repair
+  // sees ENOENT and there is nothing to repair to) is transient.
+  it('treats a first-write failure without a journal file as transient', async () => {
+    const store = await openStore();
+    fsFault.failAppends = 1;
+
+    await expect(store.enqueue(activation('a1'), limits)).rejects.toThrow(
+      'disk busy',
+    );
+    expect(store.haltedError).toBeUndefined();
+
+    await expect(
+      store.enqueue(activation('a1'), limits),
+    ).resolves.toMatchObject({ created: true });
+  });
+
+  // The fourth cell of the fault matrix: the journal file vanished after
+  // bytes were synced (ENOENT with syncedBytes > 0) — the store's durable
+  // history is gone, so the failure is fatal, never transient.
+  it('halts when the journal vanishes after synced writes', async () => {
+    const store = await openStore();
+    await store.enqueue(activation('a1'), limits);
+    await rm(filePath);
+
+    fsFault.failAppends = 1;
+    await expect(
+      store.claim(activation('a1'), 'worker-a', 60_000),
+    ).rejects.toThrow('disk busy');
+    expect(store.haltedError?.message).toBe('disk busy');
+    expect((store.haltedError?.cause as NodeJS.ErrnoException).code).toBe(
+      'ENOENT',
+    );
+  });
+
+  // The fifth cell of the fault matrix: the journal is shorter than the
+  // byte count already synced (a backup/restore or an operator truncation
+  // dropped the tail out of band). truncate() would "repair" it by extending
+  // it with NUL bytes and report success, so the repair observes the length
+  // first: a shorter journal is consistency damage — fatal, never transient.
+  it('halts when the journal is shorter than the synced byte count', async () => {
+    const store = await openStore();
+    await store.enqueue(activation('a1'), limits);
+    await writeFile(filePath, '');
+
+    fsFault.failAppends = 1;
+    await expect(
+      store.claim(activation('a1'), 'worker-a', 60_000),
+    ).rejects.toThrow('disk busy');
+    expect(store.haltedError?.message).toBe('disk busy');
+    expect((store.haltedError?.cause as Error).message).toContain('short of');
+
+    // The truncated history on disk is itself loadable; the halted store
+    // refuses to keep writing over it.
+    const reopened = await openStore();
+    expect(reopened.listPending()).toEqual([]);
+  });
+
   it('fails closed on malformed committed history', async () => {
     await mkdir(path.dirname(filePath), { recursive: true });
     await writeFile(filePath, '{"v":1,"sequence":1}\n');
@@ -221,6 +387,106 @@ describe('FileManagedActivationStore', () => {
     await expect(
       store.enqueue(activation('a1', { payloadRef: 'event:other' }), limits),
     ).rejects.toThrow('reused with different data');
+  });
+
+  it('compacts repeated renewals and restores the latest lease without replaying old renewals', async () => {
+    const store = await openStore();
+    const input = activation('long-lived');
+    await store.enqueue(input, limits);
+    let current = (await store.claim(input, 'worker-a', 1000))!;
+    for (let index = 0; index < 1024; index++) {
+      now += 100;
+      current = await store.renew(current, 1000);
+    }
+    const contents = await readFile(filePath, 'utf8');
+    const lines = contents.trimEnd().split('\n');
+    expect(JSON.parse(lines[0])).toMatchObject({
+      v: 2,
+      type: 'activation.snapshot',
+    });
+    expect(Buffer.byteLength(contents)).toBeLessThan(
+      MANAGED_JOURNAL_COMPACT_BYTES + Buffer.byteLength(lines[0]) + 512,
+    );
+    const reopened = await openStore();
+    expect(reopened.get(input)).toEqual(store.get(input));
+    expect(reopened.get(input)?.lease).toEqual(current);
+    await reopened.release(current, 'completed');
+    expect((await openStore()).get(input)?.status).toBe('released');
+  }, 60_000);
+
+  it('preserves all identities, FIFO, and per-Session epochs across snapshots', async () => {
+    const store = await openStore();
+    const released = activation('released');
+    const cancelled = activation('cancelled');
+    const first = activation('first');
+    const second = activation('second');
+    const assigned = activation('assigned', { sessionId: 'session-b' });
+    const padding = activation('padding', {
+      sessionId: 'session-c',
+      payloadRef: 'x'.repeat(MANAGED_JOURNAL_COMPACT_BYTES),
+    });
+    await store.enqueue(released, limits);
+    const releasedLease = (await store.claim(released, 'worker-a', 1000))!;
+    await store.release(releasedLease, 'completed');
+    await store.enqueue(cancelled, limits);
+    await store.cancelQueued(cancelled);
+    await store.enqueue(first, limits);
+    await store.enqueue(second, limits);
+    await store.enqueue(assigned, limits);
+    const current = (await store.claim(assigned, 'worker-a', 1000))!;
+    await store.enqueue(padding, limits);
+    now++;
+    await store.renew(current, 1000);
+    const reopened = await openStore();
+    for (const input of [
+      released,
+      cancelled,
+      first,
+      second,
+      assigned,
+      padding,
+    ]) {
+      expect(reopened.get(input)).toEqual(store.get(input));
+    }
+    expect(reopened.listPending()).toEqual(store.listPending());
+    expect(reopened.listRunnable()).toEqual(store.listRunnable());
+    await expect(reopened.enqueue(released, limits)).resolves.toMatchObject({
+      created: false,
+      activation: { status: 'released', outcome: 'completed' },
+    });
+    await expect(
+      reopened.enqueue({ ...released, payloadRef: 'changed' }, limits),
+    ).rejects.toThrow('reused with different data');
+    expect(await reopened.claim(second, 'worker-b', 1000)).toBeUndefined();
+    const next = (await reopened.claim(first, 'worker-b', 1000))!;
+    expect(next.epoch).toBe(releasedLease.epoch + 1);
+    await expect(reopened.release(releasedLease, 'completed')).rejects.toThrow(
+      'stale',
+    );
+  });
+
+  it('repairs a torn tail after a snapshot and rebases append-repair bytes', async () => {
+    const store = await openStore();
+    const input = activation('large', {
+      payloadRef: 'x'.repeat(MANAGED_JOURNAL_COMPACT_BYTES),
+    });
+    await store.enqueue(input, limits);
+    const current = (await store.claim(input, 'worker-a', 1000))!;
+    const committed = await readFile(filePath, 'utf8');
+    expect(JSON.parse(committed.split('\n')[0])['type']).toBe(
+      'activation.snapshot',
+    );
+    await appendFile(filePath, '{"v":1,"sequence":');
+    const reopened = await openStore();
+    expect(await readFile(filePath, 'utf8')).toBe(committed);
+    now++;
+    fsFault.failAppends = 1;
+    fsFault.tornWrite = true;
+    await expect(reopened.renew(current, 1000)).rejects.toThrow('disk busy');
+    expect(reopened.haltedError).toBeUndefined();
+    expect(await readFile(filePath, 'utf8')).toBe(committed);
+    await reopened.renew(current, 1000);
+    expect((await openStore()).get(input)).toEqual(reopened.get(input));
   });
 
   it('enforces tenant and global queue limits for new work', async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 
 const DEFAULT_STORAGE_KEY = 'qwen-web-shell-history';
 const MAX_HISTORY = 100;
@@ -82,21 +82,6 @@ export function useInputHistory(
   const indexRef = useRef<number>(-1);
   const draftRef = useRef<string>('');
   const searchIndexRef = useRef<number>(-1);
-  // Drives the enabled/disabled state of the history nav buttons. canUp: an
-  // older entry exists to recall; canDown: currently browsing history (a newer
-  // entry or the saved draft to return to).
-  const [nav, setNav] = useState(() => ({
-    canUp: historyRef.current.length > 0,
-    canDown: false,
-  }));
-  const syncNav = useCallback(() => {
-    const h = historyRef.current;
-    const i = indexRef.current;
-    setNav({
-      canUp: h.length > 0 && (i === -1 || i > 0),
-      canDown: i !== -1,
-    });
-  }, []);
 
   useEffect(() => {
     if (
@@ -112,8 +97,7 @@ export function useInputHistory(
     indexRef.current = -1;
     draftRef.current = '';
     searchIndexRef.current = -1;
-    syncNav();
-  }, [fallbackStorageKey, storageKey, syncNav]);
+  }, [fallbackStorageKey, storageKey]);
 
   const readCurrentHistory = useCallback(() => {
     if (unsavedHistoryRef.current) return historyRef.current;
@@ -141,9 +125,8 @@ export function useInputHistory(
       if (h.length > MAX_HISTORY) h.shift();
       unsavedHistoryRef.current = !saveHistory(storageKeyRef.current, h);
       indexRef.current = -1;
-      syncNav();
     },
-    [readCurrentHistory, syncNav],
+    [readCurrentHistory],
   );
 
   const navigateUp = useCallback(
@@ -164,10 +147,9 @@ export function useInputHistory(
         return null;
       }
 
-      syncNav();
       return h[indexRef.current];
     },
-    [readCurrentHistory, syncNav],
+    [readCurrentHistory],
   );
 
   const navigateDown = useCallback((): string | null => {
@@ -176,22 +158,19 @@ export function useInputHistory(
 
     if (indexRef.current < h.length - 1) {
       indexRef.current++;
-      syncNav();
       return h[indexRef.current];
     } else {
       indexRef.current = -1;
-      syncNav();
       return draftRef.current;
     }
-  }, [syncNav]);
+  }, []);
 
   const isNavigating = useCallback(() => indexRef.current !== -1, []);
 
   const reset = useCallback(() => {
     indexRef.current = -1;
     searchIndexRef.current = -1;
-    syncNav();
-  }, [syncNav]);
+  }, []);
 
   const searchReverse = useCallback(
     (query: string): string | null => {
@@ -264,6 +243,5 @@ export function useInputHistory(
     getReverseMatches,
     getLastEntry,
     resetSearch,
-    nav,
   };
 }

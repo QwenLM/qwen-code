@@ -8,8 +8,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import { ideContextStore } from '@qwen-code/qwen-code-core';
 import {
+  evaluateDaemonWorkflowAncestorTrust,
   evaluateDaemonWorkspaceTrust,
   readDaemonTrustPolicySnapshot,
+  type DaemonTrustPolicySnapshot,
 } from './daemon-trust-policy.js';
 import { TrustLevel } from './trustedFolders.js';
 
@@ -25,6 +27,134 @@ vi.mock('./trustedFolders.js', async (importOriginal) => {
 });
 
 const mockedFs = vi.mocked(fs);
+
+describe('daemon workflow ancestor trust policy', () => {
+  const query = {
+    workspaceCwd: '/work/repo/packages/app',
+    canonicalTargetDir: '/work/repo/packages/app',
+    ancestorDirs: ['/work/repo/packages', '/work/repo'],
+    ideScopeCwd: '/work/primary',
+  };
+  const snapshot = (
+    overrides: Partial<DaemonTrustPolicySnapshot> = {},
+  ): DaemonTrustPolicySnapshot => ({
+    revision: 'one',
+    folderTrustEnabled: true,
+    ideTrust: undefined,
+    trustedFolders: { '/work/repo': TrustLevel.TRUST_FOLDER },
+    ...overrides,
+  });
+
+  it('requires a target grant and separate ancestor grants', () => {
+    expect(evaluateDaemonWorkflowAncestorTrust(snapshot(), query)).toEqual([
+      true,
+      true,
+    ]);
+    expect(
+      evaluateDaemonWorkflowAncestorTrust(
+        snapshot({
+          trustedFolders: {
+            [query.canonicalTargetDir]: TrustLevel.TRUST_FOLDER,
+          },
+        }),
+        query,
+      ),
+    ).toEqual([false, false]);
+    expect(
+      evaluateDaemonWorkflowAncestorTrust(
+        snapshot({
+          trustedFolders: {
+            '/work/repo': TrustLevel.TRUST_FOLDER,
+            [query.canonicalTargetDir]: TrustLevel.DO_NOT_TRUST,
+          },
+        }),
+        query,
+      ),
+    ).toEqual([false, false]);
+  });
+
+  it('reuses rule precedence and TRUST_PARENT semantics', () => {
+    expect(
+      evaluateDaemonWorkflowAncestorTrust(
+        snapshot({
+          trustedFolders: {
+            [query.canonicalTargetDir]: TrustLevel.TRUST_FOLDER,
+            '/work/repo': TrustLevel.TRUST_FOLDER,
+            '/work/repo/packages': TrustLevel.DO_NOT_TRUST,
+          },
+        }),
+        query,
+      ),
+    ).toEqual([false, true]);
+    expect(
+      evaluateDaemonWorkflowAncestorTrust(
+        snapshot({
+          trustedFolders: {
+            [query.canonicalTargetDir]: TrustLevel.TRUST_PARENT,
+          },
+        }),
+        query,
+      ),
+    ).toEqual([true, false]);
+  });
+
+  it('never lets IDE true replace folder rules or override distrust', () => {
+    expect(
+      evaluateDaemonWorkflowAncestorTrust(
+        snapshot({ ideTrust: true, trustedFolders: {} }),
+        { ...query, ideScopeCwd: query.workspaceCwd },
+      ),
+    ).toEqual([false, false]);
+    expect(
+      evaluateDaemonWorkflowAncestorTrust(
+        snapshot({
+          ideTrust: true,
+          trustedFolders: { '/work/repo': TrustLevel.DO_NOT_TRUST },
+        }),
+        query,
+      ),
+    ).toEqual([false, false]);
+  });
+
+  it('scopes IDE false to the launch workspace or current target', () => {
+    const policy = snapshot({ ideTrust: false });
+    expect(evaluateDaemonWorkflowAncestorTrust(policy, query)).toEqual([
+      true,
+      true,
+    ]);
+    expect(
+      evaluateDaemonWorkflowAncestorTrust(policy, {
+        ...query,
+        ideScopeCwd: query.workspaceCwd,
+      }),
+    ).toEqual([false, false]);
+    expect(
+      evaluateDaemonWorkflowAncestorTrust(policy, {
+        ...query,
+        workspaceCwd: '/work/primary',
+      }),
+    ).toEqual([false, false]);
+  });
+
+  it.each(['settingsError', 'trustedFoldersError'] as const)(
+    'rejects a %s snapshot even with IDE true',
+    (field) => {
+      expect(
+        evaluateDaemonWorkflowAncestorTrust(
+          snapshot({
+            ideTrust: true,
+            [field]: {
+              code: 'trust_policy_invalid',
+              path: '/config/invalid',
+              message: 'invalid',
+            },
+          }),
+          query,
+        ),
+      ).toEqual([false, false]);
+    },
+  );
+});
 
 function installFiles(files: Record<string, string>): void {
   mockedFs.lstat.mockImplementation(async (filePath) => {

@@ -17,12 +17,19 @@ import {
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import {
   HOSTED_TOOL_APPROVAL_POLICY,
   HostedApprovalWaiters,
   resolveHostedAction,
 } from './hosted-tool-approval.js';
+import { slowHostBudgetMs } from '../test-utils/slow-test-host.js';
+
+// The observed chain is a serial run of fsync-backed publishes and journal
+// commits; a fixed 10s budget flaked on a loaded runner (#14084, #15176).
+const WAIT_TIMEOUT_MS = slowHostBudgetMs(10_000, 45_000);
+const TEST_TIMEOUT_MS = slowHostBudgetMs(30_000, 75_000);
 
 it.each([
   { padding: 62_000, decision: 'allow' },
@@ -112,6 +119,15 @@ it.each([
           return localPublish(kind, bytes);
         },
       );
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'capabilityDigest',
+        'get',
+      ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'resolveCapabilities',
+      ).mockResolvedValue();
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
         async function (this: HostedWorkspaceBroker) {
           this.runtime = {
@@ -190,8 +206,6 @@ it.each([
         )
         .catch((cause) => cause);
       let requestId = '';
-      // #14084: the observed chain is a serial run of fsync-backed publishes
-      // and journal commits; 5s flaked on a loaded ubuntu-latest runner.
       await vi.waitFor(
         async () => {
           const authorization =
@@ -205,7 +219,7 @@ it.each([
           requestId = authorization.checkpoint.approval!.requestId;
           expect(session.authority.action(requestId)?.state).toBe('requested');
         },
-        { timeout: 10_000 },
+        { timeout: WAIT_TIMEOUT_MS },
       );
       const action = session.authority.action(requestId)!;
       const options = JSON.parse(
@@ -270,5 +284,5 @@ it.each([
       await rm(root, { recursive: true, force: true });
     }
   },
-  30_000,
+  TEST_TIMEOUT_MS,
 );

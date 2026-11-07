@@ -77,17 +77,78 @@ function makeTool(overrides: Partial<ACPToolCall> = {}): ACPToolCall {
   };
 }
 
+describe('ReadFile output availability', () => {
+  it.each(['failed', 'completed'] as const)(
+    'labels missing %s read details',
+    (status) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'ReadFile',
+          status,
+        }),
+        { forceExpanded: true },
+      );
+      expect(container.textContent).toContain(
+        'Output is unavailable for this tool call.',
+      );
+    },
+  );
+
+  it('distinguishes an explicitly empty read from missing output', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        rawOutput: '',
+      }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('keeps waiting for an active read without output', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', status: 'in_progress' }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('Waiting for output…');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('recognizes a recorded empty text block', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        content: [{ type: 'content', content: { type: 'text', text: '' } }],
+      }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('keeps an opaque recorded result distinct from missing output', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', rawOutput: { type: 'structured' } }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+});
+
 function renderToolLine(
   tool: ACPToolCall,
   props: Partial<Parameters<typeof ToolLine>[0]> = {},
   customization = {},
+  language: 'en' | 'zh-CN' = 'en',
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <WebShellCustomizationProvider value={customization}>
           <ToolLine tool={tool} {...props} />
         </WebShellCustomizationProvider>
@@ -228,6 +289,13 @@ describe('tool group summary logic', () => {
         { onToolResultOpen: vi.fn() },
         {},
       );
+      if (result === previewOnlyResult) {
+        expect(container.textContent).not.toContain(expected);
+        const header = container.querySelector(
+          '[role="button"]',
+        ) as HTMLElement;
+        act(() => header.click());
+      }
       expect(container.textContent).toContain(expected);
     },
   );
@@ -243,6 +311,9 @@ describe('tool group summary logic', () => {
       { onToolResultOpen: onOpen },
       customization,
     );
+    expect(container.textContent).not.toContain('Capture complete');
+    const header = container.querySelector('[role="button"]') as HTMLElement;
+    act(() => header.click());
     expect(container.textContent).toContain('Capture complete');
     const { root } = mounted.at(-1)!;
     act(() =>
@@ -835,6 +906,30 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
+  it.each(['Shell', 'ReadFile'])(
+    'preserves literal successful %s output under Chinese',
+    (toolName) => {
+      const literal =
+        "You've used up your weekly credits. Please try again after the reset.";
+      const container = renderToolLine(
+        makeTool({
+          toolName,
+          status: 'completed',
+          args:
+            toolName === 'Shell'
+              ? { command: 'cat literal.txt' }
+              : { path: '/tmp/literal.txt' },
+          rawOutput: literal,
+        }),
+        { forceExpanded: toolName === 'ReadFile' },
+        {},
+        'zh-CN',
+      );
+      expect(container.textContent).toContain(literal);
+      expect(container.textContent).not.toContain('周额度已用完');
+    },
+  );
+
   it('shows the Advisor verdict and expands the full review', () => {
     const container = renderToolGroup([
       makeTool({
@@ -935,6 +1030,32 @@ describe('tool row rendering', () => {
     expect(container.querySelector('[data-workflow-summary]')).not.toBeNull();
     expect(container.textContent).toContain('Architecture Agent');
   });
+
+  it.each([
+    ['custom_tool', 'First line.\n' + 'Bounded exported answer. '.repeat(8)],
+    [
+      'tool_call',
+      JSON.stringify({
+        schemaVersion: 1,
+        documentId: `g1_${'a'.repeat(64)}`,
+        title: 'Capacity estimate',
+        summary:
+          'Four workers at 25 requests/s give 100 requests/s. Adjust inputs locally.',
+      }),
+    ],
+  ])(
+    'keeps the full safe %s text preview visible in document mode',
+    (toolName, text) => {
+      const container = renderToolGroup(
+        [makeTool({ toolName, status: 'completed', rawOutput: text })],
+        {},
+        undefined,
+        'document',
+      );
+      expect(container.textContent).toContain(text);
+      expect(container.querySelector('iframe')).toBeNull();
+    },
+  );
 
   it('keeps grouped tools and thoughts fully expanded in document mode', () => {
     const container = renderToolGroup(

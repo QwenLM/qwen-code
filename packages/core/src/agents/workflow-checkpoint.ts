@@ -354,6 +354,7 @@ async function claimOne(
   );
   const snapshot: WorkflowSnapshot = {
     runId,
+    ...(checkpoint.sessionId ? { parentSessionId: checkpoint.sessionId } : {}),
     ...(checkpoint.sourceRef ? { sourceRef: checkpoint.sourceRef } : {}),
     ...(checkpoint.toolUseId ? { toolUseId: checkpoint.toolUseId } : {}),
     description: checkpoint.description,

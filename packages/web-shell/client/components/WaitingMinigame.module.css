@@ -1,0 +1,660 @@
+.root {
+  flex: 0 0 auto;
+  margin-bottom: 6px;
+  user-select: none;
+  -webkit-user-select: none;
+  color: var(--card-foreground);
+}
+
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.trigger:hover,
+.trigger[aria-expanded='true'] {
+  background: var(--accent);
+  color: var(--card-foreground);
+}
+
+.trigger:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.title {
+  overflow: hidden;
+  color: var(--card-foreground);
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 14px;
+  font-style: italic;
+  font-weight: 600;
+  line-height: 18px;
+  letter-spacing: 0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+  color: var(--card-foreground);
+  container-type: inline-size;
+  animation: waiting-minigame-in 160ms ease-out both;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+
+.head .title {
+  flex: 1;
+  text-align: center;
+}
+
+.headSpacer {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 24px;
+}
+
+.viewTabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+}
+
+.viewTab {
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.viewTab:hover {
+  background: var(--accent);
+  color: var(--card-foreground);
+}
+
+.viewTab[aria-selected='true'] {
+  background: var(--accent);
+  color: var(--card-foreground);
+  font-weight: 600;
+}
+
+.viewTab:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.body {
+  min-height: calc(100cqw / 44 * 7);
+}
+
+.heatCalendar {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 44 / 7;
+}
+
+.heatColumns {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, 1fr);
+  gap: 2px;
+  width: 100%;
+  height: 100%;
+}
+
+.heatMonths {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 2px;
+  width: 100%;
+  height: 13px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 13px;
+}
+
+.heatMonth {
+  overflow: visible;
+  white-space: nowrap;
+}
+
+.heatTooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--popover, var(--card));
+  color: var(--popover-foreground, var(--card-foreground));
+  box-shadow: 0 4px 14px rgb(0 0 0 / 14%);
+  font-size: 11px;
+  line-height: 15px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.heatTooltip[data-align='center'] {
+  transform: translateX(-50%);
+}
+
+.heatTooltip[data-align='start'] {
+  left: 0;
+}
+
+.heatTooltip[data-align='end'] {
+  right: 0;
+}
+
+.heatTooltipHint {
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.heatCell {
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--muted-foreground) 12%, transparent);
+  cursor: pointer;
+}
+
+.heatCell[data-empty='true'] {
+  cursor: default;
+}
+
+.heatCell[data-future='true'] {
+  background: transparent;
+  pointer-events: none;
+}
+
+.heatCell:hover,
+.heatCell:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--foreground) 42%, transparent);
+  outline-offset: 1px;
+  filter: brightness(1.15);
+}
+
+.heatCell:focus-visible {
+  outline-width: 2px;
+  outline-color: var(--ring);
+}
+
+.heatCell[data-level='1'] {
+  background: color-mix(
+    in srgb,
+    var(--chat-editor-accent-color, #4a9eff) 18%,
+    transparent
+  );
+}
+
+.heatCell[data-level='2'] {
+  background: color-mix(
+    in srgb,
+    var(--chat-editor-accent-color, #4a9eff) 35%,
+    transparent
+  );
+}
+
+.heatCell[data-level='3'] {
+  background: color-mix(
+    in srgb,
+    var(--chat-editor-accent-color, #4a9eff) 55%,
+    transparent
+  );
+}
+
+.heatCell[data-level='4'] {
+  background: color-mix(
+    in srgb,
+    var(--chat-editor-accent-color, #4a9eff) 78%,
+    transparent
+  );
+}
+
+.heatGrid {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  gap: 2px;
+  pointer-events: none;
+}
+
+.gameStart {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: #ffffff;
+  box-shadow: none;
+  color: #1f2328;
+  cursor: pointer;
+  pointer-events: auto;
+  animation: waiting-game-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes waiting-game-in {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Keep the visual box cell-sized but give the tiny target a forgiving hit area. */
+.gameStart::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+}
+
+.gameStart:hover {
+  background: #f2f5ff;
+}
+
+.gameStart:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.gameIcon {
+  width: 72%;
+  height: 72%;
+  display: block;
+}
+
+.tokenView {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 0;
+}
+
+.tokenGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tokenMetric {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--card) 92%, var(--foreground) 8%);
+}
+
+.tokenMetric span {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tokenMetric strong {
+  overflow: hidden;
+  color: var(--card-foreground);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  line-height: 22px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tokenEmpty {
+  padding: 10px 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.context {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.contextHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.contextTrack {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted-foreground) 14%, transparent);
+}
+
+.contextFill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--chat-editor-accent-color, #4a9eff);
+}
+
+.board[data-intro='true'] .cell[data-state='2'] {
+  animation: waiting-intro-cell 220ms ease-out backwards;
+  box-shadow: 0 0 8px
+    color-mix(
+      in srgb,
+      var(--chat-editor-accent-color, #4a9eff) 55%,
+      transparent
+    );
+}
+
+/* 入场结束后方块整体飞向右侧，落成开局预置方块 */
+.board[data-intro='true'][data-settling='true'] .cell[data-state='2'] {
+  opacity: 0.18;
+  transform: translate(
+    calc(var(--intro-dx, 0) * (100% + 2px)),
+    calc(var(--intro-dy, 0) * (100% + 2px))
+  );
+  transition:
+    transform 520ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 180ms ease 340ms;
+}
+
+.board[data-intro='true'][data-landed='true'] .cell[data-state='1'] {
+  animation: waiting-intro-land 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  box-shadow: 0 0 8px
+    color-mix(in srgb, var(--success-color, #22c55e) 55%, transparent);
+}
+
+@keyframes waiting-intro-cell {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes waiting-intro-land {
+  from {
+    opacity: 0.35;
+    transform: scale(0.82);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.cells[data-game='snake'] .cell[data-state='1'] {
+  background: color-mix(
+    in srgb,
+    var(--chat-editor-accent-color, #4a9eff) 55%,
+    transparent
+  );
+}
+
+.cells[data-game='snake'] .cell[data-state='2'] {
+  background: var(--chat-editor-accent-color, #4a9eff);
+}
+
+.cells[data-game='snake'] .cell[data-state='3'] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+  background: transparent;
+  font-size: calc(100cqw / 44 * 0.9);
+  line-height: 1;
+}
+
+@media (max-width: 700px) {
+  .tokenGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.textButton,
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.iconButton {
+  width: 28px;
+  padding: 0;
+}
+
+.textButton:hover,
+.iconButton:hover {
+  background: var(--accent);
+  color: var(--card-foreground);
+}
+
+.textButton:focus-visible,
+.iconButton:focus-visible,
+.restartButton:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.board {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 44 / 7;
+  container-type: inline-size;
+}
+
+.cells {
+  display: grid;
+  grid-auto-rows: 1fr;
+  gap: 2px;
+  width: 100%;
+  height: 100%;
+}
+
+/* 飞行层叠在静态底板上，方块离开后原位置不会露出卡片底色 */
+.introCells {
+  position: absolute;
+  inset: 0;
+}
+
+.cell {
+  min-width: 0;
+  min-height: 0;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--muted-foreground) 12%, transparent);
+}
+
+.cell[data-state='1'] {
+  background: color-mix(
+    in srgb,
+    var(--success-color, #22c55e) 62%,
+    transparent
+  );
+}
+
+.cell[data-state='2'] {
+  background: var(--chat-editor-accent-color, #4a9eff);
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--card) 82%, transparent);
+  backdrop-filter: blur(2px);
+}
+
+.overlayTitle {
+  color: var(--card-foreground);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.overlayHint {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.restartButton {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--chat-editor-accent-color, #4a9eff);
+  font-size: 12px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.restartButton:hover {
+  background: var(--accent);
+}
+
+.notice {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--card);
+  box-shadow: 0 0 0 1px var(--border);
+  color: var(--card-foreground);
+  font-size: 11px;
+  line-height: 16px;
+  pointer-events: none;
+  animation: waiting-minigame-notice 1.2s ease-out both;
+}
+
+.foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-height: 18px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.score {
+  color: var(--card-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.controls {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes waiting-minigame-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes waiting-minigame-notice {
+  0% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  16%,
+  72% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .notice,
+  .gameStart,
+  .board[data-intro='true'] .cell[data-state='2'],
+  .board[data-intro='true'][data-landed='true'] .cell[data-state='1'] {
+    animation: none;
+  }
+
+  .board[data-intro='true'][data-settling='true'] .cell[data-state='2'] {
+    transition: none;
+  }
+}

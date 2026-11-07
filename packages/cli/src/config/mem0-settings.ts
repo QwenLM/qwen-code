@@ -10,6 +10,7 @@ import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 import { resolveBundleDir } from '@qwen-code/qwen-code-core/utils/bundlePaths.js';
+import { getJsInterpreterCommand } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import { findGitRoot } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import { getProjectHash } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { isInternalSecretEnvVar } from '@qwen-code/qwen-code-core/utils/sanitize-child-env.js';
@@ -150,7 +151,7 @@ export function createBundledMem0Server(
     ...(enableWrites ? { write: { enabled: true } } : {}),
   };
   return {
-    command: process.execPath,
+    command: getJsInterpreterCommand(import.meta.url).command,
     args: [mem0RuntimePath()],
     env: { QWEN_BUNDLED_MEM0_CONFIG: JSON.stringify(config) },
     includeTools: [
@@ -205,7 +206,7 @@ export function bundledMem0Hooks(
     !server.includeTools?.includes('context_remember') ||
     server.scope !== undefined ||
     server.extensionName !== undefined ||
-    server.command !== process.execPath ||
+    server.command !== getJsInterpreterCommand(import.meta.url).command ||
     server.args?.length !== 1 ||
     server.args[0] !== mem0RuntimePath()
   )

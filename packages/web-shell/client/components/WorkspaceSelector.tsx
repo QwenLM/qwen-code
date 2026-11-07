@@ -1,4 +1,5 @@
 import { Fragment, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   CircleDashedIcon,
   FolderClosedIcon,
@@ -44,6 +45,7 @@ interface WorkspaceSelectorProps {
   disabled?: boolean;
   busy?: boolean;
   alwaysVisible?: boolean;
+  menuItems?: ReactNode;
   scratchSupported: boolean;
   existingFolderSupported: boolean;
   /** Offer a projectless (standalone) target alongside the workspaces. */
@@ -78,6 +80,7 @@ export function WorkspaceSelector({
   disabled,
   busy,
   alwaysVisible = false,
+  menuItems,
   scratchSupported,
   existingFolderSupported,
   standaloneSupported,
@@ -106,6 +109,7 @@ export function WorkspaceSelector({
   );
   if (
     !alwaysVisible &&
+    !menuItems &&
     workspaces.length <= 1 &&
     !canCreate &&
     !standaloneSelectable
@@ -317,6 +321,12 @@ export function WorkspaceSelector({
                   )}
                 </DropdownMenuSubContent>
               </DropdownMenuSub>
+            </>
+          )}
+          {menuItems && (
+            <>
+              <DropdownMenuSeparator />
+              {menuItems}
             </>
           )}
         </DropdownMenuContent>

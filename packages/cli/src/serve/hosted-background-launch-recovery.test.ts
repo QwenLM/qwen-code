@@ -583,6 +583,18 @@ describe('hosted background launch recovery (#13847)', () => {
     }
   });
 
+  it('declines a park whose owed workflow call lacks the child ledger', async () => {
+    await parkYoloWithOwedCall('workflow');
+    const replacement = await open('boot-2', false);
+    try {
+      const outcome = await takeoverRaw(replacement, {});
+      expect(outcome).toEqual({ kind: 'declined', reason: 'model_start' });
+      expect(await unsettledTurnIds(replacement)).toContain(PROMPT_ID);
+    } finally {
+      await replacement.close();
+    }
+  });
+
   it('declines a park whose owed team call lacks one of its two evidence funnels', async () => {
     await parkYoloWithOwedCall('task_create');
     const replacement = await open('boot-2', false);
@@ -639,6 +651,63 @@ describe('hosted background launch recovery (#13847)', () => {
       // duplicate the review removed.
       expect(projectSpy).toHaveBeenCalledTimes(1);
       projectSpy.mockRestore();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('settles a park whose owed plan approval carries its own one-funnel evidence', async () => {
+    await parkYoloWithOwedCall('team_plan_approval');
+    const replacement = await open('boot-2', false);
+    try {
+      // planDecisionEvidence lives on the teams funnel alone: with it,
+      // the call joins the settle family and — nothing committed — is
+      // answered as never run, ending the Turn instead of declining it.
+      const outcome = await takeoverRaw(replacement, {
+        teams: new HostedTeamSession(
+          {
+            authority: replacement.authority,
+            resources: replacement.resources,
+          },
+          replacement.authority.sessionHeader.sessionKey,
+        ),
+      });
+      expect(outcome).toEqual({ kind: 'inapplicable' });
+      expect(await unsettledTurnIds(replacement)).not.toContain(PROMPT_ID);
+      const records = (await replacement.sink.project()).filter(
+        (entry) => entry.daemonPromptId === PROMPT_ID,
+      );
+      const fold = records.findLast(
+        (entry) =>
+          entry.type === 'tool_result' &&
+          JSON.stringify(entry.message?.parts).includes('call-1'),
+      );
+      expect(fold).toBeDefined();
+      expect(JSON.stringify(fold?.message?.parts)).toContain('never ran');
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('declines a parked plan approval without the teams evidence funnel', async () => {
+    await parkYoloWithOwedCall('team_plan_approval');
+    const replacement = await open('boot-2', false);
+    try {
+      // planDecisionEvidence rides the teams funnel alone — without it
+      // the takeover cannot prove what the call committed, so the typed
+      // decline stands, never a minted answer.
+      const before = (await replacement.sink.project()).filter(
+        (entry) => entry.daemonPromptId === PROMPT_ID,
+      ).length;
+      const outcome = await takeoverRaw(replacement, {});
+      expect(outcome).toEqual({ kind: 'declined', reason: 'model_start' });
+      expect(await unsettledTurnIds(replacement)).toContain(PROMPT_ID);
+      // The decline writes nothing: the funnel guard runs before the
+      // answer pass, so no minted tool_result fold lands in the journal.
+      const after = (await replacement.sink.project()).filter(
+        (entry) => entry.daemonPromptId === PROMPT_ID,
+      ).length;
+      expect(after).toBe(before);
     } finally {
       await replacement.close();
     }

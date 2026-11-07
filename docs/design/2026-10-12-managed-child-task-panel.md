@@ -8,13 +8,21 @@ Managed Sessions expose task list, detail and event reads and durable task cance
 
 ## Behavior and scope
 
-The first version lists only `child_agent` tasks, shows their current state and event history, and requests cancellation. It does not create tasks, send task input, read a child transcript, or publish final results. Existing public Artifact references can be viewed through the existing bounded Artifact reader; missing references show an explicit empty state.
+The first version listed only `child_agent` tasks, showed their current state and event history, and requested cancellation. It does not create tasks, send task input, read a child transcript, or publish final results. Existing public Artifact references can be viewed through the existing bounded Artifact reader; missing references show an explicit empty state.
 
-The Session header gains a child Agent tasks button when the provider supports reads and `capabilities.tasks` is explicitly true. If that capability is removed while a saved cancellation remains, a separately labeled resume task cancellation entry allows recovery, with all new cancellation controls disabled. A page container at least 1100px wide displays a 360px right panel; narrower containers use the shared Dialog and Web Shell portal. Opening and closing the panel preserve the composer, conversation and transcript pagination. The list shows a short task ID, state and creation time; detail shows the full ID, timestamps, elapsed time, available Runtime state, events and Artifacts. Returning to the list restores its page and scroll position.
+The Session header gains a Session tasks button (a child Agent tasks button before the follow-up below) when the provider supports reads and `capabilities.tasks` is explicitly true. If that capability is removed while a saved cancellation remains, a separately labeled resume task cancellation entry allows recovery, with all new cancellation controls disabled. A page container at least 1100px wide displays a 360px right panel; narrower containers use the shared Dialog and Web Shell portal. Opening and closing the panel preserve the composer, conversation and transcript pagination. The list shows a short task ID, state and creation time; detail shows the full ID, timestamps, elapsed time, available Runtime state, events and Artifacts. Returning to the list restores its page and scroll position.
 
-The server has no kind filter. Read one raw page of 50 tasks, preserve its opaque cursor and order, and display only child Agent entries. Previous and next buttons browse raw pages. An empty filtered page with more pages is not evidence that the Session has no child tasks. Do not scan all pages or present a total count.
+The server has no kind filter. Read one raw page of 50 tasks, preserve its opaque cursor and order, and display its entries (the first version displayed only child Agent entries, so an empty filtered page with more pages was not evidence that the Session had no child tasks; since the follow-up below every entry is displayed). Previous and next buttons browse raw pages. Do not scan all pages or present a total count.
 
 Task-panel translations use a separate bilingual dictionary. The read-only transcript build replaces it with an empty stub through the existing Vite message boundary, so exported transcripts retain their payload budget without carrying task-panel copy.
+
+### Every task kind (follow-up of #13746)
+
+The panel now lists every task the Session projects, each labeled by its kind: Child Agent, Workflow, Background Shell, Monitor, Automation run, Channel delivery, or a generic Task label for a kind this client does not know. Its title becomes "Session tasks" (会话任务).
+
+- **Cancel follows the server.** The cancel control and the cancel hook no longer check the kind. A task offers cancel exactly when its view advertises `cancel` in `actionCapabilities`, the same rule the server's admission rechecks. Which kinds and states advertise it is the contract's decision (`TaskActionCapability`), so a kind that gains a cancel path needs no client change.
+- **Reads take every kind.** The task reads no longer refuse a task whose kind is not `child_agent`. The resume path still checks the Session and task identity.
+- **What a kind shows.** The detail view shows the kind above the task ID. A background Shell's or a Monitor's output events and output Artifact show through the existing timeline and Artifact reader. A channel delivery, once the server projects deliveries as tasks (#13746 F3), has no runtime state; until then its label is simply unused.
 
 ## Provider and synchronization
 

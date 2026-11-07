@@ -45,7 +45,7 @@ const baselinePath = path.resolve(
   'integration-tests/baselines/hosted-latency.json',
 );
 const reportPath = path.resolve(
-  'packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json',
+  'packages/managed-agent-server/verification/target/hosted-latency-baseline.json',
 );
 const samples: HostedLatencySample[] = [];
 let sample: HostedLatencySample;
@@ -61,7 +61,7 @@ const model = await startFakeOpenAIServer(({ body, requestIndex }) => {
     (body['tools'] as Array<{ function: { name: string } }>)
       .map((tool) => tool.function.name)
       .sort(),
-    ['edit', 'read_file', 'write_file'],
+    ['edit', 'read_file', 'web_fetch', 'write_file'],
   );
   const messages = body['messages'] as Array<{
     role: string;
@@ -366,7 +366,7 @@ try {
     'integration-tests/helpers/hosted-harness-process.ts',
     'integration-tests/helpers/hosted-relay-headers.ts',
     'integration-tests/fake-openai-server.ts',
-    'packages/sdk-java/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java',
+    'packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java',
   ];
   const sourceHashes = Object.fromEntries(
     await Promise.all(

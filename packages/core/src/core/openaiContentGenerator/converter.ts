@@ -82,6 +82,34 @@ export interface ExtendedCompletionChunkDelta
   reasoning?: string | null;
 }
 
+type OpenAIToolCallWithThoughtSignature =
+  OpenAI.Chat.ChatCompletionMessageToolCall & {
+    thoughtSignature?: string;
+    extra_content?: { google: { thought_signature: string } };
+  };
+
+function readThoughtSignature(toolCall: unknown): string | undefined {
+  const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  const call = asRecord(toolCall);
+  const direct = call?.['thoughtSignature'];
+  const nested = asRecord(asRecord(call?.['extra_content'])?.['google'])?.[
+    'thought_signature'
+  ];
+  const directSignature = typeof direct === 'string' ? direct : undefined;
+  const nestedSignature = typeof nested === 'string' ? nested : undefined;
+  if (
+    directSignature !== undefined &&
+    nestedSignature !== undefined &&
+    directSignature !== nestedSignature
+  ) {
+    return undefined;
+  }
+  return directSignature ?? nestedSignature;
+}
+
 // Threshold for treating an exact-repeat chunk as a cumulative marker rather
 // than legitimate repeated content. Cumulative providers replay the entire
 // accumulated buffer (typically hundreds of bytes) on each re-send, while
@@ -487,10 +515,10 @@ export function convertLlmRequestToOpenAI(
   // Handle contents
   processContents(request.contents, messages, requestContext);
 
-  messages = mergeConsecutiveAssistantMessages(messages);
+  messages = normalizeAssistantMessages(messages);
   if (options.cleanOrphanToolCalls) {
     messages = cleanOrphanedToolCalls(messages);
-    messages = mergeConsecutiveAssistantMessages(messages);
+    messages = normalizeAssistantMessages(messages);
   }
 
   // Bound the number of images in the assembled request below the backing
@@ -655,7 +683,7 @@ function processContent(
 
   const contentParts: OpenAIContentPart[] = [];
   const reasoningParts: string[] = [];
-  const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
+  const toolCalls: OpenAIToolCallWithThoughtSignature[] = [];
   let toolCallIndex = 0;
   const emittedFunctionCallIds = new Set<string>();
   const emittedFunctionResponseIds = new Set<string>();
@@ -671,6 +699,46 @@ function processContent(
   // break that contract when multiple parallel tool calls return media.
   const accumulatedSplitMedia: OpenAIContentPart[] = [];
 
+  const flushAssistantMessage = () => {
+    if (
+      contentParts.length === 0 &&
+      toolCalls.length === 0 &&
+      reasoningParts.length === 0
+    ) {
+      return;
+    }
+
+    const assistantTextContent = contentParts
+      .filter(
+        (part): part is OpenAI.Chat.ChatCompletionContentPartText =>
+          part.type === 'text',
+      )
+      .map((part) => part.text)
+      .join('');
+    const assistantMessage: ExtendedChatCompletionAssistantMessageParam = {
+      role: 'assistant',
+      // When there is reasoning content but no text, use "" instead of null.
+      // Some OpenAI-compatible providers (e.g. Ollama) reject content: null
+      // when reasoning_content is present, returning HTTP 400.
+      // For tool-call-only messages we keep null to stay spec-compliant.
+      content: assistantTextContent || (reasoningParts.length > 0 ? '' : null),
+    };
+
+    if (toolCalls.length > 0) {
+      assistantMessage.tool_calls = [...toolCalls];
+    }
+
+    const reasoningContent = reasoningParts.join('');
+    if (reasoningContent) {
+      assistantMessage.reasoning_content = reasoningContent;
+    }
+
+    messages.push(assistantMessage);
+    contentParts.length = 0;
+    reasoningParts.length = 0;
+    toolCalls.length = 0;
+  };
+
   for (const part of parts) {
     if (typeof part === 'string') {
       contentParts.push({ type: 'text' as const, text: part });
@@ -679,6 +747,9 @@ function processContent(
 
     if ('text' in part && 'thought' in part && part.thought) {
       if (role === 'assistant' && part.text) {
+        if (contentParts.length > 0 || toolCalls.length > 0) {
+          flushAssistantMessage();
+        }
         reasoningParts.push(part.text);
       }
     }
@@ -704,6 +775,7 @@ function processContent(
         emittedFunctionCallIds.add(callId);
       }
 
+      const thoughtSignature = part.thoughtSignature;
       toolCalls.push({
         id: callId || `call_${toolCallIndex}`,
         type: 'function' as const,
@@ -711,6 +783,14 @@ function processContent(
           name: normalizeMcpToolName(part.functionCall.name || ''),
           arguments: JSON.stringify(part.functionCall.args || {}),
         },
+        ...(typeof thoughtSignature === 'string'
+          ? {
+              thoughtSignature,
+              extra_content: {
+                google: { thought_signature: thoughtSignature },
+              },
+            }
+          : {}),
       });
       toolCallIndex += 1;
     }
@@ -821,40 +901,7 @@ function processContent(
   }
 
   if (role === 'assistant') {
-    if (
-      contentParts.length === 0 &&
-      toolCalls.length === 0 &&
-      reasoningParts.length === 0
-    ) {
-      return;
-    }
-
-    const assistantTextContent = contentParts
-      .filter(
-        (part): part is OpenAI.Chat.ChatCompletionContentPartText =>
-          part.type === 'text',
-      )
-      .map((part) => part.text)
-      .join('');
-    const assistantMessage: ExtendedChatCompletionAssistantMessageParam = {
-      role: 'assistant',
-      // When there is reasoning content but no text, use "" instead of null.
-      // Some OpenAI-compatible providers (e.g. Ollama) reject content: null
-      // when reasoning_content is present, returning HTTP 400.
-      // For tool-call-only messages we keep null to stay spec-compliant.
-      content: assistantTextContent || (reasoningParts.length > 0 ? '' : null),
-    };
-
-    if (toolCalls.length > 0) {
-      assistantMessage.tool_calls = toolCalls;
-    }
-
-    const reasoningContent = reasoningParts.join('');
-    if (reasoningContent) {
-      assistantMessage.reasoning_content = reasoningContent;
-    }
-
-    messages.push(assistantMessage);
+    flushAssistantMessage();
     return;
   }
 
@@ -1438,6 +1485,7 @@ export function convertOpenAIResponseToLlm(
           if (toolCall.function.arguments) {
             args = safeJsonParse(toolCall.function.arguments, {});
           }
+          const thoughtSignature = readThoughtSignature(toolCall);
 
           parts.push({
             functionCall: {
@@ -1445,6 +1493,7 @@ export function convertOpenAIResponseToLlm(
               name: toolCall.function.name,
               args,
             },
+            ...(thoughtSignature !== undefined ? { thoughtSignature } : {}),
           });
         }
       }
@@ -1743,6 +1792,7 @@ export function convertOpenAIChunkToLlm(
     if (choice.delta?.tool_calls) {
       for (const toolCall of choice.delta.tool_calls) {
         const index = toolCall.index ?? 0;
+        const thoughtSignature = readThoughtSignature(toolCall);
 
         // Process the tool call chunk through the streaming parser
         const parseResult = toolCall.function?.arguments
@@ -1751,12 +1801,14 @@ export function convertOpenAIChunkToLlm(
               toolCall.function.arguments,
               toolCall.id,
               toolCall.function.name,
+              thoughtSignature,
             )
           : toolCallParser.addChunk(
               index,
               '', // Empty chunk for metadata-only updates
               toolCall.id,
               toolCall.function?.name,
+              thoughtSignature,
             );
 
         const { id: callId, name: toolName } = toolCallParser.getToolCallMeta(
@@ -1997,6 +2049,9 @@ export function convertOpenAIChunkToLlm(
               name: toolCall.name,
               args: toolCall.args,
             },
+            ...(toolCall.thoughtSignature !== undefined
+              ? { thoughtSignature: toolCall.thoughtSignature }
+              : {}),
           });
         }
       }
@@ -2279,7 +2334,7 @@ function isSplitToolMediaMessage(
 /**
  * Clean up orphaned tool calls from message history to prevent OpenAI API errors.
  *
- * Assumes consecutive assistant messages have already been merged.
+ * Assumes each consecutive assistant run carries its tool batch on the last message.
  */
 function cleanOrphanedToolCalls(
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
@@ -2348,11 +2403,6 @@ function cleanOrphanedToolCalls(
           if (lastToolResponseMatchesAssistant) {
             splitMediaIndexes.push(nextIndex);
           }
-          continue;
-        }
-
-        if (nextMessage.role === 'assistant' && !hasToolCalls(nextMessage)) {
-          // Consecutive assistant turns are merged before cleanup.
           continue;
         }
 
@@ -2444,109 +2494,80 @@ function cleanOrphanedToolCalls(
 }
 
 /**
- * Merge consecutive assistant messages to combine split text and tool calls.
+ * Preserve reasoning/text segments while keeping each tool batch adjacent to
+ * its results. Chat cannot interleave assistant segments with unreturned calls.
  */
-function mergeConsecutiveAssistantMessages(
+function normalizeAssistantMessages(
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
-  const merged: OpenAI.Chat.ChatCompletionMessageParam[] = [];
+  const normalized: OpenAI.Chat.ChatCompletionMessageParam[] = [];
+  let toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
+  const flushToolCalls = () => {
+    if (toolCalls.length === 0) return;
+    const last = normalized.at(-1);
+    if (last?.role === 'assistant') {
+      last.tool_calls = toolCalls;
+    } else {
+      normalized.push({
+        role: 'assistant',
+        content: null,
+        tool_calls: toolCalls,
+      });
+    }
+    toolCalls = [];
+  };
 
   for (const message of messages) {
-    if (message.role === 'assistant' && merged.length > 0) {
-      const lastMessage = merged[merged.length - 1];
-
-      // If the last message is also an assistant message, merge them
-      if (lastMessage.role === 'assistant') {
-        const lastToolCalls =
-          'tool_calls' in lastMessage ? lastMessage.tool_calls || [] : [];
-        const currentToolCalls =
-          'tool_calls' in message ? message.tool_calls || [] : [];
-        // Combine content
-        const lastContent = lastMessage.content;
-        const currentContent = message.content;
-
-        // Determine if we should use array format (if either content is an array)
-        const useArrayFormat =
-          Array.isArray(lastContent) || Array.isArray(currentContent);
-
-        let combinedContent:
-          | string
-          | OpenAI.Chat.ChatCompletionContentPart[]
-          | null;
-
-        if (useArrayFormat) {
-          // Convert both to array format and merge
-          const lastParts = Array.isArray(lastContent)
-            ? lastContent
-            : typeof lastContent === 'string' && lastContent
-              ? [{ type: 'text' as const, text: lastContent }]
-              : [];
-
-          const currentParts = Array.isArray(currentContent)
-            ? currentContent
-            : typeof currentContent === 'string' && currentContent
-              ? [{ type: 'text' as const, text: currentContent }]
-              : [];
-
-          combinedContent = [
-            ...lastParts,
-            ...currentParts,
-          ] as OpenAI.Chat.ChatCompletionContentPart[];
-        } else {
-          // Both are strings or null, merge as strings
-          const lastText = typeof lastContent === 'string' ? lastContent : '';
-          const currentText =
-            typeof currentContent === 'string' ? currentContent : '';
-          const mergedText = [lastText, currentText].filter(Boolean).join('');
-          combinedContent = mergedText || null;
-        }
-
-        // Combine tool calls
-        const combinedToolCalls = [...lastToolCalls, ...currentToolCalls];
-
-        // Update the last message with combined data
-        (
-          lastMessage as OpenAI.Chat.ChatCompletionMessageParam & {
-            content: string | OpenAI.Chat.ChatCompletionContentPart[] | null;
-            tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
-          }
-        ).content = combinedContent || null;
-        if (combinedToolCalls.length > 0) {
-          (
-            lastMessage as OpenAI.Chat.ChatCompletionMessageParam & {
-              content: string | OpenAI.Chat.ChatCompletionContentPart[] | null;
-              tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
-            }
-          ).tool_calls = combinedToolCalls;
-        }
-
-        // Combine reasoning_content the same way content is combined. Otherwise
-        // the merged-away turn's reasoning is silently dropped, while
-        // cleanOrphanedToolCalls (which also merges assistant turns) keeps it.
-        const lastReasoning = (
-          lastMessage as ExtendedChatCompletionAssistantMessageParam
-        ).reasoning_content;
-        const currentReasoning = (
-          message as ExtendedChatCompletionAssistantMessageParam
-        ).reasoning_content;
-        const combinedReasoning = [lastReasoning, currentReasoning]
-          .filter(Boolean)
-          .join('');
-        if (combinedReasoning) {
-          (
-            lastMessage as ExtendedChatCompletionAssistantMessageParam
-          ).reasoning_content = combinedReasoning;
-        }
-
-        continue; // Skip adding the current message since it's been merged
-      }
+    if (message.role !== 'assistant') {
+      flushToolCalls();
+      normalized.push(message);
+      continue;
     }
 
-    // Add the message as-is if no merging is needed
-    merged.push(message);
+    const { tool_calls: calls = [], ...next } =
+      message as ExtendedChatCompletionAssistantMessageParam;
+    const last = normalized.at(-1) as
+      | ExtendedChatCompletionMessageParam
+      | undefined;
+    const lastAssistant =
+      last?.role === 'assistant'
+        ? (last as ExtendedChatCompletionAssistantMessageParam)
+        : undefined;
+    const startsNewReasoning = Boolean(next.reasoning_content);
+    toolCalls.push(...calls);
+
+    if (!next.content && !next.reasoning_content && calls.length > 0) {
+      continue;
+    }
+    if (!lastAssistant || startsNewReasoning) {
+      normalized.push(next);
+      continue;
+    }
+
+    const reasoning =
+      (lastAssistant.reasoning_content || '') + (next.reasoning_content || '');
+    if (reasoning) lastAssistant.reasoning_content = reasoning;
+    if (Array.isArray(lastAssistant.content) || Array.isArray(next.content)) {
+      const asParts = (
+        content: OpenAI.Chat.ChatCompletionAssistantMessageParam['content'],
+      ) =>
+        Array.isArray(content)
+          ? content
+          : content
+            ? [{ type: 'text' as const, text: content }]
+            : [];
+      lastAssistant.content = [
+        ...asParts(lastAssistant.content),
+        ...asParts(next.content),
+      ];
+    } else {
+      const text = (lastAssistant.content || '') + (next.content || '');
+      lastAssistant.content = text || (reasoning ? '' : null);
+    }
   }
 
-  return merged;
+  flushToolCalls();
+  return normalized;
 }
 
 export const OpenAIContentConverter = {

@@ -12,8 +12,10 @@ import type {
   DaemonSessionArtifactChange,
 } from '../types.js';
 import { DAEMON_ERROR_KINDS, parseDaemonBackgroundTurn } from '../types.js';
-import { isSettingsChangedData } from '../events.js';
+import { asKnownDaemonEvent, isSettingsChangedData } from '../events.js';
 import type {
+  DaemonAgentIdentity,
+  DaemonLoopStop,
   DaemonUiEvent,
   DaemonUiPermissionOption,
   DaemonUiToolProvenance,
@@ -29,11 +31,14 @@ import {
   getString,
   getTextContent,
   extractContentPart,
+  getFiniteNumber,
   isRecord,
   redactSensitiveFields,
+  sanitizeTerminalText,
   stringifyJson,
   stringifyRedactedJson,
 } from './utils.js';
+import { extractToolLifecycle } from './tool-lifecycle.js';
 
 /**
  * Common base fields stamped on every normalized UI event. Centralized as a
@@ -106,6 +111,8 @@ export function normalizeDaemonEvent(
     case 'permission_already_resolved':
       return normalizePermissionResolved(event, base);
     case 'model_switched':
+      if (isRecord(event.data) && event.data['subscriptionSignedOut'] === true)
+        return [];
       return [
         {
           ...base,
@@ -225,7 +232,10 @@ export function normalizeDaemonEvent(
       // most once per overflow episode (daemon-side hysteresis).
       if (typeof console !== 'undefined') {
         // eslint-disable-next-line no-console -- intentional diagnostic for subscriber backpressure
-        console.warn?.('[daemon-ui] SSE stream is lagging', event.data);
+        console.warn?.(
+          '[daemon-ui] SSE stream is lagging',
+          sanitizeTerminalText(stringifyJson(event.data)),
+        );
       }
       return [];
     case 'stream_error': {
@@ -243,18 +253,29 @@ export function normalizeDaemonEvent(
       ];
     }
     case 'turn_error': {
+      const subscriptionQuota = isRecord(event.data)
+        ? event.data['subscriptionQuota']
+        : undefined;
       const code = getString(event.data, 'code');
       const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       const promptId = getString(event.data, 'promptId');
+      const loop =
+        errorKind === 'loop_detected'
+          ? parseDaemonLoopStop(event.data)
+          : undefined;
       return [
         {
           ...base,
           type: 'error',
           source: 'turn_error',
+          ...(subscriptionQuota !== undefined
+            ? { data: { subscriptionQuota } }
+            : {}),
           recoverable: true,
           ...(code ? { code } : {}),
           ...(errorKind ? { errorKind } : {}),
           ...(promptId ? { promptId } : {}),
+          ...(loop ? { loop } : {}),
           text:
             getString(event.data, 'message') ??
             'Prompt failed (no details available)',
@@ -267,8 +288,11 @@ export function normalizeDaemonEvent(
     case 'history_truncated':
       return normalizeHistoryTruncated(event, base);
 
+    case 'session_messages_deleted':
+      return [];
+
     case 'session_rewound':
-      return normalizeSessionRewound(event, base);
+      return normalizeSessionRewound(event, base, opts);
 
     case 'session_branched':
       return normalizeSessionBranched(event, base);
@@ -568,6 +592,7 @@ function normalizeHistoryTruncated(
 function normalizeSessionRewound(
   event: DaemonEvent,
   base: NormalizedEventBase,
+  opts: NormalizeDaemonEventOptions,
 ): DaemonUiEvent[] {
   const promptId = getString(event.data, 'promptId');
   const targetTurnIndex = numberField(event.data, 'targetTurnIndex');
@@ -575,11 +600,25 @@ function normalizeSessionRewound(
     return fallbackDebug(event, base, 'malformed session_rewound payload');
   }
   const sessionId = getString(event.data, 'sessionId');
+  const daemonPromptId = getString(event.data, 'daemonPromptId');
+  let replay: DaemonUiEvent[] | undefined;
+  if (isRecord(event.data) && event.data['replay'] !== undefined) {
+    const known = asKnownDaemonEvent(event);
+    if (known?.type !== 'session_rewound') {
+      return fallbackDebug(event, base, 'malformed session_rewound replay');
+    }
+    // Replacement includes our own formerly optimistic user rows too.
+    replay = known.data.replay?.flatMap((frame) =>
+      normalizeDaemonEvent(frame, { ...opts, suppressOwnUserEcho: false }),
+    );
+  }
   return [
     {
       ...base,
       type: 'session.rewound',
+      ...(replay !== undefined ? { replay } : {}),
       promptId,
+      ...(daemonPromptId ? { daemonPromptId } : {}),
       targetTurnIndex,
       ...(sessionId ? { sessionId } : {}),
     },
@@ -983,6 +1022,7 @@ function normalizeSessionUpdate(
     case 'agent_message_chunk': {
       const text = getTextContent(update['content']);
       const parentToolCallId = extractParentToolCallId(update);
+      const agent = extractAgentIdentity(update);
       const meta = extractUpdateMeta(update);
       if (
         meta?.['source'] === 'background_task_completed' ||
@@ -1011,6 +1051,7 @@ function normalizeSessionUpdate(
           type: 'assistant.text.delta' as const,
           text,
           ...(parentToolCallId ? { parentToolCallId } : {}),
+          ...(agent ? { agent } : {}),
           ...(meta ? { meta } : {}),
         });
       }
@@ -1032,6 +1073,7 @@ function normalizeSessionUpdate(
       const text = getTextContent(update['content']);
       if (!text) return [];
       const parentToolCallId = extractParentToolCallId(update);
+      const agent = extractAgentIdentity(update);
       const meta = extractUpdateMeta(update);
       return [
         {
@@ -1039,16 +1081,17 @@ function normalizeSessionUpdate(
           type: 'thought.text.delta' as const,
           text,
           ...(parentToolCallId ? { parentToolCallId } : {}),
+          ...(agent ? { agent } : {}),
           ...(meta ? { meta } : {}),
         },
       ];
     }
     case 'tool_call':
     case 'tool_call_update': {
-      // Silent-shell liveness heartbeat: a meta-only in_progress frame with
-      // no kind/title/content. Normalizing it would overwrite the tool
-      // block's human-readable title with the bare tool name from _meta;
-      // the web UI has its own activity indicator, so drop the frame.
+      // A metadata-only lifecycle frame (no status/kind/title/content) is
+      // forwarded as a name-only event: it may name an existing block by
+      // `toolCallId` and must never create one. The name is deliberately not
+      // folded into the block's human-readable `title`.
       const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
       if (
         meta &&
@@ -1057,8 +1100,24 @@ function normalizeSessionUpdate(
         update['content'] === undefined &&
         update['title'] === undefined &&
         update['kind'] === undefined
-      )
-        return [];
+      ) {
+        // Lifecycle frames are the only name carrier for a subagent's tool
+        // call, so forward the name alone: the reducer names an existing
+        // block by `toolCallId` and never creates a card from it.
+        const lifecycle = extractToolLifecycle(update);
+        const lifecycleCallId =
+          getString(update, 'toolCallId') ?? lifecycle?.callId;
+        if (!lifecycle?.toolName || !lifecycleCallId) return [];
+        return [
+          {
+            ...base,
+            type: 'tool.update' as const,
+            toolCallId: lifecycleCallId,
+            toolName: lifecycle.toolName,
+            nameOnly: true,
+          },
+        ];
+      }
       if (
         getString(update, 'status') === 'in_progress' &&
         getString(update, 'kind') === undefined &&
@@ -1104,6 +1163,7 @@ function normalizeSessionUpdate(
     }
     case 'plan':
       return [normalizePlanUpdate(update, base)];
+    case 'config_option_update':
     case 'current_mode_update':
     case 'session_info_update':
     case 'usage_update':
@@ -1134,6 +1194,34 @@ function extractParentToolCallId(
 ): string | undefined {
   const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
   return meta ? getString(meta, 'parentToolCallId') : undefined;
+}
+
+/**
+ * Reads the producer identity the daemon stamps as `_meta.agent`.
+ *
+ * Rejects partial or malformed shapes rather than half-populating them: a
+ * client that keys rendering or policy on `agentName` must never see an
+ * identity whose `depth`/`kind` disagree with it. Absent means the frame came
+ * from the session's root agent, which callers render unattributed.
+ */
+function extractAgentIdentity(
+  update: Record<string, unknown>,
+): DaemonAgentIdentity | undefined {
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const agent = meta && isRecord(meta['agent']) ? meta['agent'] : undefined;
+  if (!agent) return undefined;
+  const agentName = getString(agent, 'agentName');
+  const kind = getString(agent, 'kind');
+  const depth = numberField(agent, 'depth');
+  if (
+    !agentName ||
+    (kind !== 'root' && kind !== 'subagent' && kind !== 'teammate') ||
+    depth === undefined ||
+    depth < 0
+  ) {
+    return undefined;
+  }
+  return { agentName, depth, kind };
 }
 
 function extractUpdateMeta(
@@ -1207,7 +1295,14 @@ function normalizeToolUpdate(
     getString(update, 'toolName') ??
     getString(update, 'name') ??
     (metadata ? getString(metadata, 'toolName') : undefined) ??
-    (metadata ? getString(metadata, 'name') : undefined);
+    (metadata ? getString(metadata, 'name') : undefined) ??
+    // Lifecycle frames name the tool only under `_meta.toolLifecycle` (see
+    // transcript-replay's `createTranscriptToolLifecycleUpdate`), so a
+    // subagent tool call whose surviving frame carries no explicit title or
+    // toolName would otherwise project as the generic "Tool". Explicit names
+    // above still win. Read it through the same validator as the metadata-only
+    // arm so one payload gets one trust decision. #16301
+    extractToolLifecycle(update)?.toolName;
   const toolKind = getString(update, 'kind');
   const explicitTitle = getString(update, 'title');
   const title =
@@ -1275,6 +1370,7 @@ function normalizeToolUpdate(
   const subagentType =
     getString(update, 'subagentType') ??
     (metadata ? getString(metadata, 'subagentType') : undefined);
+  const agent = extractAgentIdentity(update);
   const startedAt = numberField(metadata, 'startedAt');
   const durationMs = numberField(metadata, 'durationMs');
   return {
@@ -1293,6 +1389,7 @@ function normalizeToolUpdate(
     ...(serverId ? { serverId } : {}),
     ...(parentToolCallId ? { parentToolCallId } : {}),
     ...(subagentType ? { subagentType } : {}),
+    ...(agent ? { agent } : {}),
     ...(typeof subagentSessionReady === 'boolean'
       ? { subagentSessionReady }
       : {}),
@@ -1409,6 +1506,21 @@ function extractToolProvenance(
     }
   }
   return {};
+}
+
+function parseDaemonLoopStop(data: unknown): DaemonLoopStop | undefined {
+  if (!isRecord(data)) return undefined;
+  const loopType = getString(data, 'loopType');
+  const loopReason = getString(data, 'loopReason');
+  const toolCallCount = getFiniteNumber(data, 'toolCallCount');
+  const toolCallLimit = getFiniteNumber(data, 'toolCallLimit');
+  if (!loopType && !loopReason) return undefined;
+  return {
+    ...(loopType ? { loopType } : {}),
+    ...(loopReason ? { loopReason } : {}),
+    ...(toolCallCount !== undefined ? { toolCallCount } : {}),
+    ...(toolCallLimit !== undefined ? { toolCallLimit } : {}),
+  };
 }
 
 function asDaemonErrorKind(

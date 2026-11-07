@@ -37,13 +37,18 @@ import {
   type AgentApprovalRequestEvent,
   type AgentEventEmitter,
   type AgentToolResultEvent,
+  type AgentStartEvent,
 } from './runtime/agent-events.js';
 import {
   ToolConfirmationOutcome,
   type ToolConfirmationPayload,
 } from '../tools/tools.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import { getInvocationContext } from '../utils/invocation-context.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import {
   buildFailureLines,
@@ -316,6 +321,8 @@ export type WorkflowEvent = WorkflowEventPayload & { id: string };
  * the most recent `phase()` call.
  */
 export interface WorkflowTask extends TaskBase<WorkflowStatus> {
+  /** Turn that registered this workflow run. */
+  sourceTurnId?: string;
   sourceRef?: WorkflowSourceRef;
   workflowCalls?: WorkflowCallTrace[];
   workflowCallsTruncated?: boolean;
@@ -324,6 +331,8 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   runId: string;
   /** Tool call in the parent session that launched this workflow. */
   toolUseId?: string;
+  /** Chat that owns the dispatch transcripts, including project-wide history. */
+  parentSessionId?: string;
   /** Saved workflow definition name, when this run came from one. */
   workflowName?: string;
   /** Run whose result or journal led to this attempt. */
@@ -528,6 +537,7 @@ export interface WorkflowRunCompletionMeta {
   runId: string;
   status: Extract<WorkflowStatus, 'completed' | 'failed'>;
   todoWorkChainId?: string;
+  sourceTurnId?: string;
 }
 export type WorkflowRunCompletionCallback = (
   displayText: string,
@@ -776,6 +786,7 @@ export class WorkflowRunRegistry {
       runId: entry.runId,
       status: entry.status,
       todoWorkChainId: entry.todoWorkChainId,
+      sourceTurnId: entry.sourceTurnId,
     };
     try {
       runOutsideAgentContext(() =>
@@ -904,6 +915,8 @@ export class WorkflowRunRegistry {
     entry.notified = false;
     entry.isBackgrounded = registration.isBackgrounded ?? false;
     entry.todoWorkChainId ??= todoWorkChainContext.getStore();
+    entry.sourceTurnId ??=
+      getInvocationContext()?.promptId ?? promptIdContext.getStore();
     entry.currentPhase = null;
     entry.phases = [];
     entry.phaseVisits = [];
@@ -1000,13 +1013,23 @@ export class WorkflowRunRegistry {
     const seenSources = new Set<string>();
     const isCurrentEntry = () =>
       expectedEntry === undefined || this.entries.get(runId) === expectedEntry;
+    const onStart = (event: AgentStartEvent) => {
+      if (!isCurrentEntry() || !dispatchId) return;
+      const entry = this.entries.get(runId);
+      const dispatch = entry?.dispatches.find(({ id }) => id === dispatchId);
+      if (!entry || !dispatch || dispatch.subagentId) return;
+      dispatch.subagentId = event.subagentId;
+      this.emitStatusChange(entry);
+    };
     const onWaiting = (event: AgentApprovalRequestEvent) => {
       if (!isCurrentEntry()) return;
       if (dispatchId) {
         const dispatch = this.entries
           .get(runId)
           ?.dispatches.find(({ id }) => id === dispatchId);
-        if (dispatch) dispatch.subagentId = event.subagentId;
+        if (dispatch && !dispatch.subagentId) {
+          dispatch.subagentId = event.subagentId;
+        }
       }
       const sourceKey = JSON.stringify([event.subagentId, event.callId]);
       if (seenSources.has(sourceKey)) {
@@ -1039,9 +1062,11 @@ export class WorkflowRunRegistry {
         event.timestamp,
       );
     };
+    emitter.on(AgentEventType.START, onStart);
     emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
     emitter.on(AgentEventType.TOOL_RESULT, onResult);
     return () => {
+      emitter.off(AgentEventType.START, onStart);
       emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
       emitter.off(AgentEventType.TOOL_RESULT, onResult);
       if (!isCurrentEntry()) return;
@@ -1127,13 +1152,16 @@ export class WorkflowRunRegistry {
     releaseSource: () => void,
   ): string | 'duplicate' | 'rejected' {
     const entry = this.entries.get(runId);
+    // A change callback only repaints the "needs approval" badge; it cannot
+    // answer the request. Requiring a real responder is what keeps a parked
+    // approval from waiting forever on a badge-only host.
     if (
       !entry ||
       !isActiveWorkflowStatus(entry.status) ||
-      (!this.approvalChangeCallback && !this.approvalRequestCallback)
+      !this.approvalRequestCallback
     ) {
       debugLogger.warn(
-        `Workflow approval rejected for ${runId}/${event.callId}: entry missing, not active, or no host channel`,
+        `Workflow approval rejected for ${runId}/${event.callId}: entry missing, not active, or no host responder`,
       );
       return 'rejected';
     }
@@ -1178,9 +1206,7 @@ export class WorkflowRunRegistry {
       at: event.timestamp,
     };
     const approvalRequestCallback = this.approvalRequestCallback;
-    const requestController = approvalRequestCallback
-      ? new AbortController()
-      : undefined;
+    const requestController = new AbortController();
     this.approvalRuntimes.set(approvalId, {
       respond: event.respond,
       requestController,
@@ -1194,11 +1220,7 @@ export class WorkflowRunRegistry {
       ...(dispatchId ? { dispatchId } : {}),
     });
     this.emitApprovalChange(entry);
-    if (
-      approvalRequestCallback &&
-      requestController &&
-      !requestController.signal.aborted
-    ) {
+    if (requestController && !requestController.signal.aborted) {
       try {
         const request = approvalRequestCallback(
           entry,
