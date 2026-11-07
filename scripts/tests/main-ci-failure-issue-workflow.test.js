@@ -2348,14 +2348,19 @@ fi
       '${{ github.event.workflow_run.run_attempt }}',
     );
     // Counted over the whole workflow: both projections read the file this one
-    // fetch wrote, so the payload must be fetched exactly once.
-    expect(
-      (
-        workflow.match(
-          /actions\/runs\/\$\{WORKFLOW_RUN_ID\}\/attempts\/\$\{RUN_ATTEMPT\}\/jobs/g,
-        ) ?? []
-      ).length,
-    ).toBe(1);
+    // fetch wrote, so the payload must be fetched exactly once. The pattern
+    // admits both spellings of the attempt variable — the classifier reads
+    // `${RUN_ATTEMPT:-1}`, the download `${RUN_ATTEMPT}` — because matching
+    // only the literal left this assertion reading 1 against two real reads.
+    const jobReads = (
+      workflow.match(
+        /actions\/runs\/\$\{WORKFLOW_RUN_ID\}\/attempts\/\$\{RUN_ATTEMPT(?::-1)?\}\/jobs/g,
+      ) ?? []
+    ).length;
+    // Two by design: the classifier's read (which must work before it knows
+    // this is a timeout) and the download's. A third added invisibly fails
+    // here rather than silently doubling the API cost.
+    expect(jobReads).toBe(2);
     // The ids projection is bound to the array the download loop iterates and to
     // the payload the fetch wrote. Swapping it with the TSV projection below
     // hands the reader whole TSV lines so every log download 404s. Renaming
