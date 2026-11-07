@@ -34,9 +34,12 @@ export const ENV_ACP_REPEATED_TOOL_FAILURE_GUARD =
 export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_HOME',
   'QWEN_RUNTIME_DIR',
+  // The shared Conversations root is selected by the operator at daemon boot.
+  'QWEN_CONVERSATIONS_DIR',
   // Project reloads must not replace or relabel an operator container requirement.
   'QWEN_AGENT_EXECUTION_BACKEND',
   'QWEN_CODE_MCP_APPROVALS_PATH',
+  'QWEN_CODE_HOOK_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
   // These two select which file becomes the System / SystemDefaults settings
   // layer. A project `.env` must never redirect them: the System layer
@@ -376,9 +379,16 @@ export function isPrivateProvenanceEnvKey(key: string): boolean {
 export const HOME_ENV_BOOTSTRAP_KEYS = [
   'QWEN_HOME',
   'QWEN_RUNTIME_DIR',
+  'QWEN_CONVERSATIONS_DIR',
   'QWEN_CODE_MCP_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
 ] as const;
+
+// An empty Conversations root is an explicit invalid selection. Preserve it
+// through environment loading so serve rejects it instead of using a fallback.
+export function keepsEmptyHomeEnvValue(key: string): boolean {
+  return key.toUpperCase() === 'QWEN_CONVERSATIONS_DIR';
+}
 
 // Loader-affecting variables inherited from the launching shell. A daemon or
 // ACP child needs them only for its own boot (e.g. the dev harness tsx

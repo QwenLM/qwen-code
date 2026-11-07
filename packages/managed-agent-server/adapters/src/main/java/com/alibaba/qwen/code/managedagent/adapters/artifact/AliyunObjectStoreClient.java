@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.adapters.artifact;
 
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.aliyun.oss.ClientBuilderConfiguration;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSClientBuilder;
@@ -12,7 +13,7 @@ import java.net.URI;
 public final class AliyunObjectStoreClient implements AutoCloseable {
     private final OSS client;
     public AliyunObjectStoreClient(OSS client) { this.client = client; }
-    public static AliyunObjectStoreClient environment(com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings settings) throws Exception {
+    public static AliyunObjectStoreClient environment(ManagedAgentSettings settings) throws Exception {
         return new AliyunObjectStoreClient(buildOss(settings, CredentialsProviderFactory.newEnvironmentVariableCredentialsProvider()));
     }
     public static AliyunObjectStoreClient regional(URI endpoint, String region) throws Exception {
@@ -25,8 +26,9 @@ public final class AliyunObjectStoreClient implements AutoCloseable {
     }
     public AliyunToolPublicationObjectStore objects(String bucket) { return new AliyunToolPublicationObjectStore(client, bucket); }
     public void shutdown() { client.shutdown(); }
+    @Override
     public void close() { shutdown(); }
-    public static OSS buildOss(com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties, CredentialsProvider credentials) {
+    public static OSS buildOss(ManagedAgentSettings properties, CredentialsProvider credentials) {
         var settings = properties.getToolPublication();
         URI endpoint = URI.create(required(settings.getOssEndpoint(), "OSS endpoint"));
         String region = required(settings.getOssRegion(), "OSS region");

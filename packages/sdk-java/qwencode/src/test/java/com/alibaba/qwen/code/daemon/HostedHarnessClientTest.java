@@ -95,6 +95,26 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void modelConfigurationRequiresNegotiationAndSurvivesLoadCopies() {
+        var store = ManagedSessionStoreConnection.builder().baseUri(URI.create("https://store.example/"))
+                .tenantId("tenant-a").workspaceId("workspace-a").writerId(BOOT_ID)
+                .writerToken("qwt1_" + "a".repeat(43)).leaseDuration(Duration.ofSeconds(45)).build();
+        var create = CreateHarnessSession.builder().harnessSessionId(SESSION_ID)
+                .managedSessionStore(store).modelConfigDigest(DIGEST).build();
+        var load = new LoadHarnessSession(SESSION_ID, store, false).withModelConfigDigest(DIGEST);
+        assertEquals(DIGEST, create.toJson().get("modelConfigDigest"));
+        assertEquals(DIGEST, load.withChildWorkspaces(true).withForegroundOnly(true)
+                .withStoppedMessages().forLifecycle(PROMPT_ID, 1).toJson().get("modelConfigDigest"));
+        try (HostedHarnessClient client = newClient()) {
+            assertThrows(DaemonProtocolException.class, () -> client.createSession(create));
+            assertThrows(DaemonProtocolException.class, () -> client.loadSession(load));
+        }
+        assertThrows(IllegalArgumentException.class, () -> CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID).modelConfigDigest(DIGEST).build());
+        assertThrows(IllegalArgumentException.class, () -> load.withModelConfigDigest("invalid"));
+    }
+
+    @Test
     void mcpManagementKeepsTheSessionAndOriginalCommandIdentityAcrossReadsAndSubmission() throws Exception {
         createSessionRoute();
         String command = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -1913,6 +1933,28 @@ class HostedHarnessClientTest {
             client.resolveAction(session, action, "allow", 1, "hosted-tool-approval/1");
             assertEquals(Map.of("optionId", "allow", "inputRevision", 1, "policyRevision", "hosted-tool-approval/1"),
                     JsonSupport.parseObject(payload.get(), "Action response"));
+        }
+    }
+
+    @Test
+    void questionResolutionCarriesStructuredAnswersAndClientIdentity() {
+        String action = "tool_approval_" + "b".repeat(32);
+        AtomicReference<String> payload = new AtomicReference<>();
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        server.createContext("/session/" + SESSION_ID + "/actions/" + action + "/resolve", exchange -> {
+            assertEquals(CLIENT_ID, exchange.getRequestHeaders().getFirst(HostedHarnessClient.CLIENT_ID_HEADER));
+            assertEquals("Bearer harness-token", exchange.getRequestHeaders().getFirst("Authorization"));
+            payload.set(readBody(exchange));
+            sendSessionJson(exchange, 200, "{\"requestId\":\"" + action + "\",\"state\":\"decided\"}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = client.createSession(CreateHarnessSession.builder().harnessSessionId(SESSION_ID).build());
+            List<Map<String, Object>> answers = List.of(Map.of("questionId", "q1", "optionIds", List.of("q1o2"), "text", "中😀/\\\""));
+            client.resolveQuestion(session, action, answers, 1, "hosted-user-question/1");
+            assertEquals(Map.of("answers", answers, "inputRevision", 1, "policyRevision", "hosted-user-question/1"),
+                    JsonSupport.parseObject(payload.get(), "Question response"));
+            assertThrows(IllegalArgumentException.class, () -> client.resolveQuestion(session, action, answers, 1, "hosted-tool-approval/1"));
+            assertThrows(IllegalArgumentException.class, () -> client.resolveQuestion(session, action, List.of(), 1, "hosted-user-question/1"));
         }
     }
 

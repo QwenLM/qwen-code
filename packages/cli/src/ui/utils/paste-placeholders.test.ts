@@ -5,6 +5,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  collapsePastes,
+  collapseRewrite,
   expandPendingPastePlaceholders,
   restorePasteDraft,
   framePasteExpansion,
@@ -80,5 +82,71 @@ describe('shared model paste encoding', () => {
     );
     expect(unframeClipboardPastes(framed)).toBe(`${body}\nthen\nsecond`);
     expect(framed.split(CLIPBOARD_PASTE_FRAMING)).toHaveLength(2);
+  });
+});
+
+describe('collapseRewrite', () => {
+  const a = '[Pasted Content 40 chars]';
+  const b = '[Pasted Content 40 chars] #2';
+  const bodyA = 'alpha '.repeat(8).trim();
+  const bodyB = 'beta '.repeat(8).trim();
+
+  it('collapses every paste the rewrite kept whole', () => {
+    const pastes = new Map([
+      [a, bodyA],
+      [b, bodyB],
+    ]);
+    expect(
+      collapseRewrite(
+        `see ${a} and ${b}`,
+        `Please see ${bodyA}; ${bodyB}`,
+        pastes,
+      ),
+    ).toEqual({
+      text: `Please see ${a}; ${b}`,
+      pasteExpansions: pastes,
+    });
+  });
+
+  it('is undefined when a paste was edited inside or removed', () => {
+    const pastes = new Map([[a, bodyA]]);
+    expect(
+      collapseRewrite(`see ${a}`, `see ${bodyA.replace('alpha', 'x')}`, pastes),
+    ).toBeUndefined();
+    expect(collapseRewrite(`see ${a}`, 'see nothing', pastes)).toBeUndefined();
+  });
+
+  it('ignores a paste whose placeholder left the typed text', () => {
+    const pastes = new Map([
+      [a, bodyA],
+      [b, bodyB],
+    ]);
+    // Only `#2` is typed; `a` is a prefix of it and was discarded.
+    expect(collapseRewrite(`see ${b}`, `Look at ${bodyB}`, pastes)).toEqual({
+      text: `Look at ${b}`,
+      pasteExpansions: new Map([[b, bodyB]]),
+    });
+  });
+
+  it('passes a rewrite of text without pastes through', () => {
+    expect(collapseRewrite('hi', 'hello', new Map([[a, bodyA]]))).toEqual({
+      text: 'hello',
+    });
+  });
+});
+
+describe('collapsePastes', () => {
+  it('collapses a text pasted twice when it appears twice, in paste order', () => {
+    const pastes = new Map([
+      ['[P1]', 'same body'],
+      ['[P2]', 'same body'],
+    ]);
+    expect(collapsePastes('same body then same body', pastes)).toEqual({
+      text: '[P1] then [P2]',
+      pasteExpansions: pastes,
+    });
+    expect(collapsePastes('only same body', pastes).pasteExpansions.size).toBe(
+      0,
+    );
   });
 });

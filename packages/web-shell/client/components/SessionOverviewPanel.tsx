@@ -872,6 +872,7 @@ function SessionOverviewPanelInner({
         byCwd.set(key, [...(byCwd.get(key) ?? []), card]);
       }
       const succeededIdentities = new Set<string>();
+      const deleteFailures: string[] = [];
       let firstError: Error | undefined;
       for (const [cwd, group] of byCwd) {
         const ids = group.map((card) => card.sessionId);
@@ -905,21 +906,32 @@ function SessionOverviewPanelInner({
                 : undefined;
             }
           } else {
-            const invalidateDeleted =
-              generatedUiOwner?.captureSessionDeletion(ownerCwd);
-            const result = await client.deleteSessionsData(ids);
-            invalidateDeleted?.([...result.removed, ...result.notFound]);
-            for (const id of [...result.removed, ...result.notFound]) {
-              const card = cardsById.get(id);
-              if (card) succeededIdentities.add(getSessionIdentity(card));
+            for (
+              let offset = 0;
+              offset < ids.length;
+              offset += SESSION_ARCHIVE_BATCH_SIZE
+            ) {
+              const invalidateDeleted =
+                generatedUiOwner?.captureSessionDeletion(ownerCwd);
+              const result = await client.deleteSessionsData(
+                ids.slice(offset, offset + SESSION_ARCHIVE_BATCH_SIZE),
+              );
+              invalidateDeleted?.([...result.removed, ...result.notFound]);
+              for (const id of [...result.removed, ...result.notFound]) {
+                const card = cardsById.get(id);
+                if (card) succeededIdentities.add(getSessionIdentity(card));
+              }
+              deleteFailures.push(...result.errors.map(({ error }) => error));
             }
-            firstError ??= result.errors[0]
-              ? new Error(result.errors[0].error)
-              : undefined;
           }
         } catch (error) {
-          firstError ??=
+          const requestError =
             error instanceof Error ? error : new Error(String(error));
+          if (mutation === 'delete') {
+            deleteFailures.push(requestError.message);
+          } else {
+            firstError ??= requestError;
+          }
         } finally {
           if (ownerCwd) {
             sessionCatalogController.refreshWorkspace(ownerCwd);
@@ -965,16 +977,24 @@ function SessionOverviewPanelInner({
                 id,
               );
             }
-            firstError ??= result.errors[0]
-              ? new Error(result.errors[0].message)
-              : undefined;
+            deleteFailures.push(...result.errors.map(({ message }) => message));
           }
         } catch (error) {
-          firstError ??=
+          const requestError =
             error instanceof Error ? error : new Error(String(error));
+          if (mutation === 'delete') {
+            deleteFailures.push(requestError.message);
+          } else {
+            firstError ??= requestError;
+          }
         }
       }
-      return { succeededIdentities, error: firstError };
+      return {
+        succeededIdentities,
+        error: deleteFailures.length
+          ? new Error(deleteFailures.join('; '))
+          : firstError,
+      };
     },
     [
       canArchiveCard,

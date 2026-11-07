@@ -59,7 +59,14 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
 
   // Qwen VL (vision-language) models: image + video
   [/^qwen-vl-/, { image: true, video: true }],
-  [/^qwen3-vl-/, { image: true, video: true }],
+  // Ollama names these `qwen3-vl:8b` and `qwen2.5vl:7b`, so the tag strip
+  // leaves a bare `qwen3-vl` or a `qwen2.5vl` with no hyphen.
+  [/^qwen3-?vl(?:-|$)/, { image: true, video: true }],
+  // Open-weight Qwen2-VL / Qwen2.5-VL, including sizes and quantized builds
+  // the bundled catalog has no entry for (32B, 3B, -AWQ, -FP8).
+  [/^qwen2(?:\.5)?-?vl(?:-|$)/, { image: true, video: true }],
+  // QVQ visual reasoning models.
+  [/^qvq-/, { image: true }],
 
   // Qwen coder / text models: text-only
   [/^qwen3-coder-/, {}],
@@ -96,7 +103,11 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // -------------------
   // Moonshot / Kimi
   // -------------------
-  [/^kimi-k3/, { image: true, video: true }],
+  // Kimi Code exposes the K3 generation without the `kimi-` prefix, so the
+  // prefix is optional here too. Its 256K variant accepts images but not
+  // video, so it is named ahead of the video-capable row.
+  [/^(?:kimi-)?k3-256k/, { image: true }],
+  [/^(?:kimi-)?k3/, { image: true, video: true }],
   [/^kimi-k2\./, { image: true, video: true }],
   [/^kimi-/, {}],
 
@@ -111,6 +122,17 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^doubao-seed/, { image: true }],
   [/^doubao-.*(vision|vl)/, { image: true }],
   [/^doubao/, {}],
+
+  // -------------------
+  // Other open-weight vision models, commonly served through Ollama, vLLM and
+  // other OpenAI-compatible servers: Meta's Llama 3.2 Vision and Llama 4,
+  // LLaVA, and Mistral's Pixtral and Small 3.1 / 3.2 all accept images.
+  // -------------------
+  [/^llama-?3\.2-(?:\d+b-)?vision/, { image: true }],
+  [/^llama-?4(?:-|$)/, { image: true }],
+  [/^llava/, { image: true }],
+  [/^pixtral/, { image: true }],
+  [/^mistral-small-?3\.[12](?:-|$)/, { image: true }],
 ];
 
 /**
