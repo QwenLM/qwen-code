@@ -36,7 +36,9 @@ export function planLabels(runners, mode, dayCount = 0) {
   }
   if (mode === 'day') {
     if (!Number.isInteger(dayCount) || dayCount < 1) {
-      throw new Error('mode day needs a positive integer review-day runner count');
+      throw new Error(
+        'mode day needs a positive integer review-day runner count',
+      );
     }
     const online = runners.filter(
       (r) => r.status === 'online' && FLEET_NAME.test(r.name),
@@ -53,9 +55,7 @@ export function planLabels(runners, mode, dayCount = 0) {
   }
   const sorted = runners
     .filter((r) => FLEET_NAME.test(r.name))
-    .sort((a, b) =>
-      a.name.localeCompare(b.name, undefined, { numeric: true }),
-    );
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   const keep = new Set(
     mode === 'day'
       ? sorted
@@ -95,15 +95,16 @@ async function main() {
       'usage: review-runner-schedule.mjs <owner/repo> <review|day|ci> [review-day runner count]',
     );
   }
-  const dayCount =
-    rest.length === 0 ? 0 : Number.parseInt(rest.join(' '), 10);
+  const dayCount = rest.length === 0 ? 0 : Number.parseInt(rest.join(' '), 10);
   // Validate the mode (and the day count shape) before spending an
   // authenticated call on it.
   if (!MODES.includes(mode)) {
     throw new Error('mode must be review, day or ci');
   }
   if (mode === 'day' && (!Number.isInteger(dayCount) || dayCount < 1)) {
-    throw new Error('mode day needs a positive integer review-day runner count');
+    throw new Error(
+      'mode day needs a positive integer review-day runner count',
+    );
   }
   if (!process.env.RUNNER_ADMIN_TOKEN) {
     throw new Error(
@@ -161,7 +162,9 @@ async function main() {
   );
   const summary = [
     `### hz runner pool: ${mode}`,
-    ...(mode === 'day' ? [`- keeping on review: first ${dayCount} runners`] : []),
+    ...(mode === 'day'
+      ? [`- keeping on review: first ${dayCount} runners`]
+      : []),
     `- ${actions.length} runners to switch`,
     ...results.map((r) => r.message),
   ].join('\n');
