@@ -1229,6 +1229,7 @@ describe('createAcpSessionBridge', () => {
         handle.agent.initializeCalls[0]?.clientCapabilities?._meta,
       ).toEqual({
         'qwen.goalProposals': true,
+        'qwen.askUserQuestion': true,
         'qwen.mcpAppHost': true,
       });
 

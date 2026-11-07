@@ -39,6 +39,7 @@ import {
   interactionMetaFields,
   type PermissionPersistencePolicy,
   requestPermissionWithAbort,
+  resolveAskUserQuestionAnswers,
   resolvePermissionOutcome,
   toPermissionOptions,
 } from './permissionUtils.js';
@@ -86,6 +87,7 @@ export class SubAgentTracker {
     ) => requestPermissionWithAbort(this.client, params, signal),
     private readonly permissionPersistencePolicy?: PermissionPersistencePolicy,
     private readonly parentAgent: AgentIdentity = ROOT_AGENT_IDENTITY,
+    private readonly flattenStructuredQuestions = false,
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.messageEmitter = new MessageEmitter(ctx);
@@ -352,6 +354,7 @@ export class SubAgentTracker {
         fullConfirmationDetails,
         false,
         this.permissionPersistencePolicy,
+        this.flattenStructuredQuestions,
       );
       const offeredPermissionOptions = permissionOptions.map((option) => ({
         ...option,
@@ -385,13 +388,22 @@ export class SubAgentTracker {
         const outcome = resolvePermissionOutcome(
           output,
           offeredPermissionOptions,
+          this.flattenStructuredQuestions,
         );
+        const answers =
+          'answers' in output
+            ? (output.answers as Record<string, string> | undefined)
+            : undefined;
         // Respond to subagent with the outcome
         await event.respond(outcome, {
           answers:
-            'answers' in output
-              ? (output.answers as Record<string, string> | undefined)
-              : undefined,
+            answers ??
+            resolveAskUserQuestionAnswers(
+              fullConfirmationDetails,
+              output.outcome.outcome === 'selected'
+                ? output.outcome.optionId
+                : undefined,
+            ),
         });
         if (
           outcome === ToolConfirmationOutcome.Cancel &&

@@ -5,6 +5,7 @@
  */
 
 import { logger } from '../utils/logger.js';
+import { ASK_USER_QUESTION_CAPABILITY_META_KEY } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
 import {
   ClientSideConnection,
   ndJsonStream,
@@ -47,6 +48,60 @@ import type { PromptSubmissionOptions } from '../types/connectionTypes.js';
 const SHUTDOWN_GRACE_MS = 75_000;
 const SIGTERM_GRACE_MS = 75_000;
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
+
+/**
+ * Capabilities this companion sends on `initialize`. Exported so a test can pin
+ * the wire value: the companion renders structured questions from the raw
+ * `questions` payload, so dropping `qwen.askUserQuestion` would silently push
+ * it onto the flattened option path.
+ */
+export function buildAcpClientCapabilities(): {
+  _meta: Record<string, boolean>;
+  fs: { readTextFile: boolean; writeTextFile: boolean };
+} {
+  return {
+    _meta: { [ASK_USER_QUESTION_CAPABILITY_META_KEY]: true },
+    fs: { readTextFile: true, writeTextFile: true },
+  };
+}
+
+/**
+ * Returns `preferredOptionId` only when the peer actually offered it. Voting an
+ * id the peer did not offer makes the agent throw "unoffered option" and abort
+ * the turn with the user's typed answers discarded, so both resolvers below
+ * start from this check. Their fallback ladders differ on purpose.
+ */
+function offeredPreferredOptionId(
+  options: ReadonlyArray<{ optionId: string }>,
+  preferredOptionId: string | undefined,
+): string | undefined {
+  return preferredOptionId &&
+    options.some((option) => option.optionId === preferredOptionId)
+    ? preferredOptionId
+    : undefined;
+}
+
+/**
+ * Picks the option id to vote for a question approval: the webview's choice
+ * when the peer offered it, else `proceed_once`. Returns undefined when neither
+ * is on offer, which the handler turns into `cancelled`.
+ *
+ * Stricter than `resolvePermissionOptionId` below, whose ladder ends at any
+ * `allow_once` option and then at `options[0]` — on a flattened question that
+ * would silently record the first choice as the user's answer. The daemon twin
+ * (`daemonIdeConnection.resolvePermissionOptionId`) is stricter still: it has no
+ * fallback and cancels instead.
+ */
+export function resolveAskUserQuestionOptionId(
+  options: ReadonlyArray<{ optionId: string }> | undefined,
+  preferredOptionId: string | undefined,
+): string | undefined {
+  const offered = Array.isArray(options) ? options : [];
+  return (
+    offeredPreferredOptionId(offered, preferredOptionId) ??
+    offeredPreferredOptionId(offered, 'proceed_once')
+  );
+}
 
 /**
  * ACP Connection Handler for VSCode Extension
@@ -274,11 +329,29 @@ export class AcpConnection {
               if (outcome === 'cancelled') {
                 return { outcome: { outcome: 'cancelled' } };
               }
+              const selectedOptionId = resolveAskUserQuestionOptionId(
+                permissionData.options,
+                optionId,
+              );
+              if (selectedOptionId === undefined) {
+                // The user's typed answers are discarded here, so this is the
+                // daemon twin's WARN, not an INFO line, and it names both the
+                // voted id and the offered set: a flattened question (a
+                // capability regression), no options at all, and a stale webview
+                // id all land in this branch and have different owners.
+                logger.warn(
+                  '[ACP] AskUserQuestion option not advertised; cancelling',
+                  {
+                    optionId,
+                    offered: permissionData.options?.map(
+                      (option) => option.optionId,
+                    ),
+                  },
+                );
+                return { outcome: { outcome: 'cancelled' } };
+              }
               return {
-                outcome: {
-                  outcome: 'selected',
-                  optionId: optionId || 'proceed_once',
-                },
+                outcome: { outcome: 'selected', optionId: selectedOptionId },
                 answers,
               } as RequestPermissionResponse;
             }
@@ -376,12 +449,7 @@ export class AcpConnection {
     const initResponse = await Promise.race([
       wiredConnection.initialize({
         protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: {
-          fs: {
-            readTextFile: true,
-            writeTextFile: true,
-          },
-        },
+        clientCapabilities: buildAcpClientCapabilities(),
       }),
       processExitPromise,
     ]);
@@ -465,11 +533,12 @@ export class AcpConnection {
       return undefined;
     }
 
-    if (
-      preferredOptionId &&
-      options.some((option) => option.optionId === preferredOptionId)
-    ) {
-      return preferredOptionId;
+    const offeredPreferred = offeredPreferredOptionId(
+      options,
+      preferredOptionId,
+    );
+    if (offeredPreferred) {
+      return offeredPreferred;
     }
 
     return (

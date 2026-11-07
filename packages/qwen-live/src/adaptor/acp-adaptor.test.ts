@@ -31,6 +31,7 @@ class FakeConnection implements AcpConnectionLike {
   cancelCalls: Array<Record<string, unknown>> = [];
   extCalls: Array<{ method: string; params: Record<string, unknown> }> = [];
   authCalls: Array<Record<string, unknown>> = [];
+  initializeCalls: Array<Record<string, unknown>> = [];
   sessionSeq = 0;
   /** Resolve the in-flight prompt; defaults to end_turn. */
   settlePrompt: (stopReason?: string, error?: unknown) => void = () => {};
@@ -70,7 +71,10 @@ class FakeConnection implements AcpConnectionLike {
   onExit: (info: { code: number | null; signal: string | null }) => void =
     () => {};
 
-  initialize(): Promise<Record<string, unknown>> {
+  initialize(
+    params: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>> {
+    this.initializeCalls.push(params);
     if (this.initializeError !== undefined) {
       return Promise.reject(this.initializeError);
     }
@@ -338,6 +342,15 @@ describe('AcpAdaptor sessions and receipts', () => {
     expect(adaptor.capabilities().imageInput).toBe(true);
     // authenticate was attempted (authMethods advertised openai)
     expect(connection.authCalls).toHaveLength(1);
+    // The Live vote is only allow/cancel, so it must advertise the structured
+    // -question capability by value to opt out of the flat option list (R1-5).
+    expect(
+      (
+        connection.initializeCalls[0]?.['clientCapabilities'] as {
+          _meta?: Record<string, unknown>;
+        }
+      )?._meta?.['qwen.askUserQuestion'],
+    ).toBe(true);
   });
 
   it('completes the handshake when initialize outlasts the old 10s budget', async () => {

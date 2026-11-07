@@ -91,6 +91,10 @@ const DRAIN_BATCH = 10;
 
 // Duplicated from packages/acp-bridge/src/status.ts (see header note).
 const DRAIN_MID_TURN_QUEUE_METHOD = 'craft/drainMidTurnQueue';
+// packages/core/src/utils/invocation-context.ts owns this key. Live has no
+// dependency path to core, so the wire contract is pinned by value in a test
+// instead of imported.
+const ASK_USER_QUESTION_CAPABILITY_META_KEY = 'qwen.askUserQuestion';
 const LIVE_CONVERSATION_METHOD = 'qwen/control/session/live-conversation';
 const SPEAK_TO_USER_METHOD = 'qwen/control/live/speak-to-user';
 
@@ -672,7 +676,14 @@ export class AcpAdaptor implements BackendAdaptor {
     const racers: Array<Promise<unknown>> = [
       conn.initialize({
         protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: {},
+        clientCapabilities: {
+          // A Live vote is only allow/cancel and `respondPermission` takes
+          // the least-escalating proceed option, so per-choice question
+          // options would silently record the first choice. Keep the
+          // generic Submit/Cancel pair by declaring the structured-question
+          // capability (which opts out of the flat option list).
+          _meta: { [ASK_USER_QUESTION_CAPABILITY_META_KEY]: true },
+        },
         clientInfo: { name: 'qwen-live', version: '0.1.0' },
       }),
       this.handshakeDeadline(initializeTimeoutMs),

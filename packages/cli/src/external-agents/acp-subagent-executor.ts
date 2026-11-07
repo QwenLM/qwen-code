@@ -52,6 +52,36 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Resolves the tool name a peer reports for a call. Peers frame it differently:
+ * Claude Code nests it under `_meta.claudeCode.toolName`, while a Qwen peer
+ * stamps `_meta.toolName` and carries `kind: 'think'` for a question. Every
+ * reader in this file goes through this one ladder, so a peer is never resolved
+ * under one framing here and another there — a permission request under the
+ * Qwen name and its tool call under the Claude-shaped fallback.
+ *
+ * A shared ladder is not the same as one value everywhere, and this file does
+ * not claim it. The name a call is announced with is first-frame-wins
+ * (`toolNames`), because `TOOL_CALL` is already emitted and cannot be recalled,
+ * while `response.toolName` carries the latest frame's resolution, which a peer
+ * may refine: announced as `kind: 'execute'`, later reported as
+ * `_meta.claudeCode.toolName: 'Bash'`. Both readings are pinned by tests, so a
+ * peer that renames mid-call shows the announced name in the events and the
+ * refined one in the response payload.
+ */
+function resolvePeerToolName(tool: {
+  _meta?: Record<string, unknown> | null;
+  kind?: string | null;
+}): string {
+  const claudeMeta = tool._meta?.['claudeCode'];
+  if (isRecord(claudeMeta) && typeof claudeMeta['toolName'] === 'string') {
+    return claudeMeta['toolName'];
+  }
+  const qwenToolName = tool._meta?.['toolName'];
+  if (typeof qwenToolName === 'string') return qwenToolName;
+  return tool.kind ?? 'external_tool';
+}
+
 const EXTERNAL_ACTION_PROMPT_MAX = 300;
 
 function stripControlChars(value: string): string {
@@ -958,13 +988,13 @@ class AcpSubagentExecutor implements SubagentExecutor {
           ([, value]) => value !== null && value !== undefined,
         ),
       ),
+      // The spread above is shallow, so a progress frame carrying its own
+      // `_meta` but no tool name would replace the stored one wholesale and the
+      // call would finish under a different name than it was announced with.
+      _meta: { ...previous?._meta, ...update._meta },
     };
     this.tools.set(callId, tool);
-    const meta = tool._meta?.['claudeCode'];
-    const reportedName =
-      isRecord(meta) && typeof meta['toolName'] === 'string'
-        ? meta['toolName']
-        : (tool.kind ?? 'external_tool');
+    const reportedName = resolvePeerToolName(tool);
     const name = this.toolNames.get(callId) ?? reportedName;
     if (!previous) {
       this.toolNames.set(callId, name);
@@ -1031,11 +1061,7 @@ class AcpSubagentExecutor implements SubagentExecutor {
    */
   private flushOpenTools(): void {
     for (const [callId, tool] of this.tools) {
-      const meta = tool._meta?.['claudeCode'];
-      const reportedName =
-        isRecord(meta) && typeof meta['toolName'] === 'string'
-          ? meta['toolName']
-          : (tool.kind ?? 'external_tool');
+      const reportedName = resolvePeerToolName(tool);
       const name = this.toolNames.get(callId) ?? reportedName;
       this.toolFailed++;
       const response = {
@@ -1077,11 +1103,9 @@ class AcpSubagentExecutor implements SubagentExecutor {
     };
     const runtime = this.params.runtimeContext;
     const callId = params.toolCall.toolCallId;
-    const meta = params.toolCall._meta?.['claudeCode'];
-    const name =
-      isRecord(meta) && typeof meta['toolName'] === 'string'
-        ? meta['toolName']
-        : (params.toolCall.kind ?? 'external_tool');
+    // The routed-question denial below compares against this name, so it must
+    // resolve the peer's own framing rather than Claude Code's alone.
+    const name = resolvePeerToolName(params.toolCall);
     // Turn-level and request-integrity states: the turn is already over, the
     // request is not ours, or it cannot be answered safely (no options, or
     // ambiguous duplicate option IDs). ACP `cancelled` is the right response —
