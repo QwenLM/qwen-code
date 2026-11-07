@@ -11,7 +11,10 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { SettingScope } from '../../config/settings.js';
-import type { SettingDefinition } from '../../config/settingsSchema.js';
+import type {
+  SettingDefinition,
+  SettingsType,
+} from '../../config/settingsSchema.js';
 import { t } from '../../i18n/index.js';
 import {
   getAllSettingKeys,
@@ -23,7 +26,10 @@ import {
   validateSettingValue,
 } from '../../config/settingsUtils.js';
 
-const SETTABLE_TYPES = new Set([
+// Typed against the schema's own union so an entry that is not a setting type
+// is a compile error, rather than a key that silently drops out of `/config`,
+// completion and typo suggestions.
+const SETTABLE_TYPES: ReadonlySet<SettingsType> = new Set([
   'boolean',
   'string',
   'number',
