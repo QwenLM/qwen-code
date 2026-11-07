@@ -200,6 +200,6 @@ Runtime HTTP 请求为精确 Session/server/配置/凭据 generation/owner 获�
 
 全部 schema 消费者包含新增 OAuth 存储及 Session 投影字段。仅文件 CSI retirement 要求个人执行 actor 为空、revision 为零。其他 Session 的 Workspace OAuth 记录保持不可变 context，不作为被退休 Session 的内容恢复。固定 OAuth callback 显式登记为无需身份请求头的浏览器入口，由 state 和经过认证的 complete 保护；它继续处于普通 API 使用的 tenant/signature 请求头谓词之外。
 
-实现遵守现有类大小预算：独立的 Runtime token 请求 collaborator 负责发放前后的 lease/owner 校验，SQL actor 检查保留在现有带行锁的记录/准入 helper 内。模型目录和 agent revision 校验由模型/策略的现有责任方承担。公共 facade 签名、锁顺序和校验条件保持一致。action/store facade 上限收紧为 825/1167 行；CSI inventory 将行为不变的 JDBC 列 schema 谓词委托给包内 helper，上限收紧为 3320 行，不提高任何现有大小限制。
+实现遵守现有类大小预算：独立的 Runtime token 请求 collaborator 负责发放前后的 lease/owner 校验，SQL actor 检查保留在现有带行锁的记录/准入 helper 内。模型目录和 agent revision 校验由模型/策略的现有责任方承担。公共 facade 签名、锁顺序和校验条件保持一致。action/store facade 上限收紧为 825/1167 行；CSI inventory 将行为不变的 JDBC 列 schema 谓词委托给包内 helper，上限收紧为 3319 行，不提高任何现有大小限制。
 
 行为验收计划位于 `.qwen/e2e-tests/2026-11-07-managed-skills-mcp-self-service.md`。实现增量为准备/校验、API/契约、安装 UI、Runtime 快照、OAuth 记录/准入和 HTTP 认证/恢复。本地、真实 MySQL/进程及完整 CI 证据分别报告。
