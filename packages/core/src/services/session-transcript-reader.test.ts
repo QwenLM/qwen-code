@@ -711,7 +711,7 @@ describe('SessionTranscriptReader', () => {
     const shape = (history: readonly Content[]) =>
       history.map(({ role, parts }) => ({ role, parts }));
     expect(shape(legacy)).toEqual(
-      shape([preludeMessage, hello.message, reply.message]),
+      shape([preludeMessage, hello.message!, reply.message!]),
     );
 
     for (const options of [NONE, all(false)]) {
