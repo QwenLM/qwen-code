@@ -18,6 +18,7 @@ import {
 import type { DaemonTransport } from '../../src/daemon/DaemonTransport.js';
 import type { DaemonSessionAgentsStatus } from '../../src/daemon/index.js';
 import { negotiateTransport } from '../../src/daemon/negotiateTransport.js';
+import { AcpHttpTransport } from '../../src/daemon/AcpHttpTransport.js';
 import {
   DaemonCapabilityMissingError,
   DAEMON_REASONING_SELECTIONS,
@@ -6647,6 +6648,35 @@ describe('DaemonClient', () => {
       expect(calls.map((call) => call.url)).toEqual([
         'http://daemon/workspace/%2Fwork%2Fa/sessions?size=20&liveOnly=1',
         'http://daemon/workspaces/%2Fwork%2Fa/sessions?size=20&liveOnly=1',
+      ]);
+    });
+
+    it('routes liveOnly through native REST when an ACP transport is configured', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { sessions: [] }),
+      );
+      const transport = new AcpHttpTransport('http://daemon', undefined, fetch);
+      const transportFetch = vi
+        .spyOn(transport, 'fetch')
+        .mockRejectedValue(new Error('ACP transport must not serve liveOnly'));
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await client.listWorkspaceSessionsPage('/work/a', {
+        pageSize: 100,
+        liveOnly: true,
+      });
+      await client
+        .workspaceByCwd('/work/a')
+        .listWorkspaceSessionsPage({ pageSize: 100, liveOnly: true });
+
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=100&liveOnly=1',
+        'http://daemon/workspaces/%2Fwork%2Fa/sessions?size=100&liveOnly=1',
       ]);
     });
 

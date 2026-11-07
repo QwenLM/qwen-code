@@ -1951,7 +1951,8 @@ export interface DaemonSessionListPageOptions {
   /**
    * List the sessions currently live in the workspace bridge instead of
    * persisted history, so closed rows cannot crowd live sessions out of the
-   * first page. Cannot be combined with `view`, archived `archiveState`,
+   * first page. Served over native REST; the ACP transport does not carry it.
+   * Cannot be combined with `view`, archived `archiveState`,
    * `parentSessionId`, `sourceType`, or `sourceId`.
    */
   liveOnly?: boolean;
