@@ -11,6 +11,8 @@
 // with three Overview rows); otherwise the key is left to the browser,
 // mirroring the existing Overview/Split chords.
 
+import { parseSessionId } from './sessionPath';
+
 /** 1–9 for the main number row (`Digit1`–`Digit9`), 0 otherwise. Numpad
  *  codes are deliberately out of scope. */
 export function modifierDigit(e: KeyboardEvent): number {
@@ -29,13 +31,38 @@ function consume(e: KeyboardEvent): void {
   e.stopPropagation();
 }
 
+/**
+ * Laid out (non-zero width) and not hidden by `visibility`. Width alone is
+ * not enough: the compact shell keeps its closed sidebar drawer laid out
+ * under `visibility: hidden` (App.module.css, so the fade-out can finish),
+ * and the computed value is inherited, so descendants of the closed drawer
+ * report it too.
+ */
 function isVisible(el: Element | null | undefined): el is HTMLElement {
-  return Boolean(el && el instanceof HTMLElement && el.offsetWidth > 0);
+  if (!(el instanceof HTMLElement) || el.offsetWidth <= 0) return false;
+  const visibility = getComputedStyle(el).visibility;
+  return visibility !== 'hidden' && visibility !== 'collapse';
+}
+
+function isDisabled(el: HTMLElement): boolean {
+  return (
+    (el instanceof HTMLButtonElement && el.disabled) ||
+    el.hasAttribute('data-disabled')
+  );
 }
 
 function isEligible(el: HTMLButtonElement): boolean {
-  return (
-    el.offsetWidth > 0 && !el.disabled && !el.hasAttribute('data-disabled')
+  return isVisible(el) && !isDisabled(el);
+}
+
+/**
+ * The Session Overview's session rows. DataTable renders its empty state
+ * (`data-slot="data-table-empty"`, no click handler) as a row of the same
+ * tbody whenever no row matches, so it is not a row target.
+ */
+function overviewRows(viewport: Element): HTMLElement[] {
+  return Array.from(viewport.querySelectorAll<HTMLElement>('tbody tr')).filter(
+    (row) => row.getAttribute('data-slot') !== 'data-table-empty',
   );
 }
 
@@ -54,17 +81,23 @@ function focusPaneComposer(pane: HTMLElement): void {
 }
 
 /**
- * Picks the approval panel to act on: the one containing the focused
- * element when there is one, otherwise the first visible panel.
+ * Picks the approval panel to act on, in decreasing priority: the one
+ * containing the focused element, then the one in the same split pane as
+ * the focus (a composer focus sits outside every card of its pane),
+ * otherwise the first visible panel.
  */
 function pickVisiblePanel(panels: NodeListOf<Element>): Element | null {
-  let fallback: Element | null = null;
-  for (const panel of Array.from(panels)) {
-    if (!isVisible(panel)) continue;
-    if (panel.contains(document.activeElement)) return panel;
-    fallback ??= panel;
+  const visible = Array.from(panels).filter(isVisible);
+  const active = document.activeElement;
+  const contained = visible.find((panel) => panel.contains(active));
+  if (contained) return contained;
+  const pane =
+    active instanceof Element ? active.closest('[data-pane-session-id]') : null;
+  if (pane) {
+    const inPane = visible.find((panel) => pane.contains(panel));
+    if (inPane) return inPane;
   }
-  return fallback;
+  return visible[0] ?? null;
 }
 
 /**
@@ -106,18 +139,20 @@ function markHotkeyFocused(option: HTMLElement): void {
 
 /**
  * Option+Shift+1–9 (macOS) — toggles the Nth Session Overview row's
- * checkbox. A no-op without consumption when a dialog is open, the table
- * is hidden, or the row does not exist; when the row is found the event
- * is consumed even if that row has no checkbox.
+ * checkbox. A no-op without consumption when the table is hidden or the
+ * row does not exist; when the row is found the event is consumed even if
+ * that row has no checkbox. Covering modals are App's guard
+ * (shellHotkeyTargetsClear), which matches the modal primitives rather
+ * than role="dialog": non-modal popovers (session details) carry that
+ * role too and must not disable the chord.
  */
 export function pressOverviewRowCheckbox(e: KeyboardEvent): boolean {
   const n = modifierDigit(e);
-  if (document.querySelector('[role="dialog"]')) return false;
   const viewport = document.querySelector(
     '[data-web-shell-session-table-viewport]',
   );
   if (!isVisible(viewport)) return false;
-  const row = viewport.querySelectorAll<HTMLElement>('tbody tr')[n - 1];
+  const row = overviewRows(viewport)[n - 1];
   if (!row) return false;
   consume(e);
   row
@@ -126,35 +161,27 @@ export function pressOverviewRowCheckbox(e: KeyboardEvent): boolean {
   return true;
 }
 
-/**
- * Cmd/Ctrl+1–9 (with Shift when the Overview is visible or in split
- * view) — navigates by priority:
- *
- * 1. Approval card (without Shift): focuses the Nth option. The card
- *    wins and always consumes, even when it has fewer than N options
- *    (the extra digit is swallowed) or no option group at all.
- * 2. Session Overview: clicks the Nth row while the table is visible
- *    (the key is consumed even with fewer than N rows).
- * 3. Pinned section (without Shift): the first press expands a
- *    collapsed section; the Nth pinned row is clicked. When the section
- *    is present but nothing matches, the key stays unconsumed and the
- *    panes are not touched.
- * 4. Split panes: focuses the Nth pane and its composer (the key is
- *    consumed even with fewer than N panes).
- *
- * Returns whether the event was consumed.
- */
-export function pressNavigationDigit(e: KeyboardEvent): boolean {
-  const n = modifierDigit(e);
-  const shift = e.shiftKey;
+/** The surface a Cmd/Ctrl+digit press acts on, with its targets. */
+type DigitStage =
+  | { kind: 'approval'; options: HTMLElement[] }
+  | { kind: 'overview'; rows: HTMLElement[] }
+  // rows: null while the section is collapsed (the press expands it).
+  | { kind: 'pinned'; header: HTMLButtonElement; rows: HTMLElement[] | null }
+  | { kind: 'panes'; panes: HTMLElement[] };
 
-  // 1. Approval card: focus, not click.
+/**
+ * Resolves the digit chord's priority chain once, for both consumers:
+ * pressNavigationDigit acts on the result and showNavDigitPreview numbers
+ * it, so the preview cannot drift from what the next press does (Shift
+ * included).
+ */
+function resolveDigitStage(shift: boolean): DigitStage | null {
+  // 1. Approval card (without Shift).
   if (!shift) {
     const panel = pickVisiblePanel(
       document.querySelectorAll('[data-web-shell-permission-panel]'),
     );
     if (panel) {
-      consume(e);
       const group = panel.querySelector('[role="radiogroup"]');
       // Direct button children — the `:scope > button` equivalent without
       // a scoped selector (jsdom's scoped-selector matching is unreliable).
@@ -163,75 +190,116 @@ export function pressNavigationDigit(e: KeyboardEvent): boolean {
             (child): child is HTMLElement => child instanceof HTMLButtonElement,
           )
         : [];
-      const option = options[n - 1];
-      if (option) {
-        markHotkeyFocused(option);
-        option.focus();
-      }
-      return true;
+      return { kind: 'approval', options };
     }
   }
 
-  // 2. Session Overview row.
+  // 2. Session Overview.
   const viewport = document.querySelector(
     '[data-web-shell-session-table-viewport]',
   );
   if (isVisible(viewport)) {
-    consume(e);
-    viewport.querySelectorAll<HTMLElement>('tbody tr')[n - 1]?.click();
-    return true;
+    return { kind: 'overview', rows: overviewRows(viewport) };
   }
 
   // 3. Pinned section (without Shift).
   if (!shift) {
     const header = findPinnedHeader();
     if (header) {
-      const wrapper = header.parentElement;
-      if (wrapper) {
-        if (header.getAttribute('aria-expanded') === 'false') {
-          header.click();
-          consume(e);
-          return true;
-        }
-        const list = wrapper.nextElementSibling;
-        const row = isVisible(list)
-          ? list.querySelectorAll<HTMLElement>('div[role="button"]')[n - 1]
-          : undefined;
-        if (row) {
-          row.click();
-          consume(e);
-          return true;
-        }
+      if (header.getAttribute('aria-expanded') === 'false') {
+        return { kind: 'pinned', header, rows: null };
       }
-      // The section is present but nothing matches: leave the key
-      // unconsumed and do not touch the panes.
-      return false;
+      const list = header.parentElement?.nextElementSibling;
+      const rows = isVisible(list)
+        ? Array.from(list.querySelectorAll<HTMLElement>('div[role="button"]'))
+        : [];
+      return { kind: 'pinned', header, rows };
     }
   }
 
-  // 4. Split pane + composer.
-  const panes = document.querySelectorAll<HTMLElement>(
-    '[data-pane-session-id]',
-  );
-  if (panes.length > 1) {
-    consume(e);
-    const pane = panes[n - 1];
-    if (pane) focusPaneComposer(pane);
-    return true;
+  // 4. Split panes. SplitView keeps the panes hidden by a maximized
+  // sibling mounted (their sessions keep streaming), so only the visible
+  // ones are numbered.
+  const panes = Array.from(
+    document.querySelectorAll<HTMLElement>('[data-pane-session-id]'),
+  ).filter(isVisible);
+  return panes.length > 1 ? { kind: 'panes', panes } : null;
+}
+
+/**
+ * Cmd/Ctrl+1–9 (with Shift when the Overview is visible or in split
+ * view) — navigates by priority:
+ *
+ * 1. Approval card (without Shift): focuses the Nth option. The card
+ *    wins and always consumes, even when it has fewer than N options
+ *    (the extra digit is swallowed), no option group at all, or the Nth
+ *    option is disabled (a Goal card while it submits).
+ * 2. Session Overview: clicks the Nth row while the table is visible
+ *    (the key is consumed even with fewer than N rows).
+ * 3. Pinned section (without Shift): the first press expands a
+ *    collapsed section; the Nth pinned row is clicked. When the section
+ *    is present but nothing matches, the key stays unconsumed and the
+ *    panes are not touched.
+ * 4. Split panes: focuses the Nth visible pane and its composer (the key
+ *    is consumed even with fewer than N panes).
+ *
+ * Returns whether the event was consumed.
+ */
+export function pressNavigationDigit(e: KeyboardEvent): boolean {
+  const n = modifierDigit(e);
+  const stage = resolveDigitStage(e.shiftKey);
+  if (!stage) return false;
+  switch (stage.kind) {
+    case 'approval': {
+      // Focus, not click. A disabled option cannot take focus, so it is
+      // neither marked nor focused; the card still claims the key.
+      consume(e);
+      const option = stage.options[n - 1];
+      if (option && !isDisabled(option)) {
+        markHotkeyFocused(option);
+        option.focus();
+      }
+      return true;
+    }
+    case 'overview':
+      consume(e);
+      stage.rows[n - 1]?.click();
+      return true;
+    case 'pinned': {
+      if (stage.rows === null) {
+        stage.header.click();
+        consume(e);
+        return true;
+      }
+      const row = stage.rows[n - 1];
+      // The section is present but nothing matches: leave the key
+      // unconsumed and do not touch the panes.
+      if (!row) return false;
+      row.click();
+      consume(e);
+      return true;
+    }
+    case 'panes': {
+      consume(e);
+      const pane = stage.panes[n - 1];
+      if (pane) focusPaneComposer(pane);
+      return true;
+    }
   }
-  return false;
 }
 
 const NAV_PREVIEW_STYLE_ID = 'webShellNavPreviewStyle';
+const NAV_PREVIEW_ATTR = 'data-web-shell-nav-preview';
+const NAV_PREVIEW_ANCHOR_ATTR = 'data-web-shell-nav-preview-anchor';
 
 function ensureNavPreviewStyle(): void {
   if (document.getElementById(NAV_PREVIEW_STYLE_ID)) return;
   const style = document.createElement('style');
   style.id = NAV_PREVIEW_STYLE_ID;
   style.textContent = `
-[data-web-shell-nav-preview] { position: relative; }
-[data-web-shell-nav-preview]::after {
-  content: attr(data-web-shell-nav-preview);
+[${NAV_PREVIEW_ANCHOR_ATTR}] { position: relative; }
+[${NAV_PREVIEW_ATTR}]::after {
+  content: attr(${NAV_PREVIEW_ATTR});
   position: absolute;
   top: 50%;
   right: 8px;
@@ -256,73 +324,73 @@ function ensureNavPreviewStyle(): void {
 }
 
 /**
- * The elements a plain (no-Shift) Cmd/Ctrl+1..9 press would act on —
- * mirrors the priority and claim semantics of pressNavigationDigit: the
- * approval card wins even with no options, the Overview table even with
- * no rows, the Pinned section even when collapsed (the first press would
- * expand it, not navigate, so it numbers nothing); only a missing or
- * hidden Pinned header falls through to the split panes.
+ * The elements a Cmd/Ctrl+1..9 press would act on, by position — read off
+ * the same resolver as pressNavigationDigit, so the claim semantics match:
+ * the approval card wins even with no options, the Overview table even
+ * with no rows, the Pinned section even when collapsed (the first press
+ * would expand it, not navigate, so it numbers nothing). A `null` keeps a
+ * position that the press would not act on (a disabled approval option)
+ * unnumbered without renumbering the ones after it.
  */
-function navPreviewTargets(): HTMLElement[] {
-  const panel = pickVisiblePanel(
-    document.querySelectorAll('[data-web-shell-permission-panel]'),
-  );
-  if (panel) {
-    const group = panel.querySelector('[role="radiogroup"]');
-    return group
-      ? Array.from(group.children).filter(
-          (child): child is HTMLElement => child instanceof HTMLButtonElement,
-        )
-      : [];
+function navPreviewTargets(shift: boolean): Array<HTMLElement | null> {
+  const stage = resolveDigitStage(shift);
+  if (!stage) return [];
+  switch (stage.kind) {
+    case 'approval':
+      return stage.options.map((option) =>
+        isDisabled(option) ? null : option,
+      );
+    case 'overview':
+      // Badge the row's last cell (it has the free right edge); fall back
+      // to the row itself for cells without a trailing td.
+      return stage.rows.map(
+        (row) => row.querySelector<HTMLElement>('td:last-child') ?? row,
+      );
+    case 'pinned':
+      return stage.rows ?? [];
+    case 'panes':
+      return stage.panes;
   }
-  const viewport = document.querySelector(
-    '[data-web-shell-session-table-viewport]',
-  );
-  if (isVisible(viewport)) {
-    // Badge the row's last cell (it has the free right edge); fall back
-    // to the row itself for cells without a trailing td.
-    return Array.from(viewport.querySelectorAll<HTMLElement>('tbody tr')).map(
-      (row) => row.querySelector<HTMLElement>('td:last-child') ?? row,
-    );
-  }
-  const header = findPinnedHeader();
-  if (header) {
-    if (header.getAttribute('aria-expanded') !== 'true') return [];
-    const list = header.parentElement?.nextElementSibling;
-    if (!isVisible(list)) return [];
-    return Array.from(list.querySelectorAll<HTMLElement>('div[role="button"]'));
-  }
-  const panes = document.querySelectorAll<HTMLElement>(
-    '[data-pane-session-id]',
-  );
-  return panes.length > 1 ? Array.from(panes) : [];
 }
 
 /**
  * Numbers 1..9 over the next digit-navigation targets — the macOS-menu
- * canon for "what this modifier does next". Called on each Cmd/Ctrl
- * (Windows/Linux) keydown, so a list that changed while the modifier is
- * held re-numbers itself. The badge is a CSS ::after driven by a data
- * attribute, not an extra DOM node: React re-renders of the rows cannot
- * drop or duplicate it mid-hold. At most nine targets are numbered, in
- * DOM order; the numbers are positions, matching the chord.
+ * canon for "what this modifier does next". App calls it on each Cmd/Ctrl
+ * keydown and again when Shift joins or leaves the held modifier (`shift`
+ * selects the Shift chain, which skips the approval and Pinned stages),
+ * so the badges name what the next press does. The badge is a CSS ::after
+ * driven by a data attribute, not an extra DOM node: React re-renders of
+ * the rows cannot drop or duplicate it mid-hold. At most nine targets are
+ * numbered, in DOM order; the numbers are positions, matching the chord.
  */
-export function showNavDigitPreview(): void {
+export function showNavDigitPreview(opts: { shift?: boolean } = {}): void {
   ensureNavPreviewStyle();
   hideNavDigitPreview();
-  if (document.querySelector('[role="dialog"]')) return;
-  navPreviewTargets()
+  navPreviewTargets(opts.shift ?? false)
     .slice(0, 9)
-    .forEach((el, i) =>
-      el.setAttribute('data-web-shell-nav-preview', String(i + 1)),
-    );
+    .forEach((el, i) => {
+      if (!el) return;
+      // The ::after needs a positioned containing block. An already
+      // positioned target keeps its own position — the Overview's actions
+      // cell is `sticky` (right-pinned while the table scrolls sideways),
+      // and forcing `relative` there would unpin it — so only a static
+      // target is anchored.
+      const position = getComputedStyle(el).position;
+      if (position === '' || position === 'static') {
+        el.setAttribute(NAV_PREVIEW_ANCHOR_ATTR, '');
+      }
+      el.setAttribute(NAV_PREVIEW_ATTR, String(i + 1));
+    });
 }
 
 /** Removes any number-preview badges. */
 export function hideNavDigitPreview(): void {
   document
-    .querySelectorAll('[data-web-shell-nav-preview]')
-    .forEach((el) => el.removeAttribute('data-web-shell-nav-preview'));
+    .querySelectorAll(`[${NAV_PREVIEW_ATTR}], [${NAV_PREVIEW_ANCHOR_ATTR}]`)
+    .forEach((el) => {
+      el.removeAttribute(NAV_PREVIEW_ATTR);
+      el.removeAttribute(NAV_PREVIEW_ANCHOR_ATTR);
+    });
 }
 
 /**
@@ -370,10 +438,12 @@ export function pressSelectedRowsSplit(e: KeyboardEvent): boolean {
  * session screen it presses the "New task" button, on the new-task
  * screen it opens the workspace picker. When the session screen offers
  * no eligible button the key stays unconsumed and the picker stage is
- * not attempted.
+ * not attempted. The session screen is recognised with the base-path
+ * aware parser (the URL is `${basePath}/session/<id>`), not a prefix
+ * match on the raw pathname.
  */
 export function pressNewTask(e: KeyboardEvent): boolean {
-  if (window.location.pathname.startsWith('/session/')) {
+  if (parseSessionId(window.location.pathname) !== undefined) {
     const buttons = document.querySelectorAll(
       'button[data-web-shell-new-task-button]',
     );
@@ -401,8 +471,17 @@ export function pressNewTask(e: KeyboardEvent): boolean {
  * Opens a Radix DropdownMenu trigger programmatically. A bare `.click()`
  * does not open the menu — Radix keys off pointer events — but a primary
  * `pointerdown` does, so a full synthetic mouse sequence is dispatched.
+ * Radix's trigger toggles on that pointerdown, so an already open menu
+ * (the trigger's own `aria-expanded` / `data-state`) is left open rather
+ * than closed.
  */
 export function openRadixTrigger(el: HTMLElement): void {
+  if (
+    el.getAttribute('aria-expanded') === 'true' ||
+    el.getAttribute('data-state') === 'open'
+  ) {
+    return;
+  }
   el.dispatchEvent(
     new PointerEvent('pointerdown', {
       bubbles: true,

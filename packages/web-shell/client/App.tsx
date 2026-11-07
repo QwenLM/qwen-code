@@ -20415,12 +20415,13 @@ export function App({
       }
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       // The modifier key itself (Meta on macOS, Control on Windows/
-      // Linux): show the number preview over the surfaces the plain
-      // digits navigate. Re-fired on each press, so a list that changed
-      // while the modifier is held re-numbers itself.
-      if (e.key === 'Meta' || e.key === 'Control') {
+      // Linux): show the number preview over the surfaces the digits
+      // navigate. Re-run when a second modifier joins, and when Shift
+      // joins the held modifier: Shift skips the approval and Pinned
+      // stages, so the badges follow the chain the next press takes.
+      if (e.key === 'Meta' || e.key === 'Control' || e.key === 'Shift') {
         if (shellHotkeyTargetsClear(e, { composerExempt: true })) {
-          showNavDigitPreview();
+          showNavDigitPreview({ shift: e.shiftKey });
         }
         return;
       }
@@ -20473,6 +20474,18 @@ export function App({
     // modifier (a naive !metaKey && !ctrlKey never fires on a real
     // release); window blur covers switching away with the modifier held.
     const onNavPreviewKeyup = (e: KeyboardEvent): void => {
+      // Shift released while the modifier is still held: back to the
+      // plain-digit chain.
+      if (e.key === 'Shift') {
+        if (
+          (e.metaKey || e.ctrlKey) &&
+          !e.altKey &&
+          shellHotkeyTargetsClear(e, { composerExempt: true })
+        ) {
+          showNavDigitPreview({ shift: false });
+        }
+        return;
+      }
       if (e.key !== 'Meta' && e.key !== 'Control') return;
       if (e.key === 'Meta' ? e.ctrlKey : e.metaKey) return;
       hideNavDigitPreview();

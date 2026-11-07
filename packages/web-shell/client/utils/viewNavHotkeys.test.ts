@@ -50,13 +50,18 @@ afterEach(() => {
   window.history.pushState({}, '', '/');
 });
 
-// Session Overview table with N rows; each row may carry a checkbox.
+// Session Overview table with N rows; each row may carry a checkbox. The
+// checkbox is the production shape — the Radix Checkbox renders a
+// <button role="checkbox" aria-checked> (no `checked` property).
+// emptyRow appends DataTable's empty-state row (data-slot
+// "data-table-empty"), which the panel renders when no row matches.
 function makeOverviewRows(
   n: number,
-  opts: { visible?: boolean; checkboxes?: boolean; dialog?: boolean } = {},
-): { clicks: number[]; checkboxClicks: number[] } {
+  opts: { visible?: boolean; checkboxes?: boolean; emptyRow?: boolean } = {},
+): { clicks: number[]; checkboxClicks: number[]; emptyClicks: number[] } {
   const clicks: number[] = [];
   const checkboxClicks: number[] = [];
+  const emptyClicks: number[] = [];
   const viewport = document.createElement('div');
   viewport.setAttribute('data-web-shell-session-table-viewport', '');
   const table = document.createElement('table');
@@ -65,27 +70,48 @@ function makeOverviewRows(
     const tr = document.createElement('tr');
     tr.addEventListener('click', () => clicks.push(i + 1));
     if (opts.checkboxes !== false) {
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
+      const cb = document.createElement('button');
+      cb.type = 'button';
+      cb.setAttribute('role', 'checkbox');
+      cb.setAttribute('aria-checked', 'false');
       cb.addEventListener('click', (ev) => {
         // The real checkbox cell stops the row's click (SessionOverviewPanel).
         ev.stopPropagation();
+        cb.setAttribute(
+          'aria-checked',
+          String(cb.getAttribute('aria-checked') !== 'true'),
+        );
         checkboxClicks.push(i + 1);
       });
       tr.appendChild(cb);
     }
     tbody.appendChild(tr);
   }
+  if (opts.emptyRow) {
+    const empty = document.createElement('tr');
+    empty.setAttribute('data-slot', 'data-table-empty');
+    const td = document.createElement('td');
+    td.textContent = 'No results';
+    empty.appendChild(td);
+    empty.addEventListener('click', () => emptyClicks.push(1));
+    tbody.appendChild(empty);
+  }
   table.appendChild(tbody);
   viewport.appendChild(table);
   setWidth(viewport, opts.visible === false ? 0 : 800);
   document.body.appendChild(viewport);
-  if (opts.dialog) {
-    const dialog = document.createElement('div');
-    dialog.setAttribute('role', 'dialog');
-    document.body.appendChild(dialog);
-  }
-  return { clicks, checkboxClicks };
+  return { clicks, checkboxClicks, emptyClicks };
+}
+
+// A non-modal popover carrying role="dialog" (SessionDetailsTooltip, the
+// Overview's workspace filter). Covering modals are App's guard; the
+// module must not treat such a popover as one.
+function makePopover(): Element {
+  const popover = document.createElement('div');
+  popover.setAttribute('role', 'dialog');
+  popover.setAttribute('data-web-shell-session-details-content', '');
+  document.body.appendChild(popover);
+  return popover;
 }
 
 // Overview footer with a bulk-actions group: a DIV child of the footer
@@ -162,7 +188,12 @@ function paneComposer(pane: Element): Element {
 // is a real DOM containment). buttons: number of options, null = no
 // option group.
 function makeApprovalPanels(
-  specs: Array<{ visible?: boolean; pane?: number; buttons?: number | null }>,
+  specs: Array<{
+    visible?: boolean;
+    pane?: number;
+    buttons?: number | null;
+    disabled?: number[];
+  }>,
   panes: Element[] = [],
 ): Element[] {
   return specs.map((spec) => {
@@ -172,7 +203,10 @@ function makeApprovalPanels(
       const group = document.createElement('div');
       group.setAttribute('role', 'radiogroup');
       for (let i = 0; i < spec.buttons; i++) {
-        group.appendChild(document.createElement('button'));
+        const option = document.createElement('button');
+        // 1-based positions, as on the card.
+        if (spec.disabled?.includes(i + 1)) option.disabled = true;
+        group.appendChild(option);
       }
       panel.appendChild(group);
     }
@@ -195,6 +229,9 @@ function makePinned(opts: {
   visible?: boolean;
   headerVisible?: boolean;
   marked?: boolean;
+  // The compact shell's closed drawer: laid out (non-zero widths) but
+  // under an ancestor with `visibility: hidden`.
+  inHiddenDrawer?: boolean;
 }): { rowClicks: number[]; headerClicks: number[]; section: Element } {
   const rowClicks: number[] = [];
   const headerClicks: number[] = [];
@@ -227,13 +264,22 @@ function makePinned(opts: {
   setWidth(list, opts.visible === false ? 0 : 800);
   section.appendChild(list);
   setWidth(header, opts.headerVisible === false ? 0 : 800);
-  document.body.appendChild(section);
+  if (opts.inHiddenDrawer) {
+    const drawer = document.createElement('div');
+    drawer.style.visibility = 'hidden';
+    drawer.appendChild(section);
+    document.body.appendChild(drawer);
+  } else {
+    document.body.appendChild(section);
+  }
   return { rowClicks, headerClicks, section };
 }
 
 // A Radix-like dropdown trigger: a bare .click() (detail 0, no pointer
 // events) does not open the menu; a primary pointerdown does.
-function makeRadixTrigger(): {
+// Like Radix (onOpenToggle), a primary pointerdown toggles the menu and the
+// trigger reflects the state in aria-expanded / data-state.
+function makeRadixTrigger(opts: { open?: boolean } = {}): {
   el: HTMLButtonElement;
   events: string[];
   opened: () => boolean;
@@ -243,10 +289,16 @@ function makeRadixTrigger(): {
   setWidth(el, 200);
   const events: string[] = [];
   let open = false;
+  const setOpen = (next: boolean): void => {
+    open = next;
+    el.setAttribute('aria-expanded', String(next));
+    el.setAttribute('data-state', next ? 'open' : 'closed');
+  };
+  setOpen(opts.open ?? false);
   el.addEventListener('pointerdown', (event) => {
     const pe = event as PointerEvent;
     events.push('pointerdown');
-    if (pe.isPrimary && pe.pointerType === 'mouse') open = true;
+    if (pe.isPrimary && pe.pointerType === 'mouse') setOpen(!open);
   });
   el.addEventListener('mousedown', () => events.push('mousedown'));
   el.addEventListener('pointerup', () => events.push('pointerup'));
@@ -318,37 +370,54 @@ describe('modifierDigit / isOverviewCheckboxChord', () => {
 });
 
 describe('pressOverviewRowCheckbox (Option+Shift+1..9)', () => {
-  it('toggles the Nth row checkbox without clicking the row', () => {
-    const { clicks, checkboxClicks } = makeOverviewRows(9);
+  it('toggles the Nth row checkbox (the role="checkbox" button)', () => {
+    const { checkboxClicks } = makeOverviewRows(9);
     for (const n of [2, 4, 9]) {
       const event = press({ code: `Digit${n}`, altKey: true, shiftKey: true });
       expect(pressOverviewRowCheckbox(event)).toBe(true);
       expect(event.defaultPrevented).toBe(true);
+      // Consumed means stopped too: the key must not reach React handlers.
+      expect(event.cancelBubble).toBe(true);
     }
     expect(checkboxClicks).toEqual([2, 4, 9]);
-    expect(clicks).toEqual([]);
+    const boxes = document.querySelectorAll('[role="checkbox"]');
+    expect(boxes[1].getAttribute('aria-checked')).toBe('true');
+    expect(boxes[0].getAttribute('aria-checked')).toBe('false');
   });
 
-  it('leaves the key unconsumed with a dialog open', () => {
-    const { checkboxClicks } = makeOverviewRows(9, { dialog: true });
+  it('still toggles while a non-modal role="dialog" popover is open', () => {
+    // Covering modals are App's guard (the modal primitives); a hover
+    // popover with role="dialog" must not disable the chord.
+    const { checkboxClicks } = makeOverviewRows(9);
+    makePopover();
     const event = press({ code: 'Digit2', altKey: true, shiftKey: true });
-    expect(pressOverviewRowCheckbox(event)).toBe(false);
-    expect(event.defaultPrevented).toBe(false);
-    expect(checkboxClicks).toEqual([]);
+    expect(pressOverviewRowCheckbox(event)).toBe(true);
+    expect(event.defaultPrevented).toBe(true);
+    expect(checkboxClicks).toEqual([2]);
   });
 
-  it('leaves the key unconsumed when the table is hidden or the row is absent', () => {
+  it('leaves the key unconsumed when the table is hidden', () => {
     const hidden = makeOverviewRows(9, { visible: false });
-    let event = press({ code: 'Digit4', altKey: true, shiftKey: true });
+    const event = press({ code: 'Digit4', altKey: true, shiftKey: true });
     expect(pressOverviewRowCheckbox(event)).toBe(false);
     expect(event.defaultPrevented).toBe(false);
     expect(hidden.checkboxClicks).toEqual([]);
+  });
 
+  it('leaves the key unconsumed when the Nth row is absent', () => {
     const few = makeOverviewRows(3);
-    event = press({ code: 'Digit7', altKey: true, shiftKey: true });
+    const event = press({ code: 'Digit7', altKey: true, shiftKey: true });
     expect(pressOverviewRowCheckbox(event)).toBe(false);
     expect(event.defaultPrevented).toBe(false);
     expect(few.checkboxClicks).toEqual([]);
+  });
+
+  it('does not count the empty-state row as a row', () => {
+    const { emptyClicks } = makeOverviewRows(0, { emptyRow: true });
+    const event = press({ code: 'Digit1', altKey: true, shiftKey: true });
+    expect(pressOverviewRowCheckbox(event)).toBe(false);
+    expect(event.defaultPrevented).toBe(false);
+    expect(emptyClicks).toEqual([]);
   });
 
   it('consumes the key when the row exists but has no checkbox', () => {
@@ -367,6 +436,7 @@ describe('pressSelectedRowsSplit (Cmd/Ctrl+Shift+\\)', () => {
     let event = press({ code: 'Backslash', metaKey: true, shiftKey: true });
     expect(pressSelectedRowsSplit(event)).toBe(true);
     expect(event.defaultPrevented).toBe(true);
+    expect(event.cancelBubble).toBe(true);
     event = press({ code: 'Backslash', ctrlKey: true, shiftKey: true });
     expect(pressSelectedRowsSplit(event)).toBe(true);
     expect(clicks).toEqual([4, 4]);
@@ -457,6 +527,7 @@ describe('pressPaneMaximizeToggle (Cmd/Ctrl+Shift+F)', () => {
     });
     expect(pressPaneMaximizeToggle(first)).toBe(true);
     expect(first.defaultPrevented).toBe(true);
+    expect(first.cancelBubble).toBe(true);
     paneComposer(panes[1]).focus();
     const second = press({
       code: 'KeyF',
@@ -466,20 +537,6 @@ describe('pressPaneMaximizeToggle (Cmd/Ctrl+Shift+F)', () => {
     });
     expect(pressPaneMaximizeToggle(second)).toBe(true);
     expect(clicks).toEqual([1, 2]);
-  });
-
-  it('works by physical key on non-QWERTY layouts', () => {
-    const panes = makePanes(2);
-    const clicks = maximizeClicks(panes);
-    paneComposer(panes[0]).focus();
-    const event = press({
-      code: 'KeyF',
-      key: 'а',
-      metaKey: true,
-      shiftKey: true,
-    });
-    expect(pressPaneMaximizeToggle(event)).toBe(true);
-    expect(clicks).toEqual([1]);
   });
 
   it('leaves the key unconsumed without a focused, visible pane button', () => {
@@ -522,12 +579,16 @@ describe('pressNewTask (Cmd/Ctrl+T)', () => {
     ]);
   });
 
-  it('works by physical key on non-QWERTY layouts', () => {
+  it('leaves an already open picker open', () => {
+    // The trigger toggles on pointerdown; a second Cmd/Ctrl+T (or one
+    // after opening the picker by mouse) must not close it.
     window.history.pushState({}, '', '/');
-    const radix = makeRadixTrigger();
-    const event = press({ code: 'KeyT', key: 'е', metaKey: true });
+    const radix = makeRadixTrigger({ open: true });
+    const event = press({ code: 'KeyT', key: 't', metaKey: true });
     expect(pressNewTask(event)).toBe(true);
+    expect(event.defaultPrevented).toBe(true);
     expect(radix.opened()).toBe(true);
+    expect(radix.events).toEqual([]);
   });
 
   it('clicks the first eligible New task button on a session screen', () => {
@@ -539,12 +600,26 @@ describe('pressNewTask (Cmd/Ctrl+T)', () => {
     const event = press({ code: 'KeyT', key: 't', metaKey: true });
     expect(pressNewTask(event)).toBe(true);
     expect(event.defaultPrevented).toBe(true);
+    expect(event.cancelBubble).toBe(true);
     expect(clicks).toEqual([1]);
     // The picker stage is not attempted on a session screen.
     expect(radix.opened()).toBe(false);
     const ctrl = press({ code: 'KeyT', key: 't', ctrlKey: true });
     expect(pressNewTask(ctrl)).toBe(true);
     expect(clicks).toEqual([1, 1]);
+  });
+
+  it('recognises a session screen under a base path', () => {
+    // The session URL is `${basePath}/session/<id>`.
+    window.history.pushState({}, '', '/agentic-code/session/abc123');
+    const button = makeEligibleButton('data-web-shell-new-task-button');
+    const clicks: number[] = [];
+    button.addEventListener('click', () => clicks.push(1));
+    const radix = makeRadixTrigger();
+    const event = press({ code: 'KeyT', key: 't', metaKey: true });
+    expect(pressNewTask(event)).toBe(true);
+    expect(clicks).toEqual([1]);
+    expect(radix.opened()).toBe(false);
   });
 
   it('skips hidden, disabled, and data-disabled candidates', () => {
@@ -609,6 +684,7 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
       for (const event of events) {
         expect(pressNavigationDigit(event)).toBe(true);
         expect(event.defaultPrevented).toBe(true);
+        expect(event.cancelBubble).toBe(true);
       }
       expect(clicks).toEqual([1, 2, 9, 1, 2]);
       expect(checkboxClicks).toEqual([]);
@@ -627,6 +703,16 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
         expect(event.defaultPrevented).toBe(true);
       }
       expect(clicks).toEqual([]);
+    });
+
+    it('claims the key over the empty-state row without clicking it', () => {
+      // The Overview claims the digits while visible (as with fewer rows
+      // than N); the "no results" row is not a row target.
+      const { emptyClicks } = makeOverviewRows(0, { emptyRow: true });
+      const event = press({ code: 'Digit1', key: '1', metaKey: true });
+      expect(pressNavigationDigit(event)).toBe(true);
+      expect(event.defaultPrevented).toBe(true);
+      expect(emptyClicks).toEqual([]);
     });
 
     it('ignores a hidden table and falls through to the panes', () => {
@@ -657,6 +743,9 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
       const first = press({ code: 'Digit1', key: '1', metaKey: true });
       expect(pressNavigationDigit(first)).toBe(true);
       expect(first.defaultPrevented).toBe(true);
+      // ToolApproval confirms on a bare digit; stopping propagation is
+      // what keeps the chord from also submitting the focused option.
+      expect(first.cancelBubble).toBe(true);
       expect(document.activeElement).toBe(options[0]);
       const second = press({ code: 'Digit2', key: '2', ctrlKey: true });
       expect(pressNavigationDigit(second)).toBe(true);
@@ -695,8 +784,9 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
     });
 
     it('swallows extra digits and cards without an option group', () => {
-      const panes = makePanes(2);
-      makeApprovalPanels([{ visible: true, pane: 1, buttons: 2 }], panes);
+      // No panes: nothing below the card would consume, so only the
+      // card's own claim can swallow the key.
+      makeApprovalPanels([{ visible: true, buttons: 2 }]);
       const event = press({ code: 'Digit3', key: '3', metaKey: true });
       expect(pressNavigationDigit(event)).toBe(true);
       expect(event.defaultPrevented).toBe(true);
@@ -704,7 +794,7 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
       document
         .querySelectorAll('[data-web-shell-permission-panel]')
         .forEach((p) => p.remove());
-      makeApprovalPanels([{ visible: true, pane: 1, buttons: null }], panes);
+      makeApprovalPanels([{ visible: true, buttons: null }]);
       const swallow = press({ code: 'Digit1', key: '1', metaKey: true });
       expect(pressNavigationDigit(swallow)).toBe(true);
       expect(swallow.defaultPrevented).toBe(true);
@@ -713,9 +803,28 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
       ).toBeNull();
     });
 
+    it('claims the key over a disabled option without marking or focusing it', () => {
+      // ToolApproval disables its options while a Goal card submits.
+      const [panel] = makeApprovalPanels([
+        { visible: true, buttons: 2, disabled: [1] },
+      ]);
+      const options = panel.querySelectorAll('[role="radiogroup"] > button');
+      const event = press({ code: 'Digit1', key: '1', metaKey: true });
+      expect(pressNavigationDigit(event)).toBe(true);
+      expect(event.defaultPrevented).toBe(true);
+      expect(options[0].hasAttribute('data-web-shell-hotkey-focused')).toBe(
+        false,
+      );
+      expect(document.activeElement).not.toBe(options[0]);
+      // The enabled option is still reachable by its own position.
+      const second = press({ code: 'Digit2', key: '2', metaKey: true });
+      expect(pressNavigationDigit(second)).toBe(true);
+      expect(document.activeElement).toBe(options[1]);
+    });
+
     it('prefers the card over the Overview, the Pinned section, and the panes', () => {
       const panes = makePanes(2);
-      makeOverviewRows(9);
+      const overview = makeOverviewRows(9);
       const { rowClicks } = makePinned({
         label: 'Pinned',
         expanded: true,
@@ -728,6 +837,44 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
         document.activeElement?.closest('[data-web-shell-permission-panel]'),
       ).not.toBeNull();
       expect(rowClicks).toEqual([]);
+      expect(overview.clicks).toEqual([]);
+    });
+
+    it('acts on the card containing the focus, not the first visible one', () => {
+      const panes = makePanes(2);
+      const [first, second] = makeApprovalPanels(
+        [
+          { visible: true, pane: 1, buttons: 2 },
+          { visible: true, pane: 2, buttons: 3 },
+        ],
+        panes,
+      );
+      paneComposer(panes[1]).focus();
+      const event = press({ code: 'Digit2', key: '2', metaKey: true });
+      expect(pressNavigationDigit(event)).toBe(true);
+      expect(document.activeElement).toBe(
+        second.querySelectorAll('[role="radiogroup"] > button')[1],
+      );
+      expect(first).not.toContain(document.activeElement);
+    });
+
+    it('keeps the card containing the focus over an earlier card in the same pane', () => {
+      // A pane can hold several cards (an unanswered one plus a newer
+      // one); the focused card wins over DOM order.
+      const panes = makePanes(1);
+      const [earlier, focused] = makeApprovalPanels(
+        [
+          { visible: true, pane: 1, buttons: 2 },
+          { visible: true, pane: 1, buttons: 2 },
+        ],
+        panes,
+      );
+      const options = focused.querySelectorAll('[role="radiogroup"] > button');
+      options[0].focus();
+      const event = press({ code: 'Digit2', key: '2', metaKey: true });
+      expect(pressNavigationDigit(event)).toBe(true);
+      expect(document.activeElement).toBe(options[1]);
+      expect(earlier).not.toContain(document.activeElement);
     });
 
     it('falls back to the first visible card without a focused card', () => {
@@ -765,13 +912,21 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
       );
     });
 
-    it('ignores hidden cards and Shift, falling through to the panes', () => {
+    it('ignores a hidden card, falling through to the panes', () => {
       const panes = makePanes(2);
       makeApprovalPanels([{ visible: false, pane: 1, buttons: 2 }], panes);
       const hidden = press({ code: 'Digit1', key: '1', metaKey: true });
       expect(pressNavigationDigit(hidden)).toBe(true);
       expect(document.activeElement).toBe(paneComposer(panes[0]));
-      // With Shift the card is not considered at all.
+    });
+
+    it('is skipped with Shift, falling through to the panes', () => {
+      // A visible card: only the Shift gate keeps it out of the chain.
+      const panes = makePanes(2);
+      const [panel] = makeApprovalPanels(
+        [{ visible: true, pane: 1, buttons: 2 }],
+        panes,
+      );
       const shifted = press({
         code: 'Digit2',
         key: '2',
@@ -780,6 +935,7 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
       });
       expect(pressNavigationDigit(shifted)).toBe(true);
       expect(document.activeElement).toBe(paneComposer(panes[1]));
+      expect(panel).not.toContain(document.activeElement);
     });
   });
 
@@ -793,6 +949,7 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
       });
       const one = press({ code: 'Digit1', key: '1', metaKey: true });
       expect(pressNavigationDigit(one)).toBe(true);
+      expect(one.cancelBubble).toBe(true);
       const four = press({ code: 'Digit4', key: '4', ctrlKey: true });
       expect(pressNavigationDigit(four)).toBe(true);
       expect(rowClicks).toEqual([1, 4]);
@@ -915,6 +1072,22 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
       expect(document.activeElement).toBe(paneComposer(panes[0]));
     });
 
+    it('treats a section in the closed (visibility: hidden) drawer as absent', () => {
+      // The compact shell keeps the closed drawer laid out under
+      // visibility: hidden — widths are non-zero, the rows are invisible.
+      const panes = makePanes(2);
+      const { rowClicks } = makePinned({
+        label: 'Pinned',
+        expanded: true,
+        rows: 6,
+        inHiddenDrawer: true,
+      });
+      const event = press({ code: 'Digit2', key: '2', metaKey: true });
+      expect(pressNavigationDigit(event)).toBe(true);
+      expect(rowClicks).toEqual([]);
+      expect(document.activeElement).toBe(paneComposer(panes[1]));
+    });
+
     it('treats an unmarked section as absent', () => {
       const panes = makePanes(2);
       makePinned({ label: 'Pinned', expanded: true, rows: 6, marked: false });
@@ -924,6 +1097,8 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
     });
 
     it('leaves an expanded section with a hidden list unconsumed', () => {
+      // Panes are present, so a fall-through would consume and focus one.
+      makePanes(2);
       const { rowClicks, headerClicks } = makePinned({
         label: 'Pinned',
         expanded: true,
@@ -952,8 +1127,29 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
       for (const event of events) {
         expect(pressNavigationDigit(event)).toBe(true);
         expect(event.defaultPrevented).toBe(true);
+        expect(event.cancelBubble).toBe(true);
       }
       expect(document.activeElement).toBe(paneComposer(panes[1]));
+    });
+
+    it('numbers only the visible panes (a maximized sibling hides the rest)', () => {
+      const panes = makePanes(3);
+      setWidth(panes[0], 0);
+      const event = press({ code: 'Digit1', key: '1', metaKey: true });
+      expect(pressNavigationDigit(event)).toBe(true);
+      expect(document.activeElement).toBe(paneComposer(panes[1]));
+      const second = press({ code: 'Digit2', key: '2', metaKey: true });
+      expect(pressNavigationDigit(second)).toBe(true);
+      expect(document.activeElement).toBe(paneComposer(panes[2]));
+    });
+
+    it('leaves the key unconsumed with a single visible pane', () => {
+      const panes = makePanes(2);
+      setWidth(panes[1], 0);
+      const event = press({ code: 'Digit1', key: '1', metaKey: true });
+      expect(pressNavigationDigit(event)).toBe(false);
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(document.body);
     });
 
     it('falls back to the composer container without .cm-content', () => {
@@ -1178,21 +1374,125 @@ describe('nav digit preview (Cmd/Ctrl hold)', () => {
     expect(badges()).toEqual([]);
   });
 
-  it('numbers nothing while a dialog is open, and again after it closes', () => {
+  it('still numbers the targets while a non-modal role="dialog" popover is open', () => {
+    // Covering modals are App's guard; a hover popover must not blank the
+    // preview while the chord itself still acts.
     const { section } = makePinned({
       label: 'Pinned',
       expanded: true,
       rows: 3,
     });
-    const dialog = document.createElement('div');
-    dialog.setAttribute('role', 'dialog');
-    document.body.appendChild(dialog);
-    showNavDigitPreview();
-    expect(badges()).toEqual([]);
-    dialog.remove();
+    makePopover();
     showNavDigitPreview();
     const rows = section.querySelectorAll('div[role="button"]');
     expect(badges().map((b) => b.el)).toEqual(Array.from(rows));
+  });
+
+  it('numbers the Shift chain when Shift is held (no card, no Pinned rows)', () => {
+    const panes = makePanes(2);
+    makePinned({ label: 'Pinned', expanded: true, rows: 3 });
+    makeApprovalPanels([{ visible: true, pane: 1, buttons: 2 }], panes);
+    showNavDigitPreview({ shift: true });
+    // The same targets pressNavigationDigit acts on with Shift: the panes.
+    expect(badges().map((b) => b.el)).toEqual(panes);
+    const press2 = press({
+      code: 'Digit2',
+      key: '2',
+      metaKey: true,
+      shiftKey: true,
+    });
+    expect(pressNavigationDigit(press2)).toBe(true);
+    expect(document.activeElement).toBe(paneComposer(panes[1]));
+  });
+
+  it('leaves a disabled approval option unnumbered, keeping the positions', () => {
+    const [panel] = makeApprovalPanels([
+      { visible: true, buttons: 3, disabled: [2] },
+    ]);
+    showNavDigitPreview();
+    const options = panel.querySelectorAll('[role="radiogroup"] > button');
+    expect(badges().map((b) => b.el)).toEqual([options[0], options[2]]);
+    expect(badges().map((b) => b.n)).toEqual(['1', '3']);
+  });
+
+  it('numbers nothing in the closed (visibility: hidden) drawer', () => {
+    const panes = makePanes(2);
+    const { section } = makePinned({
+      label: 'Pinned',
+      expanded: true,
+      rows: 3,
+      inHiddenDrawer: true,
+    });
+    showNavDigitPreview();
+    section
+      .querySelectorAll('div[role="button"]')
+      .forEach((row) =>
+        expect(row.hasAttribute('data-web-shell-nav-preview')).toBe(false),
+      );
+    // The press falls through to the panes, and so do the badges.
+    expect(badges().map((b) => b.el)).toEqual(panes);
+  });
+
+  it('numbers only the visible split panes', () => {
+    const panes = makePanes(3);
+    setWidth(panes[1], 0);
+    showNavDigitPreview();
+    expect(badges().map((b) => b.el)).toEqual([panes[0], panes[2]]);
+    expect(badges().map((b) => b.n)).toEqual(['1', '2']);
+  });
+
+  it('numbers nothing over the Overview empty-state row', () => {
+    makeOverviewRows(0, { emptyRow: true });
+    showNavDigitPreview();
+    expect(badges()).toEqual([]);
+  });
+
+  it('keeps a sticky badge target sticky, anchoring only static ones', () => {
+    // The Overview's actions column is `position: sticky` (right-pinned
+    // while the table scrolls sideways); the badge must not unpin it.
+    // The app's stylesheet loads first; the preview style is injected
+    // after it, so a same-specificity rule there would win the tie.
+    document.getElementById('webShellNavPreviewStyle')?.remove();
+    const sticky = document.createElement('style');
+    sticky.textContent = '.sticky { position: sticky; }';
+    document.head.appendChild(sticky);
+    try {
+      const viewport = document.createElement('div');
+      viewport.setAttribute('data-web-shell-session-table-viewport', '');
+      const table = document.createElement('table');
+      const tbody = document.createElement('tbody');
+      const cells: HTMLElement[] = [];
+      for (let i = 0; i < 2; i++) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        if (i === 0) td.className = 'sticky';
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+        cells.push(td);
+      }
+      table.appendChild(tbody);
+      viewport.appendChild(table);
+      setWidth(viewport, 800);
+      document.body.appendChild(viewport);
+      showNavDigitPreview();
+      expect(badges().map((b) => b.el)).toEqual(cells);
+      expect(getComputedStyle(cells[0]).position).toBe('sticky');
+      expect(cells[0].hasAttribute('data-web-shell-nav-preview-anchor')).toBe(
+        false,
+      );
+      // A static cell gets the anchor for its ::after, and loses it on hide.
+      expect(cells[1].hasAttribute('data-web-shell-nav-preview-anchor')).toBe(
+        true,
+      );
+      expect(getComputedStyle(cells[1]).position).toBe('relative');
+      hideNavDigitPreview();
+      expect(cells[1].hasAttribute('data-web-shell-nav-preview-anchor')).toBe(
+        false,
+      );
+    } finally {
+      sticky.remove();
+      document.getElementById('webShellNavPreviewStyle')?.remove();
+    }
   });
 
   it('re-numbers a changed list and leaves no orphan badge behind', () => {

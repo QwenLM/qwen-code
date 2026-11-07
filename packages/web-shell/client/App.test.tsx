@@ -52322,6 +52322,26 @@ describe('App view navigation hotkeys — surface chords', () => {
       <div role="button">two</div>
     </div>`;
 
+  // The Overview row checkbox as production renders it: the Radix
+  // Checkbox, a <button role="checkbox" aria-checked> with no `checked`
+  // property. The fixture flips aria-checked on click like Radix does.
+  const ROW_CHECKBOX =
+    '<button type="button" role="checkbox" aria-checked="false"></button>';
+  function wireRowCheckboxes(host: HTMLElement): HTMLElement[] {
+    const boxes = Array.from(
+      host.querySelectorAll<HTMLElement>('[role="checkbox"]'),
+    );
+    boxes.forEach((box) =>
+      box.addEventListener('click', () =>
+        box.setAttribute(
+          'aria-checked',
+          String(box.getAttribute('aria-checked') !== 'true'),
+        ),
+      ),
+    );
+    return boxes;
+  }
+
   // The row list is the parent of the first row (the fixture host may carry
   // trailing nodes after it, so lastElementChild is not the list).
   function sizePinnedFixture(host: HTMLElement): void {
@@ -52350,10 +52370,11 @@ describe('App view navigation hotkeys — surface chords', () => {
     const host = fixture(`
       <div data-web-shell-session-table-viewport>
         <table><tbody>
-          <tr><td><input type="checkbox" /></td></tr>
-          <tr><td><input type="checkbox" /></td></tr>
+          <tr><td>${ROW_CHECKBOX}</td></tr>
+          <tr><td>${ROW_CHECKBOX}</td></tr>
         </tbody></table>
       </div>`);
+    const boxes = wireRowCheckboxes(host);
     setWidth(
       host.querySelector('[data-web-shell-session-table-viewport]')!,
       800,
@@ -52365,9 +52386,33 @@ describe('App view navigation hotkeys — surface chords', () => {
       shiftKey: true,
     });
     expect(event.defaultPrevented).toBe(true);
-    const boxes = host.querySelectorAll('input[type="checkbox"]');
-    expect((boxes[0] as HTMLInputElement).checked).toBe(false);
-    expect((boxes[1] as HTMLInputElement).checked).toBe(true);
+    expect(boxes[0].getAttribute('aria-checked')).toBe('false');
+    expect(boxes[1].getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('keeps the checkbox chord live under a non-modal role="dialog" popover', async () => {
+    // Session details tooltips are popovers with role="dialog"; only the
+    // modal primitives hold the keyboard.
+    renderViewApp();
+    await flush();
+    const host = fixture(`
+      <div data-web-shell-session-table-viewport>
+        <table><tbody><tr><td>${ROW_CHECKBOX}</td></tr></tbody></table>
+      </div>
+      <div role="dialog" data-web-shell-session-details-content></div>`);
+    const [box] = wireRowCheckboxes(host);
+    setWidth(
+      host.querySelector('[data-web-shell-session-table-viewport]')!,
+      800,
+    );
+    const event = await pressChord({
+      code: 'Digit1',
+      key: '1',
+      altKey: true,
+      shiftKey: true,
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(box.getAttribute('aria-checked')).toBe('true');
   });
 
   it('leaves the checkbox chord to the browser while a modal is open', async () => {
@@ -52375,24 +52420,22 @@ describe('App view navigation hotkeys — surface chords', () => {
     await flush();
     const host = fixture(`
       <div data-web-shell-session-table-viewport>
-        <table><tbody><tr><td><input type="checkbox" /></td></tr></tbody></table>
+        <table><tbody><tr><td>${ROW_CHECKBOX}</td></tr></tbody></table>
       </div>
       <div role="dialog" data-slot="dialog-content" data-state="open"></div>`);
+    const [box] = wireRowCheckboxes(host);
     setWidth(
       host.querySelector('[data-web-shell-session-table-viewport]')!,
       800,
     );
     const event = await pressChord({
-      code: 'Digit2',
-      key: '2',
+      code: 'Digit1',
+      key: '1',
       altKey: true,
       shiftKey: true,
     });
     expect(event.defaultPrevented).toBe(false);
-    expect(
-      (host.querySelector('input[type="checkbox"]') as HTMLInputElement)
-        .checked,
-    ).toBe(false);
+    expect(box.getAttribute('aria-checked')).toBe('false');
   });
 
   it('maximizes the focused pane with Cmd+Shift+F', async () => {
@@ -52427,6 +52470,16 @@ describe('App view navigation hotkeys — surface chords', () => {
     });
     expect(event.defaultPrevented).toBe(true);
     expect(clicked).toBe(1);
+    // By physical key: the Russian layout types 'а' on KeyF.
+    host.querySelector('[data-pane-session-id="b"] .cm-content')!.focus();
+    const russian = await pressChord({
+      code: 'KeyF',
+      key: 'а',
+      metaKey: true,
+      shiftKey: true,
+    });
+    expect(russian.defaultPrevented).toBe(true);
+    expect(clicked).toBe(2);
   });
 
   it('opens the selected rows in split view with Cmd+Shift+Backslash', async () => {
@@ -52480,7 +52533,8 @@ describe('App view navigation hotkeys — surface chords', () => {
     trigger.addEventListener('pointerdown', (event) => {
       if ((event as PointerEvent).isPrimary) opened = true;
     });
-    const chord = await pressChord({ code: 'KeyT', key: 't', metaKey: true });
+    // By physical key: the Russian layout types 'е' on KeyT.
+    const chord = await pressChord({ code: 'KeyT', key: 'е', metaKey: true });
     expect(chord.defaultPrevented).toBe(true);
     expect(opened).toBe(true);
   });
@@ -52561,7 +52615,7 @@ describe('App view navigation hotkeys — surface chords', () => {
     await flush();
     const host = fixture(
       '<div data-web-shell-session-table-viewport>' +
-        '<table><tbody><tr><td><input type="checkbox" /></td></tr>' +
+        `<table><tbody><tr><td>${ROW_CHECKBOX}</td></tr>` +
         '</tbody></table></div>' +
         '<div data-web-shell-composer-editor><div class="cm-editor">' +
         '<div class="cm-content" contenteditable="true"></div></div></div>',
@@ -52570,19 +52624,17 @@ describe('App view navigation hotkeys — surface chords', () => {
       host.querySelector('[data-web-shell-session-table-viewport]')!,
       800,
     );
+    const [box] = wireRowCheckboxes(host);
     const content = host.querySelector('.cm-content')!;
     content.focus();
     const event = await pressChord(
-      { code: 'Digit2', key: '2', altKey: true, shiftKey: true },
+      { code: 'Digit1', key: '1', altKey: true, shiftKey: true },
       content,
     );
     // Option+Shift+digit types printable characters on macOS (US
     // layout), so the chord must not fire while the composer is focused.
     expect(event.defaultPrevented).toBe(false);
-    expect(
-      (host.querySelector('input[type="checkbox"]') as HTMLInputElement)
-        .checked,
-    ).toBe(false);
+    expect(box.getAttribute('aria-checked')).toBe('false');
   });
 
   it('ignores auto-repeat on the surface chords', async () => {
@@ -52691,7 +52743,7 @@ describe('App view navigation hotkeys — surface chords', () => {
     expect(badgeValues()).toEqual([]);
   });
 
-  it('does not show the preview over the composer (the digits stay live there)', async () => {
+  it('shows the preview over the composer (the digits stay live there)', async () => {
     renderViewApp();
     await flush();
     const host = fixture(
@@ -52708,30 +52760,91 @@ describe('App view navigation hotkeys — surface chords', () => {
     expect(badgeValues()).toEqual(['1', '2']);
   });
 
-  it('does not number targets while a dialog is open', async () => {
+  it('does not number targets while a modal is open', async () => {
     renderViewApp();
     await flush();
-    const host = fixture(PINNED_FIXTURE + '<div role="dialog"></div>');
+    const host = fixture(
+      PINNED_FIXTURE +
+        '<div role="dialog" data-slot="dialog-content" data-state="open"></div>',
+    );
     sizePinnedFixture(host);
     await pressChord({ key: 'Meta', code: 'Meta', metaKey: true });
     expect(badgeValues()).toEqual([]);
   });
 
-  it('re-numbers when the list changes under a held modifier', async () => {
+  it('numbers targets under a non-modal role="dialog" popover', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(
+      PINNED_FIXTURE +
+        '<div role="dialog" data-web-shell-session-details-content></div>',
+    );
+    sizePinnedFixture(host);
+    await pressChord({ key: 'Meta', code: 'Meta', metaKey: true });
+    expect(badgeValues()).toEqual(['1', '2']);
+  });
+
+  it('re-numbers for the Shift chain while Shift joins and leaves', async () => {
+    renderViewApp();
+    await flush();
+    // An approval card (two options) beside three split panes: the plain
+    // chain numbers the options, the Shift chain the panes.
+    const host = fixture(
+      APPROVAL_FIXTURE +
+        `<div data-pane-session-id="a" tabindex="-1"></div>
+        <div data-pane-session-id="b" tabindex="-1"></div>
+        <div data-pane-session-id="c" tabindex="-1"></div>`,
+    );
+    setWidth(host.querySelector('[data-web-shell-permission-panel]')!, 800);
+    host
+      .querySelectorAll('[data-pane-session-id]')
+      .forEach((pane) => setWidth(pane, 800));
+    const optionBadges = (): number =>
+      host.querySelectorAll('[role="radio"][data-web-shell-nav-preview]')
+        .length;
+    await pressChord({ key: 'Meta', code: 'Meta', metaKey: true });
+    expect(badgeValues()).toEqual(['1', '2']);
+    expect(optionBadges()).toBe(2);
+    await pressChord({
+      key: 'Shift',
+      code: 'ShiftLeft',
+      metaKey: true,
+      shiftKey: true,
+    });
+    expect(badgeValues()).toEqual(['1', '2', '3']);
+    expect(optionBadges()).toBe(0);
+    // Shift released, the modifier still held: back to the options.
+    await releaseKey({
+      key: 'Shift',
+      code: 'ShiftLeft',
+      metaKey: true,
+      shiftKey: false,
+    });
+    expect(badgeValues()).toEqual(['1', '2']);
+    expect(optionBadges()).toBe(2);
+  });
+
+  it('re-numbers a changed list when a second modifier joins', async () => {
     renderViewApp();
     await flush();
     const host = fixture(PINNED_FIXTURE);
     sizePinnedFixture(host);
     await pressChord({ key: 'Meta', code: 'Meta', metaKey: true });
     expect(badgeValues()).toEqual(['1', '2']);
-    // A row joins (a re-render); each modifier press re-numbers.
+    // A row joins (a re-render) while Meta is held, then Control joins:
+    // a real keydown (not an auto-repeat, which the listener ignores).
     host
       .querySelectorAll('[role="button"]')[0]
       .parentElement!.insertAdjacentHTML(
         'beforeend',
         '<div role="button">three</div>',
       );
-    await pressChord({ key: 'Meta', code: 'Meta', metaKey: true });
+    await pressChord({
+      key: 'Control',
+      code: 'ControlLeft',
+      metaKey: true,
+      ctrlKey: true,
+    });
     expect(badgeValues()).toEqual(['1', '2', '3']);
   });
 
