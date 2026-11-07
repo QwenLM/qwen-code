@@ -5,8 +5,11 @@
  */
 
 import nodePath from 'node:path';
+import chalk from 'chalk';
 import type { ReasoningEffort } from '@qwen-code/qwen-code-core';
 import { StreamingState } from './types.js';
+import type { SemanticColors } from './themes/semantic-tokens.js';
+import { resolveColor } from './themes/color-utils.js';
 
 export const STATUS_LINE_PRESET_ITEM_IDS = [
   'project-name',
@@ -29,6 +32,39 @@ export const STATUS_LINE_PRESET_ITEM_IDS = [
 
 export type StatusLinePresetItemId =
   (typeof STATUS_LINE_PRESET_ITEM_IDS)[number];
+
+const PRESET_COLOR_CATEGORIES = {
+  'project-name': 'project',
+  'git-branch': 'project',
+  'model-with-reasoning': 'model',
+  model: 'model',
+  'context-remaining': 'context',
+  'total-input-tokens': 'context',
+  'total-output-tokens': 'context',
+  'current-dir': 'project',
+  'pull-request-number': 'project',
+  'branch-changes': 'project',
+  'context-used': 'context',
+  'run-state': 'session',
+  'qwen-version': 'session',
+  'context-window-size': 'context',
+  'used-tokens': 'context',
+  'session-id': 'session',
+} as const satisfies Record<StatusLinePresetItemId, string>;
+
+function stylePresetText(
+  text: string,
+  color: string | false | undefined,
+): string {
+  const resolved = color ? resolveColor(color) : undefined;
+  if (!resolved) return text;
+  if (resolved.startsWith('#')) return chalk.hex(resolved)(text);
+  const name = resolved.replace(
+    /bright$/,
+    'Bright',
+  ) as typeof chalk.ForegroundColor;
+  return chalk[name](text);
+}
 
 export interface StatusLinePresetItem {
   id: StatusLinePresetItemId;
@@ -416,12 +452,21 @@ function formatPresetItem(
 export function buildStatusLinePresetParts(
   config: StatusLinePresetConfig,
   data: StatusLinePresetData,
+  colors?: SemanticColors,
 ): string[] {
+  const palette = colors && {
+    project: colors.status.success,
+    model: colors.text.accent,
+    context: colors.text.link,
+    session: colors.status.warning,
+  };
   const parts: string[] = [];
   for (const item of orderStatusLinePresetItems(config.items)) {
     const text = formatPresetItem(item, data);
     if (text) {
-      parts.push(text);
+      const color =
+        config.useThemeColors && palette?.[PRESET_COLOR_CATEGORIES[item]];
+      parts.push(stylePresetText(text, color));
     }
   }
   return parts;
@@ -430,11 +475,14 @@ export function buildStatusLinePresetParts(
 export function buildStatusLinePresetLines(
   config: StatusLinePresetConfig,
   data: StatusLinePresetData,
+  colors?: SemanticColors,
 ): string[] {
   // Dynamic path fields may contain line breaks, but valid horizontal
   // whitespace must survive unchanged.
-  const line = buildStatusLinePresetParts(config, data)
-    .join(' \u00b7 ')
+  const separatorColor = config.useThemeColors && colors?.text.secondary;
+  const separator = stylePresetText(' \u00b7 ', separatorColor);
+  const line = buildStatusLinePresetParts(config, data, colors)
+    .join(separator)
     .replace(/[\n\r\v\f\u0085\u2028\u2029]+/g, ' ');
   return line ? [line] : [];
 }

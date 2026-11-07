@@ -347,6 +347,17 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   const shellModeRef = useRef(shellModeActive);
   shellModeRef.current = shellModeActive;
   const editorRef = useRef<TextareaRenderable | null>(null);
+  useLayoutEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    if (focus) {
+      editor.focusable = true;
+      editor.focus();
+    } else {
+      editor.blur();
+      editor.focusable = false;
+    }
+  }, [focus]);
   const scrollCursorBefore = useRef<number | null>(null);
   const vimModeEnabled = props.vim?.enabled ?? false;
   const userMessagesRef = useRef(userMessages);

@@ -59,6 +59,9 @@ vi.mock('../components/StickyTodoList.js', () => ({
 }));
 
 const baseUIState: Partial<UIState> = {
+  confirmUpdateExtensionRequests: [],
+  settingInputRequests: [],
+  pluginChoiceRequests: [],
   dialogsVisible: false,
   isFeedbackDialogOpen: false,
   mainAreaWidth: 80,
@@ -99,6 +102,54 @@ function frameHeight(frame: string): number {
 }
 
 describe('ScreenReaderAppLayout', () => {
+  it('keeps the composer and footer while configuring the status line', () => {
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      dialogsVisible: true,
+      isStatusLineDialogOpen: true,
+    });
+    expect(lastFrame()).toContain('Composer');
+    expect(lastFrame()).toContain('Footer');
+    expect(lastFrame()).toContain('DialogManager');
+  });
+  it.each([8, 10, 12])(
+    'keeps the picker visible at %i rows',
+    (terminalHeight) => {
+      dialogManagerMockState.lineCount = 20;
+      const { lastFrame, unmount } = renderLayout({
+        ...baseUIState,
+        constrainHeight: true,
+        terminalHeight,
+        staticExtraHeight: 3,
+        dialogsVisible: true,
+        isStatusLineDialogOpen: true,
+      });
+      expect(lastFrame()).toContain('DialogManager 1');
+      expect(lastFrame()).not.toContain('DialogManager 2');
+      expect(lastFrame()).toContain('Composer');
+      unmount();
+    },
+  );
+  it.each([
+    [true, 12],
+    [false, 19],
+  ] as const)(
+    'reserves composer rows only for the picker (picker=%s)',
+    (isStatusLineDialogOpen, lastRow) => {
+      dialogManagerMockState.lineCount = 20;
+      const { lastFrame, unmount } = renderLayout({
+        ...baseUIState,
+        terminalHeight: 24,
+        staticExtraHeight: 3,
+        constrainHeight: true,
+        dialogsVisible: true,
+        isStatusLineDialogOpen,
+      });
+      expect(lastFrame()).toContain(`DialogManager ${lastRow}`);
+      expect(lastFrame()).not.toContain(`DialogManager ${lastRow + 1}`);
+      unmount();
+    },
+  );
   beforeEach(() => {
     dialogManagerMockState.lineCount = 1;
   });

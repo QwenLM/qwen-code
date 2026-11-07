@@ -344,10 +344,6 @@ export function OpenTuiFooter({
               <text
                 key={index}
                 content={statusLineStyledText(line, {
-                  color:
-                    !statusLine.respectUserColors && statusLine.useThemeColors
-                      ? C.accent
-                      : undefined,
                   dim:
                     !statusLine.respectUserColors && !statusLine.useThemeColors,
                 })}

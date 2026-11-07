@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -13,27 +13,24 @@ import type { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
-import type { UIState } from '../contexts/UIStateContext.js';
 import { MultiSelect } from './shared/MultiSelect.js';
-import {
-  buildStatusLinePresetLines,
-  type StatusLinePresetConfig,
-} from '../statusLinePresets.js';
+import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 import {
   buildInitialSelectedKeys,
   buildConfigFromKeys,
   getEffectiveStatusLineScope,
-  getPreviewData,
   STATUS_LINE_OPTIONS,
   STATUS_LINE_DIALOG_FIXED_ROWS,
+  STATUS_LINE_DIALOG_SEARCH_ROWS,
+  STATUS_LINE_DIALOG_MIN_ITEMS,
 } from '../status-line-model.js';
 
 interface StatusLineDialogProps {
   settings: LoadedSettings;
   config: Config;
-  uiState: UIState;
   addItem: UseHistoryManagerReturn['addItem'];
   onSaved?: (config: StatusLinePresetConfig) => void;
+  onPreviewChange?: (config: StatusLinePresetConfig | undefined) => void;
   onClose: () => void;
   availableTerminalHeight?: number;
 }
@@ -41,9 +38,9 @@ interface StatusLineDialogProps {
 export function StatusLineDialog({
   settings,
   config,
-  uiState,
   addItem,
   onSaved,
+  onPreviewChange,
   onClose,
   availableTerminalHeight,
 }: StatusLineDialogProps): React.JSX.Element {
@@ -53,46 +50,37 @@ export function StatusLineDialog({
   );
 
   const terminalHeight = availableTerminalHeight ?? 18;
-  const hasFullLayout = terminalHeight >= STATUS_LINE_DIALOG_FIXED_ROWS + 1;
+  const hasFullLayout =
+    terminalHeight >=
+    STATUS_LINE_DIALOG_FIXED_ROWS + STATUS_LINE_DIALOG_MIN_ITEMS;
+  const hasSearch =
+    terminalHeight >=
+    STATUS_LINE_DIALOG_SEARCH_ROWS + STATUS_LINE_DIALOG_MIN_ITEMS;
 
   const filteredOptions = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    if (!hasFullLayout || !normalizedQuery) {
+    if (!hasSearch || !normalizedQuery) {
       return STATUS_LINE_OPTIONS;
     }
     return STATUS_LINE_OPTIONS.filter(
       ({ key, label, separator }) =>
         !separator && `${label} ${key}`.toLowerCase().includes(normalizedQuery),
     );
-  }, [hasFullLayout, query]);
+  }, [hasSearch, query]);
 
   const presetConfig = useMemo(
-    () => buildConfigFromKeys(selectedKeys),
-    [selectedKeys],
+    () => buildConfigFromKeys(selectedKeys, settings),
+    [selectedKeys, settings],
   );
-  const previewData = useMemo(
-    () => getPreviewData(config, uiState),
-    [config, uiState],
-  );
-  const previewLines = useMemo(
-    () => buildStatusLinePresetLines(presetConfig, previewData),
-    [presetConfig, previewData],
-  );
+
+  useEffect(() => {
+    onPreviewChange?.(presetConfig);
+  }, [onPreviewChange, presetConfig]);
+  useEffect(() => () => onPreviewChange?.(undefined), [onPreviewChange]);
 
   const handleConfirm = useCallback(() => {
     const effectiveScope = getEffectiveStatusLineScope(settings);
-    const statusLine =
-      settings.forScope(effectiveScope).settings.ui?.statusLine;
-    const hideContextIndicator =
-      statusLine && typeof statusLine === 'object'
-        ? statusLine.hideContextIndicator
-        : undefined;
-    const savedConfig = {
-      ...presetConfig,
-      ...(typeof hideContextIndicator === 'boolean'
-        ? { hideContextIndicator }
-        : {}),
-    };
+    const savedConfig = presetConfig;
     settings.setValue(effectiveScope, 'ui.statusLine', savedConfig);
     onSaved?.(savedConfig);
     const feedbackItem: HistoryItemWithoutId & Record<string, unknown> = {
@@ -111,7 +99,7 @@ export function StatusLineDialog({
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
-        if (hasFullLayout && query) {
+        if (hasSearch && query) {
           setQuery('');
           return;
         }
@@ -119,10 +107,7 @@ export function StatusLineDialog({
         return;
       }
 
-      if (
-        hasFullLayout &&
-        (key.name === 'backspace' || key.name === 'delete')
-      ) {
+      if (hasSearch && (key.name === 'backspace' || key.name === 'delete')) {
         setQuery((current) => current.slice(0, -1));
         return;
       }
@@ -138,7 +123,7 @@ export function StatusLineDialog({
       }
 
       if (
-        hasFullLayout &&
+        hasSearch &&
         !key.ctrl &&
         !key.meta &&
         key.sequence.length === 1 &&
@@ -157,7 +142,7 @@ export function StatusLineDialog({
       10,
       hasFullLayout
         ? terminalHeight - STATUS_LINE_DIALOG_FIXED_ROWS
-        : terminalHeight,
+        : terminalHeight - (hasSearch ? STATUS_LINE_DIALOG_SEARCH_ROWS : 0),
     ),
   );
 
@@ -178,14 +163,16 @@ export function StatusLineDialog({
           <Text color={theme.text.secondary} wrap="truncate">
             Select which items to display in the status line.
           </Text>
-
-          <Box marginTop={1} flexDirection="column">
-            <Text color={theme.text.secondary} wrap="truncate">
-              Type to search
-            </Text>
-            <Text wrap="truncate">{query ? `> ${query}` : '>'}</Text>
-          </Box>
         </>
+      )}
+
+      {hasSearch && (
+        <Box marginTop={1} flexDirection="column">
+          <Text color={theme.text.secondary} wrap="truncate">
+            Type to search
+          </Text>
+          <Text wrap="truncate">{query ? `> ${query}` : '>'}</Text>
+        </Box>
       )}
 
       <Box marginTop={hasFullLayout ? 1 : 0} flexDirection="column">
@@ -210,30 +197,6 @@ export function StatusLineDialog({
 
       {hasFullLayout && (
         <>
-          <Box marginTop={1} flexDirection="column">
-            <Text color={theme.text.secondary} wrap="truncate">
-              Preview
-            </Text>
-            {previewLines.length > 0 ? (
-              previewLines.map((line, index) => (
-                <Text
-                  key={`${line}-${index}`}
-                  color={
-                    presetConfig.useThemeColors ? theme.text.accent : undefined
-                  }
-                  dimColor={!presetConfig.useThemeColors}
-                  wrap="truncate"
-                >
-                  {line}
-                </Text>
-              ))
-            ) : (
-              <Text color={theme.text.secondary} wrap="truncate">
-                Select at least one item to show a status line.
-              </Text>
-            )}
-          </Box>
-
           <Box marginTop={1}>
             <Text color={theme.text.secondary} wrap="truncate">
               Use up/down to navigate, space to select, enter to confirm, esc to

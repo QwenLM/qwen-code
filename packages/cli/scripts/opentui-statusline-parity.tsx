@@ -9,33 +9,43 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { act, type ReactNode } from 'react';
+import { act, useRef, type ReactNode } from 'react';
 import { testRender } from '@opentui/react/test-utils';
 import { useTerminalDimensions } from '@opentui/react';
 import {
   RGBA,
   TextAttributes,
+  type BoxRenderable,
   type CapturedSpan,
   type Renderable,
 } from '@opentui/core';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import {
   LoadedSettings,
   SettingScope,
   type Settings,
 } from '../src/config/settings.js';
+import { OpenTuiInputPrompt } from '../src/ui/opentui/input-prompt.js';
+import type { OpenTuiComposerSlot } from '../src/ui/opentui/input-submission.js';
 import { OpenTuiStatusLineDialog } from '../src/ui/opentui/dialogs-statusline.js';
 import {
   OpenTuiFooter,
   type OpenTuiFooterProps,
 } from '../src/ui/opentui/opentui-footer.js';
+import {
+  getDialogMaxHeight,
+  STATIC_EXTRA_HEIGHT,
+} from '../src/ui/utils/layoutUtils.js';
+import { useStatusLinePreviewHeight } from '../src/ui/opentui/use-status-line-preview-height.js';
+import { STATUS_LINE_COMPOSER_ROWS } from '../src/ui/status-line-model.js';
 import { statusLineStyledText } from '../src/ui/opentui/status-line-text.js';
 import { dialogAreaWidth } from '../src/ui/opentui/dialogs-shared.js';
 import { applyOpenTuiTheme } from '../src/ui/opentui/theme.js';
 import { getActiveOpenTuiTheme } from '../src/ui/opentui/theme-parity.js';
 import { theme } from '../src/ui/semantic-colors.js';
-import { StreamingState } from '../src/ui/types.js';
 import type { StatusLineState } from '../src/ui/hooks/useStatusLine.js';
+import type { StatusLinePresetConfig } from '../src/ui/statusLinePresets.js';
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 async function scenario(
@@ -144,13 +154,6 @@ const stats = {
   lastPromptTokenCount: 250,
   metrics: { models: {}, files: { totalLinesAdded: 0, totalLinesRemoved: 0 } },
 } as StatusLineState['sessionStats'];
-const state: StatusLineState = {
-  sessionStats: stats,
-  currentModel: 'u3-native-model',
-  branchName: 'main',
-  activeWorktree: null,
-  streamingState: StreamingState.Idle,
-};
 function configFor(record: (v: unknown) => void = () => {}) {
   return {
     getTargetDir: () => '/owned/project',
@@ -367,17 +370,14 @@ await scenario(
         },
       };
       const s = await mount(<OpenTuiFooter {...props} />, 80, 12);
+      const unstyled = await mount(<text>P</text>, 80, 12);
       assert.deepEqual(rgb(span(s, 'F').fg), [12, 34, 56]);
       assert.equal(
         Boolean(span(s, 'P').attributes & TextAttributes.DIM),
         !respectUserColors && !useThemeColors,
       );
       assert.deepEqual(rgb(span(s, 'R').fg), rgb(span(s, 'P').fg));
-      if (useThemeColors)
-        assert.deepEqual(
-          rgb(span(s, 'P').fg),
-          rgb(RGBA.fromHex(theme.text.accent)),
-        );
+      assert.deepEqual(rgb(span(s, 'P').fg), rgb(span(unstyled, 'P').fg));
     }
     const long = '甲🙂 '.repeat(80) + 'TAIL_NOT_ON_FIRST_TWO_ROWS';
     for (const [width, height] of [
@@ -464,11 +464,14 @@ await scenario(
       added: unknown[] = [],
       recorded: unknown[] = [];
     let closed = 0;
+    let preview: StatusLinePresetConfig | undefined;
     const s = await mount(
       <DialogRegion
         settings={settings}
         config={configFor((v) => recorded.push(v))}
-        state={state}
+        onPreviewChange={(value) => {
+          preview = value;
+        }}
         addItem={(v) => {
           added.push(v);
           return 1;
@@ -486,7 +489,8 @@ await scenario(
     assert.ok(!frame(s).includes('git-branch'));
     await key(s, ' ');
     checked(s, 'total-input-tokens', true);
-    assert.ok(frame(s).includes('0 total in'));
+    assert.ok(preview?.items.includes('total-input-tokens'));
+    assert.ok(!frame(s).includes('Preview'));
     await key(s, 'ESCAPE');
     assert.equal(closed, 0);
     assert.ok(frame(s).includes('git-branch'));
@@ -519,7 +523,6 @@ await scenario(
       <DialogRegion
         settings={settings}
         config={configFor()}
-        state={state}
         addItem={() => {
           throw new Error('cancel must not add feedback');
         }}
@@ -571,7 +574,6 @@ for (const [label, populated, trusted, expected] of [
       <DialogRegion
         settings={settings}
         config={configFor((v) => recorded.push(v))}
-        state={state}
         addItem={(v) => {
           added.push(v);
           return 1;
@@ -615,7 +617,6 @@ await scenario(
       <DialogRegion
         settings={settings}
         config={configFor()}
-        state={state}
         addItem={() => 1}
         onClose={() => {
           closed++;
@@ -635,8 +636,8 @@ await scenario(
       await act(async () => s.resize(width, region + 4));
       await idle(s);
       regionGeometry(s, region);
-      assert.equal(frame(s).includes('Type to search'), region >= 16);
-      if (region >= 16) {
+      assert.equal(frame(s).includes('Type to search'), region >= 7);
+      if (region >= 7) {
         assert.ok(frame(s).includes('> identifier'));
         assert.ok(frame(s).includes('session-id'));
       }
@@ -682,4 +683,249 @@ await scenario(
   },
 );
 
-console.log('statusline native: all 11 scenarios passed');
+await scenario(
+  'compact-picker-region-and-live-footer-80x24',
+  async ({ dir, mount }) => {
+    const settings = settingsAt(dir);
+    const regionHeight =
+      getDialogMaxHeight(24, STATIC_EXTRA_HEIGHT) - STATUS_LINE_COMPOSER_ROWS;
+    const setup = await mount(
+      <box height={24} width={80} flexDirection="column">
+        <scrollbox flexGrow={1} flexShrink={1} minHeight={0}>
+          <text>Retained transcript</text>
+        </scrollbox>
+        <box flexDirection="column" flexShrink={0}>
+          <box
+            id="statusline-region"
+            height={regionHeight}
+            width={dialogAreaWidth(80)}
+            marginLeft={2}
+            flexDirection="column"
+            overflow="hidden"
+          >
+            <OpenTuiStatusLineDialog
+              settings={settings}
+              config={configFor()}
+              addItem={() => 0}
+              onClose={() => {}}
+              availableTerminalHeight={regionHeight}
+            />
+          </box>
+          <box
+            id="statusline-composer"
+            flexDirection="column"
+            height={STATUS_LINE_COMPOSER_ROWS}
+            marginTop={0}
+          >
+            <OpenTuiInputPrompt
+              onSubmit={() => false}
+              userMessages={[]}
+              focus={false}
+            />
+            <box id="statusline-footer">
+              <OpenTuiFooter
+                config={configFor()}
+                settings={settings}
+                sessionStats={stats}
+                activeWorktree={null}
+                streaming={false}
+                statusLine={{
+                  lines: ['LIVE_FOOTER_80x24'],
+                  respectUserColors: true,
+                  useThemeColors: false,
+                  hideContextIndicator: true,
+                }}
+              />
+            </box>
+          </box>
+        </box>
+      </box>,
+      80,
+      24,
+    );
+    const all = nodes(setup.renderer.root);
+    const region = all.find((node) => node.id === 'statusline-region');
+    const footer = all.find((node) => node.id === 'statusline-footer');
+    assert.ok(region && footer);
+    assert.equal(region.height, regionHeight);
+    assert.ok(footer.y >= region.y + region.height);
+    assert.ok(footer.y + footer.height <= 24, 'live footer escaped terminal');
+    assert.match(frame(setup), /LIVE_FOOTER_80x24/);
+    const composer = all.find((node) => node.id === 'statusline-composer');
+    assert.ok(composer);
+    assert.equal(composer.height, 7);
+    assert.ok(composer.y + composer.height <= 24);
+    assert.ok(frame(setup).includes('Type to search'));
+    assert.ok(!frame(setup).includes('Configure Status Line'));
+    assert.match(frame(setup), /Use theme colors/);
+    await type(setup, 'context');
+    assert.match(frame(setup), /> context/);
+    assert.match(frame(setup), /context-remaining/);
+    assert.ok(!frame(setup).includes('model-only'));
+    await key(setup, 'ARROW_DOWN');
+    assert.match(frame(setup), /LIVE_FOOTER_80x24/);
+  },
+);
+
+await scenario(
+  'wrapped-composer-keeps-live-footer-within-80x24',
+  async ({ dir, mount }) => {
+    const settings = settingsAt(dir);
+    const composerHandle: OpenTuiComposerSlot = { current: null };
+    function WrappedPreview() {
+      const controls = useRef<BoxRenderable | null>(null);
+      const previewHeight = useStatusLinePreviewHeight(true);
+      const regionHeight = getDialogMaxHeight(
+        24,
+        STATIC_EXTRA_HEIGHT + previewHeight.reservedRows,
+      );
+      return (
+        <box height={24} width={80} flexDirection="column">
+          <scrollbox flexGrow={1} flexShrink={1} minHeight={0}>
+            <text>Retained transcript</text>
+          </scrollbox>
+          <box
+            flexDirection="column"
+            flexShrink={0}
+            ref={(el) => {
+              controls.current = el as BoxRenderable | null;
+            }}
+            onSizeChange={() =>
+              previewHeight.measure(controls.current?.height ?? 0, regionHeight)
+            }
+          >
+            <box
+              id="statusline-region"
+              height={regionHeight}
+              width={dialogAreaWidth(80)}
+              marginLeft={2}
+              flexDirection="column"
+              overflow="hidden"
+            >
+              <OpenTuiStatusLineDialog
+                settings={settings}
+                config={configFor()}
+                addItem={() => 0}
+                onClose={() => {}}
+                availableTerminalHeight={regionHeight}
+              />
+            </box>
+            <box id="statusline-composer" flexDirection="column" marginTop={1}>
+              <OpenTuiInputPrompt
+                onSubmit={() => false}
+                userMessages={[]}
+                focus={false}
+                composerHandle={composerHandle}
+              />
+              <box id="statusline-footer">
+                <OpenTuiFooter
+                  config={configFor()}
+                  settings={settings}
+                  sessionStats={stats}
+                  activeWorktree={null}
+                  streaming={false}
+                  approvalMode={ApprovalMode.DEFAULT}
+                  statusLine={{
+                    lines: ['LIVE_FOOTER_80x24'],
+                    respectUserColors: true,
+                    useThemeColors: false,
+                    hideContextIndicator: true,
+                  }}
+                />
+              </box>
+            </box>
+          </box>
+        </box>
+      );
+    }
+    const setup = await mount(<WrappedPreview />, 80, 24);
+    const geometry = () => {
+      const all = nodes(setup.renderer.root);
+      return [
+        'statusline-region',
+        'statusline-composer',
+        'statusline-footer',
+      ].map((id) => {
+        const node = all.find((candidate) => candidate.id === id);
+        assert.ok(node);
+        return { id, y: node.y, height: node.height };
+      });
+    };
+    const settleGeometry = async (direction: 'shrink' | 'grow') => {
+      const samples = [geometry()];
+      // Native layout callbacks update React state at the end of act(). Drain
+      // subsequent layouts until geometry repeats, rather than waiting once.
+      for (let round = 0; round < 5; round++) {
+        await idle(setup);
+        const current = geometry();
+        const previous = samples[samples.length - 1];
+        samples.push(current);
+        assert.ok(
+          direction === 'shrink'
+            ? current[0].height <= previous[0].height
+            : current[0].height >= previous[0].height,
+          `picker geometry oscillated: ${JSON.stringify(samples)}`,
+        );
+        if (round > 0 && JSON.stringify(current) === JSON.stringify(previous)) {
+          console.log(
+            `wrapped preview ${direction}: ${JSON.stringify(samples)}`,
+          );
+          return;
+        }
+      }
+      assert.fail(`preview did not converge: ${JSON.stringify(samples)}`);
+    };
+    assert.equal(
+      nodes(setup.renderer.root).find((node) => node.id === 'statusline-region')
+        ?.height,
+      12,
+    );
+
+    assert.ok(composerHandle.current);
+    await act(async () => {
+      composerHandle.current!.setText('WRAPPED_DRAFT '.repeat(45));
+    });
+    await settleGeometry('shrink');
+    const all = nodes(setup.renderer.root);
+    const footer = all.find((node) => node.id === 'statusline-footer');
+    const composer = all.find((node) => node.id === 'statusline-composer');
+    const region = all.find((node) => node.id === 'statusline-region');
+    assert.ok(composer && footer && region);
+    assert.ok(region.y >= 0, `picker starts above terminal: ${region.y}`);
+    assert.ok(
+      region.height > 0 && region.height < 12,
+      'picker must give rows to the growing composer',
+    );
+    assert.ok(
+      composer.y >= region.y + region.height,
+      'composer overlaps picker',
+    );
+    assert.ok(
+      composer.height > STATUS_LINE_COMPOSER_ROWS,
+      'draft did not grow',
+    );
+    assert.ok(
+      footer.y + footer.height <= 24,
+      `wrapped draft pushes footer to row ${footer.y + footer.height}`,
+    );
+    assert.match(frame(setup), /WRAPPED_DRAFT/);
+    assert.match(frame(setup), /LIVE_FOOTER_80x24/);
+    assert.match(frame(setup), /Ask permissions/);
+    assert.equal(
+      composerHandle.current!.getText(),
+      'WRAPPED_DRAFT '.repeat(45),
+    );
+    await act(async () => {
+      composerHandle.current!.setText('');
+    });
+    await settleGeometry('grow');
+    assert.equal(
+      nodes(setup.renderer.root).find((node) => node.id === 'statusline-region')
+        ?.height,
+      12,
+      'picker recovers its rows after the draft shrinks',
+    );
+  },
+);
+
+console.log('statusline native: all 13 scenarios passed');
