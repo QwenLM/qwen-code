@@ -310,6 +310,33 @@ describe('ci.yml lint_runner routing', () => {
   const ARM = '["self-hosted", "linux", "arm64"]';
   const lintRunner = (inputs) => runPickRunnerOutputs(inputs).lintRunner;
 
+  // The disposable-pool config and the CI selectors are one contract: a label
+  // rename on either side leaves every fork PR queued forever with no failed
+  // check to point at. Pin them together (#16551 review).
+  it('publishes exactly the labels the disposable-pool config registers', () => {
+    const config = JSON.parse(
+      readFileSync(
+        join(
+          workflowsDir,
+          '..',
+          '..',
+          'scripts',
+          'ci',
+          'ephemeral-runner',
+          'config.example.json',
+        ),
+        'utf8',
+      ),
+    );
+    const fork = runPickRunnerOutputs({
+      eventName: 'pull_request',
+      sameRepo: false,
+      assoc: 'NONE',
+    });
+    assert.deepEqual(JSON.parse(fork.prTestRunner), config.labels);
+    assert.deepEqual(JSON.parse(fork.lintRunner), config.labels);
+  });
+
   it('routes untrusted fork lint to the disposable pool without variables', () => {
     for (const sameRepo of [true, false]) {
       for (const assoc of ASSOCIATIONS) {

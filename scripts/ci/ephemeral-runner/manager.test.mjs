@@ -24,7 +24,7 @@ async function fixture(t) {
     image: `image@sha256:${'a'.repeat(64)}`,
     slots: 1,
     runnerGroupId: 1,
-    labels: ['self-hosted', 'linux', 'ARM64', 'trial-only'],
+    labels: ['self-hosted', 'ecs-qwen-ephemeral'],
     cpus: 1,
     memory: '1g',
     pidsLimit: 100,
