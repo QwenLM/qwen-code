@@ -951,7 +951,9 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         String id = BrokerValues.requirePathSafe(BrokerValues.requireId(harnessSessionId, "harnessSessionId"), "harnessSessionId");
         return mapFailure(safeStage(() -> sessionResolver.resolveCapabilities(id, authority)),
                 "runtime_scope_resolution_failed", "Runtime scope resolution failed").thenApply(value -> {
-                    if (value == null || value.scope() == null) throw unavailable("runtime_scope_resolution_failed", "Runtime scope resolver returned no scope");
+                    if (value == null || value.scope() == null) {
+                        throw unavailable("runtime_scope_resolution_failed", "Runtime scope resolver returned no scope");
+                    }
                     return value;
                 });
     }
