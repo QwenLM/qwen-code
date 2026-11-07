@@ -4379,6 +4379,9 @@ describe('GithubChannel', () => {
         makeConfig(overrides),
         makeBridge(),
       );
+      // connect() ends in startPollLoop(); seed the first poll so a successful
+      // connect does not print a backoff line from an unseeded paginate mock.
+      mockOctokit.paginate.mockResolvedValueOnce([]);
       return channel.connect();
     }
 
@@ -4479,6 +4482,46 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(1);
     });
 
+    it('matches a mixed-case notification repository against a lowercase entry', async () => {
+      // The mirror of the config-side case above: GitHub returns the canonical
+      // casing in subject URLs, so the comparison site must lowercase chatId.
+      // Deleting chatId.toLowerCase() there leaves the config-side case green
+      // and fails this one.
+      await initWithoutLoop({
+        repoFilterMode: 'blocklist',
+        repoFilter: ['owner/repo'],
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([
+        notificationFor('Owner/Repo', 42),
+      ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(
+        readChannelEvents().filter(
+          (event) => event['reason'] === 'repo_filter',
+        ),
+      ).toEqual([expect.objectContaining({ repository: 'Owner/Repo' })]);
+    });
+
+    it('trims entries and drops empty ones when normalizing the list', async () => {
+      await initWithoutLoop({
+        repoFilterMode: 'allowlist',
+        repoFilter: [' Owner/Repo ', '', 'owner/repo'],
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([notificationFor('owner/repo', 42)])
+        .mockResolvedValueOnce([makeComment({ body: 'hello @test-bot' })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(
+        readChannelEvents().some((event) => event['reason'] === 'repo_filter'),
+      ).toBe(false);
+    });
+
     it('processes every repository when the mode is off or unset', async () => {
       await initWithoutLoop({
         repoFilterMode: 'off',
@@ -4551,6 +4594,39 @@ describe('GithubChannel', () => {
         }),
       );
       expect(events.at(-1)).not.toHaveProperty('repository');
+    });
+
+    it('resets the journal budget on the next poll', async () => {
+      // The counters live in the poll body, so each busy poll journals its own
+      // 20 individual rows plus one counted row. Hoisting them to instance
+      // fields would yield 22 rows total and fail here.
+      await initWithoutLoop({
+        repoFilterMode: 'allowlist',
+        repoFilter: ['owner/repo'],
+      });
+      const flood = Array.from({ length: 25 }, (_, index) =>
+        notificationFor(`noise/repo-${index}`, 100 + index),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce(flood)
+        .mockResolvedValueOnce(flood);
+
+      await pollOnce();
+      await pollOnce();
+
+      const events = readChannelEvents().filter(
+        (event) => event['reason'] === 'repo_filter',
+      );
+      expect(events).toHaveLength(42);
+      const counted = events.filter(
+        (event) =>
+          (event['detail'] as { filtered?: number } | undefined)?.filtered !==
+          undefined,
+      );
+      expect(counted).toHaveLength(2);
+      expect(
+        counted.every((event) => event['detail']?.['filtered'] === 5),
+      ).toBe(true);
     });
 
     it('journals repo_filter, not reason_filter, when both gates exclude a notification', async () => {
@@ -15433,6 +15509,36 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
         'CI failed on head sha-1',
       );
+    });
+
+    it('filters notifications about a bound PR instead of delivering them', async () => {
+      // The complement of the watch-bypass case: bound-session routing must
+      // not exempt a notification from the repository filter. Moving bound
+      // delivery above the filter (or early-continuing bound threads into it)
+      // delivers this prompt and fails here.
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          repoFilterMode: 'blocklist',
+          repoFilter: ['owner/repo'],
+        },
+        { boundSessions },
+      );
+      mockNotificationsOnce([makeNotification({ reason: 'mention' })]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(
+        readChannelEvents().filter(
+          (event) => event['reason'] === 'repo_filter',
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          repository: 'owner/repo',
+          outcome: 'skipped',
+        }),
+      ]);
     });
 
     it('fires ci_failure once per head and not again for the same head', async () => {

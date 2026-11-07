@@ -2998,9 +2998,46 @@ describe('GitHub repository event filter', () => {
     it('shortens pasted GitHub web URLs to owner/repo', () => {
       expect(
         normalizeRepositoryFilterInput(
-          'https://github.com/Octo/Repo, https://github.com/Octo/Repo/pull/123, https://ghe.example.com/octo/repo.git/, octo/repo',
+          'https://github.com/Octo/Repo, https://github.com/Octo/Repo/pull/123, octo/repo',
         ),
       ).toBe('octo/repo');
+    });
+
+    it('shortens URLs on the GHES host derived from baseUrl', () => {
+      expect(
+        normalizeRepositoryFilterInput(
+          'https://ghe.example.com/octo/repo.git/',
+          'https://ghe.example.com/api/v3',
+        ),
+      ).toBe('octo/repo');
+      // Without the channel's baseUrl, the same host is not shortenable.
+      expect(
+        normalizeRepositoryFilterInput(
+          'https://ghe.example.com/octo/repo.git/',
+        ),
+      ).toBe('https://ghe.example.com/octo/repo.git/');
+    });
+
+    it('does not shorten URLs on hosts other than the channel GitHub host', () => {
+      // The structural half of the guard: the first two path segments of an
+      // arbitrary host are not a repository. Each of these once shortened to
+      // a plausible owner/repo that both validators accepted.
+      const foreign = [
+        'https://api.github.com/repos/octo/repo',
+        'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+        'https://gist.github.com/octocat/6cad1f0e5d3b2a9c',
+        'https://gitlab.com/group/project',
+      ];
+      for (const url of foreign) {
+        expect(normalizeRepositoryFilterInput(url)).toBe(url.toLowerCase());
+        expect(
+          validateChannelEditorDraft(
+            REPO_FILTER,
+            filterDraft('allowlist', url),
+            [],
+          ),
+        ).toEqual({ repoFilter: 'invalidRepoId' });
+      }
     });
 
     it('shortens URLs carrying a query or fragment', () => {
@@ -3014,19 +3051,21 @@ describe('GitHub repository event filter', () => {
     it('does not shorten non-repository GitHub URLs', () => {
       // Regression pins for the measured verify-round shapes: each of these
       // once shortened to a plausible-but-nonexistent owner/repo that both
-      // validators accepted — fatal under an allowlist. Removing a root from
-      // GITHUB_RESERVED_URL_PATHS must fail here, not only in the enumeration
-      // below (which iterates the set and cannot see a removal).
+      // validators accepted — fatal under an allowlist. The capitalized
+      // variant pins the guard's own lowercasing of the path root.
       const hostile = [
         'https://github.com/orgs/community',
+        'https://github.com/Orgs/community',
         'https://github.com/settings/profile',
         'https://github.com/apps/renovate',
         'https://github.com/features/copilot',
         'https://github.com/trending/typescript',
         'https://github.com/pricing/enterprise',
+        'https://github.com/advisories/GHSA-xxxx-xxxx-xxxx',
+        'https://github.com/copilot/c/abc123',
       ];
       for (const url of hostile) {
-        expect(normalizeRepositoryFilterInput(url)).toBe(url);
+        expect(normalizeRepositoryFilterInput(url)).toBe(url.toLowerCase());
         expect(
           validateChannelEditorDraft(
             REPO_FILTER,
@@ -3035,6 +3074,61 @@ describe('GitHub repository event filter', () => {
           ),
         ).toEqual({ repoFilter: 'invalidRepoId' });
       }
+    });
+
+    it('pins the whole reserved-area set, not a sample of it', () => {
+      // A snapshot over every member: removing any root from the set fails
+      // here, which the it.each enumeration alone cannot witness (it would
+      // simply run one case fewer).
+      expect([...GITHUB_RESERVED_URL_PATHS].sort()).toEqual(
+        [
+          'about',
+          'account',
+          'accounts',
+          'advisories',
+          'apps',
+          'codespaces',
+          'collections',
+          'contact',
+          'copilot',
+          'customer-stories',
+          'discussions',
+          'enterprise',
+          'events',
+          'explore',
+          'features',
+          'followers',
+          'following',
+          'issues',
+          'join',
+          'login',
+          'logout',
+          'marketplace',
+          'mobile',
+          'new',
+          'notifications',
+          'orgs',
+          'organizations',
+          'password_reset',
+          'premium-support',
+          'pricing',
+          'pulls',
+          'readme',
+          'search',
+          'security',
+          'sessions',
+          'settings',
+          'signup',
+          'site',
+          'sponsors',
+          'stars',
+          'team',
+          'topics',
+          'trending',
+          'users',
+          'watching',
+        ].sort(),
+      );
     });
 
     it.each([...GITHUB_RESERVED_URL_PATHS])(

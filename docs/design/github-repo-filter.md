@@ -107,18 +107,26 @@ Flat fields (not one object field) because the Web Shell editor cannot edit
 ### Editor (`web-shell`)
 
 - `channel-editor-state.ts`:
-  - `normalizeRepositoryFilterInput(value)` — splits on commas, trims,
-    lowercases, shortens GitHub web URLs (`https://github.com/owner/repo`,
-    with optional `.git`, trailing slash, query, fragment, or
-    `/pull/123`-style suffix) to `owner/repo`, deduplicates, joins with `, `.
-    A URL whose first path segment is a reserved GitHub area (`orgs`,
-    `apps`, `settings`, `trending`, ...) is not a repository URL: it passes
-    through unchanged so validation rejects it instead of silently filtering
-    a nonexistent repository. The area list is best-effort by construction —
-    a denylist of GitHub's top-level paths cannot be complete, and a future
-    area can reintroduce the hazard until it is added. An enumerated test
-    over the exported set keeps every listed root rejected, and explicit
-    regression pins fail if a known root is removed. Other non-URL entries
+  - `normalizeRepositoryFilterInput(value, baseUrl)` — splits on commas,
+    trims, lowercases, shortens GitHub web URLs
+    (`https://github.com/owner/repo`, with optional `.git`, trailing slash,
+    query, fragment, or `/pull/123`-style suffix) to `owner/repo`,
+    deduplicates, joins with `, `. Two gates decide whether a URL is
+    shortened at all. Structurally, only URLs whose host is the channel's
+    own GitHub host qualify: `github.com` plus the host derived from
+    `baseUrl` for GitHub Enterprise (an `api.` prefix is stripped); any
+    other host — `api.github.com`, `gist.github.com`, `gitlab.com`, an
+    arbitrary site — passes through unchanged for validation to reject,
+    which closes the "first two segments of any host" class. On a qualified
+    host, a URL whose first path segment is a reserved GitHub area (`orgs`,
+    `apps`, `settings`, `trending`, ...) still passes through unchanged so
+    validation rejects it instead of silently filtering a nonexistent
+    repository. That area list is best-effort by construction — a denylist
+    of GitHub's top-level paths cannot be complete, and a future area can
+    reintroduce the hazard until it is added. A snapshot assertion pins the
+    whole exported set (removing any member fails it), an enumerated test
+    keeps every listed root rejected, and explicit regression pins cover the
+    reported shapes including a capitalized root. Other non-URL entries
     pass through unchanged so validation can name them.
   - Validation (github only): when `repoFilterMode` is active, an empty list
     is `repoFilterRequired`; entries that still fail the repository regex

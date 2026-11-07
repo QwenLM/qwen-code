@@ -115,10 +115,12 @@ export const GITHUB_RESERVED_URL_PATHS = new Set([
   'about',
   'account',
   'accounts',
+  'advisories',
   'apps',
   'codespaces',
   'collections',
   'contact',
+  'copilot',
   'customer-stories',
   'discussions',
   'enterprise',
@@ -158,18 +160,57 @@ export const GITHUB_RESERVED_URL_PATHS = new Set([
 ]);
 
 /**
+ * The hosts whose two-segment paths may be repository URLs: github.com, plus
+ * the channel's own GitHub Enterprise host derived from baseUrl (the web host
+ * equals the API host there, and an `api.` prefix is stripped the same way
+ * githubEventWebUrl does). Any other host — api.github.com, gist.github.com,
+ * gitlab.com, an arbitrary site — passes through unchanged for validation to
+ * reject, which closes the "first two segments of any host" class structurally
+ * instead of through the area denylist.
+ */
+function repositoryUrlHosts(baseUrl: string): Set<string> {
+  const hosts = new Set(['github.com', 'www.github.com']);
+  const trimmed = baseUrl.trim();
+  if (trimmed) {
+    try {
+      const host = new URL(trimmed).hostname.toLowerCase();
+      hosts.add(host);
+      if (host.startsWith('api.')) hosts.add(host.slice(4));
+    } catch {
+      // A malformed baseUrl is its own field's validation error; only
+      // github.com remains shortenable here.
+    }
+  }
+  return hosts;
+}
+
+/**
  * Canonicalize the repository filter input: lowercase, deduplicate, and
  * shorten pasted GitHub web URLs (repository, PR, or issue pages, with an
- * optional `.git`, trailing path, query, or fragment) to `owner/repo`.
- * Entries that are not repository URLs pass through unchanged so validation
- * can name them. Shared by the validator and the save path so the two
- * cannot disagree.
+ * optional `.git`, trailing path, query, or fragment) to `owner/repo` — only
+ * when the URL's host is the channel's own GitHub host. Entries that are not
+ * repository URLs on that host pass through unchanged so validation can name
+ * them. Shared by the validator and the save path so the two cannot disagree.
  */
-export function normalizeRepositoryFilterInput(value: string): string {
+export function normalizeRepositoryFilterInput(
+  value: string,
+  baseUrl = '',
+): string {
+  const hosts = repositoryUrlHosts(baseUrl);
   const entries = toList(value).map((entry) => {
     const match = GITHUB_REPOSITORY_URL_RE.exec(entry);
+    let host = '';
+    if (match) {
+      try {
+        host = new URL(entry).hostname.toLowerCase();
+      } catch {
+        host = '';
+      }
+    }
     const shortened =
-      match && !GITHUB_RESERVED_URL_PATHS.has(match[1].toLowerCase())
+      match &&
+      hosts.has(host) &&
+      !GITHUB_RESERVED_URL_PATHS.has(match[1].toLowerCase())
         ? `${match[1]}/${match[2]}`
         : entry;
     return shortened.toLowerCase();
@@ -530,6 +571,7 @@ export function validateChannelEditorDraft(
     if (isRepoFilterActive(draft.values['repoFilterMode'])) {
       const normalized = normalizeRepositoryFilterInput(
         String(draft.values['repoFilter'] ?? ''),
+        String(draft.values['baseUrl'] ?? ''),
       );
       if (!normalized) {
         errors['repoFilter'] = 'repoFilterRequired';
@@ -960,6 +1002,7 @@ export function buildChannelUpsertRequest(
       config['repoFilter']
         .filter((entry): entry is string => typeof entry === 'string')
         .join(', '),
+      typeof config['baseUrl'] === 'string' ? config['baseUrl'] : '',
     );
     config['repoFilter'] = normalized ? normalized.split(', ') : [];
   }

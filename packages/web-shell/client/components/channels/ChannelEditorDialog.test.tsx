@@ -3891,12 +3891,111 @@ describe('GitHub repository event filter', () => {
     );
     expect(inputByLabel('Filtered Repositories')).toBeNull();
 
+    // The discriminating half: while Off the field is unmounted, so the
+    // assertion above cannot see a stale error. Switching back remounts it —
+    // the message must stay retired, which only happens if the mode switch
+    // re-derived the shown errors instead of leaving them in the map.
+    await selectOption(
+      'Repository Filter',
+      'Allowlist — only listed repositories',
+    );
+    expect(inputByLabel('Filtered Repositories')).not.toBeNull();
+    expect(document.body.textContent).not.toContain(
+      'List at least one repository, or set Repository Filter to Off.',
+    );
+    await selectOption('Repository Filter', 'Off — all repositories');
+
     await saveDialog();
     expect(onSave).toHaveBeenCalledTimes(1);
     const request = onSave.mock.calls[0]![1] as {
       config: Record<string, unknown>;
     };
     expect(request.config['repoFilterMode']).toBe('off');
+  });
+
+  it('retires the shown error when a valid entry is typed, without saving', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_REPO_FILTER,
+      instance: FILTER_INSTANCE,
+      onSave,
+    });
+
+    await selectOption(
+      'Repository Filter',
+      'Allowlist — only listed repositories',
+    );
+    await saveDialog();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'List at least one repository, or set Repository Filter to Off.',
+    );
+
+    await act(async () => {
+      setInputValue(inputByLabel('Filtered Repositories')!, 'octo/repo');
+    });
+    expect(document.body.textContent).not.toContain(
+      'List at least one repository, or set Repository Filter to Off.',
+    );
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('retires the format error when the entry is corrected, without saving', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_REPO_FILTER,
+      instance: FILTER_INSTANCE,
+      onSave,
+    });
+
+    await selectOption(
+      'Repository Filter',
+      'Blocklist — all except listed repositories',
+    );
+    await act(async () => {
+      setInputValue(inputByLabel('Filtered Repositories')!, 'not-a-repo');
+    });
+    await saveDialog();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'Enter each repository as owner/repo.',
+    );
+
+    await act(async () => {
+      setInputValue(inputByLabel('Filtered Repositories')!, 'octo/repo');
+    });
+    expect(document.body.textContent).not.toContain(
+      'Enter each repository as owner/repo.',
+    );
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('opens on a stored active mode with its list and re-saves both keys', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_REPO_FILTER,
+      instance: {
+        ...FILTER_INSTANCE,
+        config: {
+          ...FILTER_INSTANCE.config,
+          repoFilterMode: 'blocklist',
+          repoFilter: ['octo/repo'],
+        },
+      },
+      onSave,
+    });
+
+    const input = inputByLabel('Filtered Repositories');
+    expect(input).not.toBeNull();
+    expect(input).toHaveProperty('value', 'octo/repo');
+
+    await saveDialog();
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0]![1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['repoFilterMode']).toBe('blocklist');
+    expect(request.config['repoFilter']).toEqual(['octo/repo']);
   });
 
   it('rejects entries that are not owner/repo after normalization', async () => {

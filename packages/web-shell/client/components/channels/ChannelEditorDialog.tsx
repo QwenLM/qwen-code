@@ -727,9 +727,10 @@ export function ChannelEditorDialog({
     const value = draft.values[field.key];
     const error = errors[field.key];
     const update = (next: string | boolean) => {
-      if (field.key === 'repoFilterMode') {
-        // Switching to off hides the list; retire any error shown on it so
-        // no instruction lingers on a field the operator can no longer see.
+      if (field.key === 'repoFilterMode' || field.key === 'repoFilter') {
+        // Both remedies retire a shown error: switching to off hides the
+        // list, and typing a valid entry satisfies the instruction. Submit
+        // stays the only site that populates errors.
         refreshErrors({ ...draft.values, [field.key]: next });
       }
       setDraft((current) => ({
