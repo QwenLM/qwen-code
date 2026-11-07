@@ -65,6 +65,47 @@ function renderWithRules(
   return { ...rendered, setValue };
 }
 
+/**
+ * Send a keypress, retrying it until the frame shows the expected result.
+ *
+ * The dialog subscribes to keypresses in an effect, so a write that arrives
+ * before that effect runs is dropped. Waiting on a rendered marker cannot
+ * detect that: the synthetic Add row carries the cursor from the very first
+ * frame, before any rule is listed, and a screen that merely exists is not
+ * evidence the keypress arrived. Retrying the write is the only signal tied to
+ * the subscription itself.
+ *
+ * One write per retry, spaced by a full poll interval: a second keypress while
+ * the first is still being dispatched moves the cursor twice and skips the row
+ * the caller asked for.
+ */
+async function pressUntil(
+  stdin: { write: (data: string) => unknown },
+  lastFrame: () => string | undefined,
+  keys: string,
+  expectText: string,
+  budget = 40,
+): Promise<void> {
+  for (let attempt = 0; attempt < budget; attempt += 1) {
+    stdin.write(keys);
+    try {
+      await vi.waitFor(() => expect(lastFrame() ?? '').toContain(expectText), {
+        timeout: 100,
+        interval: 10,
+      });
+      return;
+    } catch {
+      // The keypress was dropped before the subscription existed; retry.
+    }
+  }
+  throw new Error(
+    `keypress ${JSON.stringify(keys)} never produced ${expectText}`,
+  );
+}
+
+const DOWN = '\u001B[B';
+const ENTER = '\r';
+
 describe('PermissionsDialog', () => {
   it('marks an unparsable rule and leaves a valid one unmarked', async () => {
     const { lastFrame } = renderWithRules([
@@ -94,17 +135,8 @@ describe('PermissionsDialog', () => {
     await vi.waitFor(() =>
       expect(lastFrame() ?? '').toContain('Bash(docker *)'),
     );
-    await vi.waitFor(() =>
-      expect(lastFrame() ?? '').toContain('› 1. Add a new rule'),
-    );
-    stdin.write('\u001B[B'); // Down to the first rule
-    await vi.waitFor(() =>
-      expect(lastFrame() ?? '').toContain('› 2. Bash(docker *)'),
-    );
-    stdin.write('\r');
-    await vi.waitFor(() =>
-      expect(lastFrame() ?? '').toContain('Delete allow rule?'),
-    );
+    await pressUntil(stdin, lastFrame, DOWN, '› 2. Bash(docker *)');
+    await pressUntil(stdin, lastFrame, ENTER, 'Delete allow rule?');
     stdin.write('\r');
     await vi.waitFor(() =>
       expect(setValue).toHaveBeenCalledWith('User', 'permissions.allow', []),
@@ -123,17 +155,8 @@ describe('PermissionsDialog', () => {
     await vi.waitFor(() =>
       expect(lastFrame() ?? '').toContain('Bash(docker *)'),
     );
-    await vi.waitFor(() =>
-      expect(lastFrame() ?? '').toContain('› 1. Add a new rule'),
-    );
-    stdin.write('\u001B[B');
-    await vi.waitFor(() =>
-      expect(lastFrame() ?? '').toContain('› 2. Bash(docker *)'),
-    );
-    stdin.write('\r');
-    await vi.waitFor(() =>
-      expect(lastFrame() ?? '').toContain('Delete allow rule?'),
-    );
+    await pressUntil(stdin, lastFrame, DOWN, '› 2. Bash(docker *)');
+    await pressUntil(stdin, lastFrame, ENTER, 'Delete allow rule?');
     stdin.write('\r');
     await vi.waitFor(() =>
       expect(setValue).toHaveBeenCalledWith('User', 'permissions.allow', [
@@ -155,17 +178,8 @@ describe('PermissionsDialog', () => {
     await vi.waitFor(() =>
       expect(lastFrame() ?? '').toContain('Bash(docker *)'),
     );
-    await vi.waitFor(() =>
-      expect(lastFrame() ?? '').toContain('› 1. Add a new rule'),
-    );
-    stdin.write('\u001B[B');
-    await vi.waitFor(() =>
-      expect(lastFrame() ?? '').toContain('› 2. Bash(docker *)'),
-    );
-    stdin.write('\r');
-    await vi.waitFor(() =>
-      expect(lastFrame() ?? '').toContain('Delete allow rule?'),
-    );
+    await pressUntil(stdin, lastFrame, DOWN, '› 2. Bash(docker *)');
+    await pressUntil(stdin, lastFrame, ENTER, 'Delete allow rule?');
     stdin.write('\r');
     await vi.waitFor(() =>
       expect(setValue).toHaveBeenCalledWith('User', 'permissions.allow', [
@@ -185,17 +199,8 @@ describe('PermissionsDialog', () => {
     await vi.waitFor(() =>
       expect(lastFrame() ?? '').toContain('Bash(docker *)'),
     );
-    await vi.waitFor(() =>
-      expect(lastFrame() ?? '').toContain('› 1. Add a new rule'),
-    );
-    stdin.write('\u001B[B');
-    await vi.waitFor(() =>
-      expect(lastFrame() ?? '').toContain('› 2. Bash(docker *)'),
-    );
-    stdin.write('\r');
-    await vi.waitFor(() =>
-      expect(lastFrame() ?? '').toContain('Delete allow rule?'),
-    );
+    await pressUntil(stdin, lastFrame, DOWN, '› 2. Bash(docker *)');
+    await pressUntil(stdin, lastFrame, ENTER, 'Delete allow rule?');
     stdin.write('\r');
     await vi.waitFor(() =>
       expect(setValue).toHaveBeenCalledWith(
