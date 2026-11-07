@@ -497,6 +497,7 @@ describe('SessionService', () => {
       schemaVersion: 1,
       pid: 123,
       procStart: null,
+      pidNs: null,
       sessionId,
       workDir,
       hostname: 'host',

@@ -323,6 +323,76 @@ describe('readRuntimeStatus', () => {
     });
   });
 
+  it('round-trips the pid_ns field', async () => {
+    await writeRuntimeStatus(targetPath(), {
+      sessionId: 'abc',
+      workDir: '/w',
+      pid: 99,
+      procStart: 'boot-id:test',
+      pidNs: 4026531836,
+    });
+    const status = await readRuntimeStatus(targetPath());
+    expect(status!.pidNs).toBe(4026531836);
+  });
+
+  it('reads a legacy record without pid_ns as null', async () => {
+    await writeFile(
+      targetPath(),
+      JSON.stringify({
+        schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
+        pid: 1,
+        proc_start: 'boot-id:test',
+        session_id: 'abc',
+        work_dir: '/w',
+        hostname: 'h',
+        started_at: 0,
+        qwen_version: null,
+      }),
+      'utf-8',
+    );
+    await expect(readRuntimeStatus(targetPath())).resolves.toMatchObject({
+      pidNs: null,
+    });
+  });
+
+  it('returns null when pid_ns has the wrong type', async () => {
+    await writeFile(
+      targetPath(),
+      JSON.stringify({
+        schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
+        pid: 1,
+        pid_ns: '4026531836',
+        session_id: 'abc',
+        work_dir: '/w',
+        hostname: 'h',
+        started_at: 0,
+        qwen_version: null,
+      }),
+      'utf-8',
+    );
+    expect(await readRuntimeStatus(targetPath())).toBeNull();
+  });
+
+  it('returns null when proc_start is an empty string', async () => {
+    // An empty token would always mismatch the current token and judge a live
+    // session dead; it must be rejected as malformed instead.
+    await writeFile(
+      targetPath(),
+      JSON.stringify({
+        schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
+        pid: 1,
+        proc_start: '',
+        session_id: 'abc',
+        work_dir: '/w',
+        hostname: 'h',
+        started_at: 0,
+        qwen_version: null,
+      }),
+      'utf-8',
+    );
+    expect(await readRuntimeStatus(targetPath())).toBeNull();
+  });
+
   it('returns null on invalid UTF-8 bytes', async () => {
     // Truncated multi-byte sequence
     await writeFile(targetPath(), Buffer.from([0xff, 0xfe, 0x20, 0x67]));

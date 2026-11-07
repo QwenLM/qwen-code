@@ -14,7 +14,11 @@ import { Storage } from '../config/storage.js';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
-import { isZombie, readProcStartToken } from '../utils/process-liveness.js';
+import {
+  isZombie,
+  readPidNamespaceId,
+  readProcStartToken,
+} from '../utils/process-liveness.js';
 import {
   readWorktreeSessionMarker,
   writeWorktreeSessionMarker,
@@ -656,11 +660,24 @@ async function getRuntimeStatusPathState(
     return 'unknown';
   }
 
+  // A PID number and its proc_start token only identify a process within the
+  // namespace that assigned them. A record written in a different PID
+  // namespace (host + devcontainer with a mounted home, sibling CI containers)
+  // names a PID that resolves to nothing — or to a different process — here,
+  // so comparing proc_start would judge a live foreign session 'dead' and let
+  // its worktree be taken over or deleted. 'unknown' is the safe direction:
+  // isSessionRuntimeActive treats it as active. Records without pid_ns (older
+  // writers, non-Linux) fall through to the proc_start comparison below.
+  if (status.pidNs !== null && status.pidNs !== readPidNamespaceId()) {
+    return 'unknown';
+  }
+
   const procStartMatches = (): boolean => {
     if (status.procStart === null) return true;
     const current = readProcStartToken(status.pid);
     // An unreadable token degrades to plain liveness rather than declaring a
-    // live session dead; only a readable mismatch proves the PID was reused.
+    // live session dead; within the same PID namespace (guaranteed by the
+    // pid_ns guard above), only a readable mismatch proves the PID was reused.
     return current === null || current === status.procStart;
   };
 

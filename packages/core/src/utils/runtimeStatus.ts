@@ -39,7 +39,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { atomicWriteJSON } from './atomicFileWrite.js';
-import { readProcStartToken } from './process-liveness.js';
+import { readPidNamespaceId, readProcStartToken } from './process-liveness.js';
 
 export const RUNTIME_STATUS_SCHEMA_VERSION = 1;
 
@@ -49,6 +49,14 @@ export interface RuntimeStatus {
   pid: number;
   /** Identity of the recorded PID; null when the platform has no token. */
   procStart: string | null;
+  /**
+   * PID-namespace identity of the writer (see `readPidNamespaceId`); null
+   * when the platform does not expose it or the record predates the field.
+   * A PID number and its `procStart` token only identify a process within
+   * the namespace that assigned them, so a reader in a different namespace
+   * must not judge this record by its own `/proc`.
+   */
+  pidNs: number | null;
   sessionId: string;
   workDir: string;
   hostname: string;
@@ -66,6 +74,7 @@ interface RuntimeStatusOnDisk {
   schema_version: number;
   pid: number;
   proc_start: string | null;
+  pid_ns: number | null;
   session_id: string;
   work_dir: string;
   hostname: string;
@@ -83,6 +92,11 @@ export interface WriteRuntimeStatusFields {
    * override it; `null` means no identity token is available.
    */
   procStart?: string | null;
+  /**
+   * Defaults to the local PID-namespace id. Tests and trusted records can
+   * override it; `null` means no namespace identity is available.
+   */
+  pidNs?: number | null;
   /** Defaults to `null`. Pass the value of `getCliVersion()`. */
   qwenVersion?: string | null;
 }
@@ -109,10 +123,22 @@ export async function writeRuntimeStatus(
       procStart = readProcStartToken(pid);
     }
   }
+  let pidNs = fields.pidNs;
+  if (pidNs === undefined) {
+    pidNs = readPidNamespaceId();
+    // Same transient fd-pressure window as the start token above; one retry
+    // mirrors the sibling writers. A null namespace is tolerated here (unlike
+    // the session registry): runtime.json is never swept by this writer, and
+    // readers fall back to the proc_start comparison for namespace-less records.
+    if (pidNs === null && process.platform === 'linux') {
+      pidNs = readPidNamespaceId();
+    }
+  }
   const payload: RuntimeStatusOnDisk = {
     schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
     pid,
     proc_start: procStart,
+    pid_ns: pidNs,
     session_id: fields.sessionId,
     work_dir: fields.workDir,
     hostname: os.hostname(),
@@ -180,6 +206,7 @@ export async function readRuntimeStatus(
   const schemaVersion = obj['schema_version'];
   const pid = obj['pid'];
   const procStart = obj['proc_start'];
+  const pidNs = obj['pid_ns'];
   const sessionId = obj['session_id'];
   const workDir = obj['work_dir'];
   const hostname = obj['hostname'];
@@ -188,11 +215,12 @@ export async function readRuntimeStatus(
 
   if (!isFiniteInteger(schemaVersion)) return null;
   if (!isFiniteInteger(pid)) return null;
-  if (
-    procStart !== undefined &&
-    procStart !== null &&
-    typeof procStart !== 'string'
-  ) {
+  if (procStart !== undefined && procStart !== null) {
+    // An empty token is not a readable identity: it would always mismatch the
+    // current token and judge a live session dead. Treat it as malformed.
+    if (typeof procStart !== 'string' || procStart.length === 0) return null;
+  }
+  if (pidNs !== undefined && pidNs !== null && !isFiniteInteger(pidNs)) {
     return null;
   }
   if (typeof sessionId !== 'string') return null;
@@ -207,6 +235,7 @@ export async function readRuntimeStatus(
     schemaVersion,
     pid,
     procStart: procStart ?? null,
+    pidNs: pidNs ?? null,
     sessionId,
     workDir,
     hostname,

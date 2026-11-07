@@ -610,6 +610,8 @@ describe('isSessionRuntimeActive', () => {
     killImpl?: () => never,
     procStart: string | null = null,
     tokenUnreadable = false,
+    recordPidNs: number | null | undefined = undefined,
+    localNsIno: number | null = 100,
   ) {
     const repoRoot = path.join(tmpDir, `repo-${state}-${pid}`);
     await fs.mkdir(repoRoot, { recursive: true });
@@ -639,7 +641,21 @@ describe('isSessionRuntimeActive', () => {
           actual.readFileSync as (a: unknown, ...r: unknown[]) => unknown
         )(p, ...rest);
       }) as typeof actual.readFileSync;
-      return { ...actual, readFileSync };
+      // readPidNamespaceId stats /proc/self/ns/pid; pin the local namespace so
+      // the cross-namespace guard is deterministic on every CI platform.
+      const statSync = ((p: unknown, ...rest: unknown[]) => {
+        if (String(p) === '/proc/self/ns/pid') {
+          if (localNsIno === null) {
+            throw Object.assign(new Error('no such file'), { code: 'ENOENT' });
+          }
+          return { ino: localNsIno };
+        }
+        return (actual.statSync as (a: unknown, ...r: unknown[]) => unknown)(
+          p,
+          ...rest,
+        );
+      }) as typeof actual.statSync;
+      return { ...actual, readFileSync, statSync };
     });
     vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     if (killImpl) {
@@ -666,6 +682,7 @@ describe('isSessionRuntimeActive', () => {
         workDir: repoRoot,
         pid,
         procStart,
+        pidNs: recordPidNs,
       },
     );
 
@@ -697,11 +714,26 @@ describe('isSessionRuntimeActive', () => {
   });
 
   it('reports a recycled pid as inactive when proc_start differs', async () => {
+    // Same boot prefix, different start ticks: a same-boot PID reuse. Using a
+    // different boot here would let a ticks-only comparison pass too, so the
+    // boot-id segment of the token must be pinned by a separate case below.
     const probe = await probeWithFakeProc(
       process.pid,
       'S',
       undefined,
-      'previous-boot:1234',
+      'deadbeef:9999',
+    );
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+    await expect(probe.isActive()).resolves.toBe(false);
+  });
+
+  it('reports a cross-boot pid as inactive when the boot prefix differs', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'previous-boot:1000',
     );
 
     await expect(probe.liveness()).resolves.toBe('inactive');
@@ -718,6 +750,70 @@ describe('isSessionRuntimeActive', () => {
 
     await expect(probe.liveness()).resolves.toBe('active');
     await expect(probe.isActive()).resolves.toBe(true);
+  });
+
+  it('treats a record from a different PID namespace as unknown, not dead', async () => {
+    // The recorded token would match if compared, but the record was written
+    // in namespace 200 while the reader lives in 100: its PID names a different
+    // process here, so the guard must short-circuit to the safe 'unknown'
+    // (active) instead of judging the foreign session dead (#16128 review).
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:1000',
+      false,
+      200,
+      100,
+    );
+
+    await expect(probe.liveness()).resolves.toBe('unknown');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
+  it('treats a namespaced record as unknown when the local namespace is unreadable', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:1000',
+      false,
+      200,
+      null,
+    );
+
+    await expect(probe.liveness()).resolves.toBe('unknown');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
+  it('still judges a same-namespace recycled pid as inactive', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:9999',
+      false,
+      100,
+      100,
+    );
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+    await expect(probe.isActive()).resolves.toBe(false);
+  });
+
+  it('falls back to proc_start for a legacy record without pid_ns', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:9999',
+      false,
+      null,
+      100,
+    );
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+    await expect(probe.isActive()).resolves.toBe(false);
   });
 
   it('degrades to plain liveness when the identity token is unreadable', async () => {

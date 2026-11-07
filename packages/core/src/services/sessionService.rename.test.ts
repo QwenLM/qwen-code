@@ -394,6 +394,7 @@ describe('SessionService - rename and custom title', () => {
         schemaVersion: 1,
         pid: 123,
         procStart: null,
+        pidNs: null,
         sessionId: sessionIdA,
         workDir: '/test/project/root',
         hostname: 'host',
