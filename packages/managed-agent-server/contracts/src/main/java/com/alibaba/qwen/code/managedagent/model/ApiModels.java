@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.model;
 
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin;
+import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -290,7 +291,7 @@ public final class ApiModels {
                     compactionRevision, contextCompressionOperationId, value, worktree, memoryStoreId, ownerOnly);
         }
 
-        public PublicSession withWorktree(com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Descriptor value) {
+        public PublicSession withWorktree(SessionWorktreeStore.Descriptor value) {
             return new PublicSession(id, object, agentId, agentRevision,
                     agentDefinitionDigest, status, createdAt, updatedAt,
                     metadata, activeTurn, lastEventId, replayFloorSequence,
@@ -723,7 +724,7 @@ public final class ApiModels {
             Long approvalRevision, String initialApprovalMode, boolean planMode, boolean planModeSupported,
             Long compactionRevision, String contextCompressionOperationId,
             WebShellLifecycleOperation lifecycleOperation, SessionRecovery recovery,
-            com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Descriptor worktree) {
+            SessionWorktreeStore.Descriptor worktree) {
         public WebShellSession(String sessionId, String title, String agentId, String status,
                 long createdAt, long updatedAt, WebShellTurn activeTurn, Object environment,
                 long lastSequence, WebShellWorkspace workspace, WebShellSessionCapabilities capabilities,
@@ -786,7 +787,7 @@ public final class ApiModels {
                     lifecycleOperation, value, worktree);
         }
 
-        public WebShellSession withWorktree(com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Descriptor value) {
+        public WebShellSession withWorktree(SessionWorktreeStore.Descriptor value) {
             return new WebShellSession(sessionId, title, agentId, status,
                     createdAt, updatedAt, activeTurn, environment, lastSequence,
                     workspace, capabilities, approvalMode, modelContext,

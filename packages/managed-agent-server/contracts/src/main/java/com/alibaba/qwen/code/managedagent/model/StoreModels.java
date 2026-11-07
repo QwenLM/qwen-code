@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.model;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.EventIdentity;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
@@ -138,7 +139,7 @@ public final class StoreModels {
             }
             try {
                 return Arrays.equals(actorKey,
-                        com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+                        ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
             } catch (IllegalArgumentException error) {
                 return false;
             }

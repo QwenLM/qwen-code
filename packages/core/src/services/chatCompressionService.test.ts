@@ -40,6 +40,8 @@ import * as slimmingModule from './compactionInputSlimming.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { estimateContentTokens } from './tokenEstimation.js';
 import { getAutoMemorySnapshot } from '../memory/request-context.js';
+import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../memory/request-context.js';
+import { createUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
 import {
   content,
@@ -1570,6 +1572,38 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expectCacheLog(config, true, true);
   });
 
+  it('reorders injected context in the shared payload to keep the warmed prefix', async () => {
+    const hookBlock = createUserPromptSubmitContextPart('hook context');
+    const catalogSnapshot = {
+      text: 'catalog snapshot',
+      partMetadata: { [AUTO_MEMORY_SNAPSHOT_METADATA]: true },
+    };
+    const entry: Content = {
+      role: 'user',
+      parts: [
+        { text: '<system-reminder>turn reminder</system-reminder>' },
+        { text: 'do the thing' },
+        hookBlock,
+        catalogSnapshot,
+      ],
+    };
+    const history: Content[] = [entry, modelText('ok')];
+    const { generateText } = await expectShared({ history });
+
+    const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
+    // The main request sends [reminder, hook, catalog, prompt]; the shared
+    // payload must match or the compaction side-query re-prefills the history.
+    expect(request.contents[0]?.parts).toEqual([
+      { text: '<system-reminder>turn reminder</system-reminder>' },
+      hookBlock,
+      catalogSnapshot,
+      { text: 'do the thing' },
+    ]);
+    // The stored order stays put: the cold path and the post-compact image
+    // restore read `sideQueryHistory` itself.
+    expect(entry.parts?.[1]).toEqual({ text: 'do the thing' });
+  });
+
   it('preserves per-request tool overrides used by subagent turns', async () => {
     const { generateText, run } = makeFixture();
     const requestTools = [
@@ -1697,7 +1731,11 @@ describe('ChatCompressionService.compress cache sharing', () => {
       );
       expect(request.contents.slice(0, -1)).toEqual([
         ...history,
-        expectedPending,
+        // The shared payload follows the main request's per-entry order; the
+        // cold path keeps the stored shape.
+        cacheSharing
+          ? content('user', response, ...(visible ? [snapshot] : []), quoted)
+          : expectedPending,
       ]);
       expect(pendingUserMessage).toEqual(before);
       expect(raw.parts).toEqual([response, quoted, snapshot]);
