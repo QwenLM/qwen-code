@@ -158,7 +158,10 @@ import type {
   ChatRecordingFailureEvent,
 } from '../services/chatRecordingService.js';
 import type { ResumedSessionData } from '../services/sessionService.js';
-import { settleOrphanedShellStatusFiles } from '../services/backgroundShellRegistry.js';
+import {
+  settleOrphanedShellStatusFiles,
+  watchOrphanedShellStatusFiles,
+} from '../services/backgroundShellRegistry.js';
 import { GoalPersistenceUnavailableError } from '../goals/goal-runtime.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 import {
@@ -209,7 +212,8 @@ vi.mock('../services/backgroundShellRegistry.js', async (importOriginal) => ({
   ...(await importOriginal<
     typeof import('../services/backgroundShellRegistry.js')
   >()),
-  settleOrphanedShellStatusFiles: vi.fn(() => 0),
+  settleOrphanedShellStatusFiles: vi.fn(() => ({ settled: 0, alive: [] })),
+  watchOrphanedShellStatusFiles: vi.fn(() => vi.fn()),
 }));
 vi.mock('../memory/metadata-migration.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../memory/metadata-migration.js')>()),
@@ -3295,6 +3299,30 @@ describe('Server Config (config.ts)', () => {
       expect(settleOrphanedShellStatusFiles).toHaveBeenCalledWith(
         shellDir(config, 'other-session'),
       );
+    });
+
+    it('watches orphans still alive until it switches away or shuts down', async () => {
+      const orphan = { statusPath: '/tmp/shell-bg_1.status', pid: 4242 };
+      const stopFirst = vi.fn();
+      const stopSecond = vi.fn();
+      vi.mocked(watchOrphanedShellStatusFiles)
+        .mockClear()
+        .mockReturnValueOnce(stopFirst)
+        .mockReturnValueOnce(stopSecond);
+      const config = makeConfig({ sessionId: 'current-session' });
+      vi.mocked(settleOrphanedShellStatusFiles)
+        .mockReturnValueOnce({ settled: 0, alive: [orphan] })
+        .mockReturnValueOnce({ settled: 0, alive: [orphan] });
+
+      config.startNewSession('resumed-session');
+      expect(watchOrphanedShellStatusFiles).toHaveBeenCalledWith([orphan]);
+      config.startNewSession('resumed-session');
+      expect(stopFirst).not.toHaveBeenCalled();
+      config.startNewSession('another-session');
+      expect(stopFirst).toHaveBeenCalledOnce();
+
+      await config.shutdown();
+      expect(stopSecond).toHaveBeenCalledOnce();
     });
   });
 

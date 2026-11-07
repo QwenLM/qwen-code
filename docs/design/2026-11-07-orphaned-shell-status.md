@@ -54,7 +54,12 @@ positive integer that `isPidAlive` reports gone is rewritten with
 uses the same atomic, owner-only, no-follow options as `writeStatusFile()`.
 
 Left alone: other statuses, sidecars without a pid, unreadable or malformed
-files, and sidecars whose pid is alive.
+files, and sidecars whose pid is alive. The function returns the last kind, so
+the caller can watch them.
+
+`watchOrphanedShellStatusFiles(orphans)` checks those pids every two seconds and
+settles each sidecar the same way once its process is gone. Its timer does not
+keep the process alive, and it returns a function that stops it.
 
 ### B. When it runs
 
@@ -65,6 +70,11 @@ files, and sidecars whose pid is alive.
   restore);
 - in `startNewSession` when it switches to a different session id, which covers
   `/resume` inside a running CLI.
+
+When a sidecar's process is still alive at that point, the Config watches it
+until it exits, so a command that finishes after the resume is settled within
+the same session. Switching to another session or shutting down stops the
+watch.
 
 At those points this Config tracks none of that session's shells, and
 `BackgroundShellRegistry.reset()` may only run once no managed shell of the
@@ -105,6 +115,11 @@ the process ended without recording how it finished.
 - Unit tests for the settling function: a dead pid, a live pid, other statuses,
   no pid, malformed JSON, non-status files, a missing directory, and a real
   exited process through the default `isPidAlive`.
+- Watcher tests: a watched sidecar is settled once its process exits and not
+  after the watch is stopped; and, with a real child, a process alive at
+  takeover that exits later is settled with no second takeover.
+- `Config` test: orphans still alive are watched, and the watch stops on a
+  switch to another session and on shutdown.
 - `Config` tests: initialization settles the session it starts with; switching
   settles the new session; resuming the current one does not.
 - On Ubuntu 24.04 with Node 22: drive the bundled CLI with the repo's fake
@@ -116,7 +131,8 @@ the process ended without recording how it finished.
 
 - After the owning CLI is killed and its background command finishes, resuming
   the session turns the sidecar into `unknown` with its original fields.
-- A sidecar whose process is still running stays `running`.
+- A sidecar whose process is still running stays `running`, and becomes
+  `unknown` once that process exits while the resumed session is open.
 - Orderly shutdowns still write `cancelled`, as before.
 
 ## Open questions

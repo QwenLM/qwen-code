@@ -242,76 +242,140 @@ export function statusFilePathFor(outputFile: string): string {
     : `${outputFile}.status`;
 }
 
+/** How often a watched orphan's process is checked. */
+const ORPHANED_SHELL_POLL_MS = 2_000;
+
+/** A sidecar whose recorded process was still alive when it was checked. */
+export interface OrphanedShellStatusFile {
+  statusPath: string;
+  pid: number;
+}
+
+/**
+ * Reads one sidecar without following symlinks and settles it when it still
+ * says `running` although its recorded process is gone. Returns the pid when
+ * that process is still alive.
+ */
+function settleShellStatusFile(
+  statusPath: string,
+  isAlive: (pid: number) => boolean,
+): { settled: boolean; alivePid?: number } {
+  let payload: unknown;
+  let fd: number | undefined;
+  try {
+    fd = openSyncNoFollow(statusPath);
+    payload = JSON.parse(fs.readFileSync(fd, 'utf8'));
+  } catch (error) {
+    debugLogger.debug(
+      `skipping unreadable status sidecar ${statusPath}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return { settled: false };
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  if (
+    typeof payload !== 'object' ||
+    payload === null ||
+    Array.isArray(payload)
+  ) {
+    return { settled: false };
+  }
+  const record = payload as Record<string, unknown>;
+  const pid = record['pid'];
+  if (
+    record['status'] !== 'running' ||
+    typeof pid !== 'number' ||
+    !Number.isSafeInteger(pid) ||
+    pid <= 0
+  ) {
+    return { settled: false };
+  }
+  if (isAlive(pid)) return { settled: false, alivePid: pid };
+  atomicWriteFileSync(
+    statusPath,
+    JSON.stringify(
+      { ...record, status: 'unknown', updatedAt: new Date().toISOString() },
+      null,
+      2,
+    ),
+    { flush: false, mode: 0o600, forceMode: true, noFollow: true },
+  );
+  return { settled: true };
+}
+
 /**
  * Settles the status sidecars in `dir` that still say `running` although the
  * process they recorded is gone. Only the CLI that started a shell updates its
  * sidecar, so a CLI that died without shutting down leaves it `running` for
  * good (#15800). The outcome was never observed, so the status becomes
- * `unknown` and every other field is kept. A sidecar without a pid, or whose
- * pid is alive, is left alone: a reused pid can at worst keep it `running`.
+ * `unknown` and every other field is kept. A sidecar without a pid is left
+ * alone, and a reused pid can at worst keep it `running`.
  *
+ * Returns the sidecars whose process is still alive; nothing will update
+ * them when it exits unless {@link watchOrphanedShellStatusFiles} does.
  * Only call this for a session that no live process owns.
  */
 export function settleOrphanedShellStatusFiles(
   dir: string,
   isAlive: (pid: number) => boolean = isPidAlive,
-): number {
+): { settled: number; alive: OrphanedShellStatusFile[] } {
   let names: string[];
   try {
     names = fs.readdirSync(dir);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { settled: 0, alive: [] };
+    }
     throw error;
   }
   let settled = 0;
+  const alive: OrphanedShellStatusFile[] = [];
   for (const name of names) {
     if (!name.endsWith('.status')) continue;
     const statusPath = path.join(dir, name);
-    let payload: unknown;
-    let fd: number | undefined;
-    try {
-      fd = openSyncNoFollow(statusPath);
-      payload = JSON.parse(fs.readFileSync(fd, 'utf8'));
-    } catch (error) {
-      debugLogger.debug(
-        `skipping unreadable status sidecar ${statusPath}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      continue;
-    } finally {
-      if (fd !== undefined) fs.closeSync(fd);
+    const result = settleShellStatusFile(statusPath, isAlive);
+    if (result.settled) settled++;
+    if (result.alivePid !== undefined) {
+      alive.push({ statusPath, pid: result.alivePid });
     }
-    if (
-      typeof payload !== 'object' ||
-      payload === null ||
-      Array.isArray(payload)
-    ) {
-      continue;
-    }
-    const record = payload as Record<string, unknown>;
-    const pid = record['pid'];
-    if (
-      record['status'] !== 'running' ||
-      typeof pid !== 'number' ||
-      !Number.isSafeInteger(pid) ||
-      pid <= 0 ||
-      isAlive(pid)
-    ) {
-      continue;
-    }
-    atomicWriteFileSync(
-      statusPath,
-      JSON.stringify(
-        { ...record, status: 'unknown', updatedAt: new Date().toISOString() },
-        null,
-        2,
-      ),
-      { flush: false, mode: 0o600, forceMode: true, noFollow: true },
-    );
-    settled++;
   }
-  return settled;
+  return { settled, alive };
+}
+
+/**
+ * Keeps checking sidecars whose process outlived the CLI that started it and
+ * settles each one once that process exits. The timer does not keep the
+ * process alive. Returns a function that stops watching.
+ */
+export function watchOrphanedShellStatusFiles(
+  orphans: readonly OrphanedShellStatusFile[],
+  options: { intervalMs?: number; isAlive?: (pid: number) => boolean } = {},
+): () => void {
+  const isAlive = options.isAlive ?? isPidAlive;
+  const pending = new Map(
+    orphans.map((orphan) => [orphan.statusPath, orphan.pid]),
+  );
+  if (pending.size === 0) return () => {};
+  const timer = setInterval(() => {
+    for (const [statusPath, pid] of pending) {
+      if (isAlive(pid)) continue;
+      pending.delete(statusPath);
+      try {
+        settleShellStatusFile(statusPath, isAlive);
+      } catch (error) {
+        debugLogger.warn(
+          `could not settle orphaned status sidecar ${statusPath}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    if (pending.size === 0) clearInterval(timer);
+  }, options.intervalMs ?? ORPHANED_SHELL_POLL_MS);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 
 /** Fires when a new entry is registered. */

@@ -204,6 +204,7 @@ import { BackgroundAgentResumeService } from '../agents/background-agent-resume.
 import {
   BackgroundShellRegistry,
   settleOrphanedShellStatusFiles,
+  watchOrphanedShellStatusFiles,
 } from '../services/backgroundShellRegistry.js';
 import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
 import { TurnBudget } from '../core/turn-budget.js';
@@ -2955,6 +2956,7 @@ export class Config {
   private readonly monitorRegistry = new MonitorRegistry();
   private backgroundAgentResumeService?: BackgroundAgentResumeService;
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
+  private stopOrphanedShellWatch?: () => void;
   private readonly workflowRunRegistry = new WorkflowRunRegistry();
   // Derived Configs reach this one through the prototype, on purpose: a
   // workflow started inside a subagent measures against its session's turn.
@@ -6648,10 +6650,14 @@ export class Config {
   /**
    * Settles the status sidecars a previous process left `running` for this
    * session (#15800). This Config has just taken the session and tracks none of
-   * its shells yet. Shells of an execution environment may not run on this
-   * host, so their pids cannot be checked here.
+   * its shells yet. A sidecar whose process is still alive is watched until it
+   * exits, for as long as this Config holds the session. Shells of an
+   * execution environment may not run on this host, so their pids cannot be
+   * checked here.
    */
   private settleOrphanedBackgroundShells(): void {
+    this.stopOrphanedShellWatch?.();
+    this.stopOrphanedShellWatch = undefined;
     if (this.executionEnvironment) return;
     const dir = path.join(
       this.storage.getProjectTempDir(),
@@ -6659,11 +6665,14 @@ export class Config {
       this.sessionId,
     );
     try {
-      const settled = settleOrphanedShellStatusFiles(dir);
+      const { settled, alive } = settleOrphanedShellStatusFiles(dir);
       if (settled > 0) {
         this.debugLogger.debug(
           `Settled ${settled} orphaned background shell status file(s) in ${dir}`,
         );
+      }
+      if (alive.length > 0) {
+        this.stopOrphanedShellWatch = watchOrphanedShellStatusFiles(alive);
       }
     } catch (error) {
       this.debugLogger.warn(
@@ -8563,6 +8572,8 @@ export class Config {
         this.backgroundShellRegistry.abortAll();
         this.workflowRunRegistry.abortAll();
       }
+      this.stopOrphanedShellWatch?.();
+      this.stopOrphanedShellWatch = undefined;
     } catch (error) {
       resourceError = error;
       this.debugLogger.error('Error during Config shutdown:', error);
