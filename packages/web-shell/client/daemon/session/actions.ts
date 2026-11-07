@@ -1321,6 +1321,8 @@ export function createDaemonSessionActions({
         );
       }
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+      const localPrompt = { sessionId, startedAt: Date.now() };
+      setConnection((current) => ({ ...current, localPrompt }));
       setPromptStatus('waiting');
       const ctrl = new AbortController();
       activePromptsRef.current.set(sessionId, {
@@ -1528,6 +1530,12 @@ export function createDaemonSessionActions({
           'send_prompt',
         );
       } finally {
+        setConnection((current) => {
+          if (current.localPrompt !== localPrompt) return current;
+          const next = { ...current };
+          delete next.localPrompt;
+          return next;
+        });
         const active = activePromptsRef.current.get(sessionId);
         if (active?.controller === ctrl) {
           activePromptsRef.current.delete(sessionId);

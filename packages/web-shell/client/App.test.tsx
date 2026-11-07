@@ -12171,7 +12171,7 @@ function visibleRecapTexts(): string[] {
   );
 }
 
-async function triggerAutoRecap(): Promise<{
+async function triggerAutoRecap(supported = true): Promise<{
   recap: ReturnType<
     typeof deferred<{ sessionId: string; recap: string | null }>
   >;
@@ -12180,6 +12180,7 @@ async function triggerAutoRecap(): Promise<{
 }> {
   const recap = deferred<{ sessionId: string; recap: string | null }>();
   mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
+  mockConnection.capabilities.features = supported ? ['session_recap'] : [];
   testState.blocks = [{}, {}, {}, {}];
   let hidden = true;
   Object.defineProperty(document, 'hidden', {
@@ -12195,7 +12196,9 @@ async function triggerAutoRecap(): Promise<{
   now += 3 * 60 * 1000;
   hidden = false;
   act(() => document.dispatchEvent(new Event('visibilitychange')));
-  expect(mockSessionActions.recapSession).toHaveBeenCalledOnce();
+  expect(mockSessionActions.recapSession).toHaveBeenCalledTimes(
+    supported ? 1 : 0,
+  );
   return { recap, container, rerender };
 }
 
@@ -26872,6 +26875,11 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('does not request an automatic recap without the advertised capability', async () => {
+    await triggerAutoRecap(false);
+    expect(visibleRecapTexts()).toEqual([]);
+  });
+
   it('shows an automatic recap when the session remains active', async () => {
     const { recap } = await triggerAutoRecap();
     await act(async () => {
@@ -27036,6 +27044,7 @@ describe('App session callbacks', () => {
   });
 
   it('keeps only the newest automatic recap across away cycles', async () => {
+    mockConnection.capabilities.features = ['session_recap'];
     const first = deferred<{ sessionId: string; recap: string | null }>();
     const second = deferred<{ sessionId: string; recap: string | null }>();
     mockSessionActions.recapSession
@@ -27132,6 +27141,7 @@ describe('App session callbacks', () => {
   });
 
   it('does not strand the manual recap placeholder when a newer request supersedes it', async () => {
+    mockConnection.capabilities.features = ['session_recap'];
     const manual = deferred<{ sessionId: string; recap: string | null }>();
     const auto = deferred<{ sessionId: string; recap: string | null }>();
     mockSessionActions.recapSession
@@ -47866,6 +47876,33 @@ describe('App prompt send failure retry', () => {
     ).not.toBeNull();
   });
 
+  it('anchors a local send before the authoritative user echo arrives', async () => {
+    testState.messages = [
+      {
+        id: 'old-user',
+        role: 'user',
+        content: 'old question',
+        timestamp: 1000,
+      },
+    ];
+    testState.streamingState = 'waiting';
+    Object.assign(mockConnection, {
+      localPrompt: { sessionId: mockConnection.sessionId, startedAt: 9000 },
+    });
+    try {
+      const { container } = renderApp();
+      await flush();
+      expect(
+        container
+          .querySelector('[data-testid="streaming-status"]')
+          ?.getAttribute('data-started-at'),
+      ).toBe('9000');
+      expect(testState.latestMessageListProps?.activeTurnStartedAt).toBe(9000);
+    } finally {
+      Reflect.deleteProperty(mockConnection, 'localPrompt');
+    }
+  });
+
   it('shows processing only after retry admission and restarts its timer', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const firstSend = deferred<void>();
@@ -53689,4 +53726,94 @@ describe('Managed home integration', () => {
       expectSelectedTab('Extensions');
     },
   );
+});
+
+describe('upstream embedded transport reproduction', () => {
+  it('does not automatically recap when the transport omits session_recap', async () => {
+    mockConnection.capabilities = { qwenCodeVersion: 'test', features: [] };
+    mockSessionActions.recapSession.mockResolvedValue({
+      sessionId: 'session-1',
+      recap: null,
+    });
+    testState.blocks = [{}, {}, {}, {}];
+    let hidden = true;
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => hidden,
+    });
+    let now = 1;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    renderApp();
+    await flush();
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    now += 3 * 60 * 1000;
+    hidden = false;
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(mockSessionActions.recapSession).not.toHaveBeenCalled();
+  });
+
+  it('starts the current local clock before the authoritative user echo', async () => {
+    const pending = deferred<void>();
+    const now = Date.now();
+    testState.messages = [
+      {
+        id: 'previous-user',
+        role: 'user',
+        content: 'previous question',
+        timestamp: now - 3_600_000,
+      },
+    ];
+    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
+      Object.assign(mockConnection, {
+        localPrompt: {
+          sessionId: mockConnection.sessionId,
+          startedAt: Date.now(),
+        },
+      });
+      return pending.promise;
+    });
+    const { rerender } = renderApp();
+    await flush();
+    try {
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('new question');
+        await Promise.resolve();
+      });
+      await vi.waitFor(() =>
+        expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+          'new question',
+          expect.anything(),
+        ),
+      );
+      act(() => {
+        testState.streamingState = 'waiting';
+        rerender();
+      });
+      expect(
+        testState.latestMessageListProps?.activeTurnStartedAt,
+      ).toBeGreaterThanOrEqual(now);
+    } finally {
+      await act(async () => {
+        pending.resolve();
+        await pending.promise;
+      });
+      Reflect.deleteProperty(mockConnection, 'localPrompt');
+    }
+  });
+
+  it('preserves the original remote turn anchor when no local send exists', async () => {
+    testState.messages = [
+      {
+        id: 'remote-user',
+        role: 'user',
+        content: 'remote question',
+        timestamp: 1000,
+      },
+    ];
+    testState.streamingState = 'waiting';
+    renderApp();
+    await flush();
+    expect(testState.latestMessageListProps?.activeTurnStartedAt).toBe(1000);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
 });
