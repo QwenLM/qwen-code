@@ -201,7 +201,10 @@ import { MonitorRegistry } from '../services/monitorRegistry.js';
 import { normalizeImageGenerationBaseUrl } from '../services/image-generation-service.js';
 import { isImageGenerationCapable } from '../models/image-generation-capability.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
-import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
+import {
+  BackgroundShellRegistry,
+  settleOrphanedShellStatusFiles,
+} from '../services/backgroundShellRegistry.js';
 import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
 import { TurnBudget } from '../core/turn-budget.js';
 import {
@@ -4247,6 +4250,7 @@ export class Config {
       await this.bindSessionExecutionEngine();
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
+      this.settleOrphanedBackgroundShells();
       await this.initializeInternal(options);
       this.workflowModeReady = true;
       if (this.initialWorkflowMode !== undefined) {
@@ -6642,6 +6646,35 @@ export class Config {
   }
 
   /**
+   * Settles the status sidecars a previous process left `running` for this
+   * session (#15800). This Config has just taken the session and tracks none of
+   * its shells yet. Shells of an execution environment may not run on this
+   * host, so their pids cannot be checked here.
+   */
+  private settleOrphanedBackgroundShells(): void {
+    if (this.executionEnvironment) return;
+    const dir = path.join(
+      this.storage.getProjectTempDir(),
+      'background-shells',
+      this.sessionId,
+    );
+    try {
+      const settled = settleOrphanedShellStatusFiles(dir);
+      if (settled > 0) {
+        this.debugLogger.debug(
+          `Settled ${settled} orphaned background shell status file(s) in ${dir}`,
+        );
+      }
+    } catch (error) {
+      this.debugLogger.warn(
+        `Could not settle orphaned background shell status files in ${dir}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
    * Starts a new session and resets session-scoped services.
    */
   startNewSession(
@@ -6682,6 +6715,7 @@ export class Config {
       logSessionEnd(this);
     }
     this.sessionId = nextSessionId;
+    if (isSessionTransition) this.settleOrphanedBackgroundShells();
     // Unconditional: startNewSession is only called on the canonical Config
     // instance (the one that already claimed via sessionEnvClaimed), so this
     // correctly updates the env var to reflect the new active session.

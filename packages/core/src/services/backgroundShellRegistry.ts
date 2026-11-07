@@ -19,12 +19,14 @@
  */
 
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getInvocationContext } from '../utils/invocation-context.js';
 import { openSyncNoFollow } from '../utils/no-follow-open.js';
+import { isPidAlive } from '../utils/process-liveness.js';
 import {
   promptIdContext,
   todoWorkChainContext,
@@ -238,6 +240,78 @@ export function statusFilePathFor(outputFile: string): string {
   return outputFile.endsWith('.output')
     ? `${outputFile.slice(0, -'.output'.length)}.status`
     : `${outputFile}.status`;
+}
+
+/**
+ * Settles the status sidecars in `dir` that still say `running` although the
+ * process they recorded is gone. Only the CLI that started a shell updates its
+ * sidecar, so a CLI that died without shutting down leaves it `running` for
+ * good (#15800). The outcome was never observed, so the status becomes
+ * `unknown` and every other field is kept. A sidecar without a pid, or whose
+ * pid is alive, is left alone: a reused pid can at worst keep it `running`.
+ *
+ * Only call this for a session that no live process owns.
+ */
+export function settleOrphanedShellStatusFiles(
+  dir: string,
+  isAlive: (pid: number) => boolean = isPidAlive,
+): number {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+    throw error;
+  }
+  let settled = 0;
+  for (const name of names) {
+    if (!name.endsWith('.status')) continue;
+    const statusPath = path.join(dir, name);
+    let payload: unknown;
+    let fd: number | undefined;
+    try {
+      fd = openSyncNoFollow(statusPath);
+      payload = JSON.parse(fs.readFileSync(fd, 'utf8'));
+    } catch (error) {
+      debugLogger.debug(
+        `skipping unreadable status sidecar ${statusPath}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      continue;
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+    if (
+      typeof payload !== 'object' ||
+      payload === null ||
+      Array.isArray(payload)
+    ) {
+      continue;
+    }
+    const record = payload as Record<string, unknown>;
+    const pid = record['pid'];
+    if (
+      record['status'] !== 'running' ||
+      typeof pid !== 'number' ||
+      !Number.isSafeInteger(pid) ||
+      pid <= 0 ||
+      isAlive(pid)
+    ) {
+      continue;
+    }
+    atomicWriteFileSync(
+      statusPath,
+      JSON.stringify(
+        { ...record, status: 'unknown', updatedAt: new Date().toISOString() },
+        null,
+        2,
+      ),
+      { flush: false, mode: 0o600, forceMode: true, noFollow: true },
+    );
+    settled++;
+  }
+  return settled;
 }
 
 /** Fires when a new entry is registered. */

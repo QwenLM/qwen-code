@@ -16,6 +16,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -23,6 +24,7 @@ import {
   BackgroundShellRegistry,
   MAX_NOTIFICATION_OUTPUT_TAIL_BYTES,
   MAX_RETAINED_TERMINAL_SHELLS,
+  settleOrphanedShellStatusFiles,
   statusFilePathFor,
   type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
@@ -1051,6 +1053,73 @@ describe('BackgroundShellRegistry', () => {
       expect(() => reg.register(e)).not.toThrow();
       expect(() => reg.complete('a', 0, 2000)).not.toThrow();
     });
+  });
+});
+
+describe('settleOrphanedShellStatusFiles', () => {
+  let dir: string;
+  const running = {
+    id: 'bg_1',
+    status: 'running',
+    command: 'sleep 6',
+    cwd: '/work',
+    startTime: '2026-11-07T00:00:00.000Z',
+    updatedAt: '2026-11-07T00:00:00.000Z',
+    pid: 4242,
+  };
+  const write = (name: string, payload: unknown) =>
+    writeFileSync(
+      join(dir, name),
+      typeof payload === 'string' ? payload : JSON.stringify(payload),
+    );
+  const read = (name: string) =>
+    JSON.parse(readFileSync(join(dir, name), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'qwen-shell-status-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('settles a running sidecar whose process is gone and keeps its fields', () => {
+    write('shell-bg_1.status', running);
+    expect(settleOrphanedShellStatusFiles(dir, () => false)).toBe(1);
+    const { updatedAt, ...kept } = running;
+    const settled = read('shell-bg_1.status');
+    expect(settled).toMatchObject({ ...kept, status: 'unknown' });
+    expect(settled['updatedAt']).not.toBe(updatedAt);
+  });
+
+  it('keeps a running sidecar whose process is alive', () => {
+    write('shell-bg_1.status', running);
+    expect(settleOrphanedShellStatusFiles(dir, () => true)).toBe(0);
+    expect(read('shell-bg_1.status')).toEqual(running);
+  });
+
+  it('leaves settled, pid-less, unreadable and non-status files alone', () => {
+    const { pid: _pid, ...withoutPid } = running;
+    write('shell-done.status', { ...running, status: 'completed' });
+    write('shell-nopid.status', withoutPid);
+    write('shell-bad.status', '{not json');
+    write('shell-bg_1.output', 'output');
+    expect(settleOrphanedShellStatusFiles(dir, () => false)).toBe(0);
+    expect(read('shell-done.status')['status']).toBe('completed');
+    expect(read('shell-nopid.status')['status']).toBe('running');
+  });
+
+  it('returns 0 for a session without a sidecar directory', () => {
+    expect(settleOrphanedShellStatusFiles(join(dir, 'missing'))).toBe(0);
+  });
+
+  it('detects an exited process with the default liveness probe', () => {
+    const { pid } = spawnSync(process.execPath, ['-e', '']);
+    write('shell-bg_1.status', { ...running, pid });
+    expect(settleOrphanedShellStatusFiles(dir)).toBe(1);
+    expect(read('shell-bg_1.status')['status']).toBe('unknown');
   });
 });
 

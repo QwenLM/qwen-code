@@ -158,6 +158,7 @@ import type {
   ChatRecordingFailureEvent,
 } from '../services/chatRecordingService.js';
 import type { ResumedSessionData } from '../services/sessionService.js';
+import { settleOrphanedShellStatusFiles } from '../services/backgroundShellRegistry.js';
 import { GoalPersistenceUnavailableError } from '../goals/goal-runtime.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 import {
@@ -204,6 +205,12 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
+vi.mock('../services/backgroundShellRegistry.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('../services/backgroundShellRegistry.js')
+  >()),
+  settleOrphanedShellStatusFiles: vi.fn(() => 0),
+}));
 vi.mock('../memory/metadata-migration.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../memory/metadata-migration.js')>()),
   scanMemoryMetadataCorpusStatus: vi.fn().mockResolvedValue({
@@ -3262,6 +3269,34 @@ describe('Server Config (config.ts)', () => {
         );
       },
     ));
+
+  describe('orphaned background shell status files', () => {
+    const shellDir = (config: Config, sessionId: string) =>
+      path.join(
+        config.storage.getProjectTempDir(),
+        'background-shells',
+        sessionId,
+      );
+
+    it('settles the session it initializes', async () => {
+      vi.mocked(settleOrphanedShellStatusFiles).mockClear();
+      const config = await initConfig({ sessionId: 'resumed-session' });
+      expect(settleOrphanedShellStatusFiles).toHaveBeenCalledWith(
+        shellDir(config, 'resumed-session'),
+      );
+    });
+
+    it('settles a session it switches to, but not the one it is in', () => {
+      const config = makeConfig({ sessionId: 'current-session' });
+      vi.mocked(settleOrphanedShellStatusFiles).mockClear();
+      config.startNewSession('current-session');
+      expect(settleOrphanedShellStatusFiles).not.toHaveBeenCalled();
+      config.startNewSession('other-session');
+      expect(settleOrphanedShellStatusFiles).toHaveBeenCalledWith(
+        shellDir(config, 'other-session'),
+      );
+    });
+  });
 
   it('drops stale file history callbacks after session switch', () =>
     withFileHistory({}, async ({ config, trackedFile, record }) => {
