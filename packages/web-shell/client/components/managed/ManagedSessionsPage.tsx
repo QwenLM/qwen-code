@@ -111,6 +111,9 @@ interface PendingPrompt {
   draftText?: string;
   queued?: boolean;
   sessionId?: string;
+  // Captured at submit time: the owner can be absent from the filtered or
+  // paginated session page, so the page cannot re-derive it.
+  workspaceId?: string;
   input?: ManagedInputBlock[];
 }
 
@@ -162,6 +165,11 @@ function readPending(
     if (
       pending['draftText'] !== undefined &&
       typeof pending['draftText'] !== 'string'
+    )
+      return undefined;
+    if (
+      pending['workspaceId'] !== undefined &&
+      typeof pending['workspaceId'] !== 'string'
     )
       return undefined;
     return value as PendingPrompt;
@@ -479,7 +487,10 @@ function ManagedSessionsContent({
       observer?.disconnect();
       window.removeEventListener('resize', resize);
     };
-  }, []);
+    // A host that mounts before it has a session renders the ref-less waiting
+    // section, so the measured pane appears on a later commit of the same
+    // instance; without re-running here the observer never attaches.
+  }, [sessionId, hostSessionOnly]);
   useEffect(() => setTaskPanelSession(undefined), [provider, sessionId]);
   const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
   const [archivedSummaries, setArchivedSummaries] = useState<
@@ -1106,6 +1117,7 @@ function ManagedSessionsContent({
         text: submittedText,
         draftText: composerRef.current?.getText(),
         sessionId,
+        workspaceId: detail.summary?.workspace?.workspaceId,
         ...(input.some(
           (block) =>
             block.type !== 'input_text' || block.text !== submittedText,
@@ -2073,7 +2085,28 @@ function ManagedSessionsContent({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => onSelectSession(pending?.sessionId)}
+                onClick={() => {
+                  const owner = pending?.sessionId;
+                  // Route through openSession like every other navigation
+                  // entry: it clears the draft/error of the conversation being
+                  // left and forwards the owner's workspace. A request with no
+                  // owner clears the selection instead.
+                  if (!owner) {
+                    onSelectSession(undefined);
+                    setText('');
+                    setError(undefined);
+                    return;
+                  }
+                  openSession(
+                    owner,
+                    // The owner may not be on the current (filtered,
+                    // paginated, or host-mode empty) page, so prefer the
+                    // workspace captured when the request was submitted.
+                    pending?.workspaceId ??
+                      sessions.find((item) => item.sessionId === owner)
+                        ?.workspace?.workspaceId,
+                  );
+                }}
               >
                 {t('managed.openPendingOwner')}
               </Button>
