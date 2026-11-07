@@ -442,6 +442,16 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.createSession).not.toHaveBeenCalled();
   });
 
+  it('marks the real page wrapper as the composer keydown focus region', async () => {
+    await render('s1');
+    // useComposerCore keys "type anywhere" off this attribute plus a
+    // non-interactive tabIndex; the dOM tests build their own region, so only a
+    // render of the real page pins the pair.
+    const region = container.querySelector('[data-web-shell-focus-region]');
+    expect(region).not.toBeNull();
+    expect(region?.getAttribute('tabindex')).toBe('-1');
+  });
+
   it('keeps focus inside the host page when a discard has no composer to focus', async () => {
     provider = { ...provider, canCancel: false };
     const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}:host:s1`;
