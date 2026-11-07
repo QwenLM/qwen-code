@@ -55,16 +55,21 @@ public final class ManagedMcpSettings {
             check(command.get("serverId").equals(command.path("server").get("serverId")), "MCP server identity conflicts");
         }
         JsonNode servers = body.get("servers");
-        check(servers.isArray() && servers.size() <= 32, "Invalid MCP settings servers");
+        check(servers.isArray(), "Invalid MCP settings servers");
         Set<String> ids = new HashSet<>();
         int enabled = 0;
+        int selected = 0;
         for (JsonNode server : servers) {
             pin(server, true);
             check(ids.add(server.get("serverId").textValue()), "Duplicate MCP server");
+            if (!"removed".equals(server.get("state").textValue())) {
+                selected++;
+            }
             if ("enabled".equals(server.get("state").textValue())) {
                 enabled++;
             }
         }
+        check(selected <= 32, "MCP selection capacity exceeded");
         check(enabled <= 16, "MCP connection quota exceeded");
     }
 

@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,6 +49,30 @@ class ManagedExtensionProtocolTest {
         var substituted = new LinkedHashMap<>(reconcile);
         substituted.put("revision", 5);
         assertThrows(RuntimeBrokerException.class, () -> ManagedExtensionProtocol.validateOperation(substituted));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void countsOnlyLiveSelectionsAgainstTheMcpChangeCapacity() {
+        var prepare = prepare();
+        var command = new LinkedHashMap<>((Map<String, Object>) prepare.get("command"));
+        command.put("mcpChange", Map.of("action", "disable", "serverId", "server-0", "expectedRevision", 0,
+                "servers", selections(32, 1)));
+        prepare.put("command", command);
+        ManagedExtensionProtocol.validateOperation(prepare);
+        command.put("mcpChange", Map.of("action", "disable", "serverId", "server-0", "expectedRevision", 0,
+                "servers", selections(33, 0)));
+        assertEquals(400, assertThrows(RuntimeBrokerException.class,
+                () -> ManagedExtensionProtocol.validateOperation(prepare)).getStatusCode());
+    }
+
+    private static List<Map<String, Object>> selections(int live, int removed) {
+        var servers = new ArrayList<Map<String, Object>>();
+        for (int index = 0; index < live + removed; index++) {
+            servers.add(Map.of("serverId", "server-" + index, "serverRevision", 1,
+                    "definitionDigest", "b".repeat(64), "state", index < live ? "disabled" : "removed"));
+        }
+        return servers;
     }
 
     @Test

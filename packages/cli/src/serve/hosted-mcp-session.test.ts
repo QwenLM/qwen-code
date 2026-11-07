@@ -1883,6 +1883,51 @@ it('rejects competing settings revisions atomically before creating another phys
   expect(requests).toEqual([]);
 });
 
+it('preserves definition revision monotonicity after removal', () => {
+  for (const state of ['removed', 'enabled'] as const) {
+    expect(() =>
+      selectedMcpServers(
+        [{ ...pin, serverRevision: 5, state }],
+        managementCommand(state === 'removed' ? 'add' : 'edit', 'demo', 0, {
+          ...pin,
+          serverRevision: 1,
+        }),
+      ),
+    ).toThrow('MCP definition revision conflicts.');
+  }
+});
+
+it('charges only live MCP selections against the 32-entry capacity', () => {
+  const previous = Array.from({ length: 32 }, (_, index) => ({
+    ...pin,
+    serverId: `server-${index}`,
+    state: (index === 0 ? 'enabled' : 'removed') as 'enabled' | 'removed',
+  }));
+  const added = selectedMcpServers(
+    previous,
+    managementCommand('add', 'server-32', 0, {
+      ...pin,
+      serverId: 'server-32',
+    }),
+  );
+  expect(added).toHaveLength(33);
+  expect(added.filter((entry) => entry.state !== 'removed')).toHaveLength(2);
+
+  const tooManyEnabled = previous.map((entry, index) => ({
+    ...entry,
+    state: (index < 16 ? 'enabled' : 'removed') as 'enabled' | 'removed',
+  }));
+  expect(() =>
+    selectedMcpServers(
+      tooManyEnabled,
+      managementCommand('add', 'server-32', 0, {
+        ...pin,
+        serverId: 'server-32',
+      }),
+    ),
+  ).toThrow('MCP selection exceeds its capacity.');
+});
+
 it('adds MCP to an ordinary Session with no initial pins and rejects an unpublished definition before committing', async () => {
   managementInventory();
   const manager = new HostedMcpManager(session, [], {
