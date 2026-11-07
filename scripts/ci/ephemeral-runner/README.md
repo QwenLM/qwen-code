@@ -49,8 +49,12 @@ used for a trial. Runner and base versions need routine security updates.
 Run one manager on each host, managing only that host's Docker socket. Give each
 host a unique `poolId`; matching runner labels let GitHub share work across the
 hosts without a central scheduler. `slots` is a per-host limit, not a fleet total.
-New runner names start with `ecs-qwen-` so the existing CI worker caps and test
-timeouts apply. Restart recovery also accepts the earlier `qwen-` identities.
+Runner display names use `ecs-qwen-<poolId>-<slot>`, with two-digit slots, for
+example `ecs-qwen-hz4-ephemeral-01`. The name stays the same when a slot is
+replenished; each job still gets a fresh GitHub runner ID, container and internal
+UUID for state and diagnostics. The `ecs-qwen-` prefix preserves existing CI
+worker caps and timeouts. Restart recovery also accepts earlier UUID-based
+runner names, including the old `qwen-` prefix.
 
 Install Docker, Node 22, `gh`, and `flock` on the host. The manager uses a
 dedicated PAT supplied as `GH_TOKEN`. The account must administer the target

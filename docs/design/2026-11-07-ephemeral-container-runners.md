@@ -60,8 +60,13 @@ The Hangzhou trial ran ten slots at once; the hz4 deployment now maintains ten s
 itself, and introduces neither Kubernetes nor a database. GitHub assigns work by
 runner label. Each ECS runs its own manager against its local Docker socket,
 with a unique `poolId` and a per-host `slots` count. Hosts share the scheduling
-labels; no central manager is needed. New names use `ecs-qwen-` for compatibility
-with CI worker caps and timeouts; recovery still accepts old `qwen-` identities.
+labels; no central manager is needed. Display names use `ecs-qwen-<poolId>-<slot>`
+with two-digit slots, for example `ecs-qwen-hz4-ephemeral-01`. Replenishment
+reuses the display name after cleaning the previous runner, while the GitHub
+runner ID, container and internal UUID are new for each job. The UUID remains
+in state and diagnostic filenames. The `ecs-qwen-` prefix preserves CI worker
+caps and timeouts; recovery still accepts earlier UUID-based runner names,
+including old `qwen-` identities.
 
 systemd starts the manager at boot when enabled and restarts unexpected exits
 after ten seconds (`Restart=always`). An explicit service stop remains stopped.
