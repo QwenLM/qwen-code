@@ -83,6 +83,64 @@ function canonicalChart(title = 'Weekly orders'): string {
   });
 }
 
+function canonicalGraphChart(): string {
+  return JSON.stringify({
+    version: 1,
+    renderer: 'echarts',
+    data: {
+      kind: 'inline',
+      shape: 'graph',
+      source: {
+        nodes: [
+          { id: 'orders', name: 'Orders', category: 'sales' },
+          { id: 'billing', name: 'Billing', category: 'finance' },
+        ],
+        links: [{ source: 'orders', target: 'billing', value: 3 }],
+      },
+    },
+    spec: { series: [{ type: 'graph' }] },
+  });
+}
+
+function canonicalHierarchyChart(): string {
+  return JSON.stringify({
+    version: 1,
+    renderer: 'echarts',
+    data: {
+      kind: 'inline',
+      shape: 'hierarchy',
+      source: [
+        {
+          id: 'company',
+          name: 'Company',
+          children: [
+            { id: 'sales', name: 'Sales', value: 10 },
+            { id: 'ops', name: 'Ops', value: 5 },
+          ],
+        },
+      ],
+    },
+    spec: { series: [{ type: 'sunburst' }] },
+  });
+}
+
+function visibleTable(container: HTMLElement): {
+  headers: Array<string | null>;
+  rows: Array<Array<string | null>>;
+} {
+  const isVisible = (element: Element) => element.closest('[hidden]') === null;
+  return {
+    headers: Array.from(container.querySelectorAll('th'))
+      .filter(isVisible)
+      .map((cell) => cell.textContent),
+    rows: Array.from(container.querySelectorAll('tbody tr'))
+      .filter(isVisible)
+      .map((row) =>
+        Array.from(row.querySelectorAll('td')).map((cell) => cell.textContent),
+      ),
+  };
+}
+
 function chartTree({
   content,
   registry,
@@ -677,6 +735,149 @@ describe('Web Shell markdown-chart integration', () => {
     });
     container.remove();
     expect(instance.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the card and falls back to the data view when the renderer mount fails', async () => {
+    const runtime = {
+      init: vi.fn(() => {
+        throw new Error('mount exploded');
+      }),
+    };
+    const onError = vi.fn();
+    const registry = createMarkdownChartRegistry({
+      loadECharts: async () => runtime,
+      resizeObserver: false,
+    });
+    const { container } = await mount(
+      <I18nProvider language="en">
+        <WebShellCustomizationProvider
+          value={{ markdown: { chart: { registry, onError } } }}
+        >
+          <Markdown
+            content={`\`\`\`markdown-chart\n${canonicalChart()}\n\`\`\``}
+            source="assistant"
+          />
+        </WebShellCustomizationProvider>
+      </I18nProvider>,
+    );
+    await flushChart();
+
+    expect(runtime.init).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledOnce();
+    expect(container.querySelector('.markdown-chart-card')).not.toBeNull();
+    expect(
+      container.querySelector('[data-markdown-chart-data-view="true"]'),
+    ).not.toBeNull();
+    const alert = container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toBe('ECharts failed to render the chart');
+    expect(alert?.closest('[hidden]')).not.toBeNull();
+    expect(visibleTable(container)).toEqual({
+      headers: ['day', 'orders'],
+      rows: [
+        ['Mon', '120'],
+        ['Tue', '200'],
+      ],
+    });
+  });
+
+  it('localizes graph data-view tabs and column headers', async () => {
+    const { instance, runtime } = createFakeRuntime();
+    const registry = createMarkdownChartRegistry({
+      loadECharts: async () => runtime,
+      resizeObserver: false,
+    });
+    const { container } = await mount(
+      <I18nProvider language="zh-CN">
+        <ThemeProvider value="dark">
+          <WebShellCustomizationProvider
+            value={{ markdown: { chart: { registry } } }}
+          >
+            <Markdown
+              content={`\`\`\`markdown-chart\n${canonicalGraphChart()}\n\`\`\``}
+              source="assistant"
+            />
+          </WebShellCustomizationProvider>
+        </ThemeProvider>
+      </I18nProvider>,
+    );
+    await flushChart();
+
+    expect(instance.setOption).toHaveBeenCalledOnce();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+
+    const showData = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="显示数据"]',
+    );
+    expect(showData).not.toBeNull();
+    await act(async () => {
+      showData?.click();
+    });
+
+    const tabs = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    );
+    expect(tabs.map((tab) => tab.textContent)).toEqual(['节点', '连线']);
+    expect(visibleTable(container)).toEqual({
+      headers: ['名称', '分类', 'ID'],
+      rows: [
+        ['Orders', 'sales', 'orders'],
+        ['Billing', 'finance', 'billing'],
+      ],
+    });
+
+    await act(async () => {
+      tabs[1]?.click();
+    });
+
+    expect(visibleTable(container)).toEqual({
+      headers: ['起点', '终点', '数值', '起点 ID', '终点 ID'],
+      rows: [['Orders', 'Billing', '3', 'orders', 'billing']],
+    });
+  });
+
+  it('localizes hierarchy data-view column headers', async () => {
+    const { instance, runtime } = createFakeRuntime();
+    const registry = createMarkdownChartRegistry({
+      loadECharts: async () => runtime,
+      resizeObserver: false,
+    });
+    const { container } = await mount(
+      <I18nProvider language="zh-CN">
+        <ThemeProvider value="dark">
+          <WebShellCustomizationProvider
+            value={{ markdown: { chart: { registry } } }}
+          >
+            <Markdown
+              content={`\`\`\`markdown-chart\n${canonicalHierarchyChart()}\n\`\`\``}
+              source="assistant"
+            />
+          </WebShellCustomizationProvider>
+        </ThemeProvider>
+      </I18nProvider>,
+    );
+    await flushChart();
+
+    expect(instance.setOption).toHaveBeenCalledOnce();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+
+    const showData = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="显示数据"]',
+    );
+    expect(showData).not.toBeNull();
+    await act(async () => {
+      showData?.click();
+    });
+
+    expect(visibleTable(container)).toEqual({
+      headers: ['深度', '路径', '名称', '数值', '子树合计（派生）', 'ID 路径'],
+      rows: [
+        // The dependency stringifies a missing own value as the literal
+        // "null" (upstream `node.value ?? null`); this cell is not ours.
+        ['0', 'Company', 'Company', 'null', '15', 'company'],
+        ['1', 'Company / Ops', 'Ops', '5', '5', 'company / ops'],
+        ['1', 'Company / Sales', 'Sales', '10', '10', 'company / sales'],
+      ],
+    });
   });
 });
 
