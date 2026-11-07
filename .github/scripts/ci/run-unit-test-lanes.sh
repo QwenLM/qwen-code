@@ -27,7 +27,7 @@
 # of all CPUs but one.
 #
 # Usage: run-unit-test-lanes.sh [vitest args...]
-# The args (ci.yml passes --retry) reach every Vitest run. Every suite runs
+# The args (ci.yml passes --shard and --retry) reach every Vitest run. Every suite runs
 # even after another fails. Exits with the main lane's status, or with the side
 # lane's when the main lane passed.
 set -uo pipefail
@@ -98,8 +98,12 @@ side_threads="$(half_cap "${VITEST_MAX_THREADS:-}")"
     VITEST_MAX_THREADS="$side_threads" \
     npm run test:ci "${side_workspaces[@]}" -- "$@"
   workspaces_rc=$?
-  npm run test:standalone:runtimes:ci
-  standalone_rc=$?
+  standalone_rc=0
+  # A sharded run skips it on every shard but one.
+  if [ -z "${QWEN_CI_SKIP_STANDALONE_RUNTIMES:-}" ]; then
+    npm run test:standalone:runtimes:ci
+    standalone_rc=$?
+  fi
   VITEST_MAX_FORKS="$side_forks" VITEST_MAX_THREADS="$side_threads" \
     npm run test:scripts:unit -- "$@"
   scripts_rc=$?
