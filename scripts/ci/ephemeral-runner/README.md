@@ -138,3 +138,11 @@ been verified. Changing it affects newly evaluated jobs; cancel queued work and
 start a new workflow run when rolling back. It does not detect idle runners or
 migrate a queued job automatically.
 Set `EXTERNAL_PR_EPHEMERAL_ARCH=arm64` for an ARM64 pool; the default is x64.
+
+Fork PR runs cannot read repository variables directly. The default-branch
+`ci-runner-routing.yml` controller reads them when CI enters `in_progress` and
+publishes only a destination bound to that CI run and attempt. The classifier
+reads that status with a read-only token; missing or invalid decisions retain
+hosted routing. Merge the controller and reader before enabling the switch.
+This also covers full CI reruns; changing a variable does not move jobs whose
+destination has already been selected. The controller never runs PR code.

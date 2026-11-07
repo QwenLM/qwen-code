@@ -140,6 +140,7 @@ jobs:
     permissions:
       contents: 'read'
       pull-requests: 'read'
+      statuses: 'read'
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
       ubuntu_runner: '${{ steps.pick_runner.outputs.ubuntu_runner }}'
@@ -203,6 +204,8 @@ jobs:
           ECS_DISABLED: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED }}'
           EPHEMERAL_ENABLED: '${{ vars.EXTERNAL_PR_EPHEMERAL_RUNNER_ENABLED }}'
           EPHEMERAL_ARCH: '${{ vars.EXTERNAL_PR_EPHEMERAL_ARCH }}'
+          GH_TOKEN: '${{ github.token }}'
+          PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
           # Optional fleet selector: 'hosted' forces github.com-hosted runners,
           # 'arm64' routes to the experimental ARM64 ECS fleet, anything else
           # keeps the x64 ecs-qwen fleet. Empty/unset keeps current behavior.
@@ -240,6 +243,24 @@ jobs:
           echo "Selected Linux runner: ${ubuntu_runner}"
           pr_test_runner="${ubuntu_runner}"
           lint_runner="${ubuntu_runner}"
+          # Fork PR runs cannot read repository variables. Only accept the
+          # default-branch controller's decision for this exact run attempt.
+          if [[ "${EVENT_NAME}" == pull_request && "${SAME_REPO}" == false && "${trusted_author}" == false && -z "${EPHEMERAL_ENABLED}" && "${GITHUB_RUN_ID:-}" =~ ^[0-9]+$ && "${GITHUB_RUN_ATTEMPT:-}" =~ ^[1-9][0-9]*$ && "${PR_HEAD_SHA:-}" =~ ^[a-f0-9]{40}$ ]]; then
+            route=''
+            for attempt in {1..20}; do
+              route=$(timeout 5s gh api "repos/${GITHUB_REPOSITORY}/commits/${PR_HEAD_SHA}/statuses?per_page=100" 2>/dev/null | jq -r \
+                --arg context "ci-runner-route-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+                '[.[] | select(.context == $context and .state == "success" and .creator.login == "github-actions[bot]")][0].description // ""' 2>/dev/null) || route=''
+              if [[ -n "$route" ]]; then break; fi
+              sleep 2
+            done
+            case "$route" in
+              ephemeral-arm64) EPHEMERAL_ENABLED=true; EPHEMERAL_ARCH=arm64 ;;
+              ephemeral-x64) EPHEMERAL_ENABLED=true; EPHEMERAL_ARCH=x64 ;;
+              *) EPHEMERAL_ENABLED=false ;;
+            esac
+            echo "Trusted routing decision: ${route:-unavailable; using hosted}"
+          fi
           if [[ "${EPHEMERAL_ENABLED}" == "true" && "${ECS_DISABLED}" != "true" && "${LINUX_RUNNER_FLEET}" != "hosted" && "${EVENT_NAME}" == "pull_request" && "${SAME_REPO}" == "false" && "${trusted_author}" == "false" ]]; then
             pr_test_runner='["self-hosted", "linux", "x64", "ecs-qwen-ephemeral"]'
             if [[ "${EPHEMERAL_ARCH}" == "arm64" ]]; then

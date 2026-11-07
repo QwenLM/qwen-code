@@ -20,7 +20,13 @@
 // persistent pool.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -125,11 +131,24 @@ function runPickRunnerOutputs({
   fleet,
   ephemeralEnabled,
   ephemeralArch,
+  relayStatuses,
 }) {
   const tmp = mkdtempSync(join(tmpdir(), 'pick-runner-'));
   const outputFile = join(tmp, 'github_output');
+  writeFileSync(
+    join(tmp, 'gh'),
+    '#!/bin/sh\nprintf \'%s\' "$RELAY_STATUSES"\n',
+    {
+      mode: 0o755,
+    },
+  );
+  writeFileSync(join(tmp, 'sleep'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(tmp, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n', {
+    mode: 0o755,
+  });
   const result = spawnSync('bash', ['-c', pickRunner.run], {
     env: {
+      PATH: `${tmp}:${process.env.PATH}`,
       SAME_REPO: sameRepo ? 'true' : 'false',
       AUTHOR_ASSOCIATION: assoc,
       ECS_DISABLED: ecsDisabled ? 'true' : '',
@@ -139,6 +158,11 @@ function runPickRunnerOutputs({
       EPHEMERAL_ARCH: ephemeralArch ?? '',
       DISPATCH_LINUX_RUNNER: dispatch ?? '',
       GITHUB_OUTPUT: outputFile,
+      GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+      GITHUB_RUN_ID: relayStatuses === undefined ? '' : '42',
+      GITHUB_RUN_ATTEMPT: '2',
+      PR_HEAD_SHA: 'a'.repeat(40),
+      RELAY_STATUSES: JSON.stringify(relayStatuses ?? []),
     },
     encoding: 'utf8',
   });
@@ -451,6 +475,115 @@ describe('ci.yml lint_runner routing', () => {
 });
 
 describe('ci.yml disposable runner routing', () => {
+  it('reads the trusted decision when the fork run receives no variables', () => {
+    const base = {
+      eventName: 'pull_request',
+      sameRepo: false,
+      assoc: 'CONTRIBUTOR',
+    };
+    const status = {
+      context: 'ci-runner-route-42-2',
+      state: 'success',
+      creator: { login: 'github-actions[bot]' },
+      description: 'ephemeral-arm64',
+    };
+    const selected = runPickRunnerOutputs({ ...base, relayStatuses: [status] });
+    assert.equal(
+      selected.prTestRunner,
+      '["self-hosted", "linux", "arm64", "ecs-qwen-ephemeral"]',
+    );
+    assert.equal(selected.lintRunner, selected.prTestRunner);
+    assert.equal(selected.ubuntuRunner, HOSTED);
+    for (const statuses of [
+      [],
+      [{ ...status, context: 'ci-runner-route-42-1' }],
+      [{ ...status, context: 'ci-runner-route-43-2' }],
+      [{ ...status, state: 'failure' }],
+      [{ ...status, creator: { login: 'contributor' } }],
+      [{ ...status, description: 'hosted' }],
+      [{ ...status, description: 'arbitrary-runner-label' }],
+    ]) {
+      assert.equal(
+        runPickRunnerOutputs({ ...base, relayStatuses: statuses }).prTestRunner,
+        HOSTED,
+      );
+    }
+    assert.equal(
+      runPickRunnerOutputs({
+        ...base,
+        ephemeralEnabled: 'false',
+        relayStatuses: [status],
+      }).prTestRunner,
+      HOSTED,
+    );
+  });
+
+  it('keeps variable publication in a default-branch metadata-only workflow', () => {
+    const controller = parse(
+      readFileSync(join(workflowsDir, 'ci-runner-routing.yml'), 'utf8'),
+    );
+    assert.deepEqual(controller.on.workflow_run.workflows, [ciDoc.name]);
+    assert.deepEqual(controller.on.workflow_run.types, ['in_progress']);
+    assert.deepEqual(controller.permissions, {
+      contents: 'read',
+      statuses: 'write',
+    });
+    assert.equal(controller.jobs.publish.steps.length, 1);
+    assert.equal(controller.jobs.publish.steps[0].uses, undefined);
+    assert.doesNotMatch(
+      controller.jobs.publish.steps[0].run,
+      /checkout|download-artifact|npm|pnpm|eval|bash -c/,
+    );
+    assert.equal(ciDoc.jobs.classify_pr.permissions.statuses, 'read');
+    const step = controller.jobs.publish.steps[0];
+    const tmp = mkdtempSync(join(tmpdir(), 'routing-publisher-'));
+    const captured = join(tmp, 'args');
+    writeFileSync(
+      join(tmp, 'gh'),
+      '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$CAPTURE"\n',
+      {
+        mode: 0o755,
+      },
+    );
+    try {
+      for (const [enabled, arch, disabled, fleet, expected] of [
+        ['true', 'arm64', '', '', 'ephemeral-arm64'],
+        ['true', '', '', '', 'ephemeral-x64'],
+        ['true', 'arm64', 'true', '', 'hosted'],
+        ['true', 'arm64', '', 'hosted', 'hosted'],
+        ['false', 'arm64', '', '', 'hosted'],
+        ['', 'arm64', '', '', 'hosted'],
+      ]) {
+        const result = spawnSync('bash', ['-c', step.run], {
+          encoding: 'utf8',
+          env: {
+            PATH: `${tmp}:${process.env.PATH}`,
+            CAPTURE: captured,
+            HEAD_SHA: 'a'.repeat(40),
+            CI_RUN_ID: '42',
+            CI_ATTEMPT: '2',
+            GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+            GITHUB_SERVER_URL: 'https://github.com',
+            GITHUB_RUN_ID: '99',
+            EPHEMERAL_ENABLED: enabled,
+            EPHEMERAL_ARCH: arch,
+            ECS_DISABLED: disabled,
+            LINUX_RUNNER_FLEET: fleet,
+          },
+        });
+        assert.equal(result.status, 0, result.stderr);
+        const args = readFileSync(captured, 'utf8').split('\n');
+        assert.ok(args.includes('context=ci-runner-route-42-2'));
+        assert.ok(args.includes(`description=${expected}`));
+        assert.ok(
+          args.includes(`repos/QwenLM/qwen-code/statuses/${'a'.repeat(40)}`),
+        );
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('keeps all selected fork jobs hosted unless the switch is exactly true', () => {
     for (const ephemeralEnabled of [undefined, '', 'false', 'invalid']) {
       const out = runPickRunnerOutputs({
