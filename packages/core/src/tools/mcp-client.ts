@@ -78,6 +78,7 @@ import {
   runWithTimeout,
 } from './mcp-discovery-timeout.js';
 import { retryWithBackoff } from './mcp-retry.js';
+import { connectWithStartupStderr } from './mcp-startup-stderr.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import type {
@@ -642,7 +643,7 @@ export class McpClient {
         };
       });
 
-      await this.client.connect(this.transport, {
+      await connectWithStartupStderr(this.client, this.transport, {
         timeout: this.serverConfig.timeout,
       });
       this.instructions = this.client.getInstructions();
@@ -2297,7 +2298,7 @@ export async function connectToMcpServer(
       sendSdkMcpMessage,
     );
     try {
-      await mcpClient.connect(transport, {
+      await connectWithStartupStderr(mcpClient, transport, {
         timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
       });
       bindInvocationContextPolicy(mcpClient, transport);
@@ -2595,8 +2596,9 @@ export async function connectToMcpServer(
       // Create a concise error message
       const errorMessage = (error as Error).message || String(error);
       const isNetworkError =
-        errorMessage.includes('ENOTFOUND') ||
-        errorMessage.includes('ECONNREFUSED');
+        hasNetworkTransport(mcpServerConfig) &&
+        (errorMessage.includes('ENOTFOUND') ||
+          errorMessage.includes('ECONNREFUSED'));
 
       let conciseError: string;
       if (isNetworkError) {
