@@ -73,7 +73,7 @@ Runtime Broker 安装到本地。从仓库根目录运行：
 
 ```bash
 npm run build && npm run bundle
-mvn -f packages/sdk-java/managed-agent-server/pom.xml -Phosted-workspace-tools \
+mvn -f packages/managed-agent-server/pom.xml -Phosted-workspace-tools \
   '-Dit.test=HostedWorkspaceToolTurnIT#recordsLatencyWithDelayedRuntimeProvisioning' \
   -Dnode.executable="$(command -v node)" verify checkstyle:check
 ```

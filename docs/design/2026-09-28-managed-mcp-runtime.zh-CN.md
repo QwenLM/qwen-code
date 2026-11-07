@@ -58,7 +58,7 @@ Runtime 只允许目标 workspace 已配置的定义，以及 Session 已安装�
 
 - `packages/core/src/managed-runtime`：MCP 记录/协议、authority 接线及资源闭包。
 - `packages/cli/src/serve`：MCP Runtime 服务/路由、worker 准入、Hosted 编排和模型目录。
-- `packages/sdk-java/runtime-broker` 与 `managed-agent-server`：限定范围的转发、记录物化、目录契约和测试。
+- `packages/managed-agent-server` 与 `managed-agent-server`：限定范围的转发、记录物化、目录契约和测试。
 - `.qwen/e2e-tests/12827-h1.md`：基线、确定性协议测试和故障证据。
 
 ## 私有配置用法

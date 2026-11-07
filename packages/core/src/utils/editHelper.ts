@@ -73,6 +73,7 @@ function normalizeBasicCharacters(text: string): string {
 interface MatchedSliceResult {
   slice: string;
   removedTrailingFinalEmptyLine: boolean;
+  lineBasedMatch?: boolean;
 }
 
 /**
@@ -205,10 +206,12 @@ function findLineBasedMatch(
         offsets,
         lines,
         matchIndex,
-        patternLines.length,
+        // The trailing split element is covered by the newline flag.
+        patternLines.length - (endsWithNewline ? 1 : 0),
         endsWithNewline,
       ),
       removedTrailingFinalEmptyLine: false,
+      lineBasedMatch: true,
     };
   }
 
@@ -229,6 +232,7 @@ function findLineBasedMatch(
           false,
         ),
         removedTrailingFinalEmptyLine: true,
+        lineBasedMatch: true,
       };
     }
   }
@@ -297,6 +301,7 @@ function adjustNewStringForTrailingLine(
 export interface NormalizedEditStrings {
   oldString: string;
   newString: string;
+  lineBasedMatch?: boolean;
 }
 
 /**
@@ -332,6 +337,7 @@ export function normalizeEditStrings(
         newString,
         canonicalOriginal.removedTrailingFinalEmptyLine,
       ),
+      ...(canonicalOriginal.lineBasedMatch ? { lineBasedMatch: true } : {}),
     };
   }
 
@@ -350,6 +356,7 @@ export function maybeAugmentOldStringForDeletion(
   fileContent: string | null,
   oldString: string,
   newString: string,
+  lineBasedMatch = false,
 ): string {
   if (
     fileContent === null ||
@@ -361,7 +368,10 @@ export function maybeAugmentOldStringForDeletion(
   }
 
   const candidate = `${oldString}\n`;
-  return fileContent.includes(candidate) ? candidate : oldString;
+  const hasCandidate = lineBasedMatch
+    ? findLineBasedMatchOffsets(fileContent, candidate).length > 0
+    : fileContent.includes(candidate);
+  return hasCandidate ? candidate : oldString;
 }
 
 /**
@@ -380,6 +390,32 @@ export function countOccurrences(source: string, substr: string): number {
     index = source.indexOf(substr, index + substr.length);
   }
   return count;
+}
+
+/** Exact canonical slices from fuzzy line matching must remain whole lines. */
+export function findLineBasedMatchOffsets(
+  source: string,
+  substr: string,
+): number[] {
+  const offsets: number[] = [];
+  if (substr === '') {
+    return offsets;
+  }
+
+  let index = source.indexOf(substr);
+  while (index !== -1) {
+    const end = index + substr.length;
+    const startsLine = index === 0 || source[index - 1] === '\n';
+    const endsLine =
+      substr.endsWith('\n') || end === source.length || source[end] === '\n';
+    if (startsLine && endsLine) {
+      offsets.push(index);
+      index = source.indexOf(substr, end);
+    } else {
+      index = source.indexOf(substr, index + 1);
+    }
+  }
+  return offsets;
 }
 
 /**

@@ -36,6 +36,8 @@ const reviewDocument = {
         'Open workspace B and submit a request from workspace A.',
       witness: 'BASE: overwrote workspace B / PR: refused — probe flipped',
       suggestedFix: 'Resolve the runtime before writing.',
+      fixWitness:
+        'src/write.test.ts "refuses a cross-workspace write" goes red without the resolve',
       category: 'security',
       locations: [{ file: 'src/write.ts', line: 42, anchor: 'writeFile()' }],
       assets: ['https://example.com/evidence.png', 'javascript:alert(1)'],
@@ -145,6 +147,11 @@ describe('CodeReviewArtifactDetail', () => {
       'BASE: overwrote workspace B / PR: refused — probe flipped',
     );
     expect(container.textContent).toContain('Suggested fix');
+    // The acceptance criterion the CLI records beside the suggested fix. It
+    // round-tripped through the parser but was dropped from display, so a
+    // fixer working from this viewer never saw what the fix owes (#9679).
+    expect(container.textContent).toContain('Fix witness');
+    expect(container.textContent).toContain('goes red without the resolve');
     expect(container.textContent).toContain(
       'skipped — Outside the reviewed diff.',
     );

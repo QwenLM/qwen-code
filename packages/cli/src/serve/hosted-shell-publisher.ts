@@ -106,6 +106,7 @@ export class HostedShellPublisher {
   private server?: Server;
   private descriptor?: ShellPublisherDescriptor;
   private closing = false;
+  private lifecyclePrepared = false;
   private closePromise?: Promise<void>;
 
   constructor(
@@ -116,6 +117,10 @@ export class HostedShellPublisher {
     private readonly monitors?: HostedMonitorSession,
     private readonly onNotification?: () => void,
   ) {}
+
+  prepareLifecycle(): void {
+    this.lifecyclePrepared = true;
+  }
 
   async start(): Promise<ShellPublisherDescriptor> {
     if (this.closing) throw new Error('Shell publisher is closed.');
@@ -851,24 +856,26 @@ export class HostedShellPublisher {
               : typeof args['command'] === 'string'
                 ? (args['command'] as string)
                 : executionCallId;
-          const input = await buildMonitorNotificationInput({
-            monitorId: executionCallId,
-            toolUseId: record.run.executionCallId,
-            description,
-            sequence: record.observationSequence + 1,
-            lines: windowLines,
-            resourceStore: this.monitors.resourceStore,
-          });
+          const input = this.lifecyclePrepared
+            ? undefined
+            : await buildMonitorNotificationInput({
+                monitorId: executionCallId,
+                toolUseId: record.run.executionCallId,
+                description,
+                sequence: record.observationSequence + 1,
+                lines: windowLines,
+                resourceStore: this.monitors.resourceStore,
+              });
           await this.monitors.observe(
             executionCallId,
             { lines: windowLines },
-            { input },
+            input && !this.lifecyclePrepared ? { input } : undefined,
           );
           // Consume the tail only once its observation committed: a refused
           // commit (the record is not attached yet) keeps the lines for the
           // retry that settles this watch after the start receipt lands.
           background.remainder = '';
-          this.onNotification?.();
+          if (input && !this.lifecyclePrepared) this.onNotification?.();
         }
         const last =
           windowLines.length > 0

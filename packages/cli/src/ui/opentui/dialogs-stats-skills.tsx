@@ -21,7 +21,11 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { useRenderer, useKeyboard } from '@opentui/react';
+import {
+  useRenderer,
+  useKeyboard,
+  useTerminalDimensions,
+} from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { uiTelemetryService } from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
 import { computeSessionStats } from '../utils/computeStats.js';
@@ -36,6 +40,9 @@ import { ICON } from '../constants.js';
 import { toOriginalKey } from './key-map.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { C } from './theme.js';
+import { scrollDialogLayout } from './dialogs-core.js';
+import { dialogAreaWidth } from './dialogs-shared.js';
+import { truncateToWidth } from '../utils/textUtils.js';
 
 /** Close the dialog on a raw Escape, like the other dialog hosts. */
 function useEscToClose(onClose: () => void, enabled: boolean) {
@@ -430,13 +437,13 @@ export function OpenTuiSkillsDialog(props: {
   // after the frame's chrome: border and padding 4, the title row 1, the
   // body's margin row 1. Without a budget the body keeps its twelve rows.
   const regionHeight = clampDialogHeight(props.availableTerminalHeight);
-  const bodyRows =
-    regionHeight === undefined
-      ? SKILLS_BODY_ROWS
-      : Math.max(
-          0,
-          Math.min(SKILLS_BODY_ROWS, regionHeight - SKILLS_FRAME_CHROME_ROWS),
-        );
+  const { width } = useTerminalDimensions();
+  const bodyLayout = scrollDialogLayout(
+    regionHeight,
+    SKILLS_FRAME_CHROME_ROWS,
+    SKILLS_BODY_ROWS,
+  );
+  const contentWidth = Math.max(1, dialogAreaWidth(width) - 6);
   useEffect(() => {
     let alive = true;
     const mgr = config?.getSkillManager?.();
@@ -465,13 +472,14 @@ export function OpenTuiSkillsDialog(props: {
 
   return (
     <box
+      key={bodyLayout.compact ? `compact-${bodyLayout.border}` : 'normal'}
       flexDirection="column"
-      border
+      border={bodyLayout.border ? true : []}
       borderColor={C.dim}
       paddingLeft={2}
       paddingRight={2}
-      paddingTop={1}
-      paddingBottom={1}
+      paddingTop={bodyLayout.compact ? 0 : 1}
+      paddingBottom={bodyLayout.compact ? 0 : 1}
       // A shrinkable frame lets a short region squeeze its text rows to zero
       // and paint them over each other; staying natural height keeps the rows
       // contiguous for the region's clip to cut at the tail, as ink does for
@@ -481,13 +489,21 @@ export function OpenTuiSkillsDialog(props: {
       // region budget instead of relying on the clip (Decision 71).
       flexShrink={0}
     >
-      <box flexDirection="row" justifyContent="space-between">
-        <text fg={C.accent} attributes={1}>
-          {'Skills'}
-        </text>
-        <text fg={C.dim}>{'esc to close'}</text>
-      </box>
-      <scrollbox height={bodyRows} marginTop={1} stickyScroll={false}>
+      {!bodyLayout.compact ? (
+        <box flexDirection="row" justifyContent="space-between">
+          <text fg={C.accent} attributes={1}>
+            {truncateToWidth('Skills', contentWidth)}
+          </text>
+          {contentWidth >= 18 ? <text fg={C.dim}>{'esc to close'}</text> : null}
+        </box>
+      ) : null}
+      <scrollbox
+        key={`body-${width}-${bodyLayout.bodyRows}-${bodyLayout.compact}`}
+        height={bodyLayout.bodyRows}
+        marginTop={bodyLayout.compact ? 0 : 1}
+        flexShrink={1}
+        stickyScroll={false}
+      >
         {loading ? (
           <text fg={C.dim}>{'loading skills…'}</text>
         ) : rows.length === 0 ? (

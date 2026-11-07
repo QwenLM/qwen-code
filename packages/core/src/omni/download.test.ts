@@ -125,7 +125,7 @@ const respondWith = (body: BodyInit | null, init?: ResponseInit) =>
   vi.fn(async () => new Response(body, init)) as unknown as typeof fetch;
 
 function fetchOk(
-  body: Buffer | string,
+  body: Buffer<ArrayBuffer> | string,
   headers: Record<string, string> = {},
 ): typeof fetch {
   return vi.fn(async () => new Response(body, { status: 200, headers }));
@@ -345,17 +345,15 @@ describe('downloadMediaUrl', () => {
   });
 
   it('translates resolver errors into download-domain phrasing', async () => {
-    // resolveNetworkTarget phrases its errors for its original caller
-    // ("Extension network host …"); passing that through would misattribute
-    // the refusal (the credentials gate avoids the same problem), so the
-    // reachable resolver errors are translated, echoing only the hostname.
+    // Resolver failures are translated into download-domain phrasing,
+    // echoing only the hostname.
     const cases: Array<[string, RegExp]> = [
       [
-        'Extension network host resolved to a blocked address: media.example.com',
+        'Public network host resolved to a blocked address: media.example.com',
         /URL host resolved to a non-public address/,
       ],
       [
-        'Extension network host did not resolve: media.example.com',
+        'Public network host did not resolve: media.example.com',
         /URL host did not resolve/,
       ],
       ['socket hang up', /URL host could not be verified/],
@@ -598,8 +596,7 @@ describe('downloadMediaUrl', () => {
   });
 
   it('refuses URLs that embed credentials, without echoing them', async () => {
-    // resolveNetworkTarget would also reject these, but naming "extension
-    // network requests". Assert the refusal and that neither user nor password
+    // Assert the download-specific refusal and that neither user nor password
     // reaches the error text (rendered in the UI, written to the debug log).
     const fetchFn = vi.fn<typeof fetch>();
     const err = await dlErr({

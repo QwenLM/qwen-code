@@ -31,9 +31,11 @@
     "team_message",
     "team_plan",
     "session_message",
+    "session_command",
     "session_metadata",
     "file_history",
-    "session_source"
+    "session_source",
+    "hosted_harness_release"
   ],
   "limits": {
     "maxIdBytes": 512,

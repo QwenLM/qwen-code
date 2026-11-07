@@ -15,7 +15,23 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
-import { memberPlanModeRequired } from './hosted-member-chain.js';
+import {
+  memberPlanModeRequired,
+  hostedOpenTeamChainMember,
+  teamMemberPreamble,
+} from './hosted-member-chain.js';
+import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import {
+  decodeChildLaunchEnvelope,
+  encodeChildLaunchEnvelope,
+  MANAGED_CHILD_LIMITS,
+  type ChildLaunchEnvelope,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
+import {
+  assertManagedSessionDomainEnabled,
+  ManagedSessionRecordError,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import type {
   CommittedExtensionOperation,
@@ -32,6 +48,9 @@ import {
   MANAGED_TEAM_LIMITS,
   parseTeamState,
   parseTeamTask,
+  parseTeamPlan,
+  type TeamPlan,
+  type TeamPlanDecision,
   type TeamState,
   type TeamTask,
   type TeamTaskStatus,
@@ -40,6 +59,9 @@ import {
   teamJoinBody,
   teamLifecycleBody,
   teamOpenBody,
+  teamPlanOpenBody,
+  teamPlanDecisionBody,
+  teamPlanWithdrawBody,
   teamTaskOpenBlockers,
   teamTaskOpenBody,
   teamTaskRevisionBody,
@@ -114,6 +136,7 @@ export class HostedTeamRefusal extends Error {}
  * else's stop.
  */
 export interface HostedTeamStops {
+  sendToChild?: HostedChildAgentSession['sendToChild'];
   requestStop(
     childRunId: string,
     evidence?: { readonly operation: string; readonly commandId: string },
@@ -121,12 +144,78 @@ export interface HostedTeamStops {
 }
 
 /** The Legacy board tools' schema bounds, in characters. */
-const SUBJECT_CHARS = 200;
-const DESCRIPTION_CHARS = 10_000;
-const ACTIVE_FORM_CHARS = 200;
-const TASK_STATUSES = ['pending', 'in_progress', 'completed', 'deleted'];
+export const SUBJECT_CHARS = 200;
+export const DESCRIPTION_CHARS = 10_000;
+export const ACTIVE_FORM_CHARS = 200;
+export const TASK_STATUSES = ['pending', 'in_progress', 'completed', 'deleted'];
 const UNSAFE_METADATA_KEYS = ['__proto__', 'constructor', 'prototype'];
 const TRUSTED: ManagedSessionActor = { class: 'trusted_entry' };
+
+export const HOSTED_TEAM_PLAN_TOOL: FunctionDeclaration = {
+  name: 'team_plan_approval',
+  description:
+    'Show a member plan, or approve or reject it after its run settles. Decisions continue the member with the quoted plan.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      request_id: { type: 'string' },
+      action: { type: 'string', enum: ['approve', 'reject', 'show'] },
+      message: {
+        type: 'string',
+        description: 'Feedback, at most 4096 UTF-8 bytes.',
+      },
+    },
+    required: ['request_id', 'action'],
+    additionalProperties: false,
+  },
+};
+
+export interface HostedTeamDeliveryContext {
+  readonly closing: boolean;
+  readonly childWorkspaces?: boolean;
+}
+
+export function teamPlanInstruction(
+  plan: string,
+  decision: TeamPlanDecision,
+  feedback: string,
+): string {
+  return `Your plan was ${decision}. ${decision === 'approved' ? 'Carry out the plan.' : 'Revise the plan and call exit_plan_mode again.'}\n<plan>\n${escapeXml(plan)}\n</plan>\n<feedback>${escapeXml(feedback)}</feedback>`;
+}
+
+/** The largest feedback a decision may carry, escaped at its worst. */
+const PLAN_FEEDBACK_RESERVE = '"'.repeat(4096);
+
+/**
+ * A plan over its continuation bound is refused with its size and the
+ * room left, both in envelope bytes: the plan as XML-escaped and then
+ * JSON-encoded inside the prompt, and the bound less the envelope with an
+ * empty plan. Both escapes map code point by code point and the plan sits
+ * between newlines, so its bytes add exactly to the empty-plan envelope:
+ * the plan fits exactly when the first figure is at most the second.
+ */
+function planBoundRefusal(
+  launch: ChildLaunchEnvelope,
+  preamble: string,
+  plan: string,
+): string {
+  const refusal =
+    'Plan exceeds its continuation envelope including escaped feedback reserve (byte_limit)';
+  let fixed: number;
+  try {
+    fixed = encodeChildLaunchEnvelope({
+      ...launch,
+      prompt:
+        preamble + teamPlanInstruction('', 'rejected', PLAN_FEEDBACK_RESERVE),
+    }).byteLength;
+  } catch (cause) {
+    if (!(cause instanceof ManagedSessionRecordError)) throw cause;
+    // No plan fits: there is no room to name, so no size to shorten to.
+    return `${refusal}.`;
+  }
+  const needed = Buffer.byteLength(JSON.stringify(escapeXml(plan)), 'utf8') - 2;
+  return `${refusal}: it needs ${needed} bytes after XML and JSON escaping and ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes - fixed} fit. Shorten it and call exit_plan_mode again.`;
+}
 
 export const HOSTED_TEAM_TOOLS: readonly FunctionDeclaration[] = [
   {
@@ -305,6 +394,7 @@ const ALLOWED_KEYS: Readonly<Record<string, readonly string[]>> = {
   ],
   task_list: ['status', 'owner', 'blockedBy'],
   request_shutdown: ['to'],
+  team_plan_approval: ['request_id', 'action', 'message'],
 };
 
 function lineError(
@@ -345,6 +435,18 @@ export function hostedTeamArgumentError(
   );
   if (unsupported !== undefined)
     return `Hosted ${toolName} received unsupported argument ${JSON.stringify(unsupported)}.`;
+  if (toolName === 'team_plan_approval') {
+    if (typeof args['request_id'] !== 'string' || !args['request_id'])
+      return 'request_id must be a nonempty string.';
+    if (!['approve', 'reject', 'show'].includes(args['action'] as string))
+      return 'action must be approve, reject or show.';
+    if (
+      args['message'] !== undefined &&
+      (typeof args['message'] !== 'string' ||
+        Buffer.byteLength(args['message'], 'utf8') > 4096)
+    )
+      return 'message must be at most 4096 UTF-8 bytes.';
+  }
   if (toolName === 'team_create') {
     if (typeof args['team_name'] !== 'string')
       return 'team_name must be a string.';
@@ -510,10 +612,28 @@ export class HostedTeamSession {
    * that later never started.
    */
   committedBy(toolName: string, callKey: string): boolean {
+    if (toolName === 'team_plan_approval')
+      return (
+        this.committed('decideTeamPlan', callKey) !== undefined ||
+        this.plans().some(
+          (plan) =>
+            this.committed(
+              'withdrawTeamPlan',
+              `decision:${callKey}:${plan.requestId}`,
+            ) !== undefined,
+        )
+      );
     if (toolName === 'request_shutdown') {
       return (
         this.committed('commitChildRunRecord', `shutdown:${callKey}`) !==
-        undefined
+          undefined ||
+        this.plans().some(
+          (plan) =>
+            this.committed(
+              'withdrawTeamPlan',
+              `shutdown:${callKey}:${plan.requestId}`,
+            ) !== undefined,
+        )
       );
     }
     const commands: ReadonlyArray<readonly [string, string]> =
@@ -525,6 +645,13 @@ export class HostedTeamSession {
             ? [
                 ['deleteTeam', `${callKey}:closing`],
                 ['deleteTeam', `${callKey}:deleted`],
+                ...this.plans().map(
+                  (plan) =>
+                    [
+                      'withdrawTeamPlan',
+                      `delete:${callKey}:${plan.requestId}`,
+                    ] as const,
+                ),
               ]
             : toolName === 'task_update'
               ? Array.from(
@@ -554,9 +681,12 @@ export class HostedTeamSession {
      * passes it; a caller outside a model Turn has no work given in one.
      */
     turnPrefix?: string,
+    delivery: HostedTeamDeliveryContext = { closing: false },
   ): Promise<string> {
     return this.serial(() => {
       switch (toolName) {
+        case 'team_plan_approval':
+          return this.decidePlan(callKey, args, delivery);
         case 'team_create':
           return this.createTeam(callKey, args['team_name'] as string);
         case 'team_delete':
@@ -599,6 +729,12 @@ export class HostedTeamSession {
       throw new HostedTeamRefusal(
         `"${MANAGED_TEAM_LEADER}" is reserved for the team leader. Choose a different teammate name.`,
       );
+    // H4e-b3 decision 7: `parent` is how a member addresses its leader, so
+    // no member may take the word other members address their leader with.
+    if (name === 'parent')
+      throw new HostedTeamRefusal(
+        `"parent" is reserved for the Session that accepts the members' messages. Choose a different teammate name.`,
+      );
     if (name.length > MANAGED_TEAM_LIMITS.maxNameLength)
       throw new HostedTeamRefusal(
         `Teammate name "${name}" is longer than ${MANAGED_TEAM_LIMITS.maxNameLength} characters.`,
@@ -623,6 +759,7 @@ export class HostedTeamSession {
     readonly teamId: string;
     readonly name: string;
     readonly childRunId: string;
+    readonly planModeRequired?: boolean;
   }): Promise<{ readonly joined: true } | { readonly ended: ChildSessionRun }> {
     return this.serial(async () => {
       const commandId = `${params.childRunId}:join`;
@@ -634,7 +771,7 @@ export class HostedTeamSession {
           teamJoinBody(this.team(params.teamId)!, {
             name: params.name,
             childRunId: params.childRunId,
-            planModeRequired: false,
+            planModeRequired: params.planModeRequired ?? false,
           }),
           'joinTeam',
           commandId,
@@ -650,6 +787,316 @@ export class HostedTeamSession {
       }
       return { joined: true };
     });
+  }
+
+  plan(requestId: string): TeamPlan | undefined {
+    const record = this.store.authority.extensionRecord('team_plan', requestId);
+    return record === undefined ? undefined : parseTeamPlan(record.record);
+  }
+
+  plans(teamId?: string): TeamPlan[] {
+    return this.store.authority
+      .extensionRecordsInDomain('team_plan')
+      .map((entry) => parseTeamPlan(entry.record))
+      .filter((plan) => teamId === undefined || plan.teamId === teamId);
+  }
+
+  async showPlan(requestId: string): Promise<string> {
+    const plan = this.plan(requestId);
+    if (plan === undefined)
+      throw new HostedTeamRefusal(`No plan ${requestId}.`);
+    const feedback =
+      plan.feedbackRef === null
+        ? ''
+        : (await this.store.resources.read(plan.feedbackRef)).toString('utf8');
+    return `Plan ${requestId}, member ${plan.member}, revision ${plan.planRevision}: ${plan.decision ?? plan.run.state}\n${(await this.store.resources.read(plan.planRef)).toString('utf8')}${feedback ? `\nFeedback: ${feedback}` : ''}`;
+  }
+
+  submitPlan(
+    commandId: string,
+    childRunId: string,
+    text: string,
+  ): Promise<string> {
+    return this.serial(async () => {
+      const prior = this.plan(commandId);
+      if (prior !== undefined) return this.submissionAnswer(prior);
+      const superseded = this.supersededPlan(commandId);
+      if (superseded !== undefined)
+        return this.finishSupersede(commandId, superseded, text);
+      assertManagedSessionDomainEnabled('team_plan');
+      const chains = this.chains();
+      const member = hostedOpenTeamChainMember(
+        this.store.authority.extensionRecordsInDomain('team_state'),
+        chains,
+        childRunId,
+      );
+      if (member === undefined || member.team.lifecycle !== 'active')
+        throw new HostedTeamRefusal(
+          'Plan submission requires an active team membership.',
+        );
+      const view = hostedMemberView(chains, member.rootChildRunId);
+      if (
+        !isRunningMember(view) ||
+        view.stopping ||
+        view.head?.childRunId !== childRunId
+      )
+        throw new HostedTeamRefusal(
+          'Only the running, unstopped member head may submit a plan.',
+        );
+      if (
+        !member.team.members.find((entry) => entry.name === member.name)!
+          .planModeRequired
+      )
+        throw new HostedTeamRefusal(
+          'This member does not require plan approval.',
+        );
+      if (!text.trim())
+        throw new HostedTeamRefusal('A plan must not be empty.');
+      const launch = decodeChildLaunchEnvelope(
+        await this.store.resources.read(view.head.inputRef),
+      );
+      const preamble = teamMemberPreamble(
+        { name: member.name, teamName: member.team.name },
+        true,
+      );
+      try {
+        encodeChildLaunchEnvelope({
+          ...launch,
+          prompt:
+            preamble +
+            teamPlanInstruction(text, 'rejected', PLAN_FEEDBACK_RESERVE),
+        });
+      } catch (cause) {
+        if (!(cause instanceof ManagedSessionRecordError)) throw cause;
+        throw new HostedTeamRefusal(planBoundRefusal(launch, preamble, text));
+      }
+      const planRef = await this.store.resources.publish(
+        'managed-team-content',
+        Buffer.from(text, 'utf8'),
+      );
+      const checkHead = () => {
+        const current = this.memberView(member.rootChildRunId);
+        if (
+          current.head?.childRunId !== childRunId ||
+          !isRunningMember(current) ||
+          current.stopping ||
+          this.team(member.team.teamId)?.lifecycle !== 'active'
+        )
+          throw new HostedTeamRefusal(
+            'The submitting member is no longer the running, unstopped head.',
+          );
+      };
+      checkHead();
+      const plans = this.plans(member.team.teamId).filter(
+        (plan) => plan.member === member.name,
+      );
+      await this.withdrawPlans(
+        member.team.teamId,
+        member.name,
+        `supersede:${commandId}`,
+      );
+      // A committed cancellation owes its successor even if the run settled.
+      // Without that evidence this is still a fresh admission.
+      if (this.supersededPlan(commandId) === undefined) checkHead();
+      const plan = teamPlanOpenBody({
+        teamId: member.team.teamId,
+        requestId: commandId,
+        member: member.name,
+        planRevision:
+          Math.max(0, ...plans.map((entry) => entry.planRevision)) + 1,
+        planRef,
+      });
+      await this.commit('team_plan', plan, 'submitTeamPlan', commandId);
+      return this.submissionAnswer(plan);
+    });
+  }
+
+  supersededPlan(commandId: string): TeamPlan | undefined {
+    return this.plans()
+      .filter(
+        (plan) =>
+          this.committed(
+            'withdrawTeamPlan',
+            `supersede:${commandId}:${plan.requestId}`,
+          ) !== undefined,
+      )
+      .sort((a, b) => b.planRevision - a.planRevision)[0];
+  }
+
+  private async finishSupersede(
+    commandId: string,
+    previous: TeamPlan,
+    text: string,
+  ): Promise<string> {
+    const revision = previous.planRevision + 1;
+    const newer = this.plans(previous.teamId).find(
+      (plan) =>
+        plan.member === previous.member && plan.planRevision >= revision,
+    );
+    if (newer !== undefined)
+      return `This submission was superseded by plan ${newer.requestId} revision ${newer.planRevision}; it is not pending approval. End your turn.`;
+    const planRef = await this.store.resources.publish(
+      'managed-team-content',
+      Buffer.from(text, 'utf8'),
+    );
+    const plan = teamPlanOpenBody({
+      teamId: previous.teamId,
+      member: previous.member,
+      requestId: commandId,
+      planRevision: revision,
+      planRef,
+    });
+    await this.commit('team_plan', plan, 'submitTeamPlan', commandId);
+    return this.submissionAnswer(plan);
+  }
+
+  private submissionAnswer(plan: TeamPlan): string {
+    return `Your plan was submitted as revision ${plan.planRevision}. End your turn now; the leader's decision arrives as your next instruction.`;
+  }
+
+  private async withdrawPlans(
+    teamId: string,
+    member: string | undefined,
+    callKey: string,
+  ): Promise<void> {
+    try {
+      assertManagedSessionDomainEnabled('team_plan');
+    } catch (cause) {
+      if (!(cause instanceof ManagedSessionRecordError)) throw cause;
+      return;
+    }
+    for (const plan of this.plans(teamId)) {
+      if (
+        plan.run.state !== 'waiting' ||
+        (member !== undefined && plan.member !== member)
+      )
+        continue;
+      await this.commit(
+        'team_plan',
+        teamPlanWithdrawBody(plan),
+        'withdrawTeamPlan',
+        `${callKey}:${plan.requestId}`,
+      );
+    }
+  }
+
+  /** Recovery reads only this call's settlement and continuation, never another decision. */
+  async planDecisionEvidence(callKey: string): Promise<string | undefined> {
+    const requestId = this.committed('decideTeamPlan', callKey);
+    if (requestId === undefined) {
+      const withdrawn = this.plans().filter(
+        (plan) =>
+          this.committed(
+            'withdrawTeamPlan',
+            `decision:${callKey}:${plan.requestId}`,
+          ) !== undefined,
+      );
+      if (withdrawn.length === 0) return undefined;
+      return withdrawn
+        .map(
+          (plan) =>
+            `Plan ${plan.requestId} was withdrawn because ${plan.member} ended or was stopped.`,
+        )
+        .join('\n');
+    }
+    const plan = this.plan(requestId)!;
+    const continued = this.committed('continueChildRun', callKey);
+    if (continued !== undefined) {
+      const run = this.childRun(continued)!;
+      if (run.run.execution === 'not_started_proven')
+        return `The decision on ${plan.member}'s plan ${requestId} revision ${plan.planRevision} was recorded (${plan.decision}), but its continuation never started. Send the decision again with send_message, quoting the plan (team_plan_approval action "show", request_id "${requestId}").`;
+      return `The decision on ${plan.member}'s plan ${requestId} revision ${plan.planRevision} was recorded (${plan.decision}) and the member was continued.`;
+    }
+    return `The decision on ${plan.member}'s plan ${requestId} revision ${plan.planRevision} was recorded (${plan.decision}). The call stopped before ${plan.member} was continued; send the decision with send_message, quoting the plan (team_plan_approval with action "show", request_id "${requestId}" returns it).`;
+  }
+
+  private async decidePlan(
+    callKey: string,
+    args: Record<string, unknown>,
+    delivery: HostedTeamDeliveryContext,
+  ): Promise<string> {
+    const evidence = await this.planDecisionEvidence(callKey);
+    if (evidence !== undefined) return evidence;
+    const error = hostedTeamArgumentError('team_plan_approval', args);
+    if (error !== undefined) throw new HostedTeamRefusal(error);
+    const requestId = args['request_id'] as string;
+    if (args['action'] === 'show') return this.showPlan(requestId);
+    assertManagedSessionDomainEnabled('team_plan');
+    const plan = this.plan(requestId);
+    if (plan === undefined)
+      throw new HostedTeamRefusal(`No plan ${requestId}.`);
+    if (plan.run.state !== 'waiting')
+      return `Plan ${requestId} is ${plan.decision ?? plan.run.state}.`;
+    const team = this.team(plan.teamId)!;
+    const member = team.members.find((entry) => entry.name === plan.member)!;
+    const view = this.memberView(member.childRunId);
+    if (isEndedMember(view) || view.stopping) {
+      await this.withdrawPlans(team.teamId, member.name, `decision:${callKey}`);
+      return `Plan ${requestId} was withdrawn because ${member.name} ended or was stopped.`;
+    }
+    if (team.lifecycle !== 'active')
+      throw new HostedTeamRefusal('The team is not active.');
+    if (
+      this.plans(team.teamId).some(
+        (entry) =>
+          entry.member === member.name &&
+          entry.planRevision > plan.planRevision,
+      )
+    )
+      throw new HostedTeamRefusal(
+        'Only the newest waiting plan may be decided.',
+      );
+    if (!view.continuable || view.head === undefined)
+      throw new HostedTeamRefusal(`Decide after ${member.name}'s run settles.`);
+    if (this.stops?.sendToChild === undefined)
+      throw new HostedTeamRefusal(
+        'This Session cannot continue a plan member.',
+      );
+    const feedback = (args['message'] as string | undefined) ?? '';
+    const decision: TeamPlanDecision =
+      args['action'] === 'approve' ? 'approved' : 'rejected';
+    const text = teamPlanInstruction(
+      (await this.store.resources.read(plan.planRef)).toString('utf8'),
+      decision,
+      feedback,
+    );
+    const route = {
+      taskId: managedChildTaskId(this.key.sessionId, view.head.childRunId),
+      text,
+      messageId: `plan:${callKey}`,
+      continuationRunId: callKey,
+      executionCallId: callKey,
+      ...delivery,
+      continuationOnly: true,
+      planDecision: { requestId, decision, childRunId: view.head.childRunId },
+    };
+    const feedbackRef = feedback
+      ? await this.store.resources.publish(
+          'managed-team-content',
+          Buffer.from(feedback, 'utf8'),
+        )
+      : null;
+    const preflight = await this.stops.sendToChild({
+      ...route,
+      preflight: true,
+    });
+    if (preflight.kind === 'refused')
+      throw new HostedTeamRefusal(preflight.reason);
+    const current = this.memberView(member.childRunId);
+    if (
+      !current.continuable ||
+      current.head?.childRunId !== view.head.childRunId
+    )
+      throw new HostedTeamRefusal(`Decide after ${member.name}'s run settles.`);
+    await this.commit(
+      'team_plan',
+      teamPlanDecisionBody(plan, decision, feedbackRef),
+      'decideTeamPlan',
+      callKey,
+    );
+    // The child chain rechecks after settlement; races return the split answer.
+    await this.stops.sendToChild(route);
+    return (await this.planDecisionEvidence(callKey))!;
   }
 
   private async createTeam(teamId: string, rawName: string): Promise<string> {
@@ -706,6 +1153,7 @@ export class HostedTeamSession {
         );
       }
     }
+    await this.withdrawPlans(team.teamId, undefined, `delete:${callKey}`);
     await this.commit(
       'team_state',
       teamLifecycleBody(closing, 'deleted'),
@@ -741,6 +1189,26 @@ export class HostedTeamSession {
         `"${name}" is not a member of team "${team.name}".`,
       );
     let view = hostedMemberView(this.chains(), member.childRunId);
+    const checkWithdrawal = () => {
+      if (
+        !isRunningMember(view) &&
+        !isEndedMember(view) &&
+        this.plans(team.teamId).some(
+          (plan) => plan.member === name && plan.run.state === 'waiting',
+        )
+      ) {
+        try {
+          assertManagedSessionDomainEnabled('team_plan');
+        } catch (cause) {
+          if (!(cause instanceof ManagedSessionRecordError)) throw cause;
+          throw new HostedTeamRefusal(
+            `${name}'s waiting plan cannot be withdrawn while team_plan is disabled. No shutdown barrier was recorded; the plan can still be decided after reenablement.`,
+          );
+        }
+      }
+    };
+    checkWithdrawal();
+    await this.withdrawPlans(team.teamId, name, `shutdown:${callKey}`);
     if (isRunningMember(view) && !view.stopping && view.head !== undefined) {
       // A lane without the child funnel has nothing to stop through, and
       // can only carry members read-only; refusing here costs the merge
@@ -763,6 +1231,7 @@ export class HostedTeamSession {
         if (!(cause instanceof ManagedSessionConflictError)) throw cause;
         view = hostedMemberView(this.chains(), member.childRunId);
         if (view.state === 'running' && !view.stopping) throw cause;
+        checkWithdrawal();
       }
     }
     if (view.stoppingBeforeStart)
@@ -908,7 +1377,9 @@ export class HostedTeamSession {
       const chains = this.chains();
       const view = hostedMemberView(chains, member.childRunId);
       const recorded = ` "${owner}" was not notified: task_update records the board only.`;
-      if (isEndedMember(view)) {
+      if (view.stoppingBeforeStart) {
+        notice = `${recorded} ${owner}'s latest continuation is being stopped before it started; if it ends without starting, ${owner} can take work again. Check task_list once it settles.`;
+      } else if (isEndedMember(view)) {
         notice = `${recorded} ${owner} cannot take more work: it ${view.stopping ? 'is being stopped' : view.stopRequestedCompletion ? 'completed after a stop was requested' : `has ${view.state}`}.`;
       } else if (view.neverStarted !== undefined) {
         const neverStarted = hostedNeverStarted(
@@ -1001,15 +1472,16 @@ export class HostedTeamSession {
     // or delete it; a new owner is checked, and so is a kept owner when the
     // call moves the task to another open status, so a member that ended
     // never lands on open work.
-    if (owner != null && owner !== task.owner)
+    if (owner != null && owner !== task.owner) {
       this.assertOwner(team, owner, status === 'completed', turnPrefix);
-    else if (
+    } else if (
       (owner === undefined || owner === task.owner) &&
       task.owner !== null &&
       status !== task.status &&
       status !== 'completed'
-    )
+    ) {
       this.assertOwner(team, task.owner, false, turnPrefix, number);
+    }
     if (
       status === 'in_progress' &&
       (owner === undefined ? task.owner : owner) === null
@@ -1105,6 +1577,15 @@ export class HostedTeamSession {
       ...(team.members.length > 0
         ? team.members.map((member) => this.rosterLine(member, chains))
         : ['No members yet.']),
+      ...this.plans(team.teamId)
+        .filter((plan) => plan.run.state === 'waiting')
+        .map((plan) => {
+          const member = team.members.find(
+            (entry) => entry.name === plan.member,
+          )!;
+          const view = this.memberView(member.childRunId, chains);
+          return `Pending plan: ${plan.member}, request ${plan.requestId}, revision ${plan.planRevision}, ${plan.planRef.byteLength} bytes${isEndedMember(view) || view.stopping ? ' (member ended/stopped)' : ''}`;
+        }),
     ].join('\n');
   }
 
@@ -1152,7 +1633,12 @@ export class HostedTeamSession {
       (reachable
         ? ` — ${managedChildTaskId(this.key.sessionId, head.childRunId)}`
         : '') +
-      note
+      note +
+      (view.neverStarted !== undefined &&
+      this.committed('decideTeamPlan', view.neverStarted.childRunId) !==
+        undefined
+        ? ` Send the decision again with send_message, quoting the plan (team_plan_approval action "show", request_id "${this.committed('decideTeamPlan', view.neverStarted.childRunId)}").`
+        : '')
     );
   }
 
@@ -1230,7 +1716,11 @@ export class HostedTeamSession {
         : view.state === 'cancelled'
           ? 'was cancelled'
           : `has ${view.state}`;
-      // No run of it completed, so it did no task's work.
+      if (completing && view.stopping)
+        throw new HostedTeamRefusal(
+          `Member "${owner}" is being stopped and has not completed a run yet. Complete the task with this owner only after task_list shows its run completed; otherwise record the member that did it, or "leader".`,
+        );
+      // No settled run of an ended member could have done the task's work.
       if (completing)
         throw new HostedTeamRefusal(
           `Member "${owner}" ${ended} without completing a run, so it did not do this task's work. Record the member that did it, or "leader".`,
@@ -1252,7 +1742,7 @@ export class HostedTeamSession {
         this.messagesTo(view.neverStarted.childRunId),
       );
       throw new HostedTeamRefusal(
-        `${who(`has finished, and its latest continuation ${neverStartedClause(neverStarted)}`)}. ${neverStartedAction(neverStarted, owner)}, then update the task in the same turn${unassign}.`,
+        `${who(`has finished, and its latest continuation ${neverStartedClause(neverStarted)}`)}. ${neverStartedAction(neverStarted, owner)}. Then update the task in the same turn${unassign}.`,
       );
     }
     if (
@@ -1270,6 +1760,466 @@ export class HostedTeamSession {
     throw new HostedTeamRefusal(
       `${who('has finished')}. If it already did this task's work, from its launch prompt or a message you sent it, set status "completed" with this owner once its report is in. Otherwise give it the work with send_message to "${owner}" first, which continues it, and then update the task in the same turn${unassign}.`,
     );
+  }
+
+  /**
+   * H4e-b3: the member's view of the board for `task_list`. The board
+   * carries everything the lead's view does, minus the child task ids
+   * behind each roster name — a member reads names, states and task
+   * numbers, never the run another member is attached to.
+   */
+  async memberBoardList(
+    _memberName: string,
+    args: Record<string, unknown>,
+  ): Promise<string> {
+    return this.serial(async () => this.memberListIn(args));
+  }
+
+  private memberListIn(args: Record<string, unknown>): string {
+    const team = this.openTeam();
+    if (team === undefined)
+      throw new HostedTeamRefusal(
+        'You are not a member of an open team. Ask the leader how the team ended.',
+      );
+    let owner: string | undefined;
+    if (typeof args['owner'] === 'string' && args['owner'].trim()) {
+      owner = sanitizeName(args['owner']);
+      if (!owner)
+        throw new HostedTeamRefusal(
+          'Cannot filter by owner: owner must include at least one letter, number, or hyphen.',
+        );
+    }
+    const tasks = this.tasksOf(team.teamId);
+    const byId = new Map(tasks.map((task) => [task.taskId, task]));
+    const blocker =
+      typeof args['blockedBy'] === 'string' && args['blockedBy'].trim()
+        ? `${team.teamId}#${taskNumber(args['blockedBy'])}`
+        : undefined;
+    const lines = tasks
+      .filter(
+        (task) =>
+          task.status !== 'deleted' &&
+          (args['status'] === undefined || task.status === args['status']) &&
+          (owner === undefined || task.owner === owner) &&
+          (blocker === undefined ||
+            teamTaskOpenBlockers(task, byId).includes(blocker)),
+      )
+      .map((task) => {
+        const open = teamTaskOpenBlockers(task, byId).map(
+          (each) => `#${byId.get(each)!.number}`,
+        );
+        return (
+          `#${task.number} [${task.status}]` +
+          (task.owner ? ` @${task.owner}` : '') +
+          ` — ${task.subject}` +
+          (open.length > 0 ? ` (blocked by ${open.join(', ')})` : '')
+        );
+      });
+    const chains = this.chains();
+    return [
+      ...(lines.length > 0 ? lines : ['No tasks found.']),
+      '',
+      `--- Team "${team.name}" members ---`,
+      ...(team.members.length > 0
+        ? team.members.map((member) => this.memberRosterLine(member, chains))
+        : ['No members yet.']),
+    ].join('\n');
+  }
+
+  /** The roster line a member sees: state only, never the child task id. */
+  private memberRosterLine(
+    member: { readonly name: string; readonly childRunId: string },
+    chains: HostedChildChains,
+  ): string {
+    const view = this.memberView(member.childRunId, chains);
+    const head = view.head;
+    const label = view.stopping
+      ? 'running (stopping)'
+      : view.stopRequestedCompletion
+        ? 'completed (stop requested)'
+        : view.state;
+    const reason =
+      (view.state === 'failed' || view.state === 'cancelled') && head
+        ? head.stopReason
+        : null;
+    const note =
+      view.neverStarted === undefined ? '' : ` (its latest task did not start)`;
+    return `${member.name}: ${label}` + (reason ? ` (${reason})` : '') + note;
+  }
+
+  /**
+   * H4e-b3 decision 6: a member's `task_create`. One write, replay-stable
+   * under `${commandId}:create` so a TaskCreateCommand re-run of
+   * `execute` finds it and takes no second task. Refuses on a closing
+   * team or any rule violation, with the member-facing texts.
+   */
+  async memberTaskCreate(
+    commandId: string,
+    args: Record<string, unknown>,
+  ): Promise<string> {
+    return this.serial(async () => {
+      const created = this.committed('createTeamTask', `${commandId}:create`);
+      if (created !== undefined) {
+        const task = this.task(created);
+        return `Task #${task.number} created: "${task.subject}"`;
+      }
+      const team = this.openTeam();
+      if (team === undefined)
+        throw new HostedTeamRefusal(
+          'You are not a member of an open team. Ask the leader how the team ended.',
+        );
+      if (team.lifecycle !== 'active')
+        throw new HostedTeamRefusal(
+          `Team "${team.name}" is closing and takes no new tasks.`,
+        );
+      const number =
+        Math.max(0, ...this.tasksOf(team.teamId).map((task) => task.number)) +
+        1;
+      const metadata = metadataBytes(mergeMetadata({}, args['metadata']));
+      const task = teamTaskOpenBody({
+        teamId: team.teamId,
+        taskId: `${team.teamId}#${number}`,
+        number,
+        subject: args['subject'] as string,
+        descriptionRef: await this.publishText(args['description'] as string),
+        activeForm: (args['activeForm'] as string | undefined) ?? null,
+        metadataRef: await this.publishMetadata(metadata),
+      });
+      await this.commit(
+        'team_task',
+        task,
+        'createTeamTask',
+        `${commandId}:create`,
+      );
+      return `Task #${number} created: "${task.subject}"`;
+    });
+  }
+
+  /**
+   * H4e-b3 decision 6: a member's `task_update`, the Legacy teammate
+   * rules. Status/owner/subject/description, addBlockedBy, addBlocks and
+   * delete are writes the member may do only on its own or unowned tasks;
+   * activeForm and metadata are free for any task; owner resolves to the
+   * member's own name or `""`. An unowned task moved to `in_progress`
+   * takes the member as its owner. Deleting freezes tasks just like the
+   * lead's flow. Each write place is replay-stable under
+   * `${commandId}:${place + 1}`.
+   */
+  async memberTaskUpdate(
+    memberName: string,
+    commandId: string,
+    args: Record<string, unknown>,
+  ): Promise<string> {
+    return this.serial(async () => {
+      const team = this.openTeam();
+      if (team === undefined)
+        throw new HostedTeamRefusal(
+          'You are not a member of an open team. Ask the leader how the team ended.',
+        );
+      const number = taskNumber(args['taskId'] as string);
+      const deleting = args['status'] === 'deleted';
+      const blocks = deleting
+        ? []
+        : ((args['addBlocks'] as string[] | undefined) ?? []).map(taskNumber);
+      const blockedBy = deleting
+        ? []
+        : ((args['addBlockedBy'] as string[] | undefined) ?? []).map(
+            taskNumber,
+          );
+      const board = new Map(
+        this.tasksOf(team.teamId).map((task) => [task.number, task]),
+      );
+      const commandId_ = (place: number) => `${commandId}:${place + 1}`;
+      const pending = [number, ...blocks]
+        .map((_, place) => place)
+        .filter(
+          (place) =>
+            this.committed('updateTeamTask', commandId_(place)) === undefined,
+        );
+      const replaying = pending.length < blocks.length + 1;
+      if (!replaying)
+        this.validateMemberUpdate(
+          team,
+          board,
+          memberName,
+          number,
+          args,
+          blocks,
+          blockedBy,
+        );
+      const notCommitted: string[] = [];
+      for (const place of pending) {
+        // Each remaining place is re-validated against the board as it
+        // stands now — the board may have moved since the place before
+        // it committed: a target can be gone, and an edge the original
+        // validation allowed can now close a cycle. Deterministic
+        // refusals ride the receipt; they never escape as faults.
+        const liveBoard = this.memberBoardOf(team.teamId);
+        if (place > 0) {
+          const targetNumber = blocks[place - 1]!;
+          const target = liveBoard.get(targetNumber);
+          if (target === undefined) {
+            notCommitted.push(`#${targetNumber} not found`);
+            continue;
+          }
+          if (!this.memberMayWrite(target, memberName)) {
+            notCommitted.push(
+              `#${target.number} is owned by ${target.owner ?? 'someone'} (not unowned for you)`,
+            );
+            continue;
+          }
+          const selfTask = liveBoard.get(number);
+          if (selfTask === undefined) {
+            notCommitted.push(`#${number} not found`);
+            continue;
+          }
+          const cycle = dependencyCycle(liveBoard, number, [targetNumber], []);
+          if (cycle !== null) {
+            notCommitted.push(
+              `#${targetNumber} would create a dependency cycle (${cycle
+                .map((each) => `#${each}`)
+                .join(' → ')})`,
+            );
+            continue;
+          }
+          const current = this.task(target.taskId);
+          const nextBlocks = new Set([...current.blockedBy, selfTask.taskId]);
+          if (nextBlocks.size > MANAGED_TEAM_LIMITS.maxBlockers) {
+            notCommitted.push(
+              `#${targetNumber} would exceed ${MANAGED_TEAM_LIMITS.maxBlockers} blockers`,
+            );
+            continue;
+          }
+          try {
+            await this.commit(
+              'team_task',
+              teamTaskRevisionBody(current, {
+                addBlockedBy: [selfTask.taskId],
+              }),
+              'updateTeamTask',
+              commandId_(place),
+            );
+          } catch (cause) {
+            // Inside this serial scope the authority's conflict is the
+            // board's own verdict for this shape: fold it like the
+            // checks above, never a rotate-and-fault.
+            if (cause instanceof ManagedSessionConflictError) {
+              notCommitted.push(cause.message);
+              continue;
+            }
+            throw cause;
+          }
+          continue;
+        }
+        try {
+          this.validateMemberUpdate(
+            team,
+            liveBoard,
+            memberName,
+            number,
+            args,
+            blocks,
+            blockedBy,
+            true,
+          );
+        } catch (cause) {
+          if (!(cause instanceof HostedTeamRefusal)) throw cause;
+          notCommitted.push(cause.message);
+          continue;
+        }
+        const current = this.task(board.get(number)!.taskId);
+        const revision = deleting
+          ? teamTaskRevisionBody(current, { status: 'deleted' })
+          : await this.memberUpdatedTask(
+              current,
+              memberName,
+              args,
+              blockedBy,
+              board,
+            );
+        await this.commit(
+          'team_task',
+          revision,
+          'updateTeamTask',
+          commandId_(place),
+        );
+      }
+      const task = this.task(board.get(number)!.taskId);
+      if (deleting) return `Task #${number} deleted.`;
+      const done = `Task #${number} updated (status: ${task.status}${task.owner ? `, owner: ${task.owner}` : ''}).`;
+      if (notCommitted.length === 0) return done;
+      return `${done} Not committed: ${notCommitted.join('; ')}.`;
+    });
+  }
+
+  private memberBoardOf(teamId: string): ReadonlyMap<number, TeamTask> {
+    return new Map(
+      this.tasksOf(teamId).map((each) => [each.number, each] as const),
+    );
+  }
+
+  private memberMayWrite(task: TeamTask, memberName: string): boolean {
+    return task.owner === null || task.owner === memberName;
+  }
+
+  /**
+   * The member rules of decision 6 for one board write: status, owner,
+   * subject, description, addBlockedBy and delete all require the task to
+   * be the member's own or unowned; addBlocks also requires every named
+   * task to be the member's own or unowned; activeForm and metadata are
+   * unrestricted.
+   */
+  private validateMemberUpdate(
+    team: TeamState,
+    board: ReadonlyMap<number, TeamTask>,
+    memberName: string,
+    number: number,
+    args: Record<string, unknown>,
+    blocks: readonly number[],
+    blockedBy: readonly number[],
+    _revisited = false,
+  ): void {
+    const task = board.get(number);
+    if (task === undefined || task.status === 'deleted') {
+      throw new HostedTeamRefusal(`Task #${number} not found.`);
+    }
+    const deleting = args['status'] === 'deleted';
+    const touchesOwnerTaskRules =
+      args['status'] !== undefined ||
+      args['owner'] !== undefined ||
+      args['subject'] !== undefined ||
+      args['description'] !== undefined ||
+      (args['addBlockedBy'] as unknown[] | undefined)?.length !== undefined;
+    if (touchesOwnerTaskRules && !this.memberMayWrite(task, memberName)) {
+      throw new HostedTeamRefusal(
+        `Task #${number} is owned by ${task.owner}; you can change only tasks you own or that are unowned.`,
+      );
+    }
+    // Existence comes before ownership: the probe below reads the tasks
+    // this gate proves present, and an absent number is a refusal,
+    // never an undefined read.
+    const live = (eachNumber: number) => {
+      const each = board.get(eachNumber);
+      return each !== undefined && each.status !== 'deleted';
+    };
+    const missing = [...new Set([...blocks, ...blockedBy])]
+      .filter((each) => !live(each))
+      .sort((left, right) => left - right);
+    if (missing.length > 0)
+      throw new HostedTeamRefusal(
+        `Cannot update task #${number}: referenced task${missing.length === 1 ? '' : 's'} ${missing.map((each) => `#${each}`).join(', ')} not found.`,
+      );
+    if (blocks.length > 0) {
+      const held = blocks
+        .map((each) => board.get(each)!)
+        .find((each) => !this.memberMayWrite(each, memberName));
+      if (held)
+        throw new HostedTeamRefusal(
+          `Task #${held.number} is owned by ${held.owner}; you can block only tasks you own or that are unowned.`,
+        );
+    }
+    if (
+      args['owner'] !== undefined &&
+      args['owner'] !== '' &&
+      sanitizeName(args['owner'] as string) !== memberName
+    ) {
+      throw new HostedTeamRefusal(
+        'Task owner must be your own name or "". Assign work to another member instead with send_message.',
+      );
+    }
+    if (deleting) return;
+    if (blocks.includes(number) || blockedBy.includes(number))
+      throw new HostedTeamRefusal(
+        `Cannot update task #${number}: a task cannot block or be blocked by itself.`,
+      );
+    const crowded = [
+      [number, blockedBy] as const,
+      ...blocks.map((each) => [each, [number]] as const),
+    ].find(
+      ([each, added]) =>
+        new Set([
+          ...board.get(each)!.blockedBy,
+          ...added.map((other) => board.get(other)!.taskId),
+        ]).size > MANAGED_TEAM_LIMITS.maxBlockers,
+    );
+    if (crowded)
+      throw new HostedTeamRefusal(
+        `Cannot update task #${number}: task #${crowded[0]} would have more than ${MANAGED_TEAM_LIMITS.maxBlockers} blockers.`,
+      );
+    const cycle = dependencyCycle(board, number, blocks, blockedBy);
+    if (cycle)
+      throw new HostedTeamRefusal(
+        `Cannot update task #${number}: this would create a dependency cycle (${cycle.map((each) => `#${each}`).join(' → ')}).`,
+      );
+    const status =
+      (args['status'] as TeamTaskStatus | undefined) ?? task.status;
+    const resultingOwner =
+      args['owner'] === undefined
+        ? status === 'in_progress' && task.owner === null
+          ? memberName
+          : task.owner
+        : args['owner'] === ''
+          ? null
+          : memberName;
+    if (status === 'in_progress' && resultingOwner === null)
+      throw new HostedTeamRefusal(
+        'Cannot move a task to in_progress without an owner. Set owner to your own name, or leave the task pending.',
+      );
+    // The lead's owner rule still applies wherever the final owner is named.
+    if (resultingOwner !== null && resultingOwner !== MANAGED_TEAM_LEADER) {
+      const member = team.members.find((each) => each.name === resultingOwner);
+      if (member === undefined && resultingOwner === memberName)
+        throw new HostedTeamRefusal(
+          "You are not on this team's roster, so you cannot own a task here.",
+        );
+    }
+  }
+
+  private async memberUpdatedTask(
+    task: TeamTask,
+    memberName: string,
+    args: Record<string, unknown>,
+    blockedBy: readonly number[],
+    board: ReadonlyMap<number, TeamTask>,
+  ): Promise<TeamTask> {
+    const status =
+      (args['status'] as TeamTaskStatus | undefined) ?? task.status;
+    const owner =
+      args['owner'] === undefined
+        ? status === 'in_progress' && task.owner === null
+          ? memberName
+          : undefined
+        : args['owner'] === ''
+          ? null
+          : memberName;
+    return teamTaskRevisionBody(task, {
+      subject: args['subject'] as string | undefined,
+      descriptionRef:
+        args['description'] === undefined
+          ? undefined
+          : await this.publishText(args['description'] as string),
+      activeForm: args['activeForm'] as string | undefined,
+      metadataRef:
+        args['metadata'] === undefined
+          ? undefined
+          : await this.publishMetadata(
+              metadataBytes(
+                mergeMetadata(
+                  task.metadataRef === null
+                    ? {}
+                    : (JSON.parse(
+                        (
+                          await this.store.resources.read(task.metadataRef)
+                        ).toString('utf8'),
+                      ) as Record<string, unknown>),
+                  args['metadata'],
+                ),
+              ),
+            ),
+      owner,
+      status: args['status'] as TeamTaskStatus | undefined,
+      addBlockedBy: blockedBy.map((each) => board.get(each)!.taskId),
+    });
   }
 
   /** The lead's child Session runs, indexed for one call. */
@@ -1320,6 +2270,20 @@ export class HostedTeamSession {
   }
 
   /**
+   * The command funnel's `execute` half-applied-write probe (decision 3):
+   * whether one board write this command derived is already committed —
+   * a create's `:create` or one update place. When any is, `execute`
+   * answers from what is committed and re-validates what remains instead
+   * of running the fresh admission gates again.
+   */
+  commandWriteCommitted(recordId: string): boolean {
+    return (
+      this.committed('createTeamTask', recordId) !== undefined ||
+      this.committed('updateTeamTask', recordId) !== undefined
+    );
+  }
+
+  /**
    * The record a call's command already committed (decision 11): such a
    * command is done, and a write is computed only for one that is not.
    */
@@ -1340,8 +2304,8 @@ export class HostedTeamSession {
 
   /** Commits one revision unless the record already holds it (the replay). */
   private async commit(
-    domain: 'team_state' | 'team_task',
-    record: TeamState | TeamTask,
+    domain: 'team_state' | 'team_task' | 'team_plan',
+    record: TeamState | TeamTask | TeamPlan,
     operation: string,
     commandId: string,
   ): Promise<void> {
@@ -1349,7 +2313,9 @@ export class HostedTeamSession {
       domain,
       domain === 'team_state'
         ? (record as TeamState).teamId
-        : (record as TeamTask).taskId,
+        : domain === 'team_plan'
+          ? (record as TeamPlan).requestId
+          : (record as TeamTask).taskId,
     );
     if (existing !== undefined && isDeepStrictEqual(existing.record, record))
       return;
