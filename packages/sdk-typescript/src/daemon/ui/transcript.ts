@@ -1767,7 +1767,9 @@ function coalesceTeammateActivity(
     const candidate = state.blocks[i]!;
     // Stop at a segment boundary: a row above it keeps the text the reader saw
     // there instead of being rewritten with content from the new segment.
-    if (candidate.kind === 'user') return false;
+    if (candidate.kind === 'user' || candidate.kind === 'assistant') {
+      return false;
+    }
     if (candidate.kind !== 'status') continue;
     if (candidate.source === 'session_branched') return false;
     if (

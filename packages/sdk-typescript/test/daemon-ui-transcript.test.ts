@@ -1079,9 +1079,8 @@ describe('teammate_activity status events', () => {
       [
         { type: 'assistant.text.delta', text: 'answering' },
         plain('first'),
-        { type: 'assistant.text.delta', text: ' more' },
         plain('second'),
-        { type: 'assistant.text.delta', text: ' tail' },
+        { type: 'assistant.text.delta', text: ' more' },
       ],
       { now: 1 },
     );
@@ -1090,11 +1089,34 @@ describe('teammate_activity status events', () => {
       'assistant',
       'status',
       'assistant',
-      'assistant',
     ]);
     expect(
       state.blocks.map((block) => ('text' in block ? block.text : '')),
-    ).toEqual(['answering', 'second', ' more', ' tail']);
+    ).toEqual(['answering', 'second', ' more']);
+  });
+
+  it('starts a new row after leader output instead of rewriting above it', () => {
+    // A teammate's second activity that arrives after the leader has already
+    // replied must not rewrite the older row that sits above the rendered
+    // leader text.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        activity('first pass', '/root/qa'),
+        { type: 'assistant.text.delta', text: 'leader reply' },
+        activity('second pass', '/root/qa'),
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'status',
+      'assistant',
+      'status',
+    ]);
+    expect(
+      state.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual(['first pass', 'leader reply', 'second pass']);
   });
 
   it('starts a new row after a branch marker instead of rewriting the old one', () => {
