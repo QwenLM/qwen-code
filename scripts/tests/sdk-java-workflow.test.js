@@ -28,7 +28,7 @@ const brokerTestPattern = ['Test*', '*Test', '*Tests', '*TestCase']
   .join(',');
 
 const writeBackFind =
-  "timeout 300 find . \\( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-parent' -o -path '*/com/alibaba/qwen-managed-agent-contracts' -o -path '*/com/alibaba/qwen-managed-agent-control-plane' -o -path '*/com/alibaba/qwen-managed-agent-runtime-broker' -o -path '*/com/alibaba/qwen-managed-agent-persistence' -o -path '*/com/alibaba/qwen-managed-agent-adapters' -o -path '*/com/alibaba/qwen-managed-agent-runtime-external' -o -path '*/com/alibaba/qwen-managed-agent-runtime-host' -o -path '*/com/alibaba/qwen-managed-agent-runtime-http' -o -path '*/com/alibaba/qwen-managed-agent-runtime-local' -o -path '*/com/alibaba/qwen-managed-agent-runtime-kubernetes' -o -path '*/com/alibaba/qwen-managed-agent-runtime-ssh' -o -path '*/com/alibaba/qwen-managed-agent-runtime-static' -o -path '*/com/alibaba/qwen-managed-agent-server' -o -path '*/com/alibaba/qwen-managed-agent-verification' \\) -prune -o -type f -links 1 ! -name '_remote.repositories' ! -name 'maven-metadata-local.xml' ! -name 'resolver-status.properties' ! -name '*.lastUpdated' ! -name '*.tmp' -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?";
+  "timeout 300 find . \\( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-parent' -o -path '*/com/alibaba/qwen-managed-agent-contracts' -o -path '*/com/alibaba/qwen-managed-agent-control-plane' -o -path '*/com/alibaba/qwen-managed-agent-runtime-broker' -o -path '*/com/alibaba/qwen-managed-agent-persistence' -o -path '*/com/alibaba/qwen-managed-agent-adapters' -o -path '*/com/alibaba/qwen-managed-agent-runtime-external' -o -path '*/com/alibaba/qwen-managed-agent-runtime-host' -o -path '*/com/alibaba/qwen-managed-agent-runtime-http' -o -path '*/com/alibaba/qwen-managed-agent-runtime-local' -o -path '*/com/alibaba/qwen-managed-agent-runtime-kubernetes' -o -path '*/com/alibaba/qwen-managed-agent-runtime-ssh' -o -path '*/com/alibaba/qwen-managed-agent-runtime-static' -o -path '*/com/alibaba/qwen-managed-agent-server' -o -path '*/com/alibaba/qwen-managed-agent-verification' -o -path '*/com/alibaba/qwen-managed-agent-*' \\) -prune -o -type f -links 1 ! -name '_remote.repositories' ! -name 'maven-metadata-local.xml' ! -name 'resolver-status.properties' ! -name '*.lastUpdated' ! -name '*.tmp' -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?";
 
 const workflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
 const job = (name) => {
@@ -416,12 +416,12 @@ describe('SDK Java self-hosted workflow guards', () => {
   });
 
   it('keeps the seeded coordinate drops and write-back prunes in step', () => {
-    // The in-house coordinate set is spelled by hand at every seed site and
-    // at both write-back prunes. A set that drifts on one side leaves a
-    // seeded hardlink alive, so the unlocked Maven run rewrites the host
-    // cache through it; compare every spelling instead of one pinned pair.
+    // Seeds and host purges match both in-house families at any depth. The
+    // write-back retains every explicit coordinate plus the module glob so
+    // the host purge cannot make a seeded inode eligible for copy-back.
     const parsed = parse(workflow);
     const drops = [];
+    const hostPurges = [];
     const prunes = [];
     // Maven's resolver tracking markers are spelled twice too: the seed
     // deletes them, and a write-back that forgets them publishes a failed
@@ -429,6 +429,10 @@ describe('SDK Java self-hosted workflow guards', () => {
     // spellings instead of pinning one.
     const markersOf = (text) =>
       [...text.matchAll(/-name '([^']+)'/g)].map((match) => match[1]).sort();
+    const pathsOf = (text) =>
+      [...text.matchAll(/-path '\*\/com\/alibaba\/([^']+)'/g)]
+        .map((match) => match[1])
+        .sort();
     const seedMarkers = [];
     const pruneMarkers = [];
     for (const [jobName, job] of Object.entries(parsed.jobs)) {
@@ -440,27 +444,27 @@ describe('SDK Java self-hosted workflow guards', () => {
           const seedEnd = run.indexOf('\nmvn --batch-mode', seedAt);
           expect(seedEnd, jobName).toBeGreaterThan(seedAt);
           const seed = run.slice(seedAt, seedEnd);
-          drops.push([
-            jobName,
-            [
-              ...seed.matchAll(
-                /"\$\{RUNNER_TEMP\}\/m2-repo\/com\/alibaba\/([^"]+)"/g,
-              ),
-            ]
-              .map((match) => match[1])
-              .sort(),
-          ]);
+          expect(seed, jobName).toContain(
+            'find "${RUNNER_TEMP}/m2-repo" -depth -type d',
+          );
+          expect(seed, jobName).toContain(
+            '-exec rm -rf {} + 2>/dev/null || true',
+          );
+          drops.push([jobName, pathsOf(seed)]);
           seedMarkers.push([jobName, markersOf(seed)]);
         }
         const pruneAt = run.indexOf('timeout 300 find .');
         if (pruneAt === -1) continue;
+        const hostPurgeAt = run.indexOf(
+          'find "${HOME}/.m2/repository" -depth -type d',
+        );
+        expect(hostPurgeAt, jobName).toBeGreaterThan(-1);
+        expect(hostPurgeAt, jobName).toBeLessThan(pruneAt);
+        const hostPurge = run.slice(hostPurgeAt, pruneAt);
+        expect(hostPurge, jobName).toContain('-exec rm -rf {} + 9>&-');
+        hostPurges.push([jobName, pathsOf(hostPurge)]);
         const prune = run.slice(pruneAt, run.indexOf('\n', pruneAt));
-        prunes.push([
-          jobName,
-          [...prune.matchAll(/-path '\*\/com\/alibaba\/([^']+)'/g)]
-            .map((match) => match[1])
-            .sort(),
-        ]);
+        prunes.push([jobName, pathsOf(prune)]);
         pruneMarkers.push([jobName, markersOf(prune)]);
       }
     }
@@ -482,10 +486,17 @@ describe('SDK Java self-hosted workflow guards', () => {
       'qwen-managed-agent-verification',
       'qwencode-sdk',
     ];
+    const expectedFamilies = ['qwen-managed-agent-*', 'qwencode-sdk'];
     expect(drops.length).toBeGreaterThan(0);
+    expect(hostPurges).toHaveLength(prunes.length);
     expect(prunes.length).toBeGreaterThan(0);
-    for (const [jobName, set] of [...drops, ...prunes]) {
-      expect(set, jobName).toEqual(expected);
+    for (const [jobName, set] of [...drops, ...hostPurges]) {
+      expect(set, jobName).toEqual(expectedFamilies);
+    }
+    for (const [jobName, set] of prunes) {
+      expect(set, jobName).toEqual(
+        ['qwen-managed-agent-*', ...expected].sort(),
+      );
     }
     const expectedMarkers = [
       '*.lastUpdated',
@@ -598,10 +609,10 @@ describe('SDK Java self-hosted workflow guards', () => {
         expect(end, name).toBeGreaterThan(start);
         const seed = seedRun.slice(start, end);
         expect(seed, name).toContain(
-          'rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk"',
+          'find "${RUNNER_TEMP}/m2-repo" -depth -type d',
         );
         expect(seed, name).toContain(
-          '${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server',
+          "-path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*'",
         );
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-'));
         const home = join(dir, 'home');
@@ -789,7 +800,7 @@ describe('SDK Java self-hosted workflow guards', () => {
               .filter((name) => name && !builtins.has(name)),
           ),
         ];
-        expect(shimNames, step.name).toEqual(['rm', 'mkdir', 'timeout']);
+        expect(shimNames, step.name).toEqual(['mkdir', 'find', 'timeout']);
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-write-back-'));
         const shims = join(dir, 'bin');
         const home = join(dir, 'home');
@@ -1009,7 +1020,7 @@ describe('SDK Java self-hosted workflow guards', () => {
   );
 
   it.skipIf(process.platform !== 'linux')(
-    'removes the in-house coordinates from the host cache in the write-back',
+    'removes nested in-house trees without restoring glob-only modules',
     () => {
       const jobs = parse(workflow).jobs;
       for (const jobName of ['test', 'mysql-integration']) {
@@ -1021,18 +1032,12 @@ describe('SDK Java self-hosted workflow guards', () => {
         );
         const start = locked.run.indexOf('write_back=0');
         expect(start, locked.name).toBeGreaterThan(lockAt);
-        const rmLine = locked.run
-          .split('\n')
-          .find((line) =>
-            line
-              .trim()
-              .startsWith(
-                'rm -rf -- "${HOME}/.m2/repository/com/alibaba/qwencode-sdk"',
-              ),
-          );
-        expect(rmLine, locked.name).toBeTruthy();
-        const rmAt = locked.run.indexOf(rmLine);
-        expect(rmAt, locked.name).toBeGreaterThan(lockAt);
+        const mkdirAt = locked.run.indexOf('mkdir -p "${HOME}/.m2/repository"');
+        expect(mkdirAt, locked.name).toBeGreaterThan(start);
+        const purgeAt = locked.run.indexOf(
+          'find "${HOME}/.m2/repository" -depth -type d',
+        );
+        expect(purgeAt, locked.name).toBeGreaterThan(mkdirAt);
         const writeBack = locked.run
           .slice(start)
           .match(
@@ -1055,10 +1060,39 @@ describe('SDK Java self-hosted workflow guards', () => {
               'com/alibaba/qwen-managed-agent-contracts/0.1.0-alpha/old.jar',
               'contracts',
             ],
+            [
+              'com/alibaba/qwen-managed-agent-future-module/1.0/future.jar',
+              'future',
+            ],
+            [
+              'repository/com/alibaba/qwencode-sdk/0.1.0-alpha/nested-sdk.jar',
+              'nested-sdk',
+            ],
+            [
+              'repository/com/alibaba/qwen-managed-agent-future-module/1.0/nested-future.jar',
+              'nested-future',
+            ],
+            ['com/alibaba/qwen-managed-agent/1.0/lookalike.jar', 'lookalike'],
+            [
+              'com/alibaba/qwen-managed-agentx-future/1.0/lookalike.jar',
+              'lookalike',
+            ],
+            ['repository/com/alibaba/druid/1.0/decoy.jar', 'decoy'],
             ['org/example/lib/kept.jar', 'kept'],
           ]) {
             mkdirSync(dirname(join(host, path)), { recursive: true });
             writeFileSync(join(host, path), body);
+          }
+          // The host purge unlinks only the host name. Without the matching
+          // write-back prune, these now-nlink-1 seeds are copied straight
+          // back; without the any-depth purge, nested seeds stay hardlinked.
+          for (const path of [
+            'com/alibaba/qwen-managed-agent-future-module/1.0/future.jar',
+            'repository/com/alibaba/qwencode-sdk/0.1.0-alpha/nested-sdk.jar',
+            'repository/com/alibaba/qwen-managed-agent-future-module/1.0/nested-future.jar',
+          ]) {
+            mkdirSync(dirname(join(repo, path)), { recursive: true });
+            linkSync(join(host, path), join(repo, path));
           }
           mkdirSync(join(repo, 'org/example/lib/1.0'), { recursive: true });
           writeFileSync(join(repo, 'org/example/lib/new.jar'), 'new');
@@ -1099,6 +1133,24 @@ describe('SDK Java self-hosted workflow guards', () => {
             existsSync(join(host, 'com/alibaba/qwen-managed-agent-contracts')),
             locked.name,
           ).toBe(false);
+          for (const path of [
+            'com/alibaba/qwen-managed-agent-future-module/1.0/future.jar',
+            'repository/com/alibaba/qwencode-sdk/0.1.0-alpha/nested-sdk.jar',
+            'repository/com/alibaba/qwen-managed-agent-future-module/1.0/nested-future.jar',
+          ]) {
+            expect(existsSync(join(host, path)), locked.name + path).toBe(
+              false,
+            );
+            expect(existsSync(join(repo, path)), locked.name + path).toBe(true);
+            expect(statSync(join(repo, path)).nlink, path).toBe(1);
+          }
+          for (const path of [
+            'com/alibaba/qwen-managed-agent/1.0/lookalike.jar',
+            'com/alibaba/qwen-managed-agentx-future/1.0/lookalike.jar',
+            'repository/com/alibaba/druid/1.0/decoy.jar',
+          ]) {
+            expect(existsSync(join(host, path)), locked.name + path).toBe(true);
+          }
           expect(
             existsSync(join(host, 'org/example/lib/kept.jar')),
             locked.name,
@@ -1151,10 +1203,13 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(sdkJavaSeeds).toHaveLength(4);
       expect(referenceSeeds).toHaveLength(1);
       // The release lane has no write-back and takes no lock; its isolation
-      // is the rm -rf of every in-house tree, so pin it explicitly.
+      // is the any-depth removal of every in-house tree, so pin it explicitly.
       for (const candidate of referenceSeeds) {
         expect(candidate.run, candidate.name).toContain(
-          'rm -rf -- "${repo}/com/alibaba/qwencode-sdk" "${repo}/com/alibaba/"qwen-managed-agent-*',
+          'find "${repo}" -depth -type d',
+        );
+        expect(candidate.run, candidate.name).toContain(
+          "-path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*'",
         );
       }
       const seeding = [...sdkJavaSeeds, ...referenceSeeds];
@@ -1191,7 +1246,13 @@ describe('SDK Java self-hosted workflow guards', () => {
         const artifacts = [
           'com/alibaba/qwencode-sdk/0.1.0-alpha/qwencode-sdk.jar',
           'com/alibaba/qwencode-sdk/0.1.0-alpha/qwencode-sdk.pom',
+          'com/alibaba/qwen-managed-agent-future-module/1.0/future.jar',
+          'repository/com/alibaba/qwencode-sdk/0.1.0-alpha/nested-sdk.jar',
+          'repository/com/alibaba/qwen-managed-agent-future-module/1.0/nested-future.jar',
           'org/example/lib/kept.jar',
+          'com/alibaba/qwen-managed-agent/1.0/lookalike.jar',
+          'com/alibaba/qwen-managed-agentx-future/1.0/lookalike.jar',
+          'repository/com/alibaba/druid/1.0/third-party.jar',
         ];
         try {
           for (const path of [...metadata, ...artifacts]) {
@@ -1217,20 +1278,24 @@ describe('SDK Java self-hosted workflow guards', () => {
             );
             expect(readFileSync(join(host, path), 'utf8'), path).toBe(path);
           }
-          // Every seed removes the in-house coordinate trees, so their
-          // artifacts are absent; everything else is still seeded and
-          // still hardlinked.
+          // Every seed removes canonical and legacy nested in-house trees,
+          // including future glob-only modules; ordinary artifacts and
+          // lookalikes stay hardlinked and their host bytes stay unchanged.
           for (const path of artifacts) {
-            if (path.startsWith('com/alibaba/')) {
-              expect(existsSync(join(local, path)), candidate.name + path).toBe(
-                false,
+            const localPath = join(local, path);
+            const hostPath = join(host, path);
+            const inHouse =
+              /^(?:repository\/)?com\/alibaba\/(?:qwencode-sdk|qwen-managed-agent-[^/]+)\//.test(
+                path,
               );
+            if (inHouse) {
+              expect(existsSync(localPath), candidate.name + path).toBe(false);
+              expect(statSync(hostPath).nlink, path).toBe(1);
             } else {
-              expect(existsSync(join(local, path)), candidate.name + path).toBe(
-                true,
-              );
-              expect(statSync(join(local, path)).nlink, path).toBe(2);
+              expect(existsSync(localPath), candidate.name + path).toBe(true);
+              expect(statSync(localPath).nlink, path).toBe(2);
             }
+            expect(readFileSync(hostPath, 'utf8'), path).toBe(path);
           }
         } finally {
           rmSync(dir, { recursive: true, force: true });

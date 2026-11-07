@@ -117,10 +117,15 @@ tracking markers (`resolver-status.properties`, `*.lastUpdated`,
 rewritten in place, so the seed drops those hardlinks too and Maven
 recreates them job-locally. The write-back does not publish newly created
 bookkeeping, while the seed still strips stale hardlinked markers left by
-older runs. The Maven runs run unlocked; the write-back holds one
-acquisition, and its `mkdir` and bounded `find`/`cp` children drop fd 9 so a
-survivor cannot retain the lock. A hold now measures the copy instead of the
-suite, and the fast tier's budget is again far above one hold.
+older runs. Seed removal and the locked host purge match `qwencode-sdk` and
+`qwen-managed-agent-*` at any depth, including the legacy nested
+`repository/com/alibaba/` tree. Both write-back prunes retain every explicit
+coordinate and also exclude that module glob, so a host-side unlink cannot
+make its seeded inode eligible for copy-back. The Maven runs run unlocked;
+the write-back holds one acquisition, and its `mkdir` and bounded `find`/`cp`
+children drop fd 9 so a survivor cannot retain the lock. A hold now measures
+the copy instead of the suite, and the fast tier's budget is again far above
+one hold.
 
 The test job follows the same rule. Its suite was the other long hold: on
 2026-10-22, run 39771949573's fast-tier job failed at its 5400-second budget
@@ -323,12 +328,13 @@ order this section exists to prevent.
   every seeded job-local repository and from both write-back prunes, the
   write-back's host-side removal of the in-house coordinates, its any-depth
   prune, a failed cache-directory creation downgraded to a warning, the
-  annotation staying clear of `INFRA_FAILURE_SIGNATURES`, and the
-  seed-drop/prune sets agreeing at every site. The fault arms cover a missing
-  `flock`, a broken `mkdir`, a stray queue file, a lock path that is a
-  directory, a timed-out `flock`, and an unexpected `flock` status. The
-  `.size-baseline` entry is re-measured to the workflow's size after the last
-  edit.
+  annotation staying clear of `INFRA_FAILURE_SIGNATURES`, the seed and
+  host-purge family globs agreeing at every site, and each write-back prune
+  retaining every explicit coordinate plus the module glob. The fault arms
+  cover a missing `flock`, a broken `mkdir`, a stray queue file, a lock path
+  that is a directory, a timed-out `flock`, and an unexpected `flock` status.
+  The `.size-baseline` entry is re-measured to the workflow's size after the
+  last edit.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 

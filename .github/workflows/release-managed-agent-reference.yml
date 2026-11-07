@@ -332,7 +332,9 @@ jobs:
             repo="${RUNNER_TEMP}/m2-repo"
             mkdir -p "${repo}"
             cp -aln "${HOME}/.m2/repository/." "${repo}/" 2>/dev/null || true
-            rm -rf -- "${repo}/com/alibaba/qwencode-sdk" "${repo}/com/alibaba/"qwen-managed-agent-*
+            find "${repo}" -depth -type d \
+              \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
+              -exec rm -rf {} + 2>/dev/null || true
             find "${repo}" \( -name '_remote.repositories' -o -name 'maven-metadata-local.xml' -o -name 'resolver-status.properties' -o -name '*.lastUpdated' -o -name '*.tmp' \) -delete 2>/dev/null || true
             MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${repo}"
           fi

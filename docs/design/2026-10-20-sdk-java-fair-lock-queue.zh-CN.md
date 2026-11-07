@@ -99,9 +99,13 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 `_remote.repositories`、`maven-metadata-local.xml`）会被原地截断重写，
 因此播种时也会删除这些硬链接，由 Maven 在 job 本地重新创建。写回不会发布
 本次新产生的记账文件，而播种仍会删除旧运行遗留在宿主缓存中的硬链接标记。
-两次 Maven 运行不持锁；写回只取一次锁，且它的 `mkdir` 和有界 `find`/`cp`
-子进程会关闭 fd 9，避免幸存进程继续持有锁。这样一次持锁只量一次复制，
-而不是一整套测试，fast 通道的预算又远大于一次持锁时长。
+播种删除与持锁的宿主清理按任意深度匹配 `qwencode-sdk` 和
+`qwen-managed-agent-*`，覆盖旧版遗留的嵌套 `repository/com/alibaba/` 树。
+两处写回 prune 保留每个显式坐标，并加入同一个模块 glob，避免宿主侧删除
+文件名后，其播种 inode 因链接数降为 1 而重新符合写回条件。两次 Maven
+运行不持锁；写回只取一次锁，且它的 `mkdir` 和有界 `find`/`cp` 子进程会
+关闭 fd 9，避免幸存进程继续持有锁。这样一次持锁只量一次复制，而不是一整套
+测试，fast 通道的预算又远大于一次持锁时长。
 
 test job 现在遵循同一规则。它的测试套件曾是另一处长时间持锁：2026-10-22，
 run 39771949573 的 fast 档 job 两次在 5400 秒预算处失败，分别在
@@ -263,10 +267,11 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
   记账文件——`_remote.repositories`、`maven-metadata-local.xml`、
   `resolver-status.properties`、`*.lastUpdated` 与 `*.tmp`、写回在宿主侧
   删除内部坐标、按任意深度 prune、缓存目录创建失败降级为警告、该注解
-  保持在 `INFRA_FAILURE_SIGNATURES` 之外，以及每个站点的 seed 删除集合与
-  prune 集合一致。故障分支覆盖 `flock` 缺失、`mkdir` 损坏、队列路径被占、
-  锁路径是目录、`flock` 超时以及 `flock` 返回意外状态。`.size-baseline`
-  条目在最后一次编辑后重新实测到工作流的尺寸。
+  保持在 `INFRA_FAILURE_SIGNATURES` 之外、每个站点的 seed 与宿主清理
+  family glob 一致，以及每处写回 prune 保留全部显式坐标并加入模块 glob。
+  故障分支覆盖 `flock` 缺失、`mkdir` 损坏、队列路径被占、锁路径是目录、
+  `flock` 超时以及 `flock` 返回意外状态。`.size-baseline` 条目在最后一次
+  编辑后重新实测到工作流的尺寸。
 - 真实宿主机上的浸泡验证就是 CI 本身：合并后第一批池上运行要么
   按票序拿到锁，要么带着可归因的票据号超时。
 
