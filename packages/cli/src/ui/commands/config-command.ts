@@ -215,8 +215,8 @@ function listAllSettings(context: CommandContext): MessageActionReturn {
     .filter((key) => SETTABLE_TYPES.has(flattened[key]!.type))
     .sort();
   // The key column is the longest settable name, so a deep model.* knob is
-  // not truncated away: `model.chatCompression.maxRecentImagesToRetain` alone
-  // is 48 characters.
+  // not truncated away: `model.chatCompression.screenshotTriggerThreshold`
+  // alone is 48 characters.
   const keyWidth = Math.max(40, ...keys.map((key) => key.length + 1));
 
   lines.push(t('Available settings:'));

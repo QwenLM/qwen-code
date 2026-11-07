@@ -1983,7 +1983,7 @@ const SETTINGS_SCHEMA = {
             type: 'number',
             label: 'Image Token Estimate',
             category: 'Model',
-            requiresRestart: false,
+            requiresRestart: true,
             default: DEFAULT_IMAGE_TOKEN_ESTIMATE,
             minimum: 1,
             description:
@@ -1994,7 +1994,7 @@ const SETTINGS_SCHEMA = {
             type: 'integer',
             label: 'Max Recent Files to Retain',
             category: 'Model',
-            requiresRestart: false,
+            requiresRestart: true,
             default: DEFAULT_MAX_RECENT_FILES,
             minimum: 0,
             description:
@@ -2005,7 +2005,7 @@ const SETTINGS_SCHEMA = {
             type: 'integer',
             label: 'Max Recent Images to Retain',
             category: 'Model',
-            requiresRestart: false,
+            requiresRestart: true,
             default: DEFAULT_MAX_RECENT_IMAGES,
             minimum: 0,
             description:
@@ -2016,7 +2016,7 @@ const SETTINGS_SCHEMA = {
             type: 'boolean',
             label: 'Enable Screenshot Trigger',
             category: 'Model',
-            requiresRestart: false,
+            requiresRestart: true,
             default: DEFAULT_SCREENSHOT_TRIGGER_ENABLED,
             description:
               'When true, auto-compaction also fires once the number of tool-returned images accumulated in history reaches screenshotTriggerThreshold, independent of token usage. Env override: QWEN_COMPACT_SCREENSHOT_TRIGGER (1/true/0/false).',
@@ -2026,7 +2026,7 @@ const SETTINGS_SCHEMA = {
             type: 'integer',
             label: 'Screenshot Trigger Threshold',
             category: 'Model',
-            requiresRestart: false,
+            requiresRestart: true,
             default: DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD,
             minimum: 1,
             description:
@@ -2037,7 +2037,7 @@ const SETTINGS_SCHEMA = {
             type: 'integer',
             label: 'Image Payload Threshold',
             category: 'Model',
-            requiresRestart: false,
+            requiresRestart: true,
             default: DEFAULT_IMAGE_PAYLOAD_THRESHOLD,
             minimum: 0,
             description:
