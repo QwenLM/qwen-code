@@ -810,6 +810,93 @@ describe('statsCommand', () => {
   });
 
   describe('historical token usage subcommands', () => {
+    it.each(['non_interactive', 'acp'] as const)(
+      'stats range returns persisted usage in %s mode',
+      async (executionMode) => {
+        await seedUsage();
+        const command = statsCommand.subCommands!.find(
+          (sc) => sc.name === 'range',
+        )!;
+        expect(command.supportedModes).toContain(executionMode);
+        const result = await command.action!(
+          createMockCommandContext({ executionMode }),
+          '2025-07-14 2025-07-14',
+        );
+        expect(result).toEqual({
+          type: 'message',
+          messageType: 'info',
+          content: expect.stringContaining(
+            'Token usage for 2025-07-14..2025-07-14 (inclusive)',
+          ),
+        });
+        expect(result).toHaveProperty(
+          'content',
+          expect.stringContaining('Total: 47 tokens'),
+        );
+        expect(result).toHaveProperty(
+          'content',
+          expect.stringContaining('model-a: 32 tokens'),
+        );
+        expect(result).toHaveProperty(
+          'content',
+          expect.stringContaining('main: 47 tokens'),
+        );
+      },
+    );
+
+    it('stats range writes an inclusive report to interactive history', async () => {
+      await seedUsage();
+      const command = statsCommand.subCommands!.find(
+        (sc) => sc.name === 'range',
+      )!;
+      await command.action!(mockContext, '  2025-07-14   2025-07-15  ');
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: expect.stringContaining('Total: 47 tokens'),
+        },
+        expect.any(Number),
+      );
+    });
+
+    it.each([
+      '',
+      '2025-09-09',
+      '2025-09-09 2026-07-11 extra',
+      '2025-02-29 2026-07-11',
+      '2026-07-11 2025-09-09',
+    ])('stats range reports invalid arguments: %s', async (args) => {
+      const command = statsCommand.subCommands!.find(
+        (sc) => sc.name === 'range',
+      )!;
+      const result = await command.action!(
+        createMockCommandContext({ executionMode: 'non_interactive' }),
+        args,
+      );
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Failed to load token usage stats'),
+      });
+    });
+
+    it('stats range renders localized headings', async () => {
+      await setLanguageAsync('ru');
+      const command = statsCommand.subCommands!.find(
+        (sc) => sc.name === 'range',
+      )!;
+      const result = await command.action!(
+        createMockCommandContext({ executionMode: 'non_interactive' }),
+        '2025-09-09 2026-07-11',
+      );
+      expect(result).toHaveProperty(
+        'content',
+        expect.stringContaining(
+          'Расход токенов за 2025-09-09..2026-07-11 (включительно)',
+        ),
+      );
+    });
+
     it('stats daily returns persisted token usage in non-interactive mode', async () => {
       await seedUsage();
       const dailySubCommand = statsCommand.subCommands?.find(

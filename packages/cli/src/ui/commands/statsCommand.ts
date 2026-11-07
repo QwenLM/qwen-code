@@ -17,6 +17,7 @@ import {
   CommandKind,
 } from './types.js';
 import { getCurrentLanguage, t } from '../../i18n/index.js';
+import { queryTokenUsageRange } from '@qwen-code/qwen-code-core/services/tokenUsageService.js';
 import {
   billableOutputTokens,
   calculateCost,
@@ -145,9 +146,11 @@ function formatSkillStats(skills: SkillMetrics): string {
 
 function formatTokenUsageSummary(summary: TokenUsageSummary): string {
   const label =
-    summary.period === 'day'
-      ? t('Daily token usage for {{value}}', { value: summary.value })
-      : t('Monthly token usage for {{value}}', { value: summary.value });
+    summary.period === 'range'
+      ? t('Token usage for {{value}} (inclusive)', { value: summary.value })
+      : summary.period === 'day'
+        ? t('Daily token usage for {{value}}', { value: summary.value })
+        : t('Monthly token usage for {{value}}', { value: summary.value });
 
   return [
     label,
@@ -211,12 +214,21 @@ function addInteractiveMessage(
 
 async function showTokenUsageStats(
   context: CommandContext,
-  period: TokenUsagePeriod,
+  period: TokenUsageSummary['period'],
   args: string,
 ): Promise<MessageActionReturn | void> {
   try {
-    const value = args.trim() || undefined;
-    const summary = await queryTokenUsage({ period, value });
+    let summary: TokenUsageSummary;
+    if (period === 'range') {
+      const dates = args.trim().split(/\s+/);
+      if (dates.length !== 2) {
+        throw new Error(t('Usage: /stats range <YYYY-MM-DD> <YYYY-MM-DD>'));
+      }
+      summary = await queryTokenUsageRange(dates[0]!, dates[1]!);
+    } else {
+      const value = args.trim() || undefined;
+      summary = await queryTokenUsage({ period, value });
+    }
     const content = formatTokenUsageSummary(summary);
     if (context.executionMode !== 'interactive') {
       return asMessage(content);
@@ -714,7 +726,7 @@ export const statsCommand: SlashCommand = {
   get description() {
     return t('Show usage statistics dashboard.');
   },
-  argumentHint: '[model|tools|skills|daily|monthly|export]',
+  argumentHint: '[model|tools|skills|daily|monthly|range|export]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: (
@@ -901,6 +913,17 @@ export const statsCommand: SlashCommand = {
       supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       action: (context: CommandContext, args: string) =>
         showTokenUsageStats(context, 'month', args),
+    },
+    {
+      name: 'range',
+      get description() {
+        return t('Show token usage for an inclusive date range.');
+      },
+      argumentHint: '<YYYY-MM-DD> <YYYY-MM-DD>',
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      action: (context: CommandContext, args: string) =>
+        showTokenUsageStats(context, 'range', args),
     },
     {
       name: 'export',

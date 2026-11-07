@@ -487,6 +487,12 @@ export default {
     'Показать статистику использования модели.',
   'Show tool-specific usage statistics.':
     'Показать статистику использования инструментов.',
+  'Show token usage for an inclusive date range.':
+    'Показать расход токенов за диапазон дат включительно.',
+  'Token usage for {{value}} (inclusive)':
+    'Расход токенов за {{value}} (включительно)',
+  'Usage: /stats range <YYYY-MM-DD> <YYYY-MM-DD>':
+    'Использование: /stats range <YYYY-MM-DD> <YYYY-MM-DD>',
   'Show daily token usage statistics.':
     'Показать дневную статистику использования токенов.',
   'Show monthly token usage statistics.':

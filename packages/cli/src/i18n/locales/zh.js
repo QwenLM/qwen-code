@@ -841,6 +841,12 @@ export default {
   'Show model-specific usage statistics.': '显示模型相关的使用统计信息',
   'Show tool-specific usage statistics.': '显示工具相关的使用统计信息',
   'Show skill-specific usage statistics.': '显示技能相关的使用统计信息',
+  'Show token usage for an inclusive date range.':
+    '显示指定日期范围内的 token 使用情况（包含起止日期）。',
+  'Token usage for {{value}} (inclusive)':
+    '{{value}} 的 token 使用情况（包含起止日期）',
+  'Usage: /stats range <YYYY-MM-DD> <YYYY-MM-DD>':
+    '用法：/stats range <YYYY-MM-DD> <YYYY-MM-DD>',
   'Show daily token usage statistics.': '显示每日 token 使用统计信息',
   'Show monthly token usage statistics.': '显示每月 token 使用统计信息',
   'Export token usage statistics to CSV or JSON.':
