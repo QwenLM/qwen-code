@@ -2702,7 +2702,7 @@ function refuseServerUrl(serverUrl) {
     (/[?#]/.test(serverUrl)
       ? 'carries a query or a fragment, where the /actuator/health and API paths appended to it would land'
       : serverUrl.includes('@')
-        ? 'carries an @, as a user name or password would before its host'
+        ? 'carries an @, as a user name or password would before its host; write an @ in a path as %40'
         : undefined);
   if (reason) {
     throw new Refusal(
@@ -2783,14 +2783,14 @@ function printable(text) {
   return points > PRINTABLE_LIMIT ? `${flat}… (${points} characters)` : flat;
 }
 
-// A value a refusal or a row quotes, as JSON, which escapes C0 controls but
-// not DEL or C1 bytes, such as the CSI introducer U+009B: printable() takes
-// those, and bounds the text.
 /** A URL as a report prints it: user information masked, controls neutralized. */
 function shown(url) {
   return printable(withoutCredentials(url));
 }
 
+// A value a refusal or a row quotes, as JSON, which escapes C0 controls but
+// not DEL or C1 bytes, such as the CSI introducer U+009B: printable() takes
+// those, and bounds the text.
 function quoted(value) {
   return printable(JSON.stringify(value));
 }
@@ -2871,13 +2871,17 @@ function harnessUrlReason(text, url) {
 // The Harness base URLs start takes when the server gives no verdict: an
 // http(s) URL whose authority is a host name as java.net.URI reads one,
 // labels of letters, digits and inner hyphens whose last starts with a
-// letter and which may end in one DNS root dot, a dotted-quad IPv4 address
-// or a bracketed IPv6 address without an embedded IPv4 one, and an optional
-// port, and whose path holds only the characters a URI path may, untrimmed,
-// a % only as the start of an escape.
-// It is narrower than the server's rule, never wider.
+// letter, with or without the final dot of a fully qualified name, a
+// dotted-quad IPv4 address or a bracketed IPv6 address, which may end in an
+// IPv4 one, as ::ffff:127.0.0.1 does, and an optional port, and whose path
+// holds only the characters a URI path may, untrimmed, a % only as the start
+// of an escape. It is narrower than the server's rule, never wider: it
+// refuses a name of one label that starts with a digit, as the URL parser
+// fetch uses reads 1234 as an IPv4 address, an octet with a leading zero,
+// which it reads as octal, and an empty port.
 const LABEL = '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?';
 const OCTET = '(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])';
+const IPV4 = `${OCTET}(?:\\.${OCTET}){3}`;
 const H16 = '[0-9A-Fa-f]{1,4}';
 const IPV6 = [
   `(?:${H16}:){7}${H16}`,
@@ -2887,9 +2891,15 @@ const IPV6 = [
   ),
   `:(?::${H16}){1,7}`,
   '::',
+  // The last 32 bits as an IPv4 address, after six groups or fewer around a ::.
+  `(?:${H16}:){6}${IPV4}`,
+  `::(?:${H16}:){0,5}${IPV4}`,
+  ...[1, 2, 3, 4, 5].map(
+    (head) => `(?:${H16}:){${head}}:(?:${H16}:){0,${5 - head}}${IPV4}`,
+  ),
 ].join('|');
 const PLAIN_HTTP_URL = new RegExp(
-  `^https?://(?:(?:${LABEL}\\.)*[A-Za-z](?:[A-Za-z0-9-]*[A-Za-z0-9])?\\.?|${OCTET}(?:\\.${OCTET}){3}|\\[(?:${IPV6})\\])(?::[0-9]{1,5})?(?:/(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9\\-._~!$&'()*+,;=:@/])*)?$`,
+  `^https?://(?:(?:${LABEL}\\.)*[A-Za-z](?:[A-Za-z0-9-]*[A-Za-z0-9])?\\.?|${IPV4}|\\[(?:${IPV6})\\])(?::[0-9]{1,5})?(?:/(?:%[0-9A-Fa-f]{2}|[A-Za-z0-9\\-._~!$&'()*+,;=:@/])*)?$`,
   'i',
 );
 

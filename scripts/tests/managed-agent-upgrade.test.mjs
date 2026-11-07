@@ -2686,12 +2686,14 @@ test('start and verify use server.env when the configuration does not resolve', 
   for (const harnessUrl of [
     'http://127.0.0.1:4172/@acme/harness',
     'http://gateway.example.com/@acme/harness',
-    // An escape, an IPv6 address, a trailing DNS root dot, and a label
-    // that starts with a digit before the last one.
+    // An escape, an IPv6 address, one that ends in an IPv4 address, a
+    // label that starts with a digit before the last one, and the final dot
+    // of a fully qualified name, all of which java.net.URI reads as a host.
     'http://127.0.0.1:4172/a%20b',
     'http://[::1]:4172',
-    'http://harness.internal.:4170/',
+    'http://[::ffff:127.0.0.1]:4172',
     'http://1st.harness.internal:4172/',
+    'http://harness.internal.:4170/',
   ]) {
     await writeFile(
       env,
@@ -3370,7 +3372,7 @@ test('no report prints a password a URL carries', async (t) => {
     );
     assert.equal(
       host.output.at(-1),
-      `${phase} refused: --server-url "https://***@cp.example.com:8443" carries an @, as a user name or password would before its host.`,
+      `${phase} refused: --server-url "https://***@cp.example.com:8443" carries an @, as a user name or password would before its host; write an @ in a path as %40.`,
     );
     assert.ok(!host.output.join('\n').includes('s3cret'), phase);
     assert.equal(
@@ -3396,7 +3398,7 @@ test('check judges the --server-url its plan repeats', async (t) => {
     [
       'https://svc:12/s3cret@cp.example.com',
       'https://***@cp.example.com',
-      'carries an @, as a user name or password would before its host',
+      'carries an @, as a user name or password would before its host; write an @ in a path as %40',
     ],
     // What --server-url "https://$HOST" leaves with HOST unset, which the
     // option parser strips to https:, though https:/actuator/health parses.
