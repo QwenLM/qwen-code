@@ -243,7 +243,7 @@ describe('<ModelDialog />', () => {
     expect(mockConfig.switchModel).toHaveBeenCalledWith(
       AuthType.QWEN_SUBSCRIPTION,
       model,
-      { baseUrl },
+      { baseUrl, initializeIfNeeded: true },
     );
     const feedback = vi
       .mocked(mockHistoryManager.addItem)
@@ -964,6 +964,7 @@ describe('<ModelDialog />', () => {
 
     expect(switchModel).toHaveBeenCalledWith(AuthType.USE_OPENAI, 'gpt-4', {
       baseUrl: undefined,
+      initializeIfNeeded: true,
     });
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
@@ -1027,6 +1028,7 @@ describe('<ModelDialog />', () => {
       'qwen3.7-max',
       {
         baseUrl: 'https://idealab.example.com/v1',
+        initializeIfNeeded: true,
       },
     );
     expect(mockSettings.setValue).toHaveBeenCalledWith(
@@ -1180,7 +1182,7 @@ describe('<ModelDialog />', () => {
       expect(switchModel).toHaveBeenCalledWith(
         AuthType.USE_OPENAI,
         'MiniMax-M3',
-        { baseUrl: 'https://api.minimaxi.com/v1' },
+        { baseUrl: 'https://api.minimaxi.com/v1', initializeIfNeeded: true },
       );
     } finally {
       if (previousMinimaxKey === undefined) {

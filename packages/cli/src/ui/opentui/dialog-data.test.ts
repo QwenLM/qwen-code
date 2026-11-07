@@ -477,7 +477,10 @@ describe('applyModelSelection', () => {
       expect(switchModel).toHaveBeenCalledWith(
         AuthType.USE_OPENAI,
         'm2',
-        expect.objectContaining({ baseUrl: 'https://provider.example' }),
+        expect.objectContaining({
+          baseUrl: 'https://provider.example',
+          initializeIfNeeded: true,
+        }),
       );
       expect(written).toContainEqual({
         scope: SettingScope.User,

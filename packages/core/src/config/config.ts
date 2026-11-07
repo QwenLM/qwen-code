@@ -544,6 +544,7 @@ import {
   type ResolvedModelConfig,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
+import type { ModelSwitchOptions } from '../models/modelsConfig.js';
 import { resolveModelId } from '../utils/modelId.js';
 import type { WebSearchSettings } from '../tools/web-search.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
@@ -7778,10 +7779,11 @@ export class Config {
   private async handleModelChange(
     authType: AuthType,
     requiresRefresh: boolean,
+    initializeIfNeeded?: boolean,
   ): Promise<void> {
     this.initialResolvedAuthType = undefined;
     if (!this.contentGeneratorConfig) {
-      if (authType === AuthType.QWEN_SUBSCRIPTION)
+      if (initializeIfNeeded || authType === AuthType.QWEN_SUBSCRIPTION)
         await this.refreshAuth(authType);
       return;
     }
@@ -7981,7 +7983,7 @@ export class Config {
   async switchModel(
     authType: AuthType,
     modelId: string,
-    options?: { requireCachedCredentials?: boolean; baseUrl?: string },
+    options?: ModelSwitchOptions,
   ): Promise<void> {
     await this.modelsConfig.switchModel(authType, modelId, options);
     this.notifyModelChangeListeners();

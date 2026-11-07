@@ -1213,6 +1213,36 @@ describe('Server Config (config.ts)', () => {
       return config;
     };
 
+    it('initializes an API model when switching from a signed-out subscription', async () => {
+      const config = makeConfig({
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        model: 'qwen3.8-max',
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'api-model',
+              generationConfig: { contextWindowSize: 64000 },
+            },
+          ],
+        },
+      });
+      expect(
+        config.getContentGenerator({ allowUninitialized: true }),
+      ).toBeUndefined();
+
+      await config.switchModel(AuthType.USE_OPENAI, 'api-model', {
+        initializeIfNeeded: true,
+      });
+      expect(
+        config.getContentGenerator({ allowUninitialized: true }),
+      ).toBeDefined();
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        authType: AuthType.USE_OPENAI,
+        model: 'api-model',
+        contextWindowSize: 64000,
+      });
+    });
+
     it('reuses the same account catalog while rebuilding model capabilities and reasoning', async () => {
       const config = await subscriptionConfig();
       await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');

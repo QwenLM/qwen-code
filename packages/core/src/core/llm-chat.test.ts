@@ -30,6 +30,8 @@ import type {
 } from '@google/genai';
 import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from './contentGenerator.js';
+import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
+import { SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE } from '../qwen/subscription-errors.js';
 import { getPlanModeSystemReminder } from './prompts.js';
 import {
   LlmChat,
@@ -1462,6 +1464,21 @@ describe('LlmChat', async () => {
     /** `send` for any message shape, a bare Part included. */
     const sendAny = (message: Message, promptId: string, target = chat) =>
       target.sendMessageStream('test-model', { message }, promptId);
+
+    it('reports signed-out subscription before processing the request', async () => {
+      mockConfig.getCurrentAuthType = vi
+        .fn()
+        .mockReturnValue(AuthType.QWEN_SUBSCRIPTION);
+      mockConfig.getContentGeneratorConfig = vi.fn().mockReturnValue(undefined);
+      vi.spyOn(QwenSubscriptionSession.prototype, 'isSignedIn').mockReturnValue(
+        false,
+      );
+
+      await expect(sendAny('hello', 'signed-out')).rejects.toThrow(
+        SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE,
+      );
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+    });
 
     /** A user prompt followed by the model's (unanswered) call. */
     const afterCall = (

@@ -2206,7 +2206,11 @@ describe('Qwen Subscription model selection', () => {
       extra_body: undefined,
       modalities: {},
     });
-    expect(changed).toHaveBeenCalledWith(AuthType.QWEN_SUBSCRIPTION, true);
+    expect(changed).toHaveBeenCalledWith(
+      AuthType.QWEN_SUBSCRIPTION,
+      true,
+      undefined,
+    );
   });
 
   it('restores the subscription selection with a placeholder token', () => {
