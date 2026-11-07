@@ -1438,6 +1438,21 @@ export function stripTrailingBackgroundAmp(command: string): string {
   return trimmed.slice(0, -1).trimEnd();
 }
 
+/** The command the monitor spawns for a wrapper whose payload cannot be
+ * resolved: the payload word verbatim, with the trailing background `&`
+ * normalised away exactly as `stripTrailingBackgroundAmp` does above. Keeping
+ * the `&` made the tracked shell fork the payload and exit before it, so
+ * `settleFromExit(0)` completed the monitor and a failing payload read as
+ * success (#16075 review, R13-1). */
+function buildMonitorSpawnOverride(
+  wrapperTokens: string[],
+  payloadToken: string,
+  rest: string,
+): string {
+  const suffix = stripTrailingBackgroundAmp(rest.replace(/^[ \t]+/, ''));
+  return [...wrapperTokens, payloadToken, suffix].filter(Boolean).join(' ');
+}
+
 export function hasNonFinalTopLevelBackgroundOperator(
   command: string,
 ): boolean {
@@ -1856,7 +1871,11 @@ function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
             innerQuote: '',
             innerArgsSuffix: terminator.rest.replace(/^[ \t]+/, ''),
             wrapperPayloadUnresolved: true,
-            spawnOverride: trimmed,
+            spawnOverride: buildMonitorSpawnOverride(
+              wrapperTokens,
+              terminator.token,
+              terminator.rest,
+            ),
           };
         }
         return {

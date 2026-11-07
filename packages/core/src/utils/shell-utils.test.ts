@@ -1027,6 +1027,21 @@ describe('normalizeMonitorCommand', () => {
   // unwrapped for analysis/safety, but the unresolved signal stays observable
   // and spawnCommand keeps the whole command so the cron gate still refuses and
   // the monitor still spawns exactly what the user wrote.
+  // R13-1 (second round, #16540): the spawn override keeps the payload word
+  // verbatim but normalises the trailing background `&` away. Keeping it made
+  // the monitor's tracked child fork the payload and exit, so a non-zero exit
+  // was reported as success.
+  it('strips a trailing background & from the spawn override', () => {
+    const command = 'bash -c "echo $(id)" &';
+    expect(normalizeMonitorCommand(command)).toEqual({
+      analysisCommand: 'echo $(id)',
+      safetyCommand: 'echo $(id)',
+      spawnCommand: 'bash -c "echo $(id)"',
+      strippedTrailingAmp: true,
+      wrapperPayloadUnresolved: true,
+    });
+  });
+
   it('unwraps a fully quoted unresolved payload but keeps the spawn whole', () => {
     const command = 'bash -c "echo hi; $(echo x > /etc/passwd)"';
     expect(normalizeMonitorCommand(command)).toEqual({
