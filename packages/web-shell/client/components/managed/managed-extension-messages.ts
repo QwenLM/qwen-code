@@ -100,6 +100,35 @@ export const MANAGED_EXTENSION_MESSAGES_EN = {
     'This package could not be opened as a single connection. Manage composite extensions from the Extensions page.',
   'managed.install.replacePackage':
     'This updates the entire selected package in this session. Other sessions keep their selected versions.',
+  'managed.oauth.notice':
+    'Personal authorization is used only for your execution. Session history and tool results remain visible according to Workspace read permissions.',
+  'managed.oauth.failed':
+    'Authorization could not be confirmed. Check the original authorization status or start a new authorization if it has expired.',
+  'managed.oauth.open': 'Open authorization page',
+  'managed.oauth.check': 'Check original authorization',
+  'managed.oauth.authorize': 'Authorize and use in this session',
+  'managed.oauth.bind': 'Use my saved authorization',
+  'managed.oauth.revoke': 'Revoke my authorization',
+  'managed.oauth.state.pending': 'Waiting for authorization',
+  'managed.oauth.state.code_received': 'Ready to complete authorization',
+  'managed.oauth.state.exchanging': 'Completing authorization',
+  'managed.oauth.state.completed': 'Authorized',
+  'managed.oauth.state.failed': 'Authorization failed; authorize again',
+  'managed.oauth.state.expired': 'Authorization expired',
+  'managed.oauth.credential.unauthorized': 'Authorization required',
+  'managed.oauth.credential.authorized': 'Authorized',
+  'managed.oauth.credential.revoked': 'Revoked',
+  'managed.oauth.credential.unavailable': 'Authorization unavailable',
+  'managed.oauth.required':
+    'The package is saved. Authorize its HTTP MCP connections before applying it.',
+  'managed.oauth.configure': 'Use personal OAuth for this HTTP connection',
+  'managed.oauth.provider': 'Configured authorization provider',
+  'managed.oauth.scopes': 'Requested scopes, separated by commas',
+  'managed.oauth.bindingPending':
+    'The authorization binding is not confirmed. Check or continue the original configuration operation.',
+  'managed.oauth.removeBinding': 'Remove authorization from this session',
+  'managed.oauth.removeHelp':
+    'This disconnects the OAuth MCP contribution and removes its tools until authorized again. The package and its other contents remain selected.',
   'managed.install.discardDraft': 'Discard draft; keep saved versions',
   'managed.install.discarded':
     'The draft was discarded. Any saved package or settings revisions remain available in this workspace.',
@@ -204,6 +233,33 @@ export const MANAGED_EXTENSION_MESSAGES_ZH: Record<
     '此包无法作为独立连接打开。请在扩展页面管理复合扩展包。',
   'managed.install.replacePackage':
     '这会更新此会话所选的整个扩展包。其他会话继续使用其已选版本。',
+  'managed.oauth.notice':
+    '个人授权仅用于你本人驱动的执行。会话历史和工具结果仍按 Workspace 阅读权限可见。',
+  'managed.oauth.failed':
+    '授权结果尚未确认。请检查原授权状态；若已过期，请重新授权。',
+  'managed.oauth.open': '打开授权页面',
+  'managed.oauth.check': '检查原授权状态',
+  'managed.oauth.authorize': '授权并用于此会话',
+  'managed.oauth.bind': '使用我已保存的授权',
+  'managed.oauth.revoke': '撤销我的授权',
+  'managed.oauth.state.pending': '等待用户授权',
+  'managed.oauth.state.code_received': '可以完成授权',
+  'managed.oauth.state.exchanging': '正在完成授权',
+  'managed.oauth.state.completed': '已授权',
+  'managed.oauth.state.failed': '授权失败，请重新授权',
+  'managed.oauth.state.expired': '授权已过期',
+  'managed.oauth.credential.unauthorized': '需要授权',
+  'managed.oauth.credential.authorized': '已授权',
+  'managed.oauth.credential.revoked': '已撤销',
+  'managed.oauth.credential.unavailable': '个人授权当前不可用',
+  'managed.oauth.required': '包已保存。应用前请完成 HTTP MCP 连接的个人授权。',
+  'managed.oauth.configure': '此 HTTP 连接使用个人 OAuth',
+  'managed.oauth.provider': '已配置的授权 provider',
+  'managed.oauth.scopes': '申请的 scopes，以逗号分隔',
+  'managed.oauth.bindingPending': '授权绑定尚未确认。请检查或继续原配置操作。',
+  'managed.oauth.removeBinding': '从此会话移除授权绑定',
+  'managed.oauth.removeHelp':
+    '这会断开对应 OAuth MCP 并移除其工具，直到再次授权。扩展包及其中其他内容继续保留。',
   'managed.install.discardDraft': '放弃草稿，保留已保存版本',
   'managed.install.discarded':
     '已放弃草稿。已保存的包或 settings revisions 仍保留在此 Workspace。',

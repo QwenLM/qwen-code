@@ -384,6 +384,23 @@ export function createJavaManagedAgentProvider(
       package: (workspaceId, pin, request) =>
         client.getExtensionPackage(workspaceId, pin, request.signal),
     },
+    mcpOAuth: {
+      query: (sessionId, extensions, request) =>
+        client.queryMcpOAuth(sessionId, extensions, request.signal),
+      start: (sessionId, input, request) =>
+        client.startMcpOAuth(
+          sessionId,
+          input,
+          request.idempotencyKey,
+          request.signal,
+        ),
+      status: (sessionId, attemptId, request) =>
+        client.getMcpOAuthStatus(sessionId, attemptId, request.signal),
+      complete: (sessionId, input, request) =>
+        client.completeMcpOAuth(sessionId, input, request.signal),
+      revoke: (sessionId, input, request) =>
+        client.revokeMcpOAuth(sessionId, input, request.signal),
+    },
     mcpManagement: {
       storageScope: options.productScope?.trim()
         ? storageKey(options)

@@ -194,6 +194,18 @@ final class AgentStoreRows {
         return requireSessionForUpdate(tenantId, sessionId, true);
     }
 
+    SessionRecord requireLegacySessionForUpdate(String tenantId, String sessionId, String actorId) {
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        ManagedMcpOAuthAdmission.requireActor(jdbc, tenantId, sessionId, actorId);
+        return session;
+    }
+
+    SessionRecord requireUnattendedSessionForUpdate(String tenantId, String sessionId) {
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
+        ManagedMcpOAuthAdmission.requireUnattendedAllowed(jdbc, tenantId, sessionId);
+        return session;
+    }
+
     SessionRecord requireSessionForUpdate(String tenantId,
             String sessionId) {
         return requireSessionForUpdate(tenantId, sessionId, false);

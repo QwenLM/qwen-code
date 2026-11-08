@@ -347,6 +347,11 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         coordinator.configureExtensions(packages);
     }
 
+    public void configureMcpOAuth(String proxyBaseUrl, com.alibaba.qwen.code.runtimebroker.RuntimeMcpTokenIssuer issuer) {
+        extensionTransport.configureMcpTokenProxyBaseUrl(proxyBaseUrl);
+        service.configureMcpTokenIssuer(issuer);
+    }
+
     @Override
     public CompletionStage<Void> warm(String sessionId) {
         return coordinator.warm(sessionId);

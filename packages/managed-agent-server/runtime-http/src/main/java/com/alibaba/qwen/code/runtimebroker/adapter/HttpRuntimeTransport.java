@@ -125,6 +125,20 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
     private ExtensionPreparation extensionPreparation;
     private String managedExtensionCacheDirectory;
     private String managedExtensionCgroupRoot;
+    private URI mcpTokenProxyBase;
+
+    public void configureMcpTokenProxyBaseUrl(String value) {
+        if (value == null || value.isBlank()) {
+            mcpTokenProxyBase = null;
+            return;
+        }
+        URI uri = BrokerValues.requireOrigin(URI.create(value), "MCP token proxy base URL");
+        if (!"https".equals(uri.getScheme()) && !("http".equals(uri.getScheme())
+                && Set.of("127.0.0.1", "localhost", "[::1]", "::1").contains(uri.getHost()))) {
+            throw new IllegalArgumentException("MCP token proxy requires HTTPS or loopback HTTP");
+        }
+        mcpTokenProxyBase = uri;
+    }
 
     public HttpRuntimeTransport withManagedExtensionCacheDirectory(String directory, String cgroupRoot) {
         if (directory == null || !Path.of(directory).isAbsolute()) {
@@ -168,9 +182,18 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                 "workspaceGeneration", Long.toString(binding.getWorkspaceGeneration()), "storageId", binding.getStorageId(),
                 "cwdRelative", binding.getCwdRelative(), "contextConfigRef", binding.getContextConfigRef(),
                 "contextRevision", Long.toString(binding.getContextRevision()));
-        return prepared.thenCompose(privateOperation -> post(runtime.getLease(), ManagedExtensionProtocol.PATH,
-                encodeToolRequest(Map.of("protocolVersion", 1, "sessionKey", sessionKey, "contextBinding", context,
-                        "operation", privateOperation), ManagedExtensionProtocol.REQUEST_LIMIT), ManagedExtensionProtocol.RESPONSE_LIMIT))
+        return prepared.thenCompose(privateOperation -> {
+            Map<String, Object> envelope = new LinkedHashMap<>(Map.of("protocolVersion", 1, "sessionKey", sessionKey,
+                    "contextBinding", context, "operation", privateOperation));
+            URI proxy = mcpTokenProxyBase;
+            if (proxy != null) {
+                String lease = java.net.URLEncoder.encode(runtime.getLease().getLeaseId(), StandardCharsets.UTF_8);
+                envelope.put("mcpTokenAuthority", Map.of("url", proxy.resolve("/internal/runtime-broker/v1/runtime-leases/" + lease + "/mcp/token").toString(),
+                        "bindingId", runtime.getBindingId(), "generation", Long.toString(runtime.getGeneration())));
+            }
+            return post(runtime.getLease(), ManagedExtensionProtocol.PATH,
+                    encodeToolRequest(envelope, ManagedExtensionProtocol.REQUEST_LIMIT), ManagedExtensionProtocol.RESPONSE_LIMIT);
+        })
                 .thenApply(bytes -> ManagedExtensionProtocol.response(bytes, scope, harnessSessionId, immutable));
     }
 

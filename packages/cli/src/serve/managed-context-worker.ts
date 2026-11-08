@@ -97,6 +97,11 @@ import {
   loadManagedMcpManifest,
 } from './managed-mcp-runtime.js';
 import {
+  createManagedMcpLeaseTokenProvider,
+  parseManagedMcpTokenAuthority,
+  type ManagedMcpTokenAuthority,
+} from './managed-mcp-oauth.js';
+import {
   MANAGED_MCP_WORKER_ROUTE,
   MANAGED_MCP_DEFINITIONS_WORKER_ROUTE,
   registerManagedMcpRoutes,
@@ -430,6 +435,7 @@ export function registerManagedContextRoutes(
     handleManagedRuntimeJsonError,
   );
 
+  const mcpTokenAuthorities = new Map<string, ManagedMcpTokenAuthority>();
   const mcp = foregroundOnly
     ? undefined
     : new ManagedMcpRuntime(
@@ -457,6 +463,9 @@ export function registerManagedContextRoutes(
           resident ? undefined : process.env['QWEN_MANAGED_MCP_CONFIG'],
         ),
         extensionProcesses,
+        createManagedMcpLeaseTokenProvider(boot, (sessionId) =>
+          mcpTokenAuthorities.get(sessionId),
+        ),
       );
   if (mcp) registerManagedMcpRoutes(app, boot, mcp);
   const hooks = foregroundOnly
@@ -730,6 +739,12 @@ export function registerManagedContextRoutes(
           throw new Error('Extension context changed.');
         contexts.set(sessionId, { ...binding });
       },
+      bindMcpTokenAuthority: (sessionId, value) => {
+        mcpTokenAuthorities.set(
+          sessionId,
+          parseManagedMcpTokenAuthority(value, boot.leaseId),
+        );
+      },
       admitted: async (sessionId) => {
         const binding = contexts.get(sessionId);
         return (
@@ -813,6 +828,9 @@ export function registerManagedContextRoutes(
           packages,
           ...base,
           mcp,
+          oauthAvailable:
+            boot.isolationClass === 'session' &&
+            mcpTokenAuthorities.has(sessionId),
           hooks,
           hydrated: (directory) => {
             const value = hydrated.get(directory);

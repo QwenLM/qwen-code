@@ -177,6 +177,9 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsPersonalMcpOAuth() { return call(delegate::supportsPersonalMcpOAuth); }
+
+    @Override
     public Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
         return call(() -> delegate.applyExtensions(tenantId, sessionId, command));
     }

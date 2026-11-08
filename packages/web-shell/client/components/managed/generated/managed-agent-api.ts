@@ -1266,6 +1266,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/session-mcp-oauth/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions. */
+        post: operations["webShellMcpOAuthQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-mcp-oauth/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions. */
+        post: operations["webShellMcpOAuthStart"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-mcp-oauth/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions. */
+        post: operations["webShellMcpOAuthStatus"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-mcp-oauth/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions. */
+        post: operations["webShellMcpOAuthComplete"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-mcp-oauth/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Personal HTTP MCP authorization metadata and management require an authenticated Workspace operator with deployment package-publishing permission. Query, status and revoke retain that permission boundary when OAuth is disabled; new authorization requires an isolated supported profile. Session history and execution results retain Workspace read permissions. */
+        post: operations["webShellMcpOAuthRevoke"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2648,9 +2733,9 @@ export interface components {
         };
         ManagedExtensionPackageManifest: {
             /** @enum {integer} */
-            schemaVersion: 1;
+            schemaVersion: 1 | 2;
             /** @enum {integer} */
-            compilerVersion: 1;
+            compilerVersion: 1 | 2;
             name: string;
             version: string;
             target: {
@@ -2724,7 +2809,10 @@ export interface components {
         ManagedExtensionApplySelection: {
             expectedConfigRevision: number;
             extensions: components["schemas"]["ManagedExtensionPackagePin"][];
-        };
+            /** @enum {integer} */
+            selectionVersion?: 2;
+            mcpAuthBindings?: components["schemas"]["ManagedMcpAuthBinding"][];
+        } & (unknown | unknown);
         ManagedExtensionApplyOperation: {
             /** Format: uuid */
             operationId: string;
@@ -2748,6 +2836,9 @@ export interface components {
                 supported: boolean;
                 canApply: boolean;
             };
+            /** @enum {integer} */
+            selectionVersion?: 2;
+            mcpAuthBindings?: components["schemas"]["ManagedMcpAuthBinding"][];
         };
         WebShellExtensionSessionQuery: {
             sessionId: string;
@@ -2950,7 +3041,7 @@ export interface components {
             };
             sourceDigest: string;
             /** @enum {integer} */
-            compilerVersion: 1;
+            compilerVersion: 1 | 2;
             packageName?: string;
         };
         ManagedExtensionPackageInspection: {
@@ -2984,6 +3075,82 @@ export interface components {
         WebShellExtensionApplyLookup: {
             sessionId: string;
             idempotencyKey: string;
+        };
+        ManagedMcpAuthBinding: {
+            serverId: string;
+            credentialId: string;
+            credentialGeneration: number;
+        };
+        ManagedMcpOAuthProvider: {
+            providerId: string;
+            /** Format: uri */
+            resourceUri: string;
+            scopes: string[];
+        };
+        ManagedMcpOAuthServer: {
+            serverId: string;
+            serverName: string;
+            providerId: string;
+            resourceUri: string;
+            pin: components["schemas"]["ManagedExtensionPackagePin"];
+            scopes: string[];
+            /** @enum {string} */
+            state: "unauthorized" | "authorized" | "revoked" | "unavailable";
+            actorOwned: boolean;
+            credentialId?: string;
+            generation?: number;
+        };
+        ManagedMcpOAuthQueryResult: {
+            supported: boolean;
+            canAuthorize: boolean;
+            notice: string;
+            providers: components["schemas"]["ManagedMcpOAuthProvider"][];
+            servers: components["schemas"]["ManagedMcpOAuthServer"][];
+        };
+        ManagedMcpOAuthStartResult: {
+            attemptId: string;
+            /** Format: uri */
+            authorizationUrl: string;
+            expiresAt: number;
+        };
+        ManagedMcpOAuthStatusResult: {
+            attemptId: string;
+            /** @enum {string} */
+            state: "pending" | "code_received" | "exchanging" | "completed" | "failed" | "expired";
+            expiresAt: number;
+            credentialId?: string;
+            generation?: number;
+        };
+        ManagedMcpOAuthRevokeResult: {
+            credentialId: string;
+            generation: number;
+            /** @enum {string} */
+            state: "revoked";
+        };
+        WebShellManagedMcpOAuthQueryRequest: {
+            sessionId: string;
+            extensions?: components["schemas"]["ManagedExtensionPackagePin"][];
+        };
+        WebShellManagedMcpOAuthStartRequest: {
+            sessionId: string;
+            serverId: string;
+            pin?: components["schemas"]["ManagedExtensionPackagePin"];
+            browserNonce: string;
+            idempotencyKey: string;
+        };
+        WebShellManagedMcpOAuthStatusRequest: {
+            sessionId: string;
+            attemptId: string;
+        };
+        WebShellManagedMcpOAuthCompleteRequest: {
+            sessionId: string;
+            attemptId: string;
+            browserNonce: string;
+        };
+        WebShellManagedMcpOAuthRevokeRequest: {
+            sessionId: string;
+            credentialId: string;
+            expectedGeneration: number;
         };
     };
     responses: {
@@ -5587,6 +5754,151 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellMcpOAuthQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellManagedMcpOAuthQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Actor-scoped metadata without tokens or authorization codes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedMcpOAuthQueryResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    webShellMcpOAuthStart: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellManagedMcpOAuthStartRequest"];
+            };
+        };
+        responses: {
+            /** @description Actor-scoped metadata without tokens or authorization codes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedMcpOAuthStartResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    webShellMcpOAuthStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellManagedMcpOAuthStatusRequest"];
+            };
+        };
+        responses: {
+            /** @description Actor-scoped metadata without tokens or authorization codes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedMcpOAuthStatusResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    webShellMcpOAuthComplete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellManagedMcpOAuthCompleteRequest"];
+            };
+        };
+        responses: {
+            /** @description Actor-scoped metadata without tokens or authorization codes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedMcpOAuthStatusResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    webShellMcpOAuthRevoke: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellManagedMcpOAuthRevokeRequest"];
+            };
+        };
+        responses: {
+            /** @description Actor-scoped metadata without tokens or authorization codes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedMcpOAuthRevokeResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
 }

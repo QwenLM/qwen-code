@@ -114,6 +114,8 @@ public interface HarnessConnector extends AutoCloseable {
         throw new UnsupportedOperationException("Managed package preview is unavailable");
     }
 
+    public default boolean supportsPersonalMcpOAuth() { return false; }
+
     public default Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
         throw new UnsupportedOperationException("Extension management is unavailable");
     }

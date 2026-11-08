@@ -106,6 +106,18 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     private final HarnessSessionResolver sessionResolver;
     private RuntimeExtensionCommandVerifier extensionCommandVerifier;
+    private volatile com.alibaba.qwen.code.runtimebroker.RuntimeMcpTokenIssuer mcpTokenIssuer;
+
+    public void configureMcpTokenIssuer(com.alibaba.qwen.code.runtimebroker.RuntimeMcpTokenIssuer issuer) {
+        mcpTokenIssuer = java.util.Objects.requireNonNull(issuer);
+    }
+
+    public Map<String, Object> personalMcpToken(String leaseId, String token, Map<String, Object> body) {
+        requireOpen(closed);
+        return RuntimeMcpTokenRequests.issue(bindingRepository, sessionRepository,
+                provisioner, mcpTokenIssuer, leaseId, token, body);
+    }
+
     private final RuntimeProvisioner provisioner;
     private final RuntimeTransport transport;
     private final RuntimeBindingRepository bindingRepository;

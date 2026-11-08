@@ -25,12 +25,18 @@ import {
   createManagedExtensionInstall,
   managedExtensionSourceDigest,
   ManagedExtensionInstallInputRequired,
+  ManagedExtensionInstallAuthorizationRequired,
   parseManagedExtensionInstall,
   isManagedExtensionInstallActive,
   isManagedExtensionConfigurationPending,
   reviewManagedExtensionInstall,
   type ManagedExtensionInstallCommand,
 } from './managed-extension-install';
+import type {
+  ManagedMcpOAuthRequirement,
+  ManagedMcpOAuthSnapshot,
+} from './managed-mcp-oauth-types';
+import { ManagedMcpOAuthPanel } from './ManagedMcpOAuthPanel';
 
 export interface ManagedExtensionInstallerProps {
   provider: ManagedAgentProvider;
@@ -68,6 +74,7 @@ export function buildManagedMcpInput(input: {
   environment: string;
   headers: string;
   secretKeys: string[];
+  auth?: ManagedMcpOAuthRequirement;
 }) {
   const settings = input.secretKeys.map((key) => {
     if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key))
@@ -105,6 +112,15 @@ export function buildManagedMcpInput(input: {
     if (!reference || !input.secretKeys.includes(reference[1]!))
       throw new Error('Declared credentials must use settings placeholders.');
   }
+  if (
+    input.auth &&
+    (input.transport === 'stdio' ||
+      input.auth.resourceUri !== input.url ||
+      Object.keys(headers).some((key) => key.toLowerCase() === 'authorization'))
+  )
+    throw new Error(
+      'OAuth requires its configured HTTP resource and no static Authorization header.',
+    );
   const recipe =
     input.transport === 'stdio'
       ? { command: input.command, args, env: environment }
@@ -113,6 +129,7 @@ export function buildManagedMcpInput(input: {
           headers,
           type:
             input.transport === 'streamable-http' ? 'http' : input.transport,
+          ...(input.auth ? { auth: input.auth } : {}),
         };
   return new Blob(
     [
@@ -153,6 +170,14 @@ export function ManagedExtensionInstaller(
   const [url, setUrl] = useState('');
   const [environment, setEnvironment] = useState('{}');
   const [headers, setHeaders] = useState('{}');
+  const [useOAuth, setUseOAuth] = useState(false);
+  const [oauthProvider, setOAuthProvider] = useState('');
+  const [oauthScopes, setOAuthScopes] = useState('');
+  const [oauthProviders, setOAuthProviders] = useState<
+    NonNullable<ManagedMcpOAuthSnapshot['providers']>
+  >([]);
+  const [authorizationPins, setAuthorizationPins] =
+    useState<ManagedExtensionSnapshot['extensions']>();
   const [secretKeys, setSecretKeys] = useState<string[]>([]);
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [keepSettings, setKeepSettings] = useState(true);
@@ -180,10 +205,25 @@ export function ManagedExtensionInstaller(
     : undefined;
 
   useEffect(() => {
+    if (!provider.mcpOAuth) return;
+    const abort = new AbortController();
+    setOAuthProviders([]);
+    void provider.mcpOAuth
+      .query(sessionId, undefined, { clientId, signal: abort.signal })
+      .then((value) => {
+        if (!abort.signal.aborted && value.supported)
+          setOAuthProviders(value.providers ?? []);
+      })
+      .catch(() => {});
+    return () => abort.abort();
+  }, [provider, sessionId, clientId]);
+
+  useEffect(() => {
     mounted.current = true;
     setPending(undefined);
     setRestoredInEditor(false);
     setPreview(undefined);
+    setAuthorizationPins(undefined);
     setSecrets({});
     setFile(undefined);
     setStatus('');
@@ -243,6 +283,16 @@ export function ManagedExtensionInstaller(
     );
     setEnvironment(JSON.stringify(recipe['env'] ?? {}, null, 2));
     setHeaders(JSON.stringify(recipe['headers'] ?? {}, null, 2));
+    if (recipe['auth'] && typeof recipe['auth'] === 'object') {
+      const auth = recipe['auth'] as Record<string, unknown>;
+      setUseOAuth(auth['type'] === 'oauth');
+      setOAuthProvider(
+        typeof auth['providerId'] === 'string' ? auth['providerId'] : '',
+      );
+      setOAuthScopes(
+        Array.isArray(auth['scopes']) ? auth['scopes'].join(', ') : '',
+      );
+    }
     setSecretKeys(inspection.settings.map((entry) => entry.envVar));
     setTarget(
       `${inspection.manifest.target.platform}:${inspection.manifest.target.arch}`,
@@ -284,6 +334,9 @@ export function ManagedExtensionInstaller(
     environment,
     headers,
     secretKeys,
+    useOAuth,
+    oauthProvider,
+    oauthScopes,
   ]);
   const previewMatches =
     preview?.identity === identity && preview.file === file;
@@ -306,6 +359,19 @@ export function ManagedExtensionInstaller(
           environment,
           headers,
           secretKeys,
+          ...(useOAuth
+            ? {
+                auth: {
+                  type: 'oauth' as const,
+                  providerId: oauthProvider,
+                  resourceUri: url,
+                  scopes: oauthScopes
+                    .split(',')
+                    .map((scope) => scope.trim())
+                    .filter(Boolean),
+                },
+              }
+            : {}),
         })
       : file;
   const review = async () => {
@@ -327,7 +393,7 @@ export function ManagedExtensionInstaller(
         sourceKind: kind,
         target: { platform, arch },
         sourceDigest: await managedExtensionSourceDigest(input),
-        compilerVersion: 1,
+        compilerVersion: kind !== 'mcp' || useOAuth ? 2 : 1,
         ...(name ? { packageName: name } : {}),
       };
       const inspection = await management.previewPackage(
@@ -412,6 +478,9 @@ export function ManagedExtensionInstaller(
             ...(updateId === 'new' ? {} : { extensionId: updateId }),
             expectedSettingsRevision: settings?.settingsRevision ?? 0,
             settingsKeys: requiredKeys,
+            requiresOAuth: preview.inspection.mcpServers.some(
+              (server) => !!server.recipe['auth'],
+            ),
             ...(keepSettings &&
             old?.settingsRevision !== undefined &&
             old.settingsRevision === preview.reusableSettingsRevision
@@ -436,12 +505,50 @@ export function ManagedExtensionInstaller(
           save(value);
           setStatus(`managed.install.stage.${value.stage}`);
         },
+        async (value) => {
+          if (!value.requiresOAuth && value.selectionVersion !== 2)
+            return value;
+          if (!provider.mcpOAuth)
+            throw new ManagedExtensionInstallAuthorizationRequired();
+          const pins = [
+            ...value.extensions.filter(
+              (pin) => pin.extensionId !== value.pin!.extensionId,
+            ),
+            value.pin!,
+          ];
+          const auth = await provider.mcpOAuth.query(sessionId, pins, options);
+          controller.signal.throwIfAborted();
+          const bindings = (value.mcpAuthBindings ?? []).filter((binding) =>
+            auth.servers.some((server) => server.serverId === binding.serverId),
+          );
+          if (
+            !auth.supported ||
+            auth.servers.some(
+              (server) =>
+                !server.actorOwned ||
+                server.state !== 'authorized' ||
+                !bindings.some(
+                  (binding) =>
+                    binding.serverId === server.serverId &&
+                    binding.credentialId === server.credentialId &&
+                    binding.credentialGeneration === server.generation,
+                ),
+            )
+          ) {
+            setAuthorizationPins(pins);
+            throw new ManagedExtensionInstallAuthorizationRequired();
+          }
+          return value.selectionVersion === 2
+            ? { ...value, mcpAuthBindings: bindings }
+            : value;
+        },
       );
       if (controller.signal.aborted || !mounted.current) return;
       if (isManagedExtensionInstallActive(completedCommand, result)) {
         save(undefined);
         source.current = undefined;
         setPreview(undefined);
+        setAuthorizationPins(undefined);
         setSecrets({});
         setStatus('managed.install.complete');
         props.onInstalled?.();
@@ -449,11 +556,15 @@ export function ManagedExtensionInstaller(
       onChanged();
     } catch (cause) {
       if (!controller.signal.aborted && mounted.current) {
-        setFailed(true);
+        setFailed(
+          !(cause instanceof ManagedExtensionInstallAuthorizationRequired),
+        );
         setStatus(
-          cause instanceof ManagedExtensionInstallInputRequired
-            ? `managed.install.required.${cause.input}`
-            : 'managed.install.savedNotApplied',
+          cause instanceof ManagedExtensionInstallAuthorizationRequired
+            ? 'managed.oauth.required'
+            : cause instanceof ManagedExtensionInstallInputRequired
+              ? `managed.install.required.${cause.input}`
+              : 'managed.install.savedNotApplied',
         );
       }
     } finally {
@@ -590,6 +701,64 @@ export function ManagedExtensionInstaller(
                   disabled={busy || !!pending?.pin}
                   onChange={(event) => setHeaders(event.target.value)}
                 />
+                {oauthProviders.length > 0 && (
+                  <>
+                    <label className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={useOAuth}
+                        disabled={busy || !!pending?.pin}
+                        onChange={(event) => setUseOAuth(event.target.checked)}
+                      />
+                      {t('managed.oauth.configure')}
+                    </label>
+                    {useOAuth && (
+                      <>
+                        <Select
+                          value={oauthProvider}
+                          disabled={busy || !!pending?.pin}
+                          onValueChange={(value) => {
+                            setOAuthProvider(value);
+                            const configured = oauthProviders.find(
+                              (entry) => entry.providerId === value,
+                            );
+                            if (configured) {
+                              setUrl(configured.resourceUri);
+                              setOAuthScopes(configured.scopes.join(', '));
+                            }
+                          }}
+                        >
+                          <SelectTrigger
+                            aria-label={t('managed.oauth.provider')}
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {oauthProviders.map((entry) => (
+                              <SelectItem
+                                key={entry.providerId}
+                                value={entry.providerId}
+                              >
+                                {entry.providerId}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <Input
+                          aria-label={t('managed.oauth.scopes')}
+                          value={oauthScopes}
+                          disabled={busy || !!pending?.pin}
+                          onChange={(event) =>
+                            setOAuthScopes(event.target.value)
+                          }
+                        />
+                        <p className="text-sm text-muted-foreground">
+                          {t('managed.oauth.notice')}
+                        </p>
+                      </>
+                    )}
+                  </>
+                )}
               </>
             )}
             <p className="text-sm text-muted-foreground">
@@ -804,12 +973,34 @@ export function ManagedExtensionInstaller(
               source.current = undefined;
               setPreview(undefined);
               setSecrets({});
+              setAuthorizationPins(undefined);
               setStatus('managed.install.discarded');
               setFailed(false);
             }}
           >
             {t('managed.install.discardDraft')}
           </Button>
+        )}
+        {authorizationPins && pending && provider.mcpOAuth && (
+          <ManagedMcpOAuthPanel
+            provider={provider}
+            sessionId={sessionId}
+            extensions={authorizationPins}
+            onAuthorized={(binding) => {
+              const next = {
+                ...pending,
+                selectionVersion: 2 as const,
+                mcpAuthBindings: [
+                  ...(pending.mcpAuthBindings ?? []).filter(
+                    (entry) => entry.serverId !== binding.serverId,
+                  ),
+                  binding,
+                ],
+              };
+              save(next);
+              void install(next);
+            }}
+          />
         )}
       </CardContent>
     </Card>

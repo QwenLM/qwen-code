@@ -426,6 +426,9 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsPersonalMcpOAuth() { return feature("managed-mcp-oauth/1"); }
+
+    @Override
     public Map<String, Object> applyExtensions(String tenant, String session, Map<String, Object> command) {
         return call(tenant, session, leaf -> leaf.applyExtensions(tenant, session, command));
     }

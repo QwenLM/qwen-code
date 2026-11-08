@@ -151,6 +151,11 @@ class ManagedAgentApiContractTest {
     private static final OpenApiContract CONTRACT = OpenApiContract.load();
     private static final Map<Class<?>, List<String>> RECORD_SCHEMAS =
             Map.ofEntries(
+                    entry(com.alibaba.qwen.code.managedagent.api.ManagedMcpOAuthController.Query.class, List.of("ManagedMcpOAuthQueryRequest", "WebShellManagedMcpOAuthQueryRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.ManagedMcpOAuthController.Start.class, List.of("ManagedMcpOAuthStartRequest", "WebShellManagedMcpOAuthStartRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.ManagedMcpOAuthController.Status.class, List.of("ManagedMcpOAuthStatusRequest", "WebShellManagedMcpOAuthStatusRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.ManagedMcpOAuthController.Complete.class, List.of("ManagedMcpOAuthCompleteRequest", "WebShellManagedMcpOAuthCompleteRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.ManagedMcpOAuthController.Revoke.class, List.of("ManagedMcpOAuthRevokeRequest", "WebShellManagedMcpOAuthRevokeRequest")),
                     entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.OptionsRequest.class, List.of("WebShellSessionWorktreeOptionsRequest")),
                     entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.QueryRequest.class, List.of("WebShellSessionWorktreeQueryRequest")),
                     entry(com.alibaba.qwen.code.managedagent.api.SessionWorktreeController.InspectRequest.class, List.of("WebShellSessionWorktreeInspectRequest")),
@@ -500,6 +505,7 @@ class ManagedAgentApiContractTest {
     void everyMappedPublicRouteIsCoveredByTheSharedSurfacePredicate() {
         // A controller method added outside the predicate's prefixes would
         // silently skip both the tenant filter and the signature filter.
+        // OAuth redirects deliberately use state rather than those request headers.
         Set<String> uncovered = new TreeSet<>();
         handlerMapping.getHandlerMethods().keySet().forEach(info -> {
             for (String pattern : info.getPatternValues()) {
@@ -508,13 +514,13 @@ class ManagedAgentApiContractTest {
                     continue;
                 }
                 if (!com.alibaba.qwen.code.managedagent.security.PublicSurface
-                        .covers(pattern)) {
+                        .covers(pattern) && !"/oauth/mcp/callback".equals(pattern)) {
                     uncovered.add(pattern);
                 }
             }
         });
         assertThat(uncovered)
-                .as("every public route must satisfy PublicSurface.covers")
+                .as("every public route must satisfy PublicSurface.covers or be the fixed OAuth callback")
                 .isEmpty();
     }
 
@@ -3468,7 +3474,13 @@ class ManagedAgentApiContractTest {
                 "{\"idempotencyKey\":\"lookup\"}");
         exchange(drift, "lookupWebShellSessionExtensionOperation", 401, post(WEB_SHELL + "/session-extensions/operations/lookup").header(TENANT, tenant),
                 query + ",\"idempotencyKey\":\"lookup\"}");
-
+        for (String action : List.of("Query", "Start", "Status", "Complete", "Revoke")) {
+            String suffix = action.toLowerCase(java.util.Locale.ROOT);
+            exchange(drift, "McpOAuth" + action, 401,
+                    post("/v1/agents/sessions/" + sessionId + "/mcp-oauth/" + suffix).header(TENANT, tenant), "{}");
+            exchange(drift, "webShellMcpOAuth" + action, 401,
+                    post(WEB_SHELL + "/session-mcp-oauth/" + suffix).header(TENANT, tenant), query + "}");
+        }
     }
 
     private String exchange(Map<String, String> drift, String operationId,

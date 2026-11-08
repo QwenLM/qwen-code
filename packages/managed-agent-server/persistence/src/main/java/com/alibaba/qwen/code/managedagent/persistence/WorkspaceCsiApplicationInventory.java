@@ -36,7 +36,6 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Types;
 import java.time.Instant;
@@ -48,7 +47,6 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -107,6 +105,14 @@ final class WorkspaceCsiApplicationInventory {
             declaration("ma_extension_settings", "settings_key",
                     "settings_key:CHAR,scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,extension_id:VARBINARY,"
                     + "settings_revision:BIGINT,encryption_key_id:VARBINARY,encrypted_values:LONGTEXT,configured_keys_json:LONGTEXT,gmt_create:BIGINT"),
+            declaration("ma_mcp_credential", "credential_key",
+                    "credential_key:CHAR,scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,actor_id:VARBINARY,"
+                    + "credential_id:VARBINARY,binding_json:LONGTEXT,generation:BIGINT,state:VARCHAR,expires_at_ms:BIGINT,"
+                    + "encryption_key_id:VARBINARY,encrypted_values:LONGTEXT,refresh_lease:VARBINARY,refresh_until_ms:BIGINT,gmt_create:BIGINT"),
+            declaration("ma_mcp_oauth_attempt", "attempt_key",
+                    "attempt_key:CHAR,scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,actor_id:VARBINARY,"
+                    + "attempt_id:VARBINARY,state_hash:CHAR,nonce_hash:CHAR,request_digest:CHAR,state:VARCHAR,expires_at_ms:BIGINT,"
+                    + "binding_json:LONGTEXT,encryption_key_id:VARBINARY,encrypted_values:LONGTEXT,credential_id:VARBINARY,gmt_create:BIGINT"),
             declaration("ma_message", "tenant_id,session_id,item_id",
                     "tenant_id:VARBINARY,session_id:VARBINARY,item_id:VARBINARY,turn_id:VARBINARY,item_type:VARCHAR,"
                     + "item_role:VARCHAR,item_status:VARCHAR,attributes_json:LONGTEXT,first_sequence:BIGINT,"
@@ -224,7 +230,8 @@ final class WorkspaceCsiApplicationInventory {
                     + "cwd_relative:VARCHAR,context_config_ref:VARBINARY,context_revision:BIGINT,"
                     + "workspace_config_ref:VARBINARY,workspace_policy_ref:VARBINARY,agent_revision:VARCHAR,"
                     + "approval_mode:VARCHAR,tool_profile:VARCHAR,"
-                    + "creator_actor_key:VARBINARY,owner_actor_key:VARBINARY,parent_session_id:VARBINARY,"
+                    + "creator_actor_key:VARBINARY,owner_actor_key:VARBINARY,personal_execution_actor_key:CHAR,"
+                    + "personal_auth_config_revision:BIGINT,parent_session_id:VARBINARY,"
                     + "root_session_id:VARBINARY,parent_child_run_id:VARBINARY,child_depth:INT,"
                     + "agent_definition_digest:CHAR,session_kind:VARCHAR,tenant_key:CHAR,session_key:CHAR,"
                     + "session_scope_key:CHAR,title_revision:BIGINT,retirement_operation_id:VARBINARY,"
@@ -1344,7 +1351,7 @@ final class WorkspaceCsiApplicationInventory {
                     historicalParameter(statement, parameter++, cell);
                 }
                 try (var rows = statement.executeQuery()) {
-                    if (!schema(rows.getMetaData(), declaration)) {
+                    if (!WorkspaceCsiApplicationSchema.matches(rows.getMetaData(), declaration.columns())) {
                         blockers.add(new Blocker(declaration.name(), null, "schema_drift"));
                         return List.of();
                     }
@@ -1983,24 +1990,6 @@ final class WorkspaceCsiApplicationInventory {
         return new DecodedRow(new Row(key, fields, bytes, Membership.ORIGINAL), null);
     }
 
-    private static boolean schema(ResultSetMetaData metadata, Declaration declaration) throws SQLException {
-        int identity = declaration.columns().size() + 1;
-        if (metadata.getColumnCount() != identity
-                || !"id".equalsIgnoreCase(metadata.getColumnName(identity))
-                || metadata.getColumnType(identity) != Types.BIGINT
-                || !metadata.isAutoIncrement(identity)) {
-            return false;
-        }
-        for (int index = 0; index < declaration.columns().size(); index++) {
-            Column column = declaration.columns().get(index);
-            if (!column.name().equals(metadata.getColumnName(index + 1).toLowerCase(Locale.ROOT))
-                    || !column.kind().accepts(metadata.getColumnType(index + 1))) {
-                return false;
-            }
-        }
-        return true;
-    }
-
     private record Declaration(String name, List<String> keys, List<Column> columns) {
         private Declaration {
             keys = List.copyOf(keys);
@@ -2125,7 +2114,7 @@ final class WorkspaceCsiApplicationInventory {
                     historicalParameter(statement, index + 1, query.arguments().get(index));
                 }
                 try (var rows = statement.executeQuery()) {
-                    if (!schema(rows.getMetaData(), declaration)) {
+                    if (!WorkspaceCsiApplicationSchema.matches(rows.getMetaData(), declaration.columns())) {
                         failedTables.add(declaration.name());
                         block(declaration.name(), null, "schema_drift");
                         return;
@@ -2199,7 +2188,7 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_message" -> query(table, "tenant_id=T&session_id=sessions", "body_resource_key=resourceKeys");
                 case "ma_agent_definition" -> query(table, "tenant_id=T&agent_id=agent&revision=agentRevision");
                 case "ma_workspace_access", "ma_channel_instance", "ma_extension_operation", "ma_extension_package",
-                        "ma_extension_settings" -> query(table, "tenant_id=T&workspace_id=W");
+                        "ma_extension_settings", "ma_mcp_credential", "ma_mcp_oauth_attempt" -> query(table, "tenant_id=T&workspace_id=W");
                 case "ma_session_worktree" -> query(table, "tenant_id=T&session_id=sessions",
                         "tenant_id=T&workspace_id=W", "physical_key=F");
                 case "ma_workspace" -> query(table, "tenant_id=T&workspace_id=W", "tenant_id=T&storage_id=D",
@@ -2259,7 +2248,7 @@ final class WorkspaceCsiApplicationInventory {
             return switch (table) {
                 case "ma_tenant_guard", "ma_agent_definition" -> true;
                 case "ma_workspace_access", "ma_channel_instance", "ma_extension_operation", "ma_extension_package",
-                        "ma_extension_settings" -> workspace.equals(row.text("workspace_id"));
+                        "ma_extension_settings", "ma_mcp_credential", "ma_mcp_oauth_attempt" -> workspace.equals(row.text("workspace_id"));
                 case "ma_workspace" -> "ROOT".equals(row.text("workspace_kind"))
                         && row.cell("parent_session_id").isNull() && row.cell("parent_workspace_id").isNull();
                 case "ma_request_receipt" -> "SESSION_CREATE_MODE".equals(row.text("namespace"))
@@ -2639,7 +2628,7 @@ final class WorkspaceCsiApplicationInventory {
                     historicalParameter(statement, index + 1, new Cell(column.kind(), utf8(parameters[index])));
                 }
                 try (var result = statement.executeQuery()) {
-                    if (!schema(result.getMetaData(), declaration)) {
+                    if (!WorkspaceCsiApplicationSchema.matches(result.getMetaData(), declaration.columns())) {
                         block(table, null, "schema_drift");
                         return null;
                     }
@@ -2852,6 +2841,8 @@ final class WorkspaceCsiApplicationInventory {
                             && row.cell("model_id").isNull() && Objects.equals(0L, row.number("model_revision"))
                             && row.cell("model_config_digest").isNull() && row.cell("model_config_key_id").isNull()
                             && row.cell("model_config_ciphertext").isNull()
+                            && row.cell("personal_execution_actor_key").isNull()
+                            && Objects.equals(0L, row.number("personal_auth_config_revision"))
                             && row.cell("selected_approval_mode").isNull() && Objects.equals(0L, row.number("approval_revision"))
                             && Boolean.FALSE.equals(row.bool("is_plan_enabled")) && row.cell("permission_rules_json").isNull()
                             && Objects.equals(0L, row.number("public_child_agents_version"))
@@ -3069,7 +3060,7 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_tenant_guard" -> expect(table, row, tenant.equals(row.text("tenant_id"))
                         && has("BT", row.text("tenant_key")) && oneOf(row.text("guard_domain"), "runtime_placement", "output_publication"));
                 case "ma_workspace_access", "ma_channel_instance", "ma_extension_operation", "ma_extension_package",
-                        "ma_extension_settings" -> expect(table, row, tenant.equals(row.text("tenant_id")) && workspace.equals(row.text("workspace_id")));
+                        "ma_extension_settings", "ma_mcp_credential", "ma_mcp_oauth_attempt" -> expect(table, row, tenant.equals(row.text("tenant_id")) && workspace.equals(row.text("workspace_id")));
                 case "ma_agent_definition" -> {
                     Row parent = originalRow("ma_session");
                     expect(table, row, parent != null && tenant.equals(row.text("tenant_id"))
