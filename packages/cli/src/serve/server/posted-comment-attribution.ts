@@ -124,6 +124,20 @@ function stripShellComment(segment: string): string {
 }
 
 /**
+ * Drop a leading shell control prefix so a creation inside a conditional/loop
+ * body is still at the command position: after `;` segmentation the body stage
+ * begins with `then`/`do`/`else`/`elif` (`if …; then gh pr comment …`) or a
+ * `case` arm (`case "$S" in open*) gh pr comment …`). These are the repo's own
+ * pre-post guard shapes. Only the prefix is removed; the command itself is
+ * untouched, and the output-origin gate still applies to the whole chain.
+ */
+function stripShellControlPrefix(segment: string): string {
+  let s = segment.replace(/^\s*(?:then|do|else|elif)\s+/, '');
+  s = s.replace(/^\s*case\s+[\s\S]*?\bin\s+[^;]*?\)\s*/, '');
+  return s;
+}
+
+/**
  * Split a shell chain into pipeline stages on separators OUTSIDE quotes only.
  * A write flag must sit in the SAME stage as the collection path to count as a
  * creation: `gh api …/comments --jq … ; stat -f '%Sm' …` is a GET listing
@@ -199,7 +213,7 @@ function commandSegments(command: string): string[] {
     current += ch;
   }
   segments.push(current);
-  return segments;
+  return segments.map(stripShellControlPrefix);
 }
 
 /**

@@ -346,6 +346,38 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
+  it('does not credit a gh pr view --comments read chained before a creation', () => {
+    const entry = shellResult(
+      'gh pr view 42 --comments && gh pr comment 42 --body x',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('attributes a creation inside an if-then pre-post guard', () => {
+    const entry = shellResult(
+      'if [ "$STATE" = "OPEN" ]; then gh pr comment 42 --body c.md; else echo skip; fi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('attributes a creation inside a case arm pre-post guard', () => {
+    const entry = shellResult(
+      'case "$S" in open*) gh pr comment 42 --body c.md;; *) echo skip;; esac',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
+  });
+
+  it('does not attribute a conditional whose creation branch is chained with a comments read', () => {
+    const entry = shellResult(
+      'if [ "$S" = "OPEN" ]; then gh api repos/o/r/issues/42/comments --jq ".[0].html_url"; gh pr comment 42 --body x; fi',
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
   it('does not veto a POST whose quoted body merely quotes --method GET', () => {
     const entry = shellResult(
       "gh api repos/o/r/issues/42/comments -X POST -f body='--method GET' --jq '.id'",
