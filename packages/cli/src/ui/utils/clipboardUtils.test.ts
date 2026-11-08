@@ -668,6 +668,19 @@ describe('clipboardUtils', () => {
       expect(requestedTypes()).toEqual(testCase.reads);
     });
 
+    it('reads the CLIPBOARD selection through xclip output mode', async () => {
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockClipboard(['UTF8_STRING'], { UTF8_STRING: 'clipboard text' });
+
+      await expect(readClipboardText()).resolves.toBe('clipboard text');
+      expect(mockSpawn).toHaveBeenLastCalledWith(
+        'xclip',
+        ['-selection', 'clipboard', '-t', 'UTF8_STRING', '-o'],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+    });
+
     it('decodes a legacy STRING offer as Latin-1 when UTF-8 decoding fails', async () => {
       setupX11Env();
       mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
@@ -801,16 +814,22 @@ describe('clipboardUtils', () => {
       expect(mockSpawn).not.toHaveBeenCalled();
     });
 
-    it('does not touch the tools off Linux', async () => {
-      Object.defineProperty(process, 'platform', {
-        value: 'darwin',
-        configurable: true,
-        writable: true,
-      });
+    it.each(['darwin', 'win32'])(
+      'does not touch clipboard tools on %s',
+      async (platform) => {
+        Object.defineProperty(process, 'platform', {
+          value: platform,
+          configurable: true,
+          writable: true,
+        });
+        mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+        mockClipboard(['text/plain'], { 'text/plain': 'clipboard text' });
 
-      await expect(readClipboardText()).resolves.toBeNull();
-      expect(mockSpawn).not.toHaveBeenCalled();
-    });
+        await expect(readClipboardText()).resolves.toBeNull();
+        expect(mockExecSync).not.toHaveBeenCalled();
+        expect(mockSpawn).not.toHaveBeenCalled();
+      },
+    );
   });
 
   // ─── Linux clipboard unavailability must not be silent (#12488) ──
