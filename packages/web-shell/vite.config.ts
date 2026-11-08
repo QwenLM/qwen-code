@@ -1,4 +1,5 @@
 import { pierreResources } from './pierre-build';
+import { createConnection } from 'node:net';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import type { Connect, PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
@@ -7,8 +8,31 @@ import tailwindcss from '@tailwindcss/vite';
 import pkg from './package.json' with { type: 'json' };
 import { getAllowedDaemonOrigin } from './client/config/daemon';
 
+const daemonTarget = process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170';
+
+// One probe per dev server, not per request: an unreachable daemon is not
+// fatal (the E2E suites mock it per page), but the operator learns about it
+// at startup instead of through a suite of slow browser timeouts.
+function probeDaemonTarget(): void {
+  const url = new URL(daemonTarget);
+  const probe = createConnection(
+    { host: url.hostname, port: Number(url.port || 4170) },
+    () => probe.destroy(),
+  );
+  const unreachable = () => {
+    probe.destroy();
+    console.warn(
+      `[web-shell] no daemon is listening at ${daemonTarget}; proxied ` +
+        'daemon routes answer 502 until one is started (page-level E2E ' +
+        'mocks are unaffected)',
+    );
+  };
+  probe.setTimeout(2_000, unreachable);
+  probe.once('error', unreachable);
+}
+
 const daemonProxy: ProxyOptions = {
-  target: process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170',
+  target: daemonTarget,
   changeOrigin: true,
   bypass: (req) => {
     if (req.url?.startsWith('/api/')) return undefined;
@@ -35,6 +59,21 @@ const daemonProxy: ProxyOptions = {
     return undefined;
   },
   configure: (proxy) => {
+    // Without a listener http-proxy drops the response and the browser waits
+    // out its own timeout; run 42460891896 lost 26 tests to that shape while
+    // the real fault was one missing daemon. Answer immediately, labeled.
+    proxy.on('error', (error, _req, res) => {
+      if (!('writeHead' in res) || res.headersSent || res.writableEnded) return;
+      res.writeHead(502, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: 'daemon_unreachable',
+          message:
+            `No daemon answered at ${daemonTarget} (${error.message}). ` +
+            'Start the daemon or install the page-level mock before this request.',
+        }),
+      );
+    });
     proxy.on('proxyReq', (proxyReq) => {
       proxyReq.removeHeader('origin');
       proxyReq.removeHeader('referer');
@@ -127,6 +166,7 @@ export function createDevelopmentMiddleware(): Connect.NextHandleFunction {
 function configureDevelopmentMiddleware(
   server: ViteDevServer | PreviewServer,
 ): void {
+  probeDaemonTarget();
   server.middlewares.use(createDevelopmentMiddleware());
 }
 

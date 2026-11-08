@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi, onTestFinished } from 'vitest';
+import { EventEmitter } from 'node:events';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -313,5 +314,57 @@ describe('Web Shell launcher-supplied open path', () => {
     onTestFinished(() => vi.unstubAllEnvs());
 
     expect(loadConfig().server?.open).toBeUndefined();
+  });
+});
+
+describe('Web Shell daemon proxy failure', () => {
+  function emitProxyError(res: unknown) {
+    const options = loadConfig().server?.proxy?.['/session'] as ProxyOptions;
+    const proxy = new EventEmitter();
+    (options.configure as (proxy: EventEmitter) => void)(proxy);
+    proxy.emit(
+      'error',
+      new Error('connect ECONNREFUSED 127.0.0.1:4170'),
+      {} as IncomingMessage,
+      res,
+    );
+  }
+
+  it('answers an unreachable daemon with a labeled 502 instead of hanging', () => {
+    const res = {
+      headersSent: false,
+      writableEnded: false,
+      writeHead: vi.fn(),
+      end: vi.fn(),
+    };
+
+    emitProxyError(res);
+
+    expect(res.writeHead).toHaveBeenCalledWith(502, {
+      'content-type': 'application/json',
+    });
+    const body = JSON.parse(String(res.end.mock.calls[0]?.[0]));
+    expect(body.error).toBe('daemon_unreachable');
+    expect(body.message).toContain('ECONNREFUSED');
+  });
+
+  it('leaves an already-answered response alone', () => {
+    const res = {
+      headersSent: true,
+      writableEnded: false,
+      writeHead: vi.fn(),
+      end: vi.fn(),
+    };
+
+    emitProxyError(res);
+
+    expect(res.writeHead).not.toHaveBeenCalled();
+    expect(res.end).not.toHaveBeenCalled();
+  });
+
+  it('does not write an HTTP response onto a websocket upgrade socket', () => {
+    const res = { destroy: vi.fn() };
+
+    expect(() => emitProxyError(res)).not.toThrow();
   });
 });
