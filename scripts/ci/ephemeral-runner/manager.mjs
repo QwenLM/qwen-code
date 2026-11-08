@@ -104,6 +104,32 @@ function validate(c) {
     c.minDiskBytes < 0
   )
     throw new Error('Invalid manager configuration');
+  if (c.proxy !== undefined) {
+    if (
+      typeof c.proxy !== 'object' ||
+      c.proxy === null ||
+      Array.isArray(c.proxy)
+    )
+      throw new Error('Invalid proxy configuration');
+    const { http, https, noProxy } = c.proxy;
+    // The proxy env reaches untrusted fork jobs, so a URL with embedded
+    // credentials would leak them; reject userinfo outright.
+    const validProxyUrl = (value) => {
+      if (typeof value !== 'string' || !value) return false;
+      try {
+        const url = new URL(value);
+        return !url.username && !url.password;
+      } catch {
+        return false;
+      }
+    };
+    if (http !== undefined && !validProxyUrl(http))
+      throw new Error('Invalid proxy.http');
+    if (https !== undefined && !validProxyUrl(https))
+      throw new Error('Invalid proxy.https');
+    if (noProxy !== undefined && (typeof noProxy !== 'string' || !noProxy))
+      throw new Error('Invalid proxy.noProxy');
+  }
 }
 
 export function createManager(config, dependencies = {}) {
@@ -121,6 +147,11 @@ export function createManager(config, dependencies = {}) {
     env.DOCKER_HOST = `unix://${config.dockerSocket || '/var/run/docker.sock'}`;
     if (args[0] === 'create' && options.env?.RUNNER_JIT_CONFIG)
       env.RUNNER_JIT_CONFIG = options.env.RUNNER_JIT_CONFIG;
+    if (args[0] === 'create' && config.proxy) {
+      if (config.proxy.http) env.HTTP_PROXY = config.proxy.http;
+      if (config.proxy.https) env.HTTPS_PROXY = config.proxy.https;
+      if (config.proxy.noProxy) env.NO_PROXY = config.proxy.noProxy;
+    }
     return execute(program, args, { ...options, env });
   };
   const wait = dependencies.sleep || sleep;
@@ -465,6 +496,9 @@ export function createManager(config, dependencies = {}) {
             'max-file=3',
             '--env',
             'RUNNER_JIT_CONFIG',
+            ...(config.proxy?.http ? ['--env', 'HTTP_PROXY'] : []),
+            ...(config.proxy?.https ? ['--env', 'HTTPS_PROXY'] : []),
+            ...(config.proxy?.noProxy ? ['--env', 'NO_PROXY'] : []),
             config.image,
           ],
           { env },
