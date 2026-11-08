@@ -43,6 +43,7 @@ import {
   type PermissionResponse,
   type PromptRequest,
 } from '@qwen-code/sdk/daemon';
+import { installBootRetry } from './bootRetry';
 import { installSseTransport, type SseTransport } from './sseTransport';
 
 /** One transcript page as the mock daemon serves it. */
@@ -528,6 +529,9 @@ export async function installMockDaemon(
   peers.set(baseOrigin, { scenario, requests });
   const resolvePeer = (origin: string): DaemonPeer | undefined =>
     origin ? peers.get(origin) : undefined;
+  // Most app specs install their daemon before navigating, so hooking the
+  // boot retry here covers them without a page-setup line in each spec.
+  await installBootRetry(page);
   const sse = await installSseTransport<DaemonEvent>(page, { baseURL });
 
   await page.route(`${baseOrigin}/**`, async (route) => {
