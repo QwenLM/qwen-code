@@ -50,7 +50,18 @@ const CREATION_COMMAND_PATTERNS: readonly RegExp[] = [
   /\bcurl\b[\s\S]*?\brepos\/[^/\s]+\/[^/\s]+\/(?:issues|pulls)\/\d+\/(?:comments|reviews)\b[\s\S]*?(?:-X\s+POST|--request\s+POST|-d\s|--data\b)/,
 ];
 
+/**
+ * An explicit GET is a read even when field flags are present: `gh api` sends
+ * `-f`/`-F` values as query parameters on a GET, so
+ * `gh api …/comments --method GET --paginate -F per_page=100` lists comments
+ * and must never attribute them. Without this veto the field-flag creation
+ * pattern matches and a session that only read comments is recorded as their
+ * author, permanently withholding events it should receive.
+ */
+const EXPLICIT_GET_PATTERN = /(?:--method[=\s]+|-X\s*)GET\b/i;
+
 function isCreationCommand(command: string): boolean {
+  if (EXPLICIT_GET_PATTERN.test(command)) return false;
   return CREATION_COMMAND_PATTERNS.some((pattern) => pattern.test(command));
 }
 
@@ -137,6 +148,14 @@ interface TranscriptScanCache {
 
 const scanCache = new Map<string, TranscriptScanCache>();
 
+/**
+ * Bound the cache like the worker's wake-cwd cache: each entry retains a full
+ * id set for the life of the process, so an unbounded map would grow with every
+ * session ever looked up. Evict the oldest entry when full; an evicted session
+ * simply rescans on its next lookup.
+ */
+const MAX_TRANSCRIPT_SCAN_CACHE = 256;
+
 /** Test hook: drop cached scans (e.g. when a fixture rewrites a transcript). */
 export function clearPostedCommentScanCache(): void {
   scanCache.clear();
@@ -161,10 +180,12 @@ async function readRange(
 /**
  * Return the set of comment identifiers the session at `transcriptPath` has
  * posted, scanning incrementally: an unchanged file is answered from cache,
- * a grown file scans only the appended bytes, and a shrunk/replaced file
- * rescans from the start. A missing or unreadable transcript yields an empty
- * set (fail-open for delivery) — the caller logs it; it is never a reason to
- * prune bindings.
+ * a grown file scans only the appended bytes, and a shrunk file rescans from
+ * the start. Transcripts are append-only per session, so growth is treated as
+ * an append; a file replaced in place by a larger one is not detected (the
+ * per-session path makes this a non-goal). A missing or unreadable transcript
+ * yields an empty set (fail-open for delivery) — the caller logs it; it is
+ * never a reason to prune bindings.
  */
 export async function postedCommentIdsForTranscript(
   transcriptPath: string,
@@ -217,6 +238,13 @@ export async function postedCommentIdsForTranscript(
     for (const id of extractPostedCommentIds(entry)) ids.add(id);
   }
 
+  if (
+    scanCache.size >= MAX_TRANSCRIPT_SCAN_CACHE &&
+    !scanCache.has(transcriptPath)
+  ) {
+    const oldest = scanCache.keys().next().value;
+    if (oldest !== undefined) scanCache.delete(oldest);
+  }
   scanCache.set(transcriptPath, {
     size: stats.size,
     mtimeMs: stats.mtimeMs,

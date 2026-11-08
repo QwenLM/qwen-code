@@ -93,6 +93,34 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(apiGet)).toEqual([]);
   });
 
+  it('does not attribute an explicit GET that passes field flags as query params', () => {
+    // gh api sends -f/-F values as query parameters on a GET; this is the
+    // repo's own triage listing shape and must never attribute the listed ids.
+    const methodGet = shellResult(
+      'gh api repos/o/r/issues/42/comments --method GET --paginate -F per_page=100',
+      '[{"id":111},{"id":222}]',
+    );
+    expect(extractPostedCommentIds(methodGet)).toEqual([]);
+    const xGet = shellResult(
+      'gh api repos/o/r/pulls/7/comments -X GET -F per_page=100 -f since=2026-01-01',
+      '[{"id":333}]',
+    );
+    expect(extractPostedCommentIds(xGet)).toEqual([]);
+    const curlGet = shellResult(
+      'curl -X GET https://api.github.com/repos/o/r/issues/9/comments -d per_page=100',
+      '[{"id":444}]',
+    );
+    expect(extractPostedCommentIds(curlGet)).toEqual([]);
+  });
+
+  it('still attributes a POST that carries field flags', () => {
+    const post = shellResult(
+      'gh api repos/o/r/issues/42/comments -X POST -f body=hi',
+      '{"id":555}',
+    );
+    expect(extractPostedCommentIds(post)).toContain(issueCommentKey('555'));
+  });
+
   it('does not attribute a received channel event (user message)', () => {
     const entry = {
       type: 'user',

@@ -4,6 +4,8 @@
 
 状态：proposed（2026-11-08）。扩展 [GitHub Channel Events to PR-Bound Sessions](2026-11-02-github-channel-bound-session-events.md)；不改动四个 PR 状态 watch 事件，也不改动通知驱动的评论 lane。
 
+修订 2026-11-08（评审）：watch 仅在把评论投递给至少一个绑定会话时才消费它——其较窄的 `comment` 类无法路由的评论保持未消费（不写共享去重键），好让通知 lane 仍按线程自身的 reason 投递；评论游标不会越过投递意图未被持久化认领的评论（`dispatchEnvelope` 返回 false 时保留 `commentSince` 以便重试）；两个评论抓取沿用状态 watch 的限流快速退出重试判断，并把共享凭据/限流错误交给本轮中止逻辑；归因对显式 GET（即便带字段参数）一票否决、给 transcript 扫描缓存设上限、且只在有候选时才查询；每轮候选上限用于排出停机积压而不丢尾部。`prCommentWatch` 不带 `deliverToBoundSessions` 依赖校验，因为编辑器会为每个 channel 提交它的默认值。
+
 ## 问题
 
 绑定到某 PR 的会话——尤其是承担整个研发闭环的 `fix` 角色会话——必须听到该 PR 上的新评论，无论评论是谁发的：本人手工、另一个 Qwen Code 会话、或另一个 agent/模型，无论用的是同一个 GitHub 账号还是别的账号。今天做不到：

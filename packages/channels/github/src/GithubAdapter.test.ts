@@ -22901,6 +22901,99 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
         expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
       });
+
+      it('does not consume a comment it cannot route, leaving it to the notification lanes', async () => {
+        // Role-aware actions with only a reason-specific key: the watch resolves
+        // the narrower `comment` class and matches nothing, so it must not record
+        // the shared dedupe key — that would make the mention lane skip the same
+        // comment as a duplicate and lose a delivery that worked before.
+        await initChannel(
+          {
+            ...commentWatchConfig,
+            boundSessionActions: { 'fix:mention': 'reply' },
+          },
+          { boundSessions },
+        );
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: 'fix',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const cursor = (
+          channel as unknown as { cursor: { dispatchedComments?: string[] } }
+        ).cursor;
+        expect(cursor.dispatchedComments ?? []).not.toContain('IC_555');
+      });
+
+      it('keeps the comment cursor when a dispatch does not settle', async () => {
+        // dispatchEnvelope returns false before a durable claim when the
+        // publication audit is unreadable; advancing commentSince here would
+        // skip the comment past with no task and no re-delivery chance.
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        const dispatch = vi
+          .spyOn(
+            channel as unknown as {
+              dispatchEnvelope: (...args: unknown[]) => Promise<boolean>;
+            },
+            'dispatchEnvelope',
+          )
+          .mockResolvedValue(false);
+        try {
+          await pollOnce();
+        } finally {
+          dispatch.mockRestore();
+        }
+        expect(readWatchState().entries['owner/repo#42']!['commentSince']).toBe(
+          '2026-07-01T00:00:00.000Z',
+        );
+      });
+
+      it('fails fast on a rate-limited comment fetch instead of sleep-retrying', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockRejectedValue(
+          Object.assign(new Error('rate limited'), {
+            status: 429,
+            response: { headers: {} },
+          }),
+        );
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        // The fail-fast predicate throws on the first 429 (no sleep-retry), and
+        // the shared error aborts the watch pass rather than being swallowed.
+        expect(mockOctokit.rest.issues.listComments).toHaveBeenCalledTimes(1);
+      });
     });
   });
 });

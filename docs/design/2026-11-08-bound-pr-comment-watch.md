@@ -4,6 +4,8 @@
 
 Status: proposed (2026-11-08). Extends [GitHub Channel Events to PR-Bound Sessions](2026-11-02-github-channel-bound-session-events.md); it does not change the four PR-state watch events or the notification-driven comment lanes.
 
+Revision 2026-11-08 (review): the watch only consumes a comment when it delivers it to at least one bound session — a comment its narrower `comment` class cannot route is left unconsumed (no shared dedupe key) so the notification lanes can still deliver it under the thread's own reason; the comment cursor is not advanced past a comment whose delivery was not durably claimed (a `dispatchEnvelope` false verdict keeps `commentSince` for retry); the two comment fetches use the state watch's fail-fast retry predicate and hand shared credential/rate-limit errors to the pass-abort logic; attribution vetoes an explicit GET even with field flags, bounds the transcript scan cache, and runs only when there are candidates; a per-pass candidate cap drains outage backlogs without dropping the tail. `prCommentWatch` carries no `deliverToBoundSessions` dependency validation because the editor emits its default for every channel.
+
 ## Problem
 
 A session bound to a PR — especially a `fix`-role session that owns the whole development loop — must hear about new comments on that PR no matter who posts them: the operator by hand, another Qwen Code session, or a different agent/model, whether they use the same GitHub account or another one. Today it does not:

@@ -536,6 +536,15 @@ const CI_PENDING_RECHECK_INTERVAL_MS = 5 * 60 * 1000;
 const COMMENT_RECHECK_INTERVAL_MS = 2 * 60 * 1000;
 
 /**
+ * Per-pass cap on watched comments, mirroring the aggregate lane's batch cap:
+ * commentSince survives a restart, so after a long outage every comment in the
+ * gap would otherwise become eligible at once, each as its own durable task and
+ * prompt. The cursor resumes before the last processed comment when capped, so
+ * the tail drains over subsequent passes instead of being dropped.
+ */
+const MAX_WATCH_COMMENTS_PER_PASS = 20;
+
+/**
  * Backpressure horizon for bound-session delivery: queue-full and
  * temporarily-unavailable conditions defer without consuming the failure
  * budget, but not forever. After this many consecutive deferrals (~4 hours
@@ -7113,6 +7122,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     let conversation: GithubComment[] = [];
     let review: GithubReviewComment[] = [];
     try {
+      // Same fail-fast rule as the state watch: a rate-limited or credential
+      // answer must not sleep-retry inside the watch pass (it runs before task
+      // recovery and notification intake), and a shared error aborts the pass.
       conversation = (await this.githubApi(
         () =>
           this.octokit.paginate(this.octokit.rest.issues.listComments, {
@@ -7123,6 +7135,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             per_page: 100,
           }),
         `listComments(comment watch ${key})`,
+        3,
+        (err) => !isWatchFailFastError(err),
       )) as GithubComment[];
       review = (await this.githubApi(
         () =>
@@ -7134,10 +7148,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             per_page: 100,
           }),
         `listReviewComments(comment watch ${key})`,
+        3,
+        (err) => !isWatchFailFastError(err),
       )) as GithubReviewComment[];
     } catch (err) {
-      // Advance the fetch clock even on failure so a persistent endpoint
-      // problem retries on the interval, not every poll (as the CI fetch does).
+      // A shared credential/rate-limit error condemns the whole pass: hand it
+      // to the outer watch loop's abort logic instead of swallowing it here.
+      if (isWatchPassAbortError(err)) throw err;
+      // Per-PR failure: advance the fetch clock so a persistent endpoint
+      // problem retries on the interval, not every poll, but keep commentSince
+      // so no comment is skipped past without a delivery attempt.
       this.prWatchState.entries[key] = {
         ...(this.prWatchState.entries[key] ?? {}),
         commentLastFetchAt: now,
@@ -7149,25 +7169,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       return;
     }
 
-    // Resolve the delivery targets once, then look up each target's posted
-    // comments so a comment is withheld only from the session that wrote it.
     const { targets } = this.resolveBoundTargets(
       chatId,
       number,
       'comment',
       'comment',
     );
-    const postedBySession = new Map<string, ReadonlySet<string>>();
-    for (const target of targets) {
-      const lookup = this.boundSessions.postedCommentIds;
-      const ids = lookup
-        ? await lookup
-            .call(this.boundSessions, target.sessionId)
-            .catch(() => new Set<string>())
-        : new Set<string>();
-      postedBySession.set(target.sessionId, ids);
-    }
-
     const baseline = entry.commentBaseline;
     const alreadyDispatched = (commentKey: string): boolean =>
       this.cursor.dispatchedComments?.includes(commentKey) === true;
@@ -7251,30 +7258,86 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       });
     }
     candidates.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    for (const candidate of candidates) {
+
+    const commitCursor = (newSince: string): void => {
+      this.prWatchState.entries[key] = {
+        ...(this.prWatchState.entries[key] ?? {}),
+        commentSince: newSince,
+        commentLastFetchAt: now,
+      };
+      this.savePrWatchState();
+    };
+
+    // No new comments: advance the cursor without any attribution round-trip.
+    if (candidates.length === 0) {
+      commitCursor(nowIso);
+      return;
+    }
+
+    // Cap the per-pass burst; the cursor resumes before the last processed
+    // comment when capped so the tail drains over subsequent passes.
+    const batch = candidates.slice(0, MAX_WATCH_COMMENTS_PER_PASS);
+    const capped = candidates.length > batch.length;
+
+    // Look up each target's posted comments only now that there is something to
+    // deliver, so a quiet pass costs no serve round-trips. A comment is withheld
+    // only from the session that wrote it.
+    const postedBySession = new Map<string, ReadonlySet<string>>();
+    for (const target of targets) {
+      const lookup = this.boundSessions.postedCommentIds;
+      const ids = lookup
+        ? await lookup
+            .call(this.boundSessions, target.sessionId)
+            .catch(() => new Set<string>())
+        : new Set<string>();
+      postedBySession.set(target.sessionId, ids);
+    }
+
+    let allSettled = true;
+    for (const candidate of batch) {
       const exclude = new Set<string>();
       for (const target of targets) {
         if (postedBySession.get(target.sessionId)?.has(candidate.attrKey)) {
           exclude.add(target.sessionId);
         }
       }
-      // Private-only: a watched comment with no remaining target is retired
-      // privately, never answered in public. The stable comment id dedupes
+      // Only consume a comment when delivering it to at least one target. The
+      // watch resolves the narrower `comment` class; a comment it cannot route
+      // (e.g. the operator only configured `fix:mention`) must stay available to
+      // the notification lanes, which resolve the thread's own reason. Skipping
+      // without dispatching records no shared dedupe key, so the mention is not
+      // lost. An all-excluded comment (every target posted it) is likewise left
+      // unconsumed rather than recorded.
+      if (!targets.some((target) => !exclude.has(target.sessionId))) {
+        continue;
+      }
+      // Private-only: never answered in public. The stable comment id dedupes
       // across polls and against the notification lanes.
-      await this.dispatchEnvelope(
+      const settled = await this.dispatchEnvelope(
         candidate.envelope,
         number,
         { dispatchedComments: [candidate.key] },
         true,
         exclude,
       );
+      if (!settled) allSettled = false;
     }
-    this.prWatchState.entries[key] = {
-      ...(this.prWatchState.entries[key] ?? {}),
-      commentSince: nowIso,
-      commentLastFetchAt: now,
-    };
-    this.savePrWatchState();
+
+    if (!allSettled) {
+      // A dispatch returned false without a durable claim (e.g. the publication
+      // audit is unreadable, which freezes the notification cursor but not this
+      // independent one). Keep commentSince so the next pass re-fetches and
+      // retries; dispatchedComments dedupes anything already claimed. Advancing
+      // here would skip the comment past with no task and no re-delivery chance.
+      commitCursor(since);
+    } else if (capped) {
+      // Resume just before the last processed comment so the unprocessed tail is
+      // re-fetched next pass (a second of overlap is deduped, never lost).
+      const last = batch[batch.length - 1]!;
+      commitCursor(new Date(Date.parse(last.createdAt) - 1000).toISOString());
+    } else {
+      commitCursor(nowIso);
+    }
   }
 
   /**

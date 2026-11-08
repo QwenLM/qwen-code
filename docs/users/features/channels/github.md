@@ -375,15 +375,27 @@ re-trigger it. No marker or `@mention` is required.
 
 Comments are fetched when the PR's activity advances or on a periodic re-check
 (about every 2 minutes), and the first observation baselines silently — comments
-that predate the watch are not replayed. Delivery reuses the bound-session
-contract: role-aware templates (`comment` / `fix:comment` / `default`), stable
-comment-id dedupe (shared with the notification lanes), backpressure and
-dead-letter, and dormant wake. A watched comment with no remaining bound target
-is retired privately, never answered in public. Inline review comments carry the
-file path and line in the prompt. Attribution is best-effort: a posting method
-that leaves no recognizable comment-creation result in the transcript is not
-attributed, so such a comment may be delivered once to its author's session (the
-stable id still bounds it to a single delivery).
+that predate the watch are not replayed. A rate-limited or credential answer
+fails fast and aborts the watch pass (the same rule as the state watch), so it
+never sleep-retries ahead of task recovery and notification intake. Delivery
+reuses the bound-session contract: role-aware templates (`comment` /
+`fix:comment` / `default`), stable comment-id dedupe (shared with the
+notification lanes), backpressure and dead-letter, and dormant wake. The watch
+only consumes a comment when it delivers it to at least one bound session: a
+comment its narrower `comment` class cannot route (for example when only
+`fix:mention` is configured) is left unconsumed so the notification lanes can
+still deliver it under the thread's own reason, and the cursor is not advanced
+past a comment whose delivery was not durably claimed. A watched comment with no
+remaining bound target is never answered in public. Inline review comments carry
+the file path and line in the prompt. Attribution is best-effort and fails open
+toward delivery: a posting method that leaves no recognizable comment-creation
+result in the transcript is not attributed, so such a comment may be delivered
+once to its author's session (the stable id still bounds it to a single
+delivery). Two common paths are not attributed — code-mode shell calls omit the
+`Command:` line the detector reads, and a shell call made through the deferred
+`tool_call` wrapper records that name rather than `run_shell_command` — and an
+explicit GET is never treated as a creation even when it passes field flags as
+query parameters.
 
 ### Role-Aware Action Templates
 
