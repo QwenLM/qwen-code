@@ -5,10 +5,11 @@
  */
 
 import type React from 'react';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { subscriptionModelUnavailable } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { useState, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
-import wrapAnsi from 'wrap-ansi';
 import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRadioButtonSelect.js';
@@ -20,7 +21,6 @@ import { t } from '../../i18n/index.js';
 import { getRawModelProviders } from '../../config/loadedSettingsAdapter.js';
 import {
   findProviderById,
-  findProviderByCredentials,
   QWENCLOUD_PROVIDERS,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
@@ -30,12 +30,14 @@ import { findExistingProviderModels } from '@qwen-code/qwen-code-core/providers/
 import type { ProviderConfig } from '@qwen-code/qwen-code-core/providers/types.js';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
+import { SubscriptionDialog } from './SubscriptionDialog.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 type ViewLevel =
+  | 'subscription'
   | 'main'
   | 'qwencloud-select'
   | 'alibaba-select'
@@ -43,6 +45,7 @@ type ViewLevel =
   | 'provider-setup';
 
 type MainOption =
+  | 'QWEN_SUBSCRIPTION'
   | 'QWENCLOUD'
   | 'ALIBABA_MODELSTUDIO'
   | 'THIRD_PARTY_PROVIDERS'
@@ -141,172 +144,120 @@ function ProviderMenu<T>({
   initialIndex,
   onSelect,
   onHighlight,
-  availableTerminalHeight,
   width,
   error,
   showTerms = false,
 }: {
   title: string;
-  items: Array<{ key: string; title: string; description: string; value: T }>;
+  items: Array<{
+    key: string;
+    title: string;
+    description: string;
+    value: T;
+    isNew?: boolean;
+  }>;
   initialIndex: number;
   onSelect: (value: T) => void;
   onHighlight: (value: T) => void;
-  availableTerminalHeight?: number;
   width: number;
   error: string | null;
   showTerms?: boolean;
 }): React.JSX.Element {
-  const height = Math.max(1, availableTerminalHeight ?? Infinity);
-  const framed = height >= 5 && width >= 8;
-  const contentWidth = Math.max(1, width - (framed ? 4 : 0));
-  const itemWidth = Math.max(1, contentWidth - 2);
-  const rows = (text: string, columns = contentWidth) =>
-    wrapAnsi(text, columns, { hard: true, trim: false }).split('\n').length;
-  const itemHeights = items.map(
-    (item) => rows(item.title, itemWidth) + rows(item.description, itemWidth),
-  );
+  const contentWidth = Math.max(1, width - 4);
   const hint = t('Enter to select, ↑↓ to navigate, Esc to go back');
   const termsLabel = `${t('Terms of Services and Privacy Notice')}:`;
-  const footerRows = showTerms
-    ? 3 + rows(termsLabel) + rows(TERMS_URL)
-    : 1 + rows(hint);
-  const fullHeight =
-    6 +
-    itemHeights.reduce((sum, value) => sum + value, 0) +
-    Math.max(0, items.length - 1) +
-    footerRows +
-    (error ? 1 + rows(error) : 0);
-  const compact = !framed || fullHeight > height;
-  const showTitle = height >= (framed ? 4 : 2);
-  const chromeRows = (framed ? 2 : 0) + (showTitle ? 1 : 0);
-  // Keep a menu row, and show at least the start of errors that cannot fit.
-  const wrappedErrorRows = error ? rows(error) : 0;
-  const truncateError = height <= chromeRows + wrappedErrorRows;
-  const errorRows = error ? (truncateError ? 1 : wrappedErrorRows) : 0;
-  const showError = !!error && height > chromeRows + errorRows;
-  const errorBudget = showError ? errorRows : 0;
-  const compactFooterRows = showTerms ? rows(TERMS_URL) : 1;
-  const showFooter =
-    !compact || height >= chromeRows + errorBudget + compactFooterRows + 1;
-  const gap = compact ? 0 : 1;
-  const listHeight = compact
-    ? height - chromeRows - errorBudget - (showFooter ? compactFooterRows : 0)
-    : height - 6 - footerRows - (error ? 1 + rows(error) : 0);
-  const maxItemHeight = Math.max(1, ...itemHeights);
-  // Only truncate when even one complete option cannot fit in the viewport.
-  const truncateItem = listHeight < maxItemHeight;
-  const itemHeight = truncateItem ? Math.min(2, listHeight) : maxItemHeight;
-  const maxItemsToShow = compact
-    ? Math.max(1, Math.floor((listHeight + gap) / (itemHeight + gap)))
-    : items.length;
 
   return (
     <Box
-      borderStyle={framed ? 'single' : undefined}
+      borderStyle="single"
       borderColor={theme.border.default}
       flexDirection="column"
       flexShrink={0}
-      paddingX={framed ? 1 : 0}
-      paddingY={compact ? 0 : 1}
+      padding={1}
       width="100%"
     >
-      {showTitle && (
-        <Text bold wrap="truncate">
-          {title}
-        </Text>
-      )}
-      <Box marginTop={compact ? 0 : 1} flexShrink={0}>
+      <Text bold wrap="truncate">
+        {title}
+      </Text>
+      <Box marginTop={1} flexShrink={0}>
         <DescriptiveRadioButtonSelect
           items={items.map((item) => ({
             ...item,
-            // Truncate the string, not a nested <Text>: the list wraps every
-            // title in its own <Text>, and Ink applies the OUTER node's
-            // textWrap, so a nested wrap="truncate" never takes effect.
-            title: truncateItem
-              ? wrapAnsi(item.title, itemWidth, { hard: true }).split('\n')[0]
-              : item.title,
-            description: truncateItem ? (
-              listHeight >= 2 ? (
-                <Text color={theme.text.secondary} wrap="truncate">
-                  {item.description}
-                </Text>
-              ) : (
-                ''
-              )
+            title: item.isNew ? (
+              <Text>
+                {item.title} <Text color={theme.text.accent}>New</Text>
+              </Text>
             ) : (
-              item.description
+              item.title
             ),
           }))}
           initialIndex={initialIndex}
           onSelect={onSelect}
           onHighlight={onHighlight}
-          itemGap={gap}
-          maxItemsToShow={maxItemsToShow}
+          itemGap={1}
+          maxItemsToShow={items.length}
         />
       </Box>
-      {showError && (
-        <Box marginTop={compact ? 0 : 1} flexShrink={0}>
-          <Text
-            color={theme.status.error}
-            wrap={truncateError ? 'truncate' : 'wrap'}
-          >
-            {truncateError ? error?.split('\n')[0] : error}
-          </Text>
+      {error && (
+        <Box marginTop={1} flexShrink={0}>
+          <Text color={theme.status.error}>{error}</Text>
         </Box>
       )}
-      {showFooter &&
-        (showTerms ? (
-          <Box flexDirection="column" flexShrink={0}>
-            {!compact && (
-              <>
-                <Box marginY={1} flexShrink={0}>
-                  <Text color={theme.border.default}>
-                    {'─'.repeat(contentWidth)}
-                  </Text>
-                </Box>
-                <Text>{termsLabel}</Text>
-              </>
-            )}
-            <Link url={TERMS_URL} fallback={false}>
-              <Text color={theme.text.secondary} underline>
-                {TERMS_URL}
-              </Text>
-            </Link>
+      {showTerms ? (
+        <Box flexDirection="column" flexShrink={0}>
+          <Box marginY={1} flexShrink={0}>
+            <Text color={theme.border.default}>{'─'.repeat(contentWidth)}</Text>
           </Box>
-        ) : (
-          <Box marginTop={compact ? 0 : 1} flexShrink={0}>
-            <Text
-              color={theme.text.secondary}
-              wrap={compact ? 'truncate' : 'wrap'}
-            >
-              {hint}
+          <Text>{termsLabel}</Text>
+          <Link url={TERMS_URL} fallback={false}>
+            <Text color={theme.text.secondary} underline>
+              {TERMS_URL}
             </Text>
-          </Box>
-        ))}
+          </Link>
+        </Box>
+      ) : (
+        <Box marginTop={1} flexShrink={0}>
+          <Text color={theme.text.secondary}>{hint}</Text>
+        </Box>
+      )}
     </Box>
   );
 }
 
-export function AuthDialog({
-  availableTerminalHeight,
-}: {
-  availableTerminalHeight?: number;
-}): React.JSX.Element {
+export function AuthDialog(): React.JSX.Element {
   const {
-    auth: { authError },
+    auth: { authError, isAuthDialogDismissible },
     mainAreaWidth,
   } = useUIState();
   const {
-    auth: { closeAuthDialog, handleProviderSubmit, onAuthError },
+    auth: {
+      closeAuthDialog,
+      handleProviderSubmit,
+      handleSubscriptionSubmit,
+      onAuthError,
+    },
   } = useUIActions();
   const config = useConfig();
   const settings = useSettings();
+  const mainItems = [
+    {
+      key: 'QWEN_SUBSCRIPTION',
+      title: t('Qwen Account with Subscription'),
+      isNew: true,
+      label: t('Qwen Account with Subscription'),
+      description: t(
+        'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
+      ),
+      value: 'QWEN_SUBSCRIPTION' as MainOption,
+    },
+    ...MAIN_ITEMS,
+  ];
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
 
-  const [mainIndex, setMainIndex] = useState<number | null>(null);
+  const [mainIndex, setMainIndex] = useState(0);
   const [subMenuIndex, setSubMenuIndex] = useState<Record<string, number>>({});
 
   const setupFlow = useProviderSetupFlow(
@@ -419,30 +370,14 @@ export function AuthDialog({
 
   const activeSubMenu = subMenus[viewLevel];
 
-  // -- Default main index from current auth state ---------------------------
-
-  const contentGenConfig = config.getContentGeneratorConfig();
-  const matchedProvider = findProviderByCredentials(
-    contentGenConfig?.baseUrl,
-    contentGenConfig?.apiKeyEnvKey,
-  );
-
-  // Land on the tab that matches the active provider's uiGroup so a DeepSeek
-  // / MiniMax / OpenRouter user opens Third-party Providers, not Alibaba.
-  // (resolveMetadataKey returns config.id for *any* provider with a static
-  // models[], so it can't be used to detect "Alibaba" specifically.)
-  const defaultMainIndex = useMemo(() => {
-    if (matchedProvider?.uiGroup === 'third-party') return 2;
-    if (matchedProvider?.uiGroup === 'custom') return 3;
-    if (matchedProvider?.uiGroup === 'alibaba') return 1;
-    return 0;
-  }, [matchedProvider]);
-
   // -- Handlers -------------------------------------------------------------
 
   const handleMainSelect = (value: MainOption) => {
     clearErrors();
     switch (value) {
+      case 'QWEN_SUBSCRIPTION':
+        pushView('subscription');
+        break;
       case 'QWENCLOUD':
         pushView('qwencloud-select');
         break;
@@ -475,6 +410,17 @@ export function AuthDialog({
           goBack();
           return;
         }
+        if (
+          isAuthDialogDismissible ||
+          (settings.merged.security?.auth?.selectedType ===
+            AuthType.QWEN_SUBSCRIPTION &&
+            authError?.includes(
+              subscriptionModelUnavailable(config.getModel()),
+            ))
+        ) {
+          closeAuthDialog();
+          return;
+        }
         if (errorMessage) return;
         if (config.getAuthType() === undefined) {
           setErrorMessage(
@@ -487,7 +433,9 @@ export function AuthDialog({
         closeAuthDialog();
       }
     },
-    { isActive: true },
+    {
+      isActive: viewLevel !== 'subscription',
+    },
   );
 
   // -- View title -----------------------------------------------------------
@@ -510,17 +458,32 @@ export function AuthDialog({
 
   // -- Render ---------------------------------------------------------------
 
+  if (viewLevel === 'subscription') {
+    return (
+      <SubscriptionDialog
+        onBack={goBack}
+        onModelSelectionRequired={closeAuthDialog}
+        onConnect={handleSubscriptionSubmit}
+        onSwitchProvider={() => {
+          clearErrors();
+          setViewStack([]);
+          setViewLevel('main');
+        }}
+        suppressBrowserLaunch={config.isBrowserLaunchSuppressed()}
+      />
+    );
+  }
+
   if (viewLevel === 'main') {
     return (
       <ProviderMenu
         title={viewTitle}
-        items={MAIN_ITEMS}
-        initialIndex={mainIndex ?? defaultMainIndex}
+        items={mainItems}
+        initialIndex={mainIndex}
         onSelect={handleMainSelect}
         onHighlight={(value) => {
-          setMainIndex(MAIN_ITEMS.findIndex((item) => item.value === value));
+          setMainIndex(mainItems.findIndex((item) => item.value === value));
         }}
-        availableTerminalHeight={availableTerminalHeight}
         width={mainAreaWidth ?? 80}
         error={authError || errorMessage}
         showTerms
@@ -543,7 +506,6 @@ export function AuthDialog({
             ),
           }));
         }}
-        availableTerminalHeight={availableTerminalHeight}
         width={mainAreaWidth ?? 80}
         error={authError || errorMessage}
       />

@@ -447,12 +447,7 @@ pub fn send_key_synthesized_after_focus(
     if target.0.is_null() {
         bail!("invalid target hwnd");
     }
-    if let Some(msg) = crate::input::post_message_blocked_by_uipi(hwnd) {
-        // Same UIPI defense as the PostMessage path. SendInput from UIAccess
-        // _is_ allowed cross-integrity, but if our daemon is somehow at a
-        // lower integrity than target, SendInput would land in the wrong
-        // window (we couldn't set foreground). Better to surface the
-        // diagnostic early than silently no-op.
+    if let Some(msg) = crate::input::send_input_blocked_by_uipi(hwnd) {
         bail!(msg);
     }
     let key_vk = key_name_to_vk(key)?;
@@ -515,7 +510,7 @@ pub fn send_text_synthesized_after_focus(
     if target.0.is_null() {
         bail!("invalid target hwnd");
     }
-    if let Some(msg) = crate::input::post_message_blocked_by_uipi(hwnd) {
+    if let Some(msg) = crate::input::send_input_blocked_by_uipi(hwnd) {
         bail!(msg);
     }
     let units = text_units(text);

@@ -685,6 +685,29 @@ pub unsafe fn focused_element_of_pid(pid: i32) -> Option<AXUIElementRef> {
     Some(value as AXUIElementRef)
 }
 
+/// The process implementing an AX proxy, which can differ from its public owner.
+pub(crate) unsafe fn actual_pid_of_element(
+    element: AXUIElementRef,
+) -> Result<Option<i32>, AXError> {
+    type GetActualPid = unsafe extern "C" fn(AXUIElementRef, *mut i32) -> AXError;
+    static GET: std::sync::OnceLock<Option<GetActualPid>> = std::sync::OnceLock::new();
+    let Some(get) = *GET.get_or_init(|| {
+        let symbol = libc::dlsym(libc::RTLD_DEFAULT, c"_AXUIElementGetActualPid".as_ptr());
+        (!symbol.is_null()).then(|| std::mem::transmute::<*mut c_void, GetActualPid>(symbol))
+    }) else {
+        return Ok(None);
+    };
+    let mut pid = 0;
+    let error = get(element, &mut pid);
+    if error != kAXErrorSuccess {
+        Err(error)
+    } else if pid <= 0 {
+        Err(kAXErrorFailure)
+    } else {
+        Ok(Some(pid))
+    }
+}
+
 /// Return the CGWindowID of the application's focused AX window.
 ///
 /// This is a narrow read-only proof used before global keyboard delivery: an
@@ -1290,6 +1313,21 @@ pub unsafe fn copy_ax_windows_with_status(element: AXUIElementRef) -> CopiedAXEl
 mod tests {
     use super::*;
     use core_foundation::{boolean::CFBoolean, number::CFNumber};
+
+    #[test]
+    fn actual_pid_reader_preserves_a_direct_application_identity() {
+        let pid = std::process::id() as i32;
+        unsafe {
+            let app = AXUIElementCreateApplication(pid);
+            assert!(!app.is_null());
+            let result = actual_pid_of_element(app);
+            CFRelease(app as CFTypeRef);
+            assert!(
+                matches!(result, Ok(None)) || result == Ok(Some(pid)),
+                "{result:?}"
+            );
+        }
+    }
 
     #[test]
     fn remote_window_token_matches_the_native_unpadded_spi_layout() {

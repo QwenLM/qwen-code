@@ -1558,10 +1558,18 @@ impl CuaDriverSession {
         &self,
         input: EndSessionInput,
     ) -> Result<EndSessionOutput, DriverError> {
-        let result = self
-            .invoke_typed(EndSessionInput::TOOL_NAME, input)
-            .await?
-            .typed_success(EndSessionInput::TOOL_NAME);
+        let result = loop {
+            let result = self
+                .invoke_typed(EndSessionInput::TOOL_NAME, input.clone())
+                .await?
+                .typed_success(EndSessionInput::TOOL_NAME);
+            if !matches!(&result, Err(DriverError::Tool { error_code, .. }) if error_code == "session_cleanup_pending")
+            {
+                break result;
+            }
+            // Keep the bound handle alive until the in-flight native tail finishes.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        };
         self.backend.close_async().await;
         result
     }
@@ -2456,6 +2464,95 @@ mod tests {
 
         session.close();
         driver.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn typed_end_session_waits_for_native_tail_and_reports_cleanup_failure() {
+        let _runtime_test = crate::runtime::TEST_RUNTIME_LOCK.lock().unwrap();
+        for fail_cleanup in [false, true] {
+            let driver = configured_standard_driver();
+            let public = format!("pending-close-{}", uuid::Uuid::new_v4());
+            let session = driver
+                .create_trusted_session(TrustedSessionOptions {
+                    public_session: public.clone(),
+                    mode: SessionPermissionMode::Standard,
+                    ttl_seconds: 60,
+                    idle_ttl_seconds: 30,
+                    capability_manifest_path: None,
+                    bounded_manifest_path: None,
+                })
+                .unwrap();
+            let started = session
+                .call_tool("start_session".into(), "{}".into())
+                .await
+                .unwrap();
+            assert!(!started.is_error, "{}", started.text);
+            let snapshot = cua_driver_core::session::list_session_snapshots_with_prefix(
+                "__cua_runtime_",
+                std::time::Duration::from_secs(30),
+            )
+            .into_iter()
+            .find(|snapshot| snapshot.public_label.as_deref() == Some(public.as_str()))
+            .unwrap();
+            let tail = cua_driver_core::session::begin_session_dispatch(
+                &snapshot.runtime_id,
+                Some(&public),
+                &snapshot.owner_transport,
+                snapshot.implicit,
+                snapshot.transport,
+                snapshot.client_kind,
+            )
+            .unwrap();
+            let hook_session = snapshot.runtime_id.clone();
+            let cleanup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls = cleanup_calls.clone();
+            let hook = cua_driver_core::session::register_scoped_fallible_session_end_hook(
+                "typed-close-fixture",
+                move |ended| {
+                    if ended != hook_session {
+                        return Ok(());
+                    }
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if fail_cleanup {
+                        Err("synthetic final cleanup failure".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            let closing_session = session.clone();
+            let closing = tokio::spawn(async move {
+                closing_session
+                    .end_session(EndSessionInput { session: None })
+                    .await
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let returned_before_tail = closing.is_finished();
+            let cleanup_before_tail = cleanup_calls.load(std::sync::atomic::Ordering::SeqCst);
+            drop(tail);
+            let ended = tokio::time::timeout(std::time::Duration::from_secs(3), closing)
+                .await
+                .expect("end_session did not finish after native dispatch released")
+                .unwrap();
+            session.close();
+            driver.shutdown().await.unwrap();
+            drop(hook);
+            drop(session);
+            drop(driver);
+            assert!(
+                !returned_before_tail,
+                "returned a pending cleanup result as terminal"
+            );
+            assert_eq!(cleanup_before_tail, 0, "cleanup raced the native tail");
+            if fail_cleanup {
+                assert!(
+                    matches!(ended, Err(DriverError::Tool { error_code, .. }) if error_code == "session_cleanup_partial")
+                );
+            } else {
+                assert!(!ended.unwrap().active);
+                assert_eq!(cleanup_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            }
+        }
     }
 
     #[tokio::test]
