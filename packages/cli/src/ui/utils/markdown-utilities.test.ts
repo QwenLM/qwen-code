@@ -21,9 +21,9 @@ describe('markdown-utilities', () => {
     });
 
     it('should split on the paragraph boundary despite an inline fence marker', () => {
-      // Issue #13309: an inline `~~~` is prose, not a block fence, so the
-      // paragraph boundary after it stays a valid split point.
-      const content = 'First para with `~~~` inline.\n\nSecond para.';
+      // A bare `~~~` in prose is not a block fence, so the paragraph boundary
+      // after it stays a valid split point even when the scan is line-anchored.
+      const content = 'First para with ~~~ inline.\n\nSecond para.';
       expect(findLastSafeSplitPoint(content)).toBe(content.indexOf('Second'));
     });
 
