@@ -392,7 +392,7 @@ public final class JdbcExternalWorkspaceOwnership {
         if (external) {
             releaseStopped(connection, externalOwner, binding, claim, expected);
         } else if (physical != null) {
-            JdbcRuntimeBindingRepository.clearStoppedMember(connection, physical, expected);
+            RuntimeBindingSessionRelease.clearStoppedMember(connection, physical, expected);
         }
     }
 

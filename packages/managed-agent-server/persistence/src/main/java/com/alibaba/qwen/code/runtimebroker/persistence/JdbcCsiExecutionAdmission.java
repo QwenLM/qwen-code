@@ -323,7 +323,7 @@ public final class JdbcCsiExecutionAdmission {
 
     /** Decodes the caller's already bounded complete row; this method performs no SQL or admission. */
     public static ToolExecutionRecord readHistoricalMember(ResultSet row) throws SQLException {
-        var member = JdbcToolExecutionRepository.mapExecution(row);
+        var member = ToolExecutionRows.mapExecution(row);
         JsonNode reference = CsiNativeActivationProof.readObject(CsiNativeActivationProof.utf8(row.getString("reference_json")));
         require(same(reference, member.getReference()));
         String result = row.getString("result_json");

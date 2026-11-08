@@ -28,8 +28,10 @@ class ManagedStoreDecompositionTest {
             AgentMessageProjection.class,
             AgentSessionPolicies.class,
             AgentSessionCommands.class,
+            SessionRenameDeliveries.class,
             AgentLifecycleOperations.class,
             AgentSessionAdmissions.class,
+            ChildSessionAdmissions.class,
             AgentTurnExecution.class,
             AgentExecutionOperations.class,
             JournalStoreRows.class,
@@ -39,7 +41,8 @@ class ManagedStoreDecompositionTest {
             JournalResourceReads.class,
             JournalResourceWrites.class,
             JournalWriterLifecycle.class,
-            JournalCommit.class);
+            JournalCommit.class,
+            ManagedStoreAssembly.class);
 
     @Test
     void collaboratorsAreImmutableOrdinaryObjectsWithAcyclicDependencies() {
@@ -167,7 +170,36 @@ class ManagedStoreDecompositionTest {
 
     private static void assertEntries(Class<?> facade, String expected) {
         assertThat(facade.getAnnotation(Qualifier.class).value()).isEqualTo("managedAgentTransactionManager");
-        List<String> actual = Arrays.stream(facade.getDeclaredMethods())
+        // The facade may inherit an entry arm from a package-private
+        // superclass; the population pin covers the whole hierarchy, so a
+        // move between facade and superclass keeps the same contract.
+        List<String> actual = new java.util.ArrayList<>();
+        for (Class<?> type = facade; type != null && type != Object.class; type = type.getSuperclass()) {
+            Arrays.stream(type.getDeclaredMethods())
+                    .filter(method -> !Modifier.isPrivate(method.getModifiers()) && !method.isSynthetic())
+                    .map(method -> {
+                        var tx = method.getAnnotation(Transactional.class);
+                        String attributes = tx == null ? "-" : tx.transactionManager() + ":" + tx.propagation()
+                                + ":" + tx.isolation() + ":" + tx.readOnly();
+                        return method.getName() + "/" + method.getParameterCount() + ":" + attributes;
+                    }).forEach(actual::add);
+        }
+        assertThat(actual).containsExactlyInAnyOrderElementsOf(List.of(expected.trim().split("\\s+")));
+    }
+
+    @Test
+    void principalEntriesLiveInTheFacadeSuperclass() {
+        Class<?> superclass = ManagedAgentStore.class.getSuperclass();
+        assertThat(superclass).isEqualTo(ManagedAgentPrincipalEntries.class);
+        assertThat(Modifier.isPublic(superclass.getModifiers())).isFalse();
+        assertThat(Modifier.isFinal(superclass.getModifiers())).isFalse();
+        assertNoSpringComponent(superclass);
+        for (var field : superclass.getDeclaredFields()) {
+            assertThat(Modifier.isFinal(field.getModifiers())).as(field.toString()).isTrue();
+            assertThat(field.getType()).isIn(AgentSessionAdmissions.class, AgentSessionCommands.class,
+                    AgentSessionQueries.class);
+        }
+        List<String> actual = Arrays.stream(superclass.getDeclaredMethods())
                 .filter(method -> !Modifier.isPrivate(method.getModifiers()) && !method.isSynthetic())
                 .map(method -> {
                     var tx = method.getAnnotation(Transactional.class);
@@ -175,15 +207,28 @@ class ManagedStoreDecompositionTest {
                             + ":" + tx.isolation() + ":" + tx.readOnly();
                     return method.getName() + "/" + method.getParameterCount() + ":" + attributes;
                 }).toList();
-        assertThat(actual).containsExactlyInAnyOrderElementsOf(List.of(expected.trim().split("\\s+")));
+        assertThat(actual).containsExactlyInAnyOrderElementsOf(List.of(
+                "insertSessionCommand/10::REQUIRED:DEFAULT:false",
+                "insertSessionCommand/11::REQUIRED:DEFAULT:false",
+                "requireSessionOwnership/3:-",
+                "requireSessionAuthority/3:-",
+                "requireSessionReadAuthority/3:-",
+                "ownsSession/3:-",
+                "insertTurnCommand/8::REQUIRED:DEFAULT:false",
+                "insertCancelCommand/7::REQUIRED:DEFAULT:false",
+                "beginSessionRename/7::REQUIRED:DEFAULT:false",
+                "beginSessionMutation/8::REQUIRED:DEFAULT:false",
+                "listSessions/7:-",
+                "listOwnedSessions/7:-"));
     }
 
     @Test
     void facadeSourcesContainNoBusinessSql() throws Exception {
         Path sources = Path.of("..", "persistence", "src", "main", "java")
                 .resolve(ManagedAgentStore.class.getPackageName().replace('.', '/'));
-        for (Class<?> facade : List.of(ManagedAgentStore.class, ManagedSessionStore.class)) {
-            assertNoBusinessSql(Files.readString(sources.resolve(facade.getSimpleName() + ".java")));
+        for (String name : List.of("ManagedAgentStore", "ManagedAgentPrincipalEntries", "ManagedStoreAssembly",
+                "ManagedSessionStore")) {
+            assertNoBusinessSql(Files.readString(sources.resolve(name + ".java")));
         }
     }
 

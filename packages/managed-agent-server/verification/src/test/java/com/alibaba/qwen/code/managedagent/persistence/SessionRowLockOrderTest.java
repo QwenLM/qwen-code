@@ -104,6 +104,13 @@ class SessionRowLockOrderTest {
             for (var contract : type.getInterfaces()) {
                 collect(contract, types);
             }
+            // Facades may inherit entry arms from a package-private
+            // superclass; the inventory keys those entries by the declaring
+            // class, so the walk has to follow the hierarchy too.
+            var superclass = type.getSuperclass();
+            if (superclass != null && superclass != Object.class) {
+                collect(superclass, types);
+            }
         }
     }
 }

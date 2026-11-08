@@ -20,7 +20,6 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelSelection
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionOptions;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
-import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
@@ -52,7 +51,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Lazy;
@@ -61,19 +59,16 @@ import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
 @Repository
 @Qualifier("managedAgentTransactionManager")
-public class ManagedAgentStore implements AgentStateStore {
+public class ManagedAgentStore extends ManagedAgentPrincipalEntries implements AgentStateStore {
     private final AgentEventJournal eventJournal;
     private final AgentSessionQueries sessionQueries;
     private final AgentMessageProjection messageProjection;
@@ -116,49 +111,22 @@ public class ManagedAgentStore implements AgentStateStore {
             @Nullable WorkspaceLifecycleStore lifecycle, @Nullable ManagedAgentDefinitionStore definitions,
             @Nullable SessionWorktreeStore sessionWorktrees, @Nullable JournalEventTransport journalEventTransport,
             @Lazy @Nullable ManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs) {
-        String approvalMode =
-                properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);
-        String agentRevision = properties.getAgentRevision();
-        List<String> definitionToolProfiles = properties.getDefinitionToolProfiles();
-        List<String> definitionModels = properties.getDefinitionModels();
-        var modelIds = new HashSet<String>();
-        List<WebShellModelOption> modelCatalog = properties.getModelCatalog().stream().map(option -> {
-            String id = option.getModelId();
-            String label = option.getLabel() == null ? id : option.getLabel();
-            if (StringUtils.isBlank(id) || id.getBytes(StandardCharsets.UTF_8).length > 512
-                    || id.chars().anyMatch(Character::isISOControl) || !modelIds.add(id)
-                    || StringUtils.isBlank(label) || label.length() > 512
-                    || label.chars().anyMatch(Character::isISOControl)) {
-                throw new IllegalArgumentException("Invalid or duplicate Managed model catalog entry");
-            }
-            return new WebShellModelOption(id, label);
-        }).toList();
-        boolean journalEventTransportEnabled = properties.getEventTransport().isEnabled();
-        boolean workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
-        boolean workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
-        boolean workspaceChildAgentsEnabled = properties.admitsPublicChildAgents();
-        boolean managedExtensionExecutionEnabled = properties.getExtensions().isEnabled() && properties.getManagedExtensions().isEnabled();
-        long lifecycleHandoffMillis = properties.getSessionStore().getWriterLeaseDuration().toMillis();
-        List<? extends ManagedAgentSettings.RuntimeBroker.WorkspaceMount> workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
-        ResidentWorkspaces residentWorkspaces = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
-        WorkspaceCreationRoots createdRoots = new WorkspaceCreationRoots(jdbc, properties);
-        if (StringUtils.isBlank(agentRevision)
-                || agentRevision.length() > 128) {
-            throw new IllegalArgumentException(
-                    "qwen.managed-agent.agent-revision must contain 1-128"
-                            + " characters");
-        }
+        this(new ManagedStoreAssembly(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
+                worktreeFiles, creationSkills, extensionPackages, lifecycle, definitions,
+                sessionWorktrees, journalEventTransport, configRecords, modelConfigs));
+    }
 
-        AgentStoreRows storeRows = new AgentStoreRows(harnessRules, jdbc, objectMapper);
-        this.eventJournal = new AgentEventJournal(storeRows, jdbc, clock, eventPublisher);
-        this.sessionQueries = new AgentSessionQueries(storeRows, worktreeFiles, jdbc, modelCatalog);
-        this.messageProjection = new AgentMessageProjection(eventJournal, storeRows, jdbc, objectMapper, clock);
-        this.sessionPolicies = new AgentSessionPolicies(eventJournal, sessionQueries, storeRows, worktreeFiles, harnessRules, configRecords, jdbc, objectMapper, clock, approvalMode, workspaces, agentRevision, definitionToolProfiles, definitionModels, modelCatalog, definitions, creationSkills, workspaceFilesEnabled, workspaceShellEnabled, residentWorkspaces);
-        this.sessionCommands = new AgentSessionCommands(eventJournal, sessionPolicies, storeRows, worktreeFiles, jdbc, clock, workspaces, workspaceFilesEnabled, workspaceShellEnabled);
-        this.lifecycleOperations = new AgentLifecycleOperations(eventJournal, sessionCommands, sessionPolicies, sessionQueries, storeRows, jdbc, lifecycle, objectMapper, clock, workspaces, workspaceFilesEnabled, lifecycleHandoffMillis);
-        this.sessionAdmissions = new AgentSessionAdmissions(eventJournal, sessionCommands, sessionPolicies, storeRows, configRecords, jdbc, clock, approvalMode, workspaces, agentRevision, modelCatalog, definitions, creationSkills, sessionWorktrees, extensionPackages, workspaceFilesEnabled, workspaceShellEnabled, workspaceChildAgentsEnabled, managedExtensionExecutionEnabled, workspaceMounts, residentWorkspaces, createdRoots, journalEventTransport, journalEventTransportEnabled, modelConfigs);
-        this.turnExecution = new AgentTurnExecution(eventJournal, messageProjection, sessionCommands, storeRows, jdbc, objectMapper, clock);
-        this.executionOperations = new AgentExecutionOperations(eventJournal, lifecycleOperations, sessionPolicies, sessionQueries, storeRows, worktreeFiles, jdbc, clock, workspaces, workspaceFilesEnabled);
+    private ManagedAgentStore(ManagedStoreAssembly assembly) {
+        super(assembly.sessionAdmissions(), assembly.sessionCommands(), assembly.sessionQueries());
+        this.eventJournal = assembly.eventJournal();
+        this.sessionQueries = assembly.sessionQueries();
+        this.messageProjection = assembly.messageProjection();
+        this.sessionPolicies = assembly.sessionPolicies();
+        this.sessionCommands = assembly.sessionCommands();
+        this.lifecycleOperations = assembly.lifecycleOperations();
+        this.sessionAdmissions = assembly.sessionAdmissions();
+        this.turnExecution = assembly.turnExecution();
+        this.executionOperations = assembly.executionOperations();
     }
 
     @Override
@@ -187,51 +155,6 @@ public class ManagedAgentStore implements AgentStateStore {
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
         return sessionAdmissions.insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig);
-    }
-
-    @Override
-    @Transactional
-    public Admission insertSessionCommand(String tenantId,
-            SessionPrincipal principal, String operation,
-            String idempotencyKey, String requestDigest, String agentId,
-            String requestedRevision, String title,
-            List<Map<String, Object>> input, String payloadDigest) {
-        return sessionAdmissions.insertSessionCommand(tenantId, principal, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest);
-    }
-
-    @Override
-    @Transactional
-    public Admission insertSessionCommand(String tenantId,
-            SessionPrincipal principal, String operation,
-            String idempotencyKey, String requestDigest, String agentId,
-            String requestedRevision, String title,
-            List<Map<String, Object>> input, String payloadDigest,
-            SessionModelConfig modelConfig) {
-        return sessionAdmissions.insertSessionCommand(tenantId, principal, operation, idempotencyKey, requestDigest, agentId, requestedRevision, title, input, payloadDigest, modelConfig);
-    }
-
-    @Override
-    public void requireSessionOwnership(String tenantId, String sessionId,
-            SessionPrincipal principal) {
-        sessionAdmissions.requireSessionOwnership(tenantId, sessionId, principal);
-    }
-
-    @Override
-    public void requireSessionAuthority(String tenantId, String sessionId,
-            SessionPrincipal principal) {
-        sessionAdmissions.requireSessionAuthority(tenantId, sessionId, principal);
-    }
-
-    @Override
-    public void requireSessionReadAuthority(String tenantId, String sessionId,
-            SessionPrincipal principal) {
-        sessionAdmissions.requireSessionReadAuthority(tenantId, sessionId, principal);
-    }
-
-    @Override
-    public boolean ownsSession(String tenantId, String sessionId,
-            SessionPrincipal principal) {
-        return sessionAdmissions.ownsSession(tenantId, sessionId, principal);
     }
 
     @Override
@@ -379,15 +302,6 @@ public class ManagedAgentStore implements AgentStateStore {
         return sessionCommands.insertTurnCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, input, payloadDigest, actorId);
     }
 
-    @Override
-    @Transactional
-    public Admission insertTurnCommand(String tenantId, String operation,
-            String idempotencyKey, String requestDigest, String sessionId,
-            List<Map<String, Object>> input, String payloadDigest,
-            SessionPrincipal principal) {
-        return sessionCommands.insertTurnCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, input, payloadDigest, principal);
-    }
-
     @Transactional
     public Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
@@ -405,14 +319,6 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public Admission insertCancelCommand(String tenantId, String operation,
-            String idempotencyKey, String requestDigest, String sessionId,
-            String turnId, SessionPrincipal principal) {
-        return sessionCommands.insertCancelCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, turnId, principal);
-    }
-
-    @Override
-    @Transactional
     public SessionMutationCommand beginSessionRename(String tenantId, String key,
             String digest, String sessionId, String title) {
         return sessionCommands.beginSessionRename(tenantId, key, digest, sessionId, title, (String) null);
@@ -423,14 +329,6 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionMutationCommand beginSessionRename(String tenantId, String key,
             String digest, String sessionId, String title, String actorId) {
         return sessionCommands.beginSessionRename(tenantId, key, digest, sessionId, title, actorId);
-    }
-
-    @Override
-    @Transactional
-    public SessionMutationCommand beginSessionRename(String tenantId,
-            String idempotencyKey, String requestDigest, String sessionId,
-            String title, String actorId, SessionPrincipal principal) {
-        return sessionCommands.beginSessionRename(tenantId, idempotencyKey, requestDigest, sessionId, title, actorId, principal);
     }
 
     @Override
@@ -455,24 +353,24 @@ public class ManagedAgentStore implements AgentStateStore {
     @Override
     @Transactional
     public List<RenameDelivery> deliverableRenames(long now) {
-        return sessionCommands.deliverableRenames(now);
+        return sessionCommands.renameDeliveries().deliverableRenames(now);
     }
 
     @Override
     @Transactional
     public Optional<RenameDelivery> claimRename(RenameDelivery delivery, String owner, Duration lease) {
-        return sessionCommands.claimRename(delivery, owner, lease);
+        return sessionCommands.renameDeliveries().claimRename(delivery, owner, lease);
     }
 
     @Override
     public void markRenameSubmitted(RenameDelivery delivery, String owner) {
-        sessionCommands.markRenameSubmitted(delivery, owner);
+        sessionCommands.renameDeliveries().markRenameSubmitted(delivery, owner);
     }
 
     @Override
     @Transactional
     public void retryRename(RenameDelivery delivery, String owner, long availableAt) {
-        sessionCommands.retryRename(delivery, owner, availableAt);
+        sessionCommands.renameDeliveries().retryRename(delivery, owner, availableAt);
     }
 
     @Transactional
@@ -488,15 +386,6 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind, String actorId) {
         return sessionCommands.beginSessionMutation(tenantId, operation, idempotencyKey, requestDigest, sessionId, kind, actorId);
-    }
-
-    @Override
-    @Transactional
-    public SessionMutationCommand beginSessionMutation(String tenantId,
-            String operation, String idempotencyKey, String requestDigest,
-            String sessionId, SessionMutationKind kind, String actorId,
-            SessionPrincipal principal) {
-        return sessionCommands.beginSessionMutation(tenantId, operation, idempotencyKey, requestDigest, sessionId, kind, actorId, principal);
     }
 
     @Transactional
@@ -844,22 +733,6 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState, String titleQuery) {
         return sessionQueries.listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId, limit, archiveState, titleQuery);
-    }
-
-    @Override
-    public SessionPage listSessions(String tenantId,
-            SessionPrincipal principal, Long beforeCreatedAt,
-            String beforeSessionId, int limit, String archiveState,
-            String titleQuery) {
-        return sessionQueries.listSessions(tenantId, principal, beforeCreatedAt, beforeSessionId, limit, archiveState, titleQuery);
-    }
-
-    @Override
-    public SessionPage listOwnedSessions(String tenantId,
-            SessionPrincipal principal, Long beforeCreatedAt,
-            String beforeSessionId, int limit, String archiveState,
-            String titleQuery) {
-        return sessionQueries.listOwnedSessions(tenantId, principal, beforeCreatedAt, beforeSessionId, limit, archiveState, titleQuery);
     }
 
     public Map<String, WebShellLifecycleOperation>
