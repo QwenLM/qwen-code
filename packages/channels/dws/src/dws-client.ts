@@ -137,6 +137,46 @@ export type DwsCommandRunner = (
 
 export type DwsCommandOutcome = 'not_sent' | 'unknown';
 
+const DWS_ERROR_DETAIL_MAX_CHARS = 600;
+
+/**
+ * Compose the text a `DwsCommandError` carries. The exit code alone
+ * (`DWS command failed (1)`) is the same for every failure the CLI can hit and
+ * names neither the subcommand nor what it printed, so a user reading the
+ * channel log — which only repeats this message — has nothing to act on.
+ * Callers log through `sanitizeLogText`, so newlines are rendered visibly and
+ * the detail is bounded here to keep that truncation meaningful.
+ */
+export function describeDwsCommandFailure(
+  args: readonly string[],
+  code: unknown,
+  stderr: string,
+): string {
+  const subcommand = args.filter(
+    (arg, index) =>
+      !arg.startsWith('--') &&
+      args[index - 1] !== '--profile' &&
+      args[index - 1] !== '--format',
+  );
+  const detail = [
+    `\`dws ${subcommand.join(' ')}\``,
+    code === undefined ? '' : `(exit ${String(code)})`,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const output = stderr.trim();
+  if (!output) {
+    return `DWS command failed: ${detail}.`;
+  }
+  // Keep the tail: a CLI that fails after printing a banner or a progress log
+  // puts the actual reason at the end.
+  const bounded =
+    output.length > DWS_ERROR_DETAIL_MAX_CHARS
+      ? `…${output.slice(-DWS_ERROR_DETAIL_MAX_CHARS)}`
+      : output;
+  return `DWS command failed: ${detail}: ${bounded}`;
+}
+
 export class DwsCommandError extends Error {
   constructor(
     message: string,
@@ -219,7 +259,7 @@ function runDwsProcess(
           const outcome = classifyDwsCommandFailure(code);
           reject(
             new DwsCommandError(
-              `DWS command failed${code === undefined ? '' : ` (${String(code)})`}.`,
+              describeDwsCommandFailure(args, code, String(stderr)),
               outcome,
             ),
           );

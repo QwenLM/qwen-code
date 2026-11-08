@@ -51,4 +51,59 @@ describe('DWS command process', () => {
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
     await expect(result).resolves.toBeInstanceOf(DwsCommandError);
   });
+
+  it('names the failing subcommand and its stderr instead of only the exit code', async () => {
+    vi.mocked(execFile).mockImplementation(((
+      _file,
+      _args,
+      _options,
+      callback,
+    ) => {
+      queueMicrotask(() =>
+        callback(
+          Object.assign(new Error('Command failed'), { code: 1 }),
+          '',
+          'error: conversation is not open\n',
+        ),
+      );
+      return { exitCode: 1, kill: vi.fn() };
+    }) as unknown as typeof execFile);
+
+    const error = (await new DwsClient({ executable: '/opt/dws' })
+      .assertCompatible()
+      .catch((caught: unknown) => caught)) as DwsCommandError;
+
+    expect(error).toBeInstanceOf(DwsCommandError);
+    expect(error.message).toContain('`dws version`');
+    expect(error.message).toContain('(exit 1)');
+    expect(error.message).toContain('error: conversation is not open');
+    expect(error.outcome).toBe('unknown');
+  });
+
+  it('keeps a long stderr tail so the actual reason survives truncation', async () => {
+    const banner = `${'progress line\n'.repeat(100)}error: sender is not in the conversation\n`;
+    vi.mocked(execFile).mockImplementation(((
+      _file,
+      _args,
+      _options,
+      callback,
+    ) => {
+      queueMicrotask(() =>
+        callback(
+          Object.assign(new Error('Command failed'), { code: 1 }),
+          '',
+          banner,
+        ),
+      );
+      return { exitCode: 1, kill: vi.fn() };
+    }) as unknown as typeof execFile);
+
+    const error = (await new DwsClient({ executable: '/opt/dws' })
+      .assertCompatible()
+      .catch((caught: unknown) => caught)) as DwsCommandError;
+
+    expect(error.message).toContain('sender is not in the conversation');
+    expect(error.message.startsWith('…')).toBe(false);
+    expect(error.message.length).toBeLessThan(800);
+  });
 });
