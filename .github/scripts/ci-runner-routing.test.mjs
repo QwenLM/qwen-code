@@ -924,13 +924,22 @@ describe('credential-free jobs on the disposable pool', () => {
     assert.equal(diskFloor?.if, "${{ runner.environment == 'self-hosted' }}");
     // The slim image needs the DejaVu baseline and ffmpeg at runtime; the
     // install must stay best-effort so a blocked Debian mirror degrades
-    // the preview instead of sinking it.
+    // the preview instead of sinking it. Pin the install line itself rather
+    // than the bare word: the degradation warning also says "ffmpeg", so
+    // /ffmpeg/ stays green even with the package dropped from the apt list.
     const fonts = steps.find((s) =>
       String(s.run || '').includes('fonts-dejavu-core'),
     );
     assert.equal(fonts?.if, "${{ runner.environment == 'self-hosted' }}");
-    assert.match(String(fonts.run), /ffmpeg/);
-    assert.match(String(fonts.run), /::warning::/);
+    assert.match(String(fonts.run), /apt-get install[^\n]*\bffmpeg\b/);
+    // The step carries no continue-on-error: what keeps a failed install from
+    // sinking the job is the shell guard, and the warning has to sit in that
+    // guard's failure branch (`else` today, `||` would do). Asserting only
+    // /::warning:: would pin the prose, not the degradation path.
+    assert.match(
+      String(fonts.run),
+      /(?:else\s*\n\s*|\|\|\s*)echo "::warning::/,
+    );
   });
 });
 
