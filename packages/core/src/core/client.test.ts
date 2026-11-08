@@ -11270,6 +11270,30 @@ Other open files:
           expect.objectContaining({ confirmBeforePersist: true }),
         );
       });
+
+      it('should be reachable on its own for a host that runs the turn itself', () => {
+        // ACP's `Session` schedules Extract and Dream itself and never reaches
+        // `runManagedAutoMemoryBackgroundTasks`, so it needs this entry point.
+        skipReview('below_threshold');
+        client['toolCallCount'] = 3;
+
+        client.runManagedAutoSkillReview();
+
+        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
+          expect.objectContaining({ toolCallCount: 3 }),
+        );
+      });
+
+      it('should not review when auto-skill is disabled', () => {
+        vi.spyOn(
+          client['config'],
+          'getAutoSkillEnabled',
+        ).mockReturnValue(false);
+
+        client.runManagedAutoSkillReview();
+
+        expect(mockMemoryManager.scheduleSkillReview).not.toHaveBeenCalled();
+      });
     });
 
     describe('recordCompletedToolCall', () => {

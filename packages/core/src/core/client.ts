@@ -3318,6 +3318,70 @@ export class LlmClient {
   }
 
   /**
+   * Schedules a managed skill review when the session has accumulated enough
+   * tool calls. Split out of {@link runManagedAutoMemoryBackgroundTasks} so a
+   * host that schedules the memory tasks itself — ACP's `Session`, which only
+   * reaches Extract and Dream — can run the same gate. Must be called on the
+   * tool-call counters this client keeps, since it resets both.
+   */
+  runManagedAutoSkillReview(): void {
+    if (this.shutdownRequested) {
+      debugLogger.debug('Skipping skill review: shutdown requested.');
+      return;
+    }
+    const autoSkillEnabled = this.config.getAutoSkillEnabled();
+    if (!autoSkillEnabled) {
+      return;
+    }
+    const skillReviewResult = this.config
+      .getMemoryManager()
+      .scheduleSkillReview({
+        projectRoot: this.config.getProjectRoot(),
+        sessionId: this.config.getSessionId(),
+        history: this.getHistoryShallow(),
+        config: this.config,
+        toolCallCount: this.toolCallCount,
+        skillsModified: this.skillsModifiedInSession,
+        enabled: autoSkillEnabled,
+        threshold: AUTO_SKILL_THRESHOLD,
+        confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
+      });
+    if (skillReviewResult.status === 'scheduled') {
+      // Reset tool-call counter when a review is dispatched so the next
+      // review only fires after a full new threshold worth of tool calls.
+      this.toolCallCount = 0;
+      if (skillReviewResult.promise) {
+        this.pendingMemoryTaskPromises.push(
+          skillReviewResult.promise
+            .then((record) => {
+              const touched = record.metadata?.['touchedSkillFiles'];
+              return Array.isArray(touched) ? touched.length : 0;
+            })
+            .catch((error: unknown) => {
+              debugLogger.warn('Failed to run managed skill review.', error);
+              return 0;
+            }),
+        );
+      }
+    } else if (
+      skillReviewResult.status === 'skipped' &&
+      skillReviewResult.skippedReason === 'already_running' &&
+      this.toolCallCount >= AUTO_SKILL_THRESHOLD
+    ) {
+      // A review is already in-flight; reset the counter so that when the
+      // current review completes the next call doesn't immediately trigger
+      // another review without accumulating a fresh threshold of tool calls.
+      this.toolCallCount = 0;
+    }
+    // Always reset the skills-modified flag after the scheduleSkillReview
+    // check, regardless of whether a review was dispatched. This prevents
+    // a deadlock where skillsModifiedInSession stays true forever: when
+    // the flag is set, scheduleSkillReview returns 'skipped' immediately
+    // (never 'scheduled'), so without this reset the flag can never clear.
+    this.skillsModifiedInSession = false;
+  }
+
+  /**
    * Schedules the memory work due when a response ends without tool calls.
    * A host calls this at turn completion if the client did not schedule it.
    * `skipMemoryExtraction` is {@link SendMessageOptions.skipMemoryExtraction}.
@@ -3341,61 +3405,7 @@ export class LlmClient {
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.ToolResult
     ) {
-      const projectRoot = this.config.getProjectRoot();
-      const sessionId = this.config.getSessionId();
-      const history = this.getHistoryShallow();
-      const mgr = this.config.getMemoryManager();
-      const autoSkillEnabled = this.config.getAutoSkillEnabled();
-
-      if (autoSkillEnabled) {
-        const skillReviewResult = mgr.scheduleSkillReview({
-          projectRoot,
-          sessionId,
-          history,
-          config: this.config,
-          toolCallCount: this.toolCallCount,
-          skillsModified: this.skillsModifiedInSession,
-          enabled: autoSkillEnabled,
-          threshold: AUTO_SKILL_THRESHOLD,
-          confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
-        });
-        if (skillReviewResult.status === 'scheduled') {
-          // Reset tool-call counter when a review is dispatched so the next
-          // review only fires after a full new threshold worth of tool calls.
-          this.toolCallCount = 0;
-          if (skillReviewResult.promise) {
-            this.pendingMemoryTaskPromises.push(
-              skillReviewResult.promise
-                .then((record) => {
-                  const touched = record.metadata?.['touchedSkillFiles'];
-                  return Array.isArray(touched) ? touched.length : 0;
-                })
-                .catch((error: unknown) => {
-                  debugLogger.warn(
-                    'Failed to run managed skill review.',
-                    error,
-                  );
-                  return 0;
-                }),
-            );
-          }
-        } else if (
-          skillReviewResult.status === 'skipped' &&
-          skillReviewResult.skippedReason === 'already_running' &&
-          this.toolCallCount >= AUTO_SKILL_THRESHOLD
-        ) {
-          // A review is already in-flight; reset the counter so that when the
-          // current review completes the next call doesn't immediately trigger
-          // another review without accumulating a fresh threshold of tool calls.
-          this.toolCallCount = 0;
-        }
-        // Always reset the skills-modified flag after the scheduleSkillReview
-        // check, regardless of whether a review was dispatched. This prevents
-        // a deadlock where skillsModifiedInSession stays true forever: when
-        // the flag is set, scheduleSkillReview returns 'skipped' immediately
-        // (never 'scheduled'), so without this reset the flag can never clear.
-        this.skillsModifiedInSession = false;
-      }
+      this.runManagedAutoSkillReview();
     }
 
     if (

@@ -660,6 +660,7 @@ describe('Session', () => {
     discardManagedAutoMemoryRecallDelivery: ReturnType<typeof vi.fn>;
     finishManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     runManagedAutoMemoryBackgroundTasks: ReturnType<typeof vi.fn>;
+    runManagedAutoSkillReview: ReturnType<typeof vi.fn>;
     consumePendingMemoryTaskPromises: ReturnType<typeof vi.fn>;
     captureCacheSafeParams: ReturnType<typeof vi.fn>;
     recordCompletedToolCall: ReturnType<typeof vi.fn>;
@@ -935,6 +936,7 @@ describe('Session', () => {
       discardManagedAutoMemoryRecallDelivery: vi.fn(),
       finishManagedAutoMemoryRecall: vi.fn(),
       runManagedAutoMemoryBackgroundTasks: vi.fn(),
+      runManagedAutoSkillReview: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       captureCacheSafeParams: vi.fn(),
       recordCompletedToolCall: vi.fn(),
@@ -6643,6 +6645,28 @@ describe('Session', () => {
       expect(
         mockLlmClient.finishManagedAutoMemoryRecall,
       ).toHaveBeenCalledOnce();
+    });
+
+    it('schedules the managed skill review the shared round leaves to the client', async () => {
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      // The ACP-side branch owns the memory tasks, so it owns the skill
+      // review too: nothing else in the legacy round would schedule it.
+      expect(mockLlmClient.runManagedAutoSkillReview).toHaveBeenCalledOnce();
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+      ).not.toHaveBeenCalled();
     });
 
     it("schedules no extraction or Dream after a channel's turn", async () => {

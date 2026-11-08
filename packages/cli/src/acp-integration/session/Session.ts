@@ -11520,6 +11520,11 @@ export class Session implements SessionContext {
       void llmClient.consumePendingMemoryTaskPromises();
       return;
     }
+    // The shared round leaves skill review to the client, which runs it on the
+    // tool turns too. The legacy round only reaches this ACP-side branch, so
+    // without this call `toolCallCount` would accumulate unread and `qwen
+    // serve` would never produce an auto-skill candidate.
+    this.config.getLlmClient().runManagedAutoSkillReview();
     if (!this.config.getManagedAutoMemoryEnabled()) {
       return;
     }
