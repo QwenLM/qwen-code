@@ -461,6 +461,7 @@ export async function runAutoMemoryExtractionByAgent(
       terminateReasonMessage(
         result.terminateReason,
         'Extraction agent did not complete successfully',
+        result.loopType,
       ),
     );
   }

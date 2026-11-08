@@ -47,6 +47,7 @@ import { FunctionCallingConfigMode } from '../core/genai-compat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { LoopType } from '../telemetry/types.js';
 import {
   AgentHeadless,
   AgentEventEmitter,
@@ -471,6 +472,11 @@ export interface ForkedAgentResult {
   finalText?: string;
   /** AgentTerminateMode string explaining why the agent stopped. */
   terminateReason?: string;
+  /**
+   * Which loop detector fired when `terminateReason` is LOOP_DETECTED, so the
+   * caller can name it instead of collapsing every loop into one label (#9450).
+   */
+  loopType?: LoopType | null;
   /** File paths observed in path-like tool call arguments during execution. */
   filesTouched: string[];
   /** File paths from successful non-mutating tool results. */
@@ -826,6 +832,7 @@ export async function runForkedAgent(
     }
 
     const terminateReason = headless.getTerminateMode();
+    const loopType = headless.getLoopType();
     const finalText = completedAfterWrite
       ? undefined
       : toModelVisibleSubagentResult(
@@ -849,6 +856,7 @@ export async function runForkedAgent(
       return {
         status: 'completed',
         terminateReason: AgentTerminateMode.GOAL,
+        loopType,
         finalText,
         filesTouched: touched,
         filesWritten: written,
@@ -860,6 +868,7 @@ export async function runForkedAgent(
       return {
         status: 'cancelled',
         terminateReason,
+        loopType,
         finalText,
         filesTouched: touched,
         filesWritten: written,
@@ -871,6 +880,7 @@ export async function runForkedAgent(
       return {
         status: 'failed',
         terminateReason,
+        loopType,
         finalText,
         filesTouched: touched,
         filesWritten: written,
@@ -881,6 +891,7 @@ export async function runForkedAgent(
     return {
       status: 'completed',
       terminateReason,
+      loopType,
       finalText,
       filesTouched: touched,
       filesWritten: written,
