@@ -597,7 +597,8 @@ final class ServerEnvironment {
                 }
                 Path declaring = file(resource(tracked.getOrigin(key)));
                 if (declaring != null) {
-                    Path directory = declaring.getParent();
+                    Path directory = Objects.requireNonNull(declaring.getParent(),
+                            "a configuration file has a parent");
                     String base = looked.contains(declaring) || directory.getParent() == null
                             ? directory.toUri().toString()
                             : directory.getParent().toUri() + "*/";
