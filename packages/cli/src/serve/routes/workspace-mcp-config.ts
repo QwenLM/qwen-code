@@ -332,6 +332,10 @@ function registerFor(
                 const existing =
                   settings.forScope(settingScope).settings.mcp?.excluded ?? [];
                 if (action === 'enable') {
+                  // A pattern in a higher-priority scope re-excludes the
+                  // server on the next recompute, so enabling here cannot
+                  // take effect. Report it instead of writing settings that
+                  // would be undone (#14465).
                   const blockingScopes = [
                     SettingScope.SystemDefaults,
                     SettingScope.System,
@@ -341,21 +345,23 @@ function registerFor(
                       : []),
                   ];
                   blocking = blockingScopes.flatMap((candidateScope) =>
-                    (
-                      settings.forScope(candidateScope).settings.mcp
-                        ?.excluded ?? []
-                    ).filter(
-                      (pattern) =>
-                        matchesAnyServerPattern(serverName, [pattern]) &&
-                        (candidateScope !== settingScope ||
-                          pattern !== serverName),
-                    ),
+                    candidateScope === settingScope
+                      ? []
+                      : (
+                          settings.forScope(candidateScope).settings.mcp
+                            ?.excluded ?? []
+                        ).filter((pattern) =>
+                          matchesAnyServerPattern(serverName, [pattern]),
+                        ),
                   );
                   if (blocking.length > 0) return;
                 }
                 next =
                   action === 'enable'
-                    ? existing.filter((pattern) => pattern !== serverName)
+                    ? existing.filter(
+                        (pattern) =>
+                          !matchesAnyServerPattern(serverName, [pattern]),
+                      )
                     : existing.includes(serverName)
                       ? existing
                       : [...existing, serverName];

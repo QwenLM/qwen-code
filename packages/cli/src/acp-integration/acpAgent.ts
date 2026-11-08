@@ -11852,7 +11852,8 @@ class QwenAgent implements Agent {
             const scopeSettings = settings.forScope(scope).settings;
             const currentExcluded = scopeSettings.mcp?.excluded || [];
             const filtered = currentExcluded.filter(
-              (pattern: string) => pattern !== serverName,
+              (pattern: string) =>
+                !matchesAnyServerPattern(serverName, [pattern]),
             );
             if (filtered.length !== currentExcluded.length) {
               settings.setValue(scope, 'mcp.excluded', filtered);
@@ -11863,7 +11864,8 @@ class QwenAgent implements Agent {
           for (const liveConfig of this.getLiveMcpConfigs(serverName)) {
             const currentExcluded = liveConfig.getExcludedMcpServers() || [];
             const runtimeFiltered = currentExcluded.filter(
-              (pattern: string) => pattern !== serverName,
+              (pattern: string) =>
+                !matchesAnyServerPattern(serverName, [pattern]),
             );
             if (runtimeFiltered.length !== currentExcluded.length) {
               liveConfig.setExcludedMcpServers(runtimeFiltered);

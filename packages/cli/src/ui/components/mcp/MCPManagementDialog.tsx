@@ -479,15 +479,18 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
           ?.setMcpServerDisabled(extensionName, server.name, false);
       }
 
-      // Remove from user and workspace exclusion lists
+      // Remove from user and workspace exclusion lists. Match patterns too:
+      // `--disable-mcp-server` and `mcp.excluded` accept globs, so an
+      // exact-name filter leaves `foo-*` behind and the enable is a no-op
+      // (#14465).
       for (const scope of [SettingScope.User, SettingScope.Workspace]) {
         const scopeSettings = settings.forScope(scope).settings;
         const currentExcluded = scopeSettings.mcp?.excluded || [];
 
-        if (currentExcluded.includes(server.name)) {
-          const newExcluded = currentExcluded.filter(
-            (name: string) => name !== server.name,
-          );
+        const newExcluded = currentExcluded.filter(
+          (pattern: string) => !matchesAnyServerPattern(server.name, [pattern]),
+        );
+        if (newExcluded.length !== currentExcluded.length) {
           settings.setValue(scope, 'mcp.excluded', newExcluded);
         }
       }
@@ -495,7 +498,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       // Update runtime config exclusion list
       const currentExcluded = config.getExcludedMcpServers() || [];
       const newExcluded = currentExcluded.filter(
-        (name: string) => name !== server.name,
+        (pattern: string) => !matchesAnyServerPattern(server.name, [pattern]),
       );
       config.setExcludedMcpServers(newExcluded);
 

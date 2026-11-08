@@ -1804,15 +1804,16 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
-  it('rejects enabling an MCP server blocked by a wildcard exclusion', async () => {
+  it('rejects enabling an MCP server blocked by a wildcard in a higher scope', async () => {
     const h = await makeHarness({ token: 'secret' });
+    const systemSettingsPath = path.join(h.scratch, 'system-settings.json');
+    await fsp.writeFile(
+      systemSettingsPath,
+      JSON.stringify({ mcp: { excluded: ['docs*'] } }),
+    );
+    const previousSystemPath = process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+    process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettingsPath;
     try {
-      await fsp.mkdir(path.join(h.secondaryCwd, '.qwen'), { recursive: true });
-      await fsp.writeFile(
-        path.join(h.secondaryCwd, '.qwen', 'settings.json'),
-        JSON.stringify({ mcp: { excluded: ['docs*'] } }),
-      );
-
       const response = await request(h.app)
         .post(
           `/workspaces/${encodeURIComponent(h.secondaryId)}/config/mcp/docs/enable`,
@@ -1827,6 +1828,42 @@ describe('workspace-qualified core REST', () => {
         patterns: ['docs*'],
       });
       expect(h.persistSetting).not.toHaveBeenCalled();
+    } finally {
+      if (previousSystemPath === undefined) {
+        delete process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      } else {
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = previousSystemPath;
+      }
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('lifts a wildcard exclusion from the scope being enabled', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      await fsp.mkdir(path.join(h.secondaryCwd, '.qwen'), { recursive: true });
+      await fsp.writeFile(
+        path.join(h.secondaryCwd, '.qwen', 'settings.json'),
+        JSON.stringify({ mcp: { excluded: ['docs*', 'keep-*'] } }),
+      );
+
+      const response = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/config/mcp/docs/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'workspace' });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({ changed: true });
+      expect(h.persistSetting).toHaveBeenCalledWith(
+        h.secondaryCwd,
+        expect.any(String),
+        'mcp.excluded',
+        ['keep-*'],
+        expect.any(Function),
+      );
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

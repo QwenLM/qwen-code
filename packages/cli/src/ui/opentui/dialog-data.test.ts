@@ -1673,6 +1673,47 @@ describe('applyMcpServerAction (real server actions)', () => {
     expect(result.message).toContain('Enabled');
   });
 
+  it('enable also lifts a glob exclusion covering the server (#14465)', async () => {
+    const discoverToolsForServer = vi.fn(async () => {});
+    const setExcludedMcpServers = vi.fn();
+    const config = stubConfig({
+      getMcpServers: (() => ({
+        srv: {},
+      })) as unknown as Config['getMcpServers'],
+      getToolRegistry: (() => ({
+        discoverToolsForServer,
+      })) as unknown as Config['getToolRegistry'],
+      getExcludedMcpServers: (() => [
+        'srv*',
+        'other',
+      ]) as unknown as Config['getExcludedMcpServers'],
+      setExcludedMcpServers,
+    } as Partial<Config>);
+    const { settings, written } = createFakeSettings({
+      user: { mcp: { excluded: ['srv*', 'keep-*'] } } as Settings,
+      workspace: { mcp: { excluded: ['srv'] } } as Settings,
+    });
+    const result = await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({ isDisabled: true }),
+      'toggle-disable',
+    );
+    expect(setExcludedMcpServers).toHaveBeenCalledWith(['other']);
+    expect(written).toContainEqual({
+      scope: SettingScope.User,
+      key: 'mcp.excluded',
+      value: ['keep-*'],
+    });
+    expect(written).toContainEqual({
+      scope: SettingScope.Workspace,
+      key: 'mcp.excluded',
+      value: [],
+    });
+    expect(discoverToolsForServer).toHaveBeenCalledWith('srv');
+    expect(result.message).toContain('Enabled');
+  });
+
   it('clear-auth deletes stored tokens and disconnects', async () => {
     const { MCPOAuthTokenStorage } = await import('@qwen-code/qwen-code-core');
     const deleteCredentials = vi

@@ -1022,6 +1022,22 @@ export interface McpActionResult {
 }
 
 /**
+ * Drops every `mcp.excluded` entry that covers `serverName`, glob patterns
+ * included. Disable writes the bare server name, but `--disable-mcp-server`
+ * and `mcp.excluded` both accept patterns (`foo-*`), so an exact-only filter
+ * left a matching pattern in place while the dialog reported the server as
+ * enabled (#14465).
+ */
+function withoutExcludedServer(
+  excluded: string[],
+  serverName: string,
+): string[] {
+  return excluded.filter(
+    (pattern) => !matchesAnyServerPattern(serverName, [pattern]),
+  );
+}
+
+/**
  * Real server actions for the OpenTUI MCP dialog (audit 01 G-6 / 05 G-13),
  * mirroring MCPManagementDialog's handlers: enable/disable via the
  * extension-scoped flag or the user/workspace `mcp.excluded` lists,
@@ -1088,17 +1104,17 @@ export async function applyMcpServerAction(
           for (const scope of [SettingScope.User, SettingScope.Workspace]) {
             const scopeSettings = settings.forScope(scope).settings;
             const currentExcluded = scopeSettings.mcp?.excluded ?? [];
-            if (currentExcluded.includes(server.name)) {
-              settings.setValue(
-                scope,
-                'mcp.excluded',
-                currentExcluded.filter((name: string) => name !== server.name),
-              );
+            const remaining = withoutExcludedServer(
+              currentExcluded,
+              server.name,
+            );
+            if (remaining.length !== currentExcluded.length) {
+              settings.setValue(scope, 'mcp.excluded', remaining);
             }
           }
           const currentExcluded = config.getExcludedMcpServers() ?? [];
           config.setExcludedMcpServers(
-            currentExcluded.filter((name: string) => name !== server.name),
+            withoutExcludedServer(currentExcluded, server.name),
           );
           if (toolRegistry) {
             await toolRegistry.discoverToolsForServer(server.name);
