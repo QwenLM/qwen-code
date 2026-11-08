@@ -66,7 +66,6 @@ const jobs = [
     'qwen-autofix',
     name,
   ]),
-  ['web-shell-visuals-publish', 'publish'],
 ];
 
 it.each(jobs)(

@@ -38,37 +38,9 @@ jobs:
       github.repository == 'QwenLM/qwen-code' &&
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'success'
-    # Runs no fork code: the checkout below is pinned to the trusted
-    # default-branch commit and reads PR bytes only as the image source. That
-    # makes it safe on the persistent pool, where it used to wait hours in the
-    # hosted queue while the pool idled. Kill-switch and fallback stay the same
-    # as the other trusted lanes: MAINTAINER_ECS_RUNNER_DISABLED forces hosted.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     steps:
-      # The pool reuses workspaces across jobs, and a containerised CI job can
-      # leave root-owned files behind; without this the trusted checkout below
-      # fails on a reused slot.
-      - name: 'Restore workspace ownership'
-        if: "${{ runner.environment == 'self-hosted' }}"
-        run: |-
-          set -uo pipefail
-          RUNNER_UID="$(id -u)"
-          RUNNER_GID="$(id -g)"
-          if [ "$RUNNER_UID" != "0" ]; then
-            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown "$RUNNER_UID:$RUNNER_GID" -R "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
-          fi
-          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
-
-      # A reused slot keeps the previous job's .git, hooks included, and git
-      # still runs post-checkout hooks after actions/checkout resets the tree —
-      # so the pinned trusted ref alone does not keep old job code out. Drop
-      # the metadata first, exactly as the other pool-routed checkouts do.
-      - name: 'Recreate runner Git metadata'
-        if: "${{ runner.environment == 'self-hosted' }}"
-        run: |-
-          rm -rf -- "$GITHUB_WORKSPACE/.git"
-
       # Trusted base-repo scripts. workflow_run checks out the default branch,
       # never PR code (the PR head is github.event.workflow_run.head_sha,
       # consumed below as RUN_HEAD_SHA — never as a checkout ref). Sparse —
