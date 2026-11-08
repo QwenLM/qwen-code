@@ -103,7 +103,7 @@ function validate(c) {
     !Number.isSafeInteger(c.minDiskBytes) ||
     c.minDiskBytes < 0 ||
     (c.stallAlertSeconds !== undefined &&
-      (!Number.isFinite(c.stallAlertSeconds) || c.stallAlertSeconds <= 0))
+      (!Number.isFinite(c.stallAlertSeconds) || c.stallAlertSeconds < 1))
   )
     throw new Error('Invalid manager configuration');
   if (c.proxy !== undefined) {

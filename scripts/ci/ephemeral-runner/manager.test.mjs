@@ -1465,7 +1465,7 @@ test('stop() interrupts a long backoff sleep instead of waiting it out', async (
 
 test('rejects an invalid stall alert threshold', async (t) => {
   const f = await fixture(t);
-  for (const stallAlertSeconds of [0, -1, '3'])
+  for (const stallAlertSeconds of [0, -1, '3', 0.5, 1e-9])
     assert.throws(
       () => createManager({ ...f.config, stallAlertSeconds }),
       /Invalid manager configuration/,
