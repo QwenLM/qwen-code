@@ -92,6 +92,7 @@ Local `gh` authentication requires an HTTPS `baseUrl` so the daemon host credent
 | `repoFilterMode`          | `"off"`                  | Repository event filter: `"allowlist"` processes only the repositories listed in `repoFilter`, `"blocklist"` processes all except them, `"off"` processes everything. Applies to notification intake only                                                                                                                                                                                                                                                                                                                                                                                           |
 | `repoFilter`              | unset                    | `owner/repo` repository names used by `repoFilterMode`; required while the mode is `"allowlist"` or `"blocklist"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `deliverToBoundSessions`  | `false`                  | Deliver events for PRs bound to a live session into that session as a prompt instead of a channel-owned session (daemon-managed channels only)                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `prCommentWatch`          | `true`                   | Poll conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it, including comments by the same GitHub account used by another session/agent. Set `false` to disable. Requires `deliverToBoundSessions`                                                                                                                                                                                                                                                                                                                              |
 | `prWatchEvents`           | unset                    | Optional state transitions to watch for bound PRs: `ci_failure`, `merge_conflict`, `head_change`, `state_change`. Requires `deliverToBoundSessions`                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `prWatchLimit`            | `30`                     | Maximum open bound PRs watched per poll, kept between 1 and 500. Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR costs about one `pulls.get` per poll — ~60 requests/hour at the 60s default, so a 5000/hour PAT budget admits ~80 watched PRs (~69 open while a terminal backlog drains at the 1.2x fan-out); over budget, every watch pass aborts on rate limits. Raise `pollInterval` when raising this. Requires `deliverToBoundSessions` and `prWatchEvents` |
 | `boundSessionActions`     | unset                    | Optional operator instruction templates for bound-session delivery, keyed by event class with optional role prefixes (`review:`, `verify:`, `fix:`). Enables role-aware fan-out. Requires `deliverToBoundSessions`                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -354,6 +355,35 @@ succeeds again.
 Transitions are persisted before delivery, so restarts do not re-fire them.
 A head move fires whoever pushed it, including the bound session itself —
 see Known Limitations.
+
+### Bound PR Comment Watch
+
+With `deliverToBoundSessions` on, the channel also polls each bound PR for new
+**conversation comments and inline review comments** and delivers each one into
+every bound session that did **not** post it. This is default-on; set
+`prCommentWatch: false` to disable it. It is independent of `prWatchEvents`, so
+it works even when no state transition is subscribed.
+
+Unlike the notification-driven comment lanes, this watch does **not** filter the
+channel's own GitHub account. A comment posted under the same login by a
+different session, agent, or model — or by you by hand — still reaches the
+follower, which is what lets a `fix` session close the loop on findings posted
+by a separate verify/review session. Authorship is attributed per session from
+its transcript (the daemon's posted-comment lookup): a comment is withheld only
+from the session that actually wrote it, so a session's own reply does not
+re-trigger it. No marker or `@mention` is required.
+
+Comments are fetched when the PR's activity advances or on a periodic re-check
+(about every 2 minutes), and the first observation baselines silently — comments
+that predate the watch are not replayed. Delivery reuses the bound-session
+contract: role-aware templates (`comment` / `fix:comment` / `default`), stable
+comment-id dedupe (shared with the notification lanes), backpressure and
+dead-letter, and dormant wake. A watched comment with no remaining bound target
+is retired privately, never answered in public. Inline review comments carry the
+file path and line in the prompt. Attribution is best-effort: a posting method
+that leaves no recognizable comment-creation result in the transcript is not
+attributed, so such a comment may be delivered once to its author's session (the
+stable id still bounds it to a single delivery).
 
 ### Role-Aware Action Templates
 

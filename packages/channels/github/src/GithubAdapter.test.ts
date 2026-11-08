@@ -72,6 +72,7 @@ vi.mock('@octokit/rest', () => {
       },
       pulls: {
         get: vi.fn(),
+        listReviewComments: vi.fn(),
       },
       checks: {
         listForRef: vi.fn(),
@@ -124,6 +125,7 @@ const mockOctokit = octokitModule.__mockOctokit as {
     };
     pulls: {
       get: ReturnType<typeof vi.fn>;
+      listReviewComments: ReturnType<typeof vi.fn>;
     };
     checks: {
       listForRef: ReturnType<typeof vi.fn>;
@@ -16394,6 +16396,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
     const watchConfig = {
       deliverToBoundSessions: true,
+      // These tests cover the state watch; the orthogonal comment watch is
+      // exercised by its own suite and would otherwise add listComments /
+      // listReviewComments calls to the paginate routing below.
+      prCommentWatch: false,
       prWatchEvents: [
         'ci_failure',
         'merge_conflict',
@@ -22710,6 +22716,190 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
               event['type'] === 'task' && event['outcome'] === 'retired',
           ),
         ).toHaveLength(0);
+      });
+    });
+
+    describe('PR comment watch', () => {
+      const commentWatchConfig = {
+        deliverToBoundSessions: true,
+        prWatchEvents: [],
+        prCommentWatch: true,
+      };
+
+      function routeCommentPaginate(): void {
+        mockOctokit.paginate.mockImplementation(
+          async (_fn: unknown, params: Record<string, unknown> = {}) => {
+            if ('ref' in params) return mockOctokit.rest.checks.listForRef();
+            if ('pull_number' in params)
+              return mockOctokit.rest.pulls.listReviewComments();
+            if ('issue_number' in params)
+              return mockOctokit.rest.issues.listComments();
+            return mockOctokit.rest.activity.listNotificationsForAuthenticatedUser();
+          },
+        );
+        mockOctokit.rest.activity.listNotificationsForAuthenticatedUser.mockResolvedValue(
+          [],
+        );
+      }
+
+      function seedCommentBaseline(): void {
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            prState: 'open',
+            commentBaseline: '2026-07-01T00:00:00.000Z',
+            commentSince: '2026-07-01T00:00:00.000Z',
+            commentLastFetchAt: 0,
+          },
+        });
+      }
+
+      function conversationComment(overrides: Record<string, unknown> = {}) {
+        return {
+          id: 555,
+          node_id: 'IC_555',
+          body: 'please fix the overflow',
+          created_at: '2026-07-02T10:00:00.000Z',
+          user: { login: 'someone' },
+          ...overrides,
+        };
+      }
+
+      it('delivers a new conversation comment to the bound session', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const [sessionId, prompt] = boundSessions.deliverPrompt.mock.calls[0]!;
+        expect(sessionId).toBe('bound-session');
+        expect(prompt).toContain('New comment by @someone');
+        expect(prompt).toContain('please fix the overflow');
+      });
+
+      it('withholds a comment the bound session itself posted', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockResolvedValue(new Set(['ic:555']));
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        // Same account as the channel, but authored by the bound session.
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({ user: { login: 'test-bot' } }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('delivers a same-account comment posted by a different session', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        // The bound session did NOT post ic:555 (another session did, under
+        // the same GitHub login the channel authenticates as).
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({ user: { login: 'test-bot' } }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      });
+
+      it('delivers an inline review comment with file/line context', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([
+          {
+            id: 777,
+            node_id: 'PRRC_777',
+            body: 'guard this branch',
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'reviewer' },
+            path: 'src/a.ts',
+            line: 12,
+            side: 'RIGHT',
+            html_url: 'https://github.com/owner/repo/pull/42#discussion_r777',
+          },
+        ]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1];
+        expect(prompt).toContain('inline review comment by @reviewer');
+        expect(prompt).toContain('src/a.ts');
+        expect(prompt).toContain('guard this branch');
+      });
+
+      it('withholds an inline review comment the bound session posted', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockResolvedValue(new Set(['rc:777']));
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([
+          {
+            id: 777,
+            node_id: 'PRRC_777',
+            body: 'my own note',
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'test-bot' },
+            path: 'src/a.ts',
+          },
+        ]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('baselines silently on first observation (no backlog delivery)', async () => {
+        await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        // No seeded watch state: the first pass must baseline, not deliver.
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(
+          readWatchState().entries['owner/repo#42']!['commentBaseline'],
+        ).toBeDefined();
+      });
+
+      it('does not watch comments when prCommentWatch is false', async () => {
+        await initChannel(
+          { ...commentWatchConfig, prCommentWatch: false },
+          { boundSessions },
+        );
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment(),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
       });
     });
   });

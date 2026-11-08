@@ -60,6 +60,7 @@ interface GithubConfig extends ChannelConfig, RepoFilterConfigFields {
   prWatchEvents?: unknown;
   prWatchLimit?: unknown;
   boundSessionActions?: unknown;
+  prCommentWatch?: unknown;
 }
 
 const GH_AUTH_TIMEOUT_MS = 10_000;
@@ -251,6 +252,20 @@ interface GithubComment {
   created_at?: string | null;
   updated_at?: string | null;
   user?: { login?: string } | null;
+}
+
+/** An inline pull-request review comment (pulls.listReviewComments). */
+interface GithubReviewComment {
+  id: number;
+  node_id?: string;
+  body?: string;
+  created_at?: string | null;
+  user?: { login?: string } | null;
+  path?: string;
+  line?: number | null;
+  original_line?: number | null;
+  side?: string | null;
+  html_url?: string;
 }
 
 interface GithubIssueEvent {
@@ -513,6 +528,14 @@ const CI_RECHECK_INTERVAL_MS = 10 * 60 * 1000;
 const CI_PENDING_RECHECK_INTERVAL_MS = 5 * 60 * 1000;
 
 /**
+ * Bound PR comment watch re-check period. Comments are fetched when the PR's
+ * updated_at advances OR this interval elapses, so a settled PR still hears
+ * new comments without one listComments + one listReviewComments per poll per
+ * bound PR. Above the 60s poll interval to bound the fan-out at the watch cap.
+ */
+const COMMENT_RECHECK_INTERVAL_MS = 2 * 60 * 1000;
+
+/**
  * Backpressure horizon for bound-session delivery: queue-full and
  * temporarily-unavailable conditions defer without consuming the failure
  * budget, but not forever. After this many consecutive deferrals (~4 hours
@@ -624,6 +647,17 @@ interface PrWatchEntry {
    * Reset when the head changes.
    */
   ciFiredSha?: string;
+  /**
+   * Bound PR comment watch cursor. `commentBaseline` is the first-observation
+   * cutoff (no backlog delivery): only comments created strictly after it are
+   * eligible. `commentSince` is the listComments/listReviewComments `since`
+   * watermark advanced to each fetch's start. `commentLastFetchAt` drives the
+   * periodic re-check so a settled PR still hears new comments even when
+   * updated_at does not advance.
+   */
+  commentBaseline?: string;
+  commentSince?: string;
+  commentLastFetchAt?: number;
 }
 
 interface PendingWatchEvent {
@@ -682,6 +716,9 @@ function isPrWatchEntryShape(value: unknown): value is PrWatchEntry {
     numberOrUndef(entry.lastCiFetchAt) &&
     numberOrUndef(entry.seq) &&
     stringOrUndef(entry.ciFiredSha) &&
+    stringOrUndef(entry.commentBaseline) &&
+    stringOrUndef(entry.commentSince) &&
+    numberOrUndef(entry.commentLastFetchAt) &&
     (entry.pending === undefined ||
       (Array.isArray(entry.pending) && entry.pending.every(isPending))) &&
     (entry.fired === undefined ||
@@ -695,6 +732,7 @@ interface BoundSessionConfigFields {
   prWatchEvents?: unknown;
   prWatchLimit?: unknown;
   boundSessionActions?: unknown;
+  prCommentWatch?: unknown;
 }
 
 /**
@@ -779,6 +817,18 @@ export function validateBoundSessionConfig(
     config.deliverToBoundSessions !== true
   ) {
     return `prWatchLimit for channel ${channelName} requires deliverToBoundSessions: true.`;
+  }
+  if (
+    config.prCommentWatch !== undefined &&
+    typeof config.prCommentWatch !== 'boolean'
+  ) {
+    return `[Channel:${channelName}] prCommentWatch must be a boolean.`;
+  }
+  if (
+    config.prCommentWatch !== undefined &&
+    config.deliverToBoundSessions !== true
+  ) {
+    return `prCommentWatch for channel ${channelName} requires deliverToBoundSessions: true.`;
   }
   try {
     normalizePrWatchEvents(config, channelName);
@@ -1300,6 +1350,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private reasonFilter: Set<string> | null = null;
   private repoFilter: RepoFilter | null = null;
   private deliverToBoundSessions = false;
+  /**
+   * Bound PR comment watch: poll conversation + inline review comments and
+   * deliver each to every bound session that did not post it. Default-on
+   * with deliverToBoundSessions; `prCommentWatch: false` disables it.
+   */
+  private prCommentWatchEnabled = true;
   private prWatchEvents = new Set<PrWatchEventType>();
   /**
    * Operator instruction templates keyed by the closed bound-action
@@ -1562,6 +1618,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.prWatchEvents = normalizePrWatchEvents(cfg, this.name);
     this.boundSessionActions = normalizeBoundSessionActions(cfg, this.name);
     this.deliverToBoundSessions = cfg.deliverToBoundSessions === true;
+    this.prCommentWatchEnabled = cfg.prCommentWatch !== false;
     if (this.deliverToBoundSessions) {
       this.loadBoundDeliveredRing();
     }
@@ -2406,7 +2463,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
     // The watch pass runs before generic recovery so detection cannot race
     // recovery over the same task; pending events were already reconciled.
-    if (this.prWatchEvents.size > 0 && !this.boundRefreshFailed) {
+    // The comment watch is independent of the state-event subscription, so an
+    // empty prWatchEvents still runs the pass while comment watching is on.
+    const commentWatchActive =
+      this.deliverToBoundSessions && this.prCommentWatchEnabled;
+    if (
+      (this.prWatchEvents.size > 0 || commentWatchActive) &&
+      !this.boundRefreshFailed
+    ) {
       try {
         await this.runPrStateWatch();
       } catch (err) {
@@ -3460,6 +3524,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     issueNumber: number,
     dedupe: InboundTaskDedupe = {},
     privateOnly = false,
+    excludeSessionIds?: ReadonlySet<string>,
   ): Promise<boolean> {
     // The publication audit is the durable consumption record for the
     // public path: a reply can land (audit `posted`), the task be removed,
@@ -3501,12 +3566,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // template also catches a comment delivered under another reason.
     const laneClass =
       dedupe.dispatchedComments !== undefined ? 'comment' : undefined;
-    const { targets, followed } = this.resolveBoundTargets(
+    const resolved = this.resolveBoundTargets(
       envelope.chatId,
       issueNumber,
       eventClass,
       laneClass,
     );
+    // The bound PR comment watch withholds a comment from the session that
+    // posted it (authorship attribution), keeping every other bound target.
+    const targets =
+      excludeSessionIds && excludeSessionIds.size > 0
+        ? resolved.targets.filter(
+            (target) => !excludeSessionIds.has(target.sessionId),
+          )
+        : resolved.targets;
+    const followed = resolved.followed;
     if (targets.length > 0) {
       // Fan-out: one durable task per (event, target). Each settles
       // independently — a queue-full role defers without head-of-line
@@ -6453,7 +6527,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * tokens until a real transition fires.
    */
   private async runPrStateWatch(): Promise<void> {
-    if (!this.boundSessions || this.prWatchEvents.size === 0) return;
+    // The comment watch is default-on with deliverToBoundSessions and is
+    // independent of the state-event subscription, so an empty prWatchEvents
+    // must not skip the pass while comment watching is enabled.
+    const commentWatchActive =
+      this.deliverToBoundSessions && this.prCommentWatchEnabled;
+    if (
+      !this.boundSessions ||
+      (this.prWatchEvents.size === 0 && !commentWatchActive)
+    ) {
+      return;
+    }
     this.loadPrWatchState();
     const candidates = new Map<
       string,
@@ -6622,6 +6706,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     for (const [key, candidate] of watched) {
       try {
         await this.watchOnePr(key, candidate.chatId, candidate.number);
+        // Additive comment watch: isolates its own failures so a comment
+        // fetch problem never skips the state transitions above.
+        await this.watchPrComments(key, candidate.chatId, candidate.number);
       } catch (err) {
         if (isWatchPassAbortError(err)) {
           // Shared credential/rate-limit failure: abort the rest of the
@@ -6817,6 +6904,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ...(!headChanged && entry.ciFiredSha !== undefined
         ? { ciFiredSha: entry.ciFiredSha }
         : {}),
+      // The comment watch cursor is independent of head/CI transitions; carry
+      // it through so the state baseline write does not drop it.
+      ...(entry.commentBaseline !== undefined
+        ? { commentBaseline: entry.commentBaseline }
+        : {}),
+      ...(entry.commentSince !== undefined
+        ? { commentSince: entry.commentSince }
+        : {}),
+      ...(entry.commentLastFetchAt !== undefined
+        ? { commentLastFetchAt: entry.commentLastFetchAt }
+        : {}),
     };
 
     // Bake the PR number and detection time into every watch key. The
@@ -6965,6 +7063,221 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.recordWatchOverflowSkip(retired);
     }
     await this.drainPendingWatch(key, next);
+  }
+
+  /**
+   * Bound PR comment watch (docs/design/2026-11-08-bound-pr-comment-watch.md).
+   * Poll conversation + inline review comments on a bound PR and deliver each
+   * new one to every bound session that did NOT post it. Unlike the
+   * notification lanes this does not filter the channel's own account: a
+   * comment by the same GitHub login used by a DIFFERENT session/agent must
+   * reach the follower. Authorship attribution (the daemon's posted-comment
+   * lookup) withholds a comment only from the session that wrote it, which is
+   * what prevents a fix session's own reply from re-triggering it.
+   *
+   * Default-on with deliverToBoundSessions; `prCommentWatch: false` disables
+   * it. Failures are isolated here so they never skip the state transitions.
+   */
+  private async watchPrComments(
+    key: string,
+    chatId: string,
+    number: number,
+  ): Promise<void> {
+    if (
+      !this.deliverToBoundSessions ||
+      !this.prCommentWatchEnabled ||
+      !this.boundSessions
+    ) {
+      return;
+    }
+    const entry = this.prWatchState.entries[key] ?? {};
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+    // First observation baselines silently (no backlog delivery), matching
+    // the state-watch convention; only comments created after it are eligible.
+    if (entry.commentBaseline === undefined) {
+      this.prWatchState.entries[key] = {
+        ...entry,
+        commentBaseline: nowIso,
+        commentSince: nowIso,
+        commentLastFetchAt: now,
+      };
+      this.savePrWatchState();
+      return;
+    }
+    if (
+      entry.commentLastFetchAt !== undefined &&
+      now - entry.commentLastFetchAt < COMMENT_RECHECK_INTERVAL_MS
+    ) {
+      return;
+    }
+    const [owner, repo] = chatId.split('/');
+    const since = entry.commentSince ?? entry.commentBaseline;
+    let conversation: GithubComment[] = [];
+    let review: GithubReviewComment[] = [];
+    try {
+      conversation = (await this.githubApi(
+        () =>
+          this.octokit.paginate(this.octokit.rest.issues.listComments, {
+            owner,
+            repo,
+            issue_number: number,
+            since,
+            per_page: 100,
+          }),
+        `listComments(comment watch ${key})`,
+      )) as GithubComment[];
+      review = (await this.githubApi(
+        () =>
+          this.octokit.paginate(this.octokit.rest.pulls.listReviewComments, {
+            owner,
+            repo,
+            pull_number: number,
+            since,
+            per_page: 100,
+          }),
+        `listReviewComments(comment watch ${key})`,
+      )) as GithubReviewComment[];
+    } catch (err) {
+      // Advance the fetch clock even on failure so a persistent endpoint
+      // problem retries on the interval, not every poll (as the CI fetch does).
+      this.prWatchState.entries[key] = {
+        ...(this.prWatchState.entries[key] ?? {}),
+        commentLastFetchAt: now,
+      };
+      this.savePrWatchState();
+      process.stderr.write(
+        `[Channel:${this.name}] comment watch fetch failed for ${key}, continuing without comments this pass: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+      );
+      return;
+    }
+
+    // Resolve the delivery targets once, then look up each target's posted
+    // comments so a comment is withheld only from the session that wrote it.
+    const { targets } = this.resolveBoundTargets(
+      chatId,
+      number,
+      'comment',
+      'comment',
+    );
+    const postedBySession = new Map<string, ReadonlySet<string>>();
+    for (const target of targets) {
+      const lookup = this.boundSessions.postedCommentIds;
+      const ids = lookup
+        ? await lookup
+            .call(this.boundSessions, target.sessionId)
+            .catch(() => new Set<string>())
+        : new Set<string>();
+      postedBySession.set(target.sessionId, ids);
+    }
+
+    const baseline = entry.commentBaseline;
+    const alreadyDispatched = (commentKey: string): boolean =>
+      this.cursor.dispatchedComments?.includes(commentKey) === true;
+    const candidates: Array<{
+      key: string;
+      attrKey: string;
+      createdAt: string;
+      envelope: Envelope;
+    }> = [];
+    const threadId = `pr:${number}`;
+    const metadata = `${this.buildMetadata(chatId, threadId, '')}\nTrigger: comment.`;
+    const renderBody = (body: string | undefined): string => {
+      const display = sanitizeDisplayText((body ?? '').trim());
+      const total = Array.from(display).length;
+      return total > MAX_AGGREGATE_COMMENT_CHARS
+        ? `${truncateCodePoints(display, MAX_AGGREGATE_COMMENT_CHARS)}… [comment truncated: ${total - MAX_AGGREGATE_COMMENT_CHARS} more characters]`
+        : display;
+    };
+    for (const comment of conversation) {
+      const commentKey = comment.node_id || String(comment.id);
+      if (
+        !comment.created_at ||
+        comment.created_at <= baseline ||
+        alreadyDispatched(commentKey)
+      ) {
+        continue;
+      }
+      const author = comment.user?.login || 'unknown';
+      const url = `${this.webOrigin}/${chatId}/pull/${number}#issuecomment-${comment.id}`;
+      candidates.push({
+        key: commentKey,
+        attrKey: `ic:${comment.id}`,
+        createdAt: comment.created_at,
+        envelope: {
+          channelName: this.name,
+          senderId: author.toLowerCase(),
+          senderName: author,
+          chatId,
+          threadId,
+          messageId: commentKey,
+          text: `New comment by @${author}:\n${renderBody(comment.body)}\nComment: ${url}`,
+          isGroup: true,
+          isMentioned: true,
+          isReplyToBot: false,
+          metadata,
+        },
+      });
+    }
+    for (const comment of review) {
+      const commentKey = comment.node_id || String(comment.id);
+      if (
+        !comment.created_at ||
+        comment.created_at <= baseline ||
+        alreadyDispatched(commentKey)
+      ) {
+        continue;
+      }
+      const author = comment.user?.login || 'unknown';
+      const url =
+        comment.html_url ||
+        `${this.webOrigin}/${chatId}/pull/${number}#discussion_r${comment.id}`;
+      const line = comment.line ?? comment.original_line;
+      const location = `File: ${comment.path ?? '?'}${line != null ? ` (line ${line}${comment.side ? `, ${comment.side}` : ''})` : ''}`;
+      candidates.push({
+        key: commentKey,
+        attrKey: `rc:${comment.id}`,
+        createdAt: comment.created_at,
+        envelope: {
+          channelName: this.name,
+          senderId: author.toLowerCase(),
+          senderName: author,
+          chatId,
+          threadId,
+          messageId: commentKey,
+          text: `New inline review comment by @${author}:\n${location}\n${renderBody(comment.body)}\nComment: ${url}`,
+          isGroup: true,
+          isMentioned: true,
+          isReplyToBot: false,
+          metadata,
+        },
+      });
+    }
+    candidates.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    for (const candidate of candidates) {
+      const exclude = new Set<string>();
+      for (const target of targets) {
+        if (postedBySession.get(target.sessionId)?.has(candidate.attrKey)) {
+          exclude.add(target.sessionId);
+        }
+      }
+      // Private-only: a watched comment with no remaining target is retired
+      // privately, never answered in public. The stable comment id dedupes
+      // across polls and against the notification lanes.
+      await this.dispatchEnvelope(
+        candidate.envelope,
+        number,
+        { dispatchedComments: [candidate.key] },
+        true,
+        exclude,
+      );
+    }
+    this.prWatchState.entries[key] = {
+      ...(this.prWatchState.entries[key] ?? {}),
+      commentSince: nowIso,
+      commentLastFetchAt: now,
+    };
+    this.savePrWatchState();
   }
 
   /**

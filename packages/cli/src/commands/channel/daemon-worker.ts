@@ -687,6 +687,33 @@ export function createBoundSessionsAccessor(
         }
       }
     },
+    postedCommentIds: async (sessionId) => {
+      // Fail-open: missing cwd, a non-200, or a malformed body all resolve to
+      // an empty set so the comment watch never suppresses delivery on
+      // missing authorship evidence. The cwd comes from the bindings cache.
+      const cwd = cwdBySession.get(sessionId);
+      if (cwd === undefined) return new Set<string>();
+      let res: Response | undefined;
+      try {
+        res = await client.requestRest(
+          `/sessions/${encodeURIComponent(sessionId)}/posted-comments?workspaceCwd=${encodeURIComponent(cwd)}`,
+          { signal: requestSignal() },
+        );
+        if (!res.ok) return new Set<string>();
+        const body = (await res.json()) as { ids?: unknown };
+        const ids = new Set<string>();
+        if (Array.isArray(body.ids)) {
+          for (const id of body.ids) {
+            if (typeof id === 'string') ids.add(id);
+          }
+        }
+        return ids;
+      } catch {
+        return new Set<string>();
+      } finally {
+        if (res) await discardBody(res);
+      }
+    },
   };
 }
 

@@ -4592,6 +4592,46 @@ describe('createBoundSessionsAccessor', () => {
     });
   }
 
+  it('postedCommentIds queries the route with the cached cwd and parses ids', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(200, { ids: ['ic:555', 'rc:777'] }));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+    await accessor.listPrBindings();
+
+    const ids = await accessor.postedCommentIds!('session-1');
+
+    expect([...ids].sort()).toEqual(['ic:555', 'rc:777']);
+    expect(requestRest).toHaveBeenLastCalledWith(
+      '/sessions/session-1/posted-comments?workspaceCwd=%2Fws%2Fa',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it('postedCommentIds fail-open: unknown session yields an empty set without a request', async () => {
+    const requestRest = vi.fn();
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const ids = await accessor.postedCommentIds!('unknown-session');
+
+    expect(ids.size).toBe(0);
+    expect(requestRest).not.toHaveBeenCalled();
+  });
+
+  it('postedCommentIds fail-open: a non-200 answer yields an empty set', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(500, {}));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+    await accessor.listPrBindings();
+
+    const ids = await accessor.postedCommentIds!('session-1');
+
+    expect(ids.size).toBe(0);
+  });
+
   it('lists and validates PR bindings', async () => {
     const requestRest = vi.fn().mockResolvedValue(
       jsonResponse(200, {
