@@ -90,6 +90,7 @@ Every Qwen-managed worktree is placed under your project's `.qwen` directory:
 - **Branch** — always `worktree-<slug>`, branched from whichever branch you have checked out when you ask for the worktree (not necessarily the main working tree's `HEAD`). For PR worktrees the branch is `worktree-pr-<N>` and is based on `FETCH_HEAD` (the PR's tip on the GitHub side) rather than your local branch.
 - **Hooks** — the worktree's `core.hooksPath` is automatically pointed at the main repo's `.husky/` (preferred) or `.git/hooks/` so commits inside the worktree still trigger your existing pre-commit / commit-msg hooks.
 - **Optional symlinks** — directories listed in `worktree.symlinkDirectories` (see [Settings](#settings)) are symlinked from the main repo into the new worktree so heavy dirs like `node_modules` can be reused without reinstalling.
+- **Optional copies** — paths listed in the repository's [`.worktreeinclude`](#worktreeinclude) file are copied in, so gitignored local files like `.env` are present without pointing back at your main checkout.
 
 The general-purpose worktree path is **not configurable** — it must live under `<repoRoot>/.qwen/worktrees/` so the CLI can find it on restart and on stale-cleanup sweeps. (The unrelated `agents.arena.worktreeBaseDir` setting controls only [Agent Arena](./arena.md) worktrees, which use a separate path tree under `~/.qwen/arena/`.)
 
@@ -216,6 +217,33 @@ Three independent guards trigger before the directory and branch are deleted:
 
 The same three guards apply to the `WorktreeExitDialog → Remove` button.
 
+## `.worktreeinclude`
+
+A worktree contains only **tracked** files, so everything git deliberately ignores — `.env`, local dev configs, certificates — is missing from it. Commit a `.worktreeinclude` file at your repository root to list the paths that should be copied in:
+
+```gitignore
+# .worktreeinclude — one path per line, gitignore syntax
+.env
+appsettings.Development.json
+.local/
+config/*.json
+!config/example.json
+```
+
+- **Only gitignored files are copied.** A pattern can only select from what `git ls-files --others --ignored --exclude-standard` already reports, so a line naming a tracked file or a path outside the repository selects nothing — tracked files are already in the worktree, and nothing outside the repo is reachable. Directories are matched through to the files inside them, so `.local/` copies the whole tree.
+- **Copy, not symlink.** Editing an included file inside the worktree does not touch your main checkout.
+- **Non-fatal by design.** A missing or unreadable `.worktreeinclude`, or a failed copy, leaves the worktree usable without those files. The file is capped at 1 MB and 10,000 patterns; a larger file is ignored wholesale.
+- **Committed, so it is shared.** Everyone with push access can change which files a clone copies into its worktrees. Keep it to files you would be comfortable seeing in a colleague's worktree.
+- **Read at creation time.** A worktree created before you added a line does not retroactively receive the file.
+
+|                | `.worktreeinclude`                          | `worktree.symlinkDirectories`  |
+| -------------- | ------------------------------------------- | ------------------------------ |
+| **Configured** | `.worktreeinclude`, committed to the repo   | `settings.json`, per developer |
+| **Effect**     | copy (independent file)                     | symlink (shared file)          |
+| **Applies to** | worktrees created by the CLI and the daemon | same                           |
+
+Reach for a copy when an agent editing the file inside the worktree must not touch your main checkout — which is exactly the case for `.env`. Reach for a symlink when the content is large and read-mostly: copying `node_modules` costs gigabytes per worktree.
+
 ## Settings
 
 Two settings shape the general-purpose worktree experience:
@@ -331,6 +359,7 @@ The following items are intentionally not implemented in the current phase:
 
 - **No sparse checkout.** Large monorepos check out the full tree. (`worktree.sparsePaths` is a roadmap item.)
 - **No tmux integration.** The CLI does not spawn worktree sessions in new tmux windows.
+- **`.worktreeinclude` copies the whole matched set, with no size limit.** A pattern that reaches a large generated tree costs that tree's size per worktree; nothing deduplicates it the way a symlink would.
 - **Worktrees are separate "projects" for session storage.** Sessions started with `--worktree foo` are saved under that worktree's chats dir; to resume them later you must pass `--worktree foo` again. Sessions started without `--worktree` are saved under the main checkout and won't appear in the worktree's resume picker.
 - **No cross-slug session override.** `qwen --resume <sid> --worktree second` where `<sid>` was created with `--worktree first` will fail to find the session — sessions and worktrees are tightly bound by `projectHash(cwd)`. To switch worktrees on an existing session you must exit, then re-launch with the new `--worktree` and a fresh prompt. A future architectural change (anchoring storage at the repo root instead of `cwd`) would lift this constraint.
 - **Mid-session `enter_worktree` does NOT switch `process.cwd()` or `Config.targetDir`.** That tool uses the model-context-only convention (see [Sub-Agents](./sub-agents.md)). Only the startup `--worktree` flag actually switches the process working directory.
