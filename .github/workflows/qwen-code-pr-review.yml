@@ -674,6 +674,16 @@ jobs:
             ls -ld "$QWEN_HOME" || true
             exit 1
           fi
+          # A quarantined home (see above) keeps the foreign owner that made
+          # it unremovable, and it now sits at a name no other job looks at:
+          # triage's root container hands ownership back for the literal
+          # $QWEN_HOME only, and this job's own ladder matches that one name
+          # too. Without a sweep here, every quarantine would be permanent.
+          # Once triage has chowned a stale copy back, this user can delete
+          # it, so sweep the names the rung above mints — age-gated like the
+          # capture-tools sweep below, best-effort, and deliberately not
+          # matching $QWEN_HOME itself.
+          find "$RUNNER_TEMP" -maxdepth 1 -name 'qwen-home.stale-*' -mmin +240 -exec rm -rf {} + 2>/dev/null || true
           rm -f /tmp/stage-*.md 2>/dev/null || true
           # Stale per-run capture-tools dirs: 'Install capture tools' creates
           # them under RUNNER_TEMP (the promoted tool dir every run, plus a

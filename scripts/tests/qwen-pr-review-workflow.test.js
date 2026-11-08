@@ -17,6 +17,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -7922,11 +7923,14 @@ describe('stale agent-home reclaim guard (#16616)', () => {
         sudoStub,
         // 'deletes' emulates the reclaim a passwordless-sudo pool member
         // performs: make the target writable for this uid, then delete it.
-        // 'repairs' emulates the fallback's shape instead — the sudo rm leg
-        // fails and the chown leg is what hands the directory back, leaving
-        // the unprivileged retry to remove it.
+        // Keyed on the subcommand, because the ladder calls it twice — a stub
+        // that deleted on both legs would keep the primary reclaim's case
+        // green after that leg was deleted. 'repairs' emulates the fallback's
+        // shape instead — the sudo rm leg fails and the chown leg is what
+        // hands the directory back, leaving the unprivileged retry to remove
+        // it.
         sudoDeletes
-          ? '#!/bin/sh\nfor last in "$@"; do :; done\nchmod -R u+rwX "$last" 2>/dev/null || true\nexec rm -rf -- "$last"\n'
+          ? '#!/bin/sh\n[ "$2" = rm ] || exit 1\nfor last in "$@"; do :; done\nchmod -R u+rwX "$last" 2>/dev/null || true\nexec rm -rf -- "$last"\n'
           : sudoChownRepairs
             ? '#!/bin/sh\n[ "$2" = rm ] && exit 1\nfor last in "$@"; do :; done\nchmod -R u+rwX "$last"\n'
             : '#!/bin/sh\nexit 1\n',
@@ -7981,6 +7985,11 @@ describe('stale agent-home reclaim guard (#16616)', () => {
       expect(out.status).toBe(1);
       expect(out.stdout).toContain('stale qwen-home survives cleanup');
       expect(out.stdout).toContain(stale);
+      // The read-only parent is what refuses the rename, so the success line
+      // must not appear: an ungated echo would tell the operator a leftover
+      // was preserved at a path that was never created, right above the
+      // ::error:: that aborts the job.
+      expect(out.stdout).not.toContain('moved it to');
     } finally {
       chmodSync(runnerTemp, 0o755);
       rmSync(runnerTemp, { recursive: true, force: true });
@@ -8093,6 +8102,30 @@ describe('stale agent-home reclaim guard (#16616)', () => {
       }
     },
   );
+
+  it('drains a quarantined home once it passes the sweep age gate', () => {
+    // A quarantine keeps the foreign owner that made it unremovable, so the
+    // only deleter that can act on it is the unprivileged sweep — and only
+    // after triage's root container has handed the ownership back. The age
+    // gate is what spares a live review's leftover.
+    const runnerTemp = mkdtempSync(join(tmpdir(), 'qwen-home-guard-'));
+    const aged = join(runnerTemp, 'qwen-home.stale-20260101T000000Z-1');
+    const recent = join(runnerTemp, 'qwen-home.stale-20260101T000001Z-2');
+    try {
+      mkdirSync(aged);
+      mkdirSync(recent);
+      const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
+      utimesSync(aged, fiveHoursAgo, fiveHoursAgo);
+      const out = runGuard(runnerTemp);
+      expect(out.status, out.stderr).toBe(0);
+      expect(existsSync(aged)).toBe(false);
+      expect(existsSync(recent)).toBe(true);
+      // The sweep must not match the live home it sits next to.
+      expect(existsSync(join(runnerTemp, 'qwen-home'))).toBe(true);
+    } finally {
+      rmSync(runnerTemp, { recursive: true, force: true });
+    }
+  });
 
   it('keeps the step header honest about the fail-fast contract', () => {
     const stepIndex = workflow.indexOf("- name: 'Clean stale agent state'");

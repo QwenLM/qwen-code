@@ -10187,6 +10187,10 @@ describe('triage agent-state ownership hand-back (#16616)', () => {
     const run = restoreStep().run;
     for (const dir of [
       '"$QWEN_HOME"',
+      // A review quarantines a foreign-owned home instead of failing; that
+      // copy keeps the owner that made it unremovable, and this root
+      // container is the only body that can ever hand it back.
+      '"$RUNNER_TEMP"/qwen-home.stale-*',
       '"$RUNNER_TEMP/triage-drafts"',
       '"$RUNNER_TEMP/triage-results"',
       '"$RUNNER_TEMP/triage-context"',
