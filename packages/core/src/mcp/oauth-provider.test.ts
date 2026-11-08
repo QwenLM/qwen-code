@@ -1032,7 +1032,7 @@ describe('MCPOAuthProvider', () => {
       expect(mockFetch).toHaveBeenCalledTimes(2);
     });
 
-    it('should keep credentials saved by a re-authentication during a failing refresh', async () => {
+    it('should keep and return credentials saved by a re-authentication during a failing refresh', async () => {
       const tokenStorage = mockStoredToken(expiredToken(), true);
       const staleCredentials =
         (await tokenStorage.getCredentials('test-server'))!;
@@ -1064,7 +1064,9 @@ describe('MCPOAuthProvider', () => {
       await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledOnce());
       respond();
 
-      expect(await refresh).toBeNull();
+      // The waiter gets the new credentials, not a null that would make the
+      // caller back off while a usable token is stored.
+      expect(await refresh).toBe('reauth_access_token');
       expect(tokenStorage.deleteCredentials).not.toHaveBeenCalled();
       expect(await getValidToken()).toBe('reauth_access_token');
     });
@@ -1108,7 +1110,7 @@ describe('MCPOAuthProvider', () => {
       expect(mockFetch).toHaveBeenCalledTimes(2);
 
       respond();
-      expect(await staleRefresh).toBeNull();
+      expect(await staleRefresh).toBe('reauth_token');
       expect(tokenStorage.deleteCredentials).not.toHaveBeenCalled();
     });
 

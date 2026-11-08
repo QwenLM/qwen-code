@@ -612,52 +612,69 @@ describe('createTransport OAuth bearer token per request', () => {
     },
   );
 
-  it('does not let a late read put back a token older than one adopted since', async () => {
-    vi.useRealTimers();
-    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
-    const { handler } = stubAuthorizationServer();
-    const sent = stubMcpNetwork();
-    const transport = await transportFor({
-      httpUrl: 'https://mcp.example/mcp',
-    });
+  it.each([
+    { when: 'after', secondReadMs: 0 },
+    { when: 'while', secondReadMs: 4500 },
+  ])(
+    'does not let a late read put back an older token $when a later read finishes',
+    async ({ secondReadMs }) => {
+      vi.useRealTimers();
+      vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+      const { handler } = stubAuthorizationServer();
+      const sent = stubMcpNetwork();
+      const transport = await transportFor({
+        httpUrl: 'https://mcp.example/mcp',
+      });
 
-    // Another process already refreshed, but this read of storage is slow (a
-    // locked keychain) and returns its snapshot long after the wait.
-    vi.setSystemTime(Date.now() + 56 * 60 * 1000);
-    const snapshot: OAuthCredentials = {
-      ...storage.creds!,
-      token: {
-        ...storage.creds!.token,
-        accessToken: 'access-other-process',
-        expiresAt: Date.now() + HOUR_MS,
-      },
-    };
-    storage.getCredentials.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => setTimeout(() => resolve(snapshot), 40_000)),
-    );
-    const dueRequest = send(transport);
-    await vi.advanceTimersByTimeAsync(5000);
-    await dueRequest;
-    expect(sent.at(-1)?.authorization).toBe('Bearer access-0');
+      // Another process already refreshed, but this read of storage is slow (a
+      // locked keychain) and returns its snapshot 40s later, long after the wait.
+      vi.setSystemTime(Date.now() + 56 * 60 * 1000);
+      const snapshot: OAuthCredentials = {
+        ...storage.creds!,
+        token: {
+          ...storage.creds!.token,
+          accessToken: 'access-other-process',
+          expiresAt: Date.now() + HOUR_MS,
+        },
+      };
+      storage.getCredentials.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => setTimeout(() => resolve(snapshot), 40_000)),
+      );
+      const dueRequest = send(transport);
+      await vi.advanceTimersByTimeAsync(5000);
+      await dueRequest;
+      expect(sent.at(-1)?.authorization).toBe('Bearer access-0');
 
-    // A re-authentication replaces the credentials and drops the shared read;
-    // the next attempt picks the new credentials up.
-    storage.creds = {
-      ...snapshot,
-      token: { ...snapshot.token, accessToken: 'access-reauth' },
-    };
-    clearInflightTokenReadsForTest();
-    vi.setSystemTime(Date.now() + 31 * 1000);
-    await send(transport);
-    expect(sent.at(-1)?.authorization).toBe('Bearer access-reauth');
+      // A re-authentication replaces the credentials and drops the shared read.
+      // Once the back-off is over, a second read picks the new credentials up;
+      // the slow read returns 4s later, after or while the second one finishes.
+      const reauthenticated: OAuthCredentials = {
+        ...snapshot,
+        token: { ...snapshot.token, accessToken: 'access-reauth' },
+      };
+      storage.creds = reauthenticated;
+      clearInflightTokenReadsForTest();
+      if (secondReadMs) {
+        storage.getCredentials.mockImplementationOnce(
+          () =>
+            new Promise((resolve) =>
+              setTimeout(() => resolve(reauthenticated), secondReadMs),
+            ),
+        );
+      }
+      await vi.advanceTimersByTimeAsync(31_000);
+      const retry = send(transport);
+      await vi.advanceTimersByTimeAsync(4600);
+      await retry;
+      expect(sent.at(-1)?.authorization).toBe('Bearer access-reauth');
 
-    // The slow read finally returns its older snapshot.
-    await vi.advanceTimersByTimeAsync(35_000);
-    await send(transport);
-    expect(sent.at(-1)?.authorization).toBe('Bearer access-reauth');
-    expect(handler).not.toHaveBeenCalled();
-  });
+      await vi.advanceTimersByTimeAsync(40_000);
+      await send(transport);
+      expect(sent.at(-1)?.authorization).toBe('Bearer access-reauth');
+      expect(handler).not.toHaveBeenCalled();
+    },
+  );
 
   it('backs off a failing refresh also once the cached token has expired', async () => {
     const { handler } = stubAuthorizationServer();

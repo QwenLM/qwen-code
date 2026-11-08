@@ -1126,12 +1126,14 @@ export class MCPOAuthProvider {
         debugLogger.error(`Failed to refresh token: ${getErrorMessage(error)}`);
         // Only a refusal by the authorization server makes the stored token
         // useless; anything else may pass by the next attempt. Not even a
-        // refusal removes credentials a re-authentication replaced meanwhile.
+        // refusal removes credentials a re-authentication or another process
+        // replaced meanwhile; those are returned, as on the success path.
         if (isRefreshTokenRejected(error)) {
           const latest = await this.tokenStorage.getCredentials(serverName);
-          if (latest?.token.refreshToken === token.refreshToken) {
-            await this.tokenStorage.deleteCredentials(serverName);
+          if (latest?.token.refreshToken !== token.refreshToken) {
+            return latest?.token ?? null;
           }
+          await this.tokenStorage.deleteCredentials(serverName);
         }
       }
     }

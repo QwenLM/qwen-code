@@ -496,16 +496,18 @@ function createBearerTokenGetter(
   let cached = initialToken;
   let dueAt = refreshAfter(cached);
   // A read may return the snapshot it took when it started, so one that
-  // finishes after a later read was adopted (e.g. across a re-authentication)
-  // could put an older token back. A read's result is therefore adopted only
-  // if nothing was adopted since the read started. Expiry cannot decide this:
-  // a refresh may return a token that expires sooner than the one it replaces.
-  let adoptions = 0;
-  const adopt = (fresh: OAuthToken, adoptionsAtStart: number) => {
-    if (adoptions !== adoptionsAtStart) {
+  // finishes after a later-started read (e.g. across a re-authentication)
+  // could put an older token back. Reads are therefore numbered as they start,
+  // and a result is adopted only if no later-started read was adopted. Expiry
+  // cannot decide this: a refresh may return a token that expires sooner than
+  // the one it replaces.
+  let readsStarted = 0;
+  let adoptedRead = 0;
+  const adopt = (fresh: OAuthToken, readNumber: number) => {
+    if (readNumber <= adoptedRead) {
       return;
     }
-    adoptions += 1;
+    adoptedRead = readNumber;
     cached = fresh;
     dueAt = refreshAfter(fresh);
   };
@@ -516,7 +518,7 @@ function createBearerTokenGetter(
   return async () => {
     if (Date.now() >= dueAt) {
       let timer: NodeJS.Timeout | undefined;
-      const adoptionsAtStart = adoptions;
+      const readNumber = ++readsStarted;
       try {
         const read = authProvider.getValidOAuthToken(
           mcpServerName,
@@ -538,7 +540,7 @@ function createBearerTokenGetter(
               read.then(
                 (late) => {
                   if (late) {
-                    adopt(late, adoptionsAtStart);
+                    adopt(late, readNumber);
                   }
                 },
                 () => undefined,
@@ -548,8 +550,8 @@ function createBearerTokenGetter(
           }),
         ]);
         if (fresh) {
-          adopt(fresh, adoptionsAtStart);
-          return cached?.accessToken ?? fresh.accessToken;
+          adopt(fresh, readNumber);
+          return usableToken();
         }
       } catch (error) {
         debugLogger.warn(
