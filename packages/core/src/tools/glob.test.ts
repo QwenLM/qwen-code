@@ -152,6 +152,25 @@ describe('GlobTool', () => {
       }
     });
 
+    it('filters paths covered by a path-scoped Read deny rule', async () => {
+      const deniedFile = path.join(tempRootDir, 'fileA.txt');
+      const tool = toolWith({
+        getPermissionManager: () => ({
+          hasRelevantRules: () => true,
+          evaluate: async (context: { filePath?: string }) =>
+            context.filePath === deniedFile ? 'deny' : 'default',
+        }),
+      });
+
+      const result = await run({ pattern: '*.txt' }, tool);
+
+      expect(result.llmContent).not.toContain('fileA.txt');
+      expect(result.llmContent).toContain('FileB.TXT');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'FileB.TXT'),
+      ]);
+    });
+
     it('should find files case-insensitively by default (pattern: *.TXT)', async () => {
       expectFound(await run({ pattern: '*.TXT' }), 2, 'fileA.txt', 'FileB.TXT');
     });

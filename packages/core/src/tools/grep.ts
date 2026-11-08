@@ -29,6 +29,7 @@ import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 import { recordGrepResultFileReads } from './grepReadTracking.js';
+import { isPathDeniedByReadRule } from '../core/permission-helpers.js';
 
 const debugLogger = createDebugLogger('GREP');
 
@@ -164,6 +165,31 @@ class GrepToolInvocation extends BaseToolInvocation<
           seen.add(key);
           return true;
         });
+      }
+
+      // A workspace-wide Grep invocation is normally auto-approved, but
+      // path-scoped Read deny rules must still prevent matching file contents
+      // from being returned. Filter complete files before truncation so a
+      // denied file cannot leak through the line or character limits.
+      const permissionManager = this.config.getPermissionManager?.();
+      if (permissionManager) {
+        const deniedPaths = new Set<string>();
+        for (const match of rawMatches) {
+          if (
+            await isPathDeniedByReadRule(
+              permissionManager,
+              match.absoluteFilePath,
+              this.config.getTargetDir(),
+            )
+          ) {
+            deniedPaths.add(match.absoluteFilePath);
+          }
+        }
+        if (deniedPaths.size > 0) {
+          rawMatches = rawMatches.filter(
+            (match) => !deniedPaths.has(match.absoluteFilePath),
+          );
+        }
       }
 
       const filterDescription = this.params.glob

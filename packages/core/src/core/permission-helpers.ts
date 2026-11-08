@@ -103,6 +103,30 @@ export function buildPermissionCheckContext(
   };
 }
 
+/**
+ * Check whether a path-bearing search result is blocked by a Read rule.
+ *
+ * Search tools are allowed to scan a workspace by default, but their result
+ * sets must still honour path-scoped `Read(...)` deny rules.  Evaluating the
+ * result as the canonical read tool also applies the Read meta-category to
+ * grep/glob/list-directory callers.
+ */
+export async function isPathDeniedByReadRule(
+  pm: PermissionManager | null | undefined,
+  filePath: string,
+  targetDir: string,
+): Promise<boolean> {
+  if (!pm) return false;
+
+  const context = buildPermissionCheckContext(
+    'read_file',
+    { file_path: filePath },
+    targetDir,
+  );
+  if (!pm.hasRelevantRules(context)) return false;
+  return (await pm.evaluate(context)) === 'deny';
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PM evaluation
 // ─────────────────────────────────────────────────────────────────────────────

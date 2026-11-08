@@ -35,6 +35,7 @@ import {
   type GlobDirectoryReply,
   type GlobPath,
 } from './glob-search.js';
+import { isPathDeniedByReadRule } from '../core/permission-helpers.js';
 export type { GlobPath } from './glob-search.js';
 
 const debugLogger = createDebugLogger('GLOB');
@@ -287,7 +288,22 @@ class GlobToolInvocation extends BaseToolInvocation<
         }
       }
 
-      const filteredEntries = allFilteredEntries;
+      // Glob is auto-approved for workspace paths, but result paths still
+      // need to honour path-scoped Read deny rules. Filter before sorting and
+      // counting so denied names cannot leak in result metadata either.
+      const permissionManager = this.config.getPermissionManager?.();
+      const filteredEntries: GlobPath[] = [];
+      for (const entry of allFilteredEntries) {
+        if (
+          !(await isPathDeniedByReadRule(
+            permissionManager,
+            entry.fullpath(),
+            this.config.getTargetDir(),
+          ))
+        ) {
+          filteredEntries.push(entry);
+        }
+      }
 
       if (!filteredEntries || filteredEntries.length === 0) {
         return {
