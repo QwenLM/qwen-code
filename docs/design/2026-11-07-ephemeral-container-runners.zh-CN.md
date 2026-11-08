@@ -144,7 +144,22 @@ JIT 提供正常协议下的单任务注册语义；宿主机管理程序负责�
 保持当前路由。这样不把新镜像尚未验证的浏览器系统依赖一起迁入，也不改变
 现有分类 job 与其他 workflow 的路由镜像关系。
 
-池标签为 `ecs-qwen-ephemeral`，已部署的十个 runner 均为 ARM64。只注册
+2026-11-08 更新：两个无凭据任务此后已迁入本池。主 CI 的
+`Test (ubuntu-latest, Node 22.x)` 聚合门禁不 checkout 任何代码、只跑一条
+shell 比较，不依赖镜像里任何未验证的依赖。Web-shell Visuals 的 capture
+任务与本池安全模型完全一致（不可信 PR 代码、只读 token、仅事件级
+`GITHUB_TOKEN`），因此上面「不迁浏览器依赖」的排除对这一个任务不再适用：
+它在 self-hosted 前置检查后复用镜像自带 Node，先过磁盘水位门禁，并在
+运行时尽力安装 DejaVu 字体基线和 ffmpeg——Debian 归档出口受阻时降级为
+回退字体和仅 .webm 录制，而不是让预览失败。首次池上渲染仍需验收冷装
+耗时、apt 出口和字体度量。两个任务在 `MAINTAINER_ECS_RUNNER_DISABLED`
+下均回退托管。E2E OpenTUI 泳道刻意留在托管：它注入长期模型 secrets，
+本池边界禁止，需等独立受信池。聚合门禁不再跟随 `linux_runner` dispatch
+输入和 `LINUX_RUNNER_FLEET`，这是有意的——它与架构和 checkout 无关，
+舰队级 kill-switch 是其逃生通道。
+
+池标签为 `ecs-qwen-ephemeral`，首期部署注册了十个 ARM64 runner，
+2026-11-08 实时查询显示 hz4 上有 22 个在线槽位注册。只注册
 `self-hosted` 和这个专用标签，不注册通用 Linux、ARM64 标签，避免其他宽泛
 ARM64 选择器将无关任务送入本池。完整 PR CI 在新镜像上仍需验证。
 已记录的宿主机、网络和 runner 授权限制仍待解决，更换标签不会消除它们。

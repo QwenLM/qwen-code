@@ -183,7 +183,27 @@ keep their current routing. This avoids migrating browser system dependencies
 that the new image has not verified, and leaves the routing image relationship
 of the existing classifier job and the other workflows unchanged.
 
-The pool label is `ecs-qwen-ephemeral`; all ten deployed runners are ARM64.
+Update 2026-11-08: two credential-free jobs have since moved onto this pool.
+The main CI `Test (ubuntu-latest, Node 22.x)` aggregate gate checks out no code
+and runs a single shell comparison, so it needs none of the image's unverified
+dependencies. The Web-shell Visuals capture job matches the pool's security
+model exactly (untrusted PR code, read-only token, only the event-scoped
+`GITHUB_TOKEN`), which supersedes the browser-dependency exclusion above for
+this one job: it reuses the image's Node behind the self-hosted preflight,
+gates on the disk floor, and installs the DejaVu font baseline plus ffmpeg
+best-effort at runtime — a blocked Debian archive degrades to fallback fonts
+and .webm-only recordings instead of failing the preview. The first pooled
+render still needs acceptance for cold-install duration, apt egress and font
+metrics. Both jobs revert to hosted under `MAINTAINER_ECS_RUNNER_DISABLED`.
+The E2E OpenTUI leg deliberately stays hosted: it injects long-lived model
+secrets, which this pool's boundary forbids until a separate trusted pool
+exists. The aggregate gate no longer follows the `linux_runner` dispatch
+input or `LINUX_RUNNER_FLEET`; that is intentional — it is architecture- and
+checkout-independent, and the fleet-wide kill-switch is its escape hatch.
+
+The pool label is `ecs-qwen-ephemeral`; the initial deployment registered ten
+ARM64 runners, and the 2026-11-08 live query showed 22 online slot
+registrations on hz4.
 Register only `self-hosted` and this dedicated label, omitting generic Linux and
 ARM64 labels so existing broad ARM64 selectors cannot admit unrelated jobs.
 Full PR CI on the new image still has to be verified. The recorded

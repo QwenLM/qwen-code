@@ -71,11 +71,22 @@ jobs:
           persist-credentials: false
 
       - name: 'Set up Node.js 22.x'
+        if: "${{ runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
           package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      # The pool reuses the image's Node 22: nodejs.org may be unreachable
+      # through its egress proxy (the ci.yml / tui-parity split).
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
       - name: 'Cache pnpm store (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
@@ -93,6 +104,21 @@ jobs:
 
       - name: 'Install Playwright Chromium'
         run: 'npx playwright install --with-deps chromium'
+
+      # The slim pool image lacks the DejaVu baseline (#15383) and ffmpeg.
+      # One best-effort apt step supplies both: without the fonts the shots
+      # would render in a fallback family, without ffmpeg the inline GIFs
+      # degrade to .webm-only. A blocked Debian mirror warns and degrades
+      # instead of sinking the preview.
+      - name: 'Install font baseline and ffmpeg (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          if sudo -n apt-get update -qq \
+            && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends fonts-dejavu-core fonts-dejavu-mono ffmpeg; then
+            sudo -n fc-cache -f >/dev/null 2>&1 || true
+          else
+            echo "::warning::could not install fonts-dejavu/ffmpeg from the Debian archive; screenshots may use a fallback font and flow recordings stay .webm-only (no inline GIFs)."
+          fi
 
       - name: 'Choose web-shell Playwright port'
         run: |-

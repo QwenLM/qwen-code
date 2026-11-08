@@ -855,44 +855,82 @@ describe('credential-free jobs on the disposable pool', () => {
     );
     const runsOn = String(doc.jobs.capture['runs-on']);
     assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+    // The expression reads neither head.repo nor author_association (the
+    // repo clause is substituted to a constant), so one association sweep
+    // covers every fork and same-repo shape.
     for (const assoc of ASSOCIATIONS) {
-      for (const sameRepo of [true, false]) {
-        assert.deepEqual(
-          evalRunsOn(runsOn, {
-            ecsDisabled: false,
-            eventName: 'pull_request',
-            sameRepo,
-            assoc,
-          }),
-          EPHEMERAL,
-          `capture sameRepo=${sameRepo} assoc='${assoc}'`,
-        );
-        assert.deepEqual(
-          evalRunsOn(runsOn, {
-            ecsDisabled: true,
-            eventName: 'pull_request',
-            sameRepo,
-            assoc,
-          }),
-          JSON.parse(HOSTED),
-          'kill-switch must revert capture to hosted',
-        );
-      }
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: false,
+          eventName: 'pull_request',
+          sameRepo: false,
+          assoc,
+        }),
+        EPHEMERAL,
+        `capture assoc='${assoc}'`,
+      );
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: true,
+          eventName: 'pull_request',
+          sameRepo: false,
+          assoc,
+        }),
+        JSON.parse(HOSTED),
+        'kill-switch must revert capture to hosted',
+      );
     }
     // Only the event-scoped read-only GITHUB_TOKEN may reach the disposable
     // pool through this workflow; any other secret reference breaks the
-    // pool's no-long-lived-secrets boundary.
+    // pool's no-long-lived-secrets boundary. Both the dotted and the
+    // bracket-indexed access form are scanned.
     const text = readFileSync(
       join(workflowsDir, 'web-shell-visuals.yml'),
       'utf8',
     );
-    const secretRefs = text.match(/secrets\.[A-Za-z_]+/g) ?? [];
+    const secretRefs = [
+      ...(text.match(/secrets\.[A-Za-z_][A-Za-z0-9_]*/g) ?? []),
+      ...(text.match(/secrets\[\s*'[^']+'\s*\]/g) ?? []).map(
+        (ref) => `secrets.${ref.match(/'([^']+)'/)[1]}`,
+      ),
+    ];
     assert.deepEqual(
       [...new Set(secretRefs)],
       ['secrets.GITHUB_TOKEN'],
       'capture must not reference any secret beyond the read-only event token',
     );
     assert.equal(doc.permissions.contents, 'read');
+    // The pool half of the nodejs.org split (the tui-parity shape): the
+    // hosted setup-node download and pnpm cache stay hosted-only, the pool
+    // reuses the image's Node behind the preflight, and the disk floor
+    // fails fast before two full installs on a shared host.
+    const steps = doc.jobs.capture.steps;
+    const hostedOnly = steps.filter(
+      (s) =>
+        String(s.uses || '').startsWith('actions/setup-node') ||
+        s.uses === './.github/actions/pnpm-store-cache',
+    );
+    assert.equal(hostedOnly.length, 2);
+    for (const s of hostedOnly) {
+      assert.equal(s.if, "${{ runner.environment == 'github-hosted' }}");
+    }
+    const preflight = steps.find(
+      (s) => s.uses === './.github/actions/self-hosted-node',
+    );
+    assert.equal(preflight?.if, "${{ runner.environment == 'self-hosted' }}");
+    const diskFloor = steps.find((s) =>
+      String(s.run || '').includes('check-disk-floor.sh'),
+    );
+    assert.equal(diskFloor?.if, "${{ runner.environment == 'self-hosted' }}");
+    // The slim image needs the DejaVu baseline and ffmpeg at runtime; the
+    // install must stay best-effort so a blocked Debian mirror degrades
+    // the preview instead of sinking it.
+    const fonts = steps.find((s) =>
+      String(s.run || '').includes('fonts-dejavu-core'),
+    );
+    assert.equal(fonts?.if, "${{ runner.environment == 'self-hosted' }}");
+    assert.match(String(fonts.run), /ffmpeg/);
+    assert.match(String(fonts.run), /::warning::/);
   });
 });
 
