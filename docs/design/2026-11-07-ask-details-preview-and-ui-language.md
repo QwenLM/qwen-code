@@ -66,11 +66,14 @@ preview renderer, sandbox/CSP, and large-document gate are unchanged.
 Markdown, and image artifact card in every session reads "Preview", not only the
 ask-details card. This is intentional for consistency: those artifacts all open
 in a rendered preview tab. Non-rendered artifacts (e.g. CSV, PPTX) and external
-link artifacts keep "Open". `isRenderedArtifact` mirrors the panel's own rendered
-predicates — it normalises mime parameters (`text/html; charset=utf-8` →
-`text/html`) and honours `image/*` mime even without a path extension
-(`getArtifactImageMimeType`) — so a card never says "Open" for an artifact the
-panel would render. Both shapes are reachable via model-supplied `record_artifact`
+link artifacts keep "Open". `isRenderedArtifact` mirrors the panel's predicates
+for the relabelled kinds — it normalises mime parameters (`text/html; charset=utf-8`
+→ `text/html`) and honours `image/*` mime even without a path extension
+(`getArtifactImageMimeType`) — so HTML, Markdown, and image cards agree with the
+panel. PDF, DOCX, and XLSX cards keep "Open": the panel renders them through
+dedicated viewers (`WorkspacePdfPreview` / `DocxPreview` / `SpreadsheetPreview`),
+but they are outside this relabel's scope (pre-existing behaviour, unchanged
+here). The two mime shapes are reachable via model-supplied `record_artifact`
 input and are pinned by fixtures.
 
 ### Files affected

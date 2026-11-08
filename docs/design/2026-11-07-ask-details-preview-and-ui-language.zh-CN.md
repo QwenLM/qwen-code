@@ -52,10 +52,13 @@ artifact-tab 预览路径（不新增预览渲染器、不新增 tab 类型）�
 **影响范围。** relabel 基于 `isRenderedArtifact`，因此每个会话里的 HTML、Markdown、
 图片产物卡片都会显示「Preview」，不止问细节卡片。这是为一致性有意为之：这些产物
 都打开在渲染预览 tab。非渲染产物（如 CSV、PPTX）与外链产物保持「Open」。
-`isRenderedArtifact` 与面板自身的渲染谓词对齐——归一化 mime 参数
+`isRenderedArtifact` 就本次改标的类别与面板谓词对齐——归一化 mime 参数
 （`text/html; charset=utf-8` → `text/html`）、并在路径无扩展名时也认 `image/*`
-mime（`getArtifactImageMimeType`）——故卡片绝不会对面板会渲染的产物显示「Open」。
-这两种形状都可由模型经 `record_artifact` 输入产出，已有夹具钉住。
+mime（`getArtifactImageMimeType`）——故 HTML、Markdown、图片卡片与面板一致。
+PDF、DOCX、XLSX 卡片保持「Open」：面板经专门查看器渲染它们
+（`WorkspacePdfPreview` / `DocxPreview` / `SpreadsheetPreview`），但它们不在本次
+改标范围内（既有行为，此处未改）。这两种 mime 形状都可由模型经 `record_artifact`
+输入产出，已有夹具钉住。
 
 ### 涉及文件
 
