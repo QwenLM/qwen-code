@@ -258,9 +258,13 @@ cleanup turned out. The `!spawnCompleted` "no session exists" rationale
 belongs to the spawn-failed outer catch, a different block this PR does not
 change.
 
-Issue #11024 (the follow-up for the last two rows) also carries the
-reap-cleanup requirements gathered during this design's review, so they
-survive contact with implementation there rather than being re-derived:
+Issue #11024 (the follow-up for the last two rows) also carries the reap-cleanup
+requirements gathered during this design's review, so they survive contact with
+implementation there rather than being re-derived. They are the review's inputs,
+not the rules as built: `channel-worktree-orphan-reap.md` records the
+implemented cleanup, which departs from them in places — for example, of the two
+links only `supersededBy` refuses there, because refusing on `supersedes` as
+well left every post-reset worktree uncleanable. The requirements as gathered:
 
 - Place the deletion at the reap call site, as the create route does, never
   inside the shared `deleteDaemonSessionIfOrphan` primitive — the primitive's
@@ -830,8 +834,11 @@ owner rather than a proven one (see the redirect section below). The
 `supersededBy` value is only acted on when the session it names also claims to
 replace `S_old` for the same worktree. `isValidWorktreeSession` accepts both as
 optional strings. Readers that do not know the fields ignore them. Only the
-daemon route writes them; only the restore/reset paths read them. The registry,
-the marker format, and the sidecar's versionless shape otherwise stay unchanged.
+daemon route writes them. The restore and reset routes read both; the shared
+worktree-context restore that a session load or resume runs
+(`restoreWorktreeContext`), the `exit_worktree` tool's stale-marker check and
+the delete-path orphan cleanup (#11024) read `supersededBy`. The registry, the
+marker format, and the sidecar's versionless shape otherwise stay unchanged.
 
 ### Missing-marker restore signal
 

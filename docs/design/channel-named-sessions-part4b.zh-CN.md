@@ -212,7 +212,10 @@ definitively removed」（只有在会话已被确定移除时）才移除 check
 时的外层 catch，那是本 PR 不改动的另一个块。
 
 issue #11024（最后两行的后续工作）还承载了本设计评审期间收集到的回收清理要求，使
-它们在那里落到实现时依然有效，而不必重新推导：
+它们在进入实现阶段时不会丢失，而不必重新推导。这些是评审时的输入，不是最终实现的
+规则：`channel-worktree-orphan-reap.zh-CN.md` 记录了实际实现的清理，它在一些地方
+与这些要求不同——例如，两个链接中只有 `supersededBy` 会导致拒绝，因为对
+`supersedes` 也拒绝曾让每个 reset 之后的 worktree 都无法清理。收集到的要求如下：
 
 - 像 create 路由那样，把删除放在回收的调用点，绝不放进共享的
   `deleteDaemonSessionIfOrphan` 原语内部——该原语的其他调用点（ACP dispatch 回
@@ -671,8 +674,11 @@ owner（见下文「load/resume 时的 superseded 重定向」）。`supersedes`
 重试时的 resume 检查变成双向的，因此只有当 `supersededBy` 值所指的会话也声明自
 己针对同一个 worktree 替代了 `S_old` 时，才会依据该值采取
 行动。`isValidWorktreeSession` 把两者都作为可选字符串接受。不认识这些字段的读取
-方会忽略它们。只有 daemon 路由写入它们；只有 restore/reset 路径读取它们。除此之
-外，注册表、marker 格式以及 sidecar 不带版本号的结构都保持不变。
+方会忽略它们。只有 daemon 路由写入它们。restore 与 reset 路由读取这两个字段；会话
+load/resume 时运行的共享 worktree 上下文恢复（`restoreWorktreeContext`）、
+`exit_worktree` 工具的陈旧 marker 检查以及删除路径上的 orphan cleanup（#11024）
+读取 `supersededBy`。除此之外，注册表、marker 格式以及 sidecar 不带版本号的结构
+都保持不变。
 
 ### Marker 缺失时的 restore 信号
 
