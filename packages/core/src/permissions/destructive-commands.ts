@@ -373,16 +373,20 @@ function isDestructiveCommandUnchecked(
   // mentions the amend without a recognised invocation, and invocations whose
   // target commit cannot be attributed, route to the approval prompt instead
   // — issue #13570 accepts "allowed, or at worst an approval prompt".
+  // The ask is held, not returned: a command that also matches the IaC
+  // destroy floor below must stay hard-blocked, so only a positive block
+  // returns early (R16-3). The ask is returned after the IaC loop finds no
+  // match.
+  let amendAsk: DestructiveCommandResult | null = null;
   const recognition = classifyGitAmend(command);
   if (recognition === 'unprovable-text') {
-    return {
+    amendAsk = {
       blocked: false,
       ask: true,
       reason:
         'This command mentions "git commit --amend" in text the guard cannot prove inert. Routed to manual approval instead of blocking (issue #13570).',
     };
-  }
-  if (recognition === 'invocation') {
+  } else if (recognition === 'invocation') {
     const outcome = amendExemptionOutcome(cwd, command);
     if (outcome === 'foreign') {
       return {
@@ -392,7 +396,7 @@ function isDestructiveCommandUnchecked(
       };
     }
     if (outcome === 'unattributable') {
-      return {
+      amendAsk = {
         blocked: false,
         ask: true,
         reason:
@@ -414,7 +418,7 @@ function isDestructiveCommandUnchecked(
     }
   }
 
-  return null;
+  return amendAsk;
 }
 
 function userMentionsStack(userPrompt: string, toolName: string): boolean {

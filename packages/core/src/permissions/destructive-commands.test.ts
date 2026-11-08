@@ -196,6 +196,48 @@ describe('isDestructiveCommand — IaC patterns', () => {
     ];
     expectAllowed(safeCommands, 'deploy');
   });
+
+  // R16-3 regression: the amend ask channel must not swallow the IaC floor.
+  // Each command below also triggers the amend guard's ask (inert-unprovable
+  // text / unattributable target), but a positive IaC destroy match is a hard
+  // block and wins. Before the fix, the early amend-ask returns skipped the
+  // IaC loop entirely, downgrading these to a hook-waivable approval.
+  it('hard-blocks a destroy compounded with inert-unprovable amend text', () => {
+    expectBlocked(
+      'terraform destroy -auto-approve && echo git commit --amend >> notes.md',
+      'clean up',
+      'infrastructure destroy',
+    );
+  });
+
+  it('hard-blocks a destroy compounded with an unattributable amend', () => {
+    // A non-empty registry makes the exemption walk run; the dynamic `-C`
+    // target cannot be attributed, so the amend channel would ask.
+    registerSessionCommit('0'.repeat(40));
+    expectBlocked(
+      'terraform destroy -auto-approve && git -C "$X" commit --amend',
+      'clean up',
+      'infrastructure destroy',
+    );
+  });
+
+  it('keeps the amend ask when no IaC pattern matches', () => {
+    // Minimal pair of the first row: same amend text, no destroy — the ask
+    // channel survives for text-only commands (issue #13570 anchor shape).
+    expectAsk('echo git commit --amend >> notes.md', 'clean up');
+  });
+
+  it('still lets userMentionsStack decide when amend text is present', () => {
+    // The IaC gate keeps its prompt exemption: with the stack named, the
+    // destroy is intentional and only the held amend ask surfaces.
+    const result = isDestructiveCommand(
+      'terraform destroy -auto-approve && echo git commit --amend >> notes.md',
+      'terraform destroy the staging stack',
+    );
+    expect(result).not.toBeNull();
+    expect(result!.blocked).toBe(false);
+    expect(result!.ask).toBe(true);
+  });
 });
 
 describe('isDestructiveCommand — git commit --amend', () => {
