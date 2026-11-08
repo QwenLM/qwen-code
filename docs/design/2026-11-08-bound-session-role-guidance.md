@@ -191,6 +191,14 @@ within their own role group, so `current.role` always equals `delivery.role`
 there and the added half is inert; only legacy routing, which re-resolves the
 winner outright, can observe a role change.
 
+This refresh also MASKS the role that target selection attached, on a complete
+snapshot: revalidation refills it from `resolveBoundDelivery`, so deleting the
+role from `resolveBoundTargets` leaves the suite green. That branch is still
+load-bearing when revalidation is skipped — a partial or failed binding scan,
+where the frozen target is the only source of the role. A partial-snapshot test
+pins it, so the coverage does not depend on which snapshot a reader happens to
+imagine.
+
 ### Factual watch summaries
 
 | Type                    | Before                                                                                                          | After                                                |

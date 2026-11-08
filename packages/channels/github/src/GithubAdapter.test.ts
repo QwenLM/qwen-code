@@ -14083,6 +14083,39 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(prompt).not.toContain('[Operator instruction');
     });
 
+    it('keeps the role on a partial snapshot, where revalidation is skipped', async () => {
+      // On a COMPLETE snapshot delivery-time revalidation refills the role
+      // from resolveBoundDelivery, which masks the role that target selection
+      // attached. A partial or failed scan skips revalidation, so the frozen
+      // target is the only source of the role — this pins that half.
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'verify-session',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: true,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain('Role: verify');
+      expect(prompt).toContain(DEFAULT_BOUND_ROLE_GUIDANCE.verify);
+    });
+
     it('gives the fallback session its OWN role, not the gone session role', async () => {
       // The legacy gone-fallback scans every follower, so it can cross roles.
       // Reusing the first target's prompt hands the verifier the reviewer's

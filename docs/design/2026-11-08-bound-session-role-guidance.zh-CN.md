@@ -112,6 +112,8 @@ export const DEFAULT_BOUND_ROLE_GUIDANCE: Readonly<
 
 该比较现在也覆盖角色。角色化目标在自己的角色组内再解析，因此那里 `current.role` 恒等于 `delivery.role`，新增的这一半是惰性的；只有直接重新解析赢家的 legacy 路由才可能观察到角色变化。
 
+在完整快照下，这次刷新同时**遮蔽**了目标选择所附带的角色：再校验会从 `resolveBoundDelivery` 回填它，因此把角色从 `resolveBoundTargets` 删掉，套件仍然全绿。该分支在再校验被跳过时依然承重——绑定扫描为 partial 或失败时，被冻结的目标是角色的唯一来源。一条 partial 快照用例钉住它，使覆盖不依赖于读者恰好设想的是哪种快照。
+
 ### 事实化的监视摘要
 
 | 类型                     | 改动前                                                                                                          | 改动后                                               |
