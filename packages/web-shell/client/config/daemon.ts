@@ -10,6 +10,50 @@ export function getDaemonBaseUrl(): string {
   return getAllowedDaemonOrigin(raw);
 }
 
+/**
+ * Repeated `?fanout=` values validated into daemon origins. Fanout params
+ * name the hosts this page connects to simultaneously (multi-daemon view,
+ * #13727): the served CSP covers exactly the `daemon` + `fanout` set, so a
+ * focused-host switch inside that set never reloads the document. The page
+ * origin is dropped — `'self'` already covers it.
+ */
+export function getFanoutOrigins(): string[] {
+  if (typeof window === 'undefined') return [];
+  const seen = new Set<string>();
+  for (const raw of new URLSearchParams(window.location.search).getAll(
+    'fanout',
+  )) {
+    const origin = getAllowedDaemonOrigin(raw);
+    if (origin && origin !== window.location.origin) seen.add(origin);
+  }
+  return [...seen];
+}
+
+/**
+ * Point the URL's `fanout` params at exactly `origins`, preserving every
+ * other param. `replaceState` only: this cannot widen the CURRENT document's
+ * CSP (the header is fixed at load) — it keeps the NEXT load in sync, so the
+ * host set stays covered without a reload. A newly-connected host therefore
+ * navigates once before it can be used; every switch after that is in-app.
+ */
+export function syncFanoutParams(origins: readonly string[]): void {
+  if (typeof window === 'undefined') return;
+  const seen = new Set(
+    origins.filter((origin) => origin !== window.location.origin),
+  );
+  const url = new URL(window.location.href);
+  const current = new Set(url.searchParams.getAll('fanout'));
+  if (
+    current.size === seen.size &&
+    [...seen].every((origin) => current.has(origin))
+  ) {
+    return;
+  }
+  url.searchParams.delete('fanout');
+  for (const origin of seen) url.searchParams.append('fanout', origin);
+  window.history.replaceState(window.history.state, '', url);
+}
+
 function isLoopbackHostname(hostname: string): boolean {
   const ipv4 = hostname.split('.');
   return (
@@ -272,6 +316,18 @@ export function getAllowedDaemonOrigin(raw: string): string {
   }
 }
 
+export function isDaemonMixedContent(daemonOrigin: string): boolean {
+  if (typeof window === 'undefined' || window.location.protocol !== 'https:') {
+    return false;
+  }
+  const target = new URL(daemonOrigin || window.location.origin);
+  return (
+    target.protocol === 'http:' &&
+    !isLoopbackHostname(target.hostname) &&
+    !target.hostname.endsWith('.localhost')
+  );
+}
+
 export function buildDaemonConnectionUrl(
   raw: string,
   currentHref: string,
@@ -378,25 +434,8 @@ export function navigateToDaemon(
   // just the same: this navigation stays in the same tab, so the entry would
   // survive and boot the next daemon into a split of sessions it has never had.
   clearSplitSessions();
-  // `nextUrl` drops `?token=` and clears the hash, so a credential that lives
-  // only in the URL cannot survive this navigation — and the invalid-target
-  // boot path deliberately leaves one there for recovery, with this escape
-  // hatch as its only exit. Salvage it under the page origin's key, and only
-  // when the page is not already pointed at some other daemon — a URL token
-  // belongs to the target in the address bar, never to a replacement.
-  if (
-    token === undefined &&
-    daemonOrigin === window.location.origin &&
-    daemonOrigin === previousDaemonOrigin
-  ) {
-    const fromUrl = readTokenFromLocation();
-    if (fromUrl) persistDaemonToken(fromUrl, daemonOrigin);
-  }
-  // Past this point the credential rides on storage alone, so ask the key this
-  // navigation lands on — not hasReloadSurvivableDaemonToken(), which answers
-  // for the target being left. With the write refused the switch would land
-  // unauthenticated while reporting success. An empty token means the daemon
-  // needs none, so there is nothing to lose.
+  // The fragment belongs to the rejected target, so do not persist it under
+  // the page origin's storage key when the escape hatch changes targets.
   if (
     token?.trim() &&
     readStoredDaemonToken(daemonTokenStorageKey(daemonOrigin)) === undefined

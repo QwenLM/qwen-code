@@ -57,6 +57,8 @@ import type {
   InstructionLoadReason,
   BackgroundTaskInfo,
   CronJobInfo,
+  FileChangedInput,
+  FileChangeEvent,
 } from './types.js';
 import {
   createHookOutput,
@@ -90,6 +92,15 @@ const debugLogger = createDebugLogger('TRUSTED_HOOKS');
  * across every HookEventHandler and every MessageBus in this process.
  */
 let hookInvocationSerial = 0;
+
+export interface ManagedHookDispatcher {
+  hasHooksForEvent(eventName: string): boolean;
+  execute(
+    eventName: HookEventName,
+    input: HookInput,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult>;
+}
 
 /** Longest prompt text used as a hook's display name. */
 const HOOK_DISPLAY_NAME_MAX_LENGTH = 80;
@@ -208,6 +219,24 @@ export class HookEventHandler {
   /** Optional provider for conversation history */
   private messagesProvider?: MessagesProvider;
 
+  async fireFileChangedEvent(
+    filePath: string,
+    event: FileChangeEvent,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: FileChangedInput = {
+      ...this.createBaseInput(HookEventName.FileChanged),
+      file_path: filePath,
+      event,
+    };
+    return this.executeHooks(
+      HookEventName.FileChanged,
+      input,
+      { filePath },
+      signal,
+    );
+  }
+
   constructor(
     config: Config,
     hookPlanner: HookPlanner,
@@ -216,6 +245,7 @@ export class HookEventHandler {
     sessionHooksManager: SessionHooksManager,
     messagesProvider?: MessagesProvider,
     private readonly runtimeId: string = randomUUID(),
+    private readonly managedDispatcher?: ManagedHookDispatcher,
   ) {
     this.config = config;
     this.hookPlanner = hookPlanner;
@@ -935,6 +965,17 @@ export class HookEventHandler {
     context?: HookEventContext,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
+    if (this.managedDispatcher) {
+      if (!this.managedDispatcher.hasHooksForEvent(eventName)) {
+        return { success: true, allOutputs: [], errors: [], totalDuration: 0 };
+      }
+      const messages = this.messagesProvider?.();
+      const managedInput = {
+        ...input,
+        ...(messages ? { messages: structuredClone(messages) } : {}),
+      };
+      return this.managedDispatcher.execute(eventName, managedInput, signal);
+    }
     const failClosedResult: AggregatedHookResult = {
       success: false,
       allOutputs: [],
@@ -985,7 +1026,7 @@ export class HookEventHandler {
           : [];
       // The second side of the project-skill trust gate: a hook registered
       // from a repository's `.qwen/skills/` frontmatter (`trustGated`) runs
-      // only while the folder is STILL trusted. `Config.isTrustedFolder()`
+      // only while the folder is STILL trusted. `Config.isExplicitlyTrustedFolder()`
       // is live under an IDE connection, so a revocation mid-session
       // silences the hook at its next event without a restart or any
       // per-skill unregistration; trust granted again lets it fire. Only
@@ -994,7 +1035,8 @@ export class HookEventHandler {
         (entry) => entry.trustGated === true,
       )
         ? registeredSessionHooks.filter(
-            (entry) => !entry.trustGated || this.config.isTrustedFolder(),
+            (entry) =>
+              !entry.trustGated || this.config.isExplicitlyTrustedFolder(),
           )
         : registeredSessionHooks;
       if (sessionHooks.length !== registeredSessionHooks.length) {

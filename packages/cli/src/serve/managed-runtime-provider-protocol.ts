@@ -22,12 +22,20 @@ import {
   parseManagedToolFileHistoryState,
   type ManagedToolFileHistoryBinding,
 } from '@qwen-code/qwen-code-core/tools/managed-tool-file-history-protocol.js';
+import {
+  historyPath,
+  parseHostedFileHistoryState,
+  type RawFileHistoryOperation,
+} from './hosted-file-history-protocol.js';
 import { isShellResultDisplay } from '@qwen-code/qwen-code-core/utils/shell-result.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { ToolConfirmationPayload } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { ManagedToolConfirmationPhase } from '@qwen-code/qwen-code-core/tools/managed-tool-runtime.js';
+import { managedToolResponseMediaBytes } from '../acp-integration/managed-tool-media.js';
 
 export const MANAGED_RUNTIME_PROVIDER_PROTOCOL = 'managed-runtime-provider/1';
+export const MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES = 768 * 1024;
+export const MAX_PROVIDER_MEDIA_RESULT_BYTES = 896 * 1024;
 export const MANAGED_RUNTIME_PROVIDER_ROUTE = Object.freeze({
   key: 'provider-control',
   method: 'POST',
@@ -38,6 +46,26 @@ export const MANAGED_RUNTIME_PROVIDER_ROUTE = Object.freeze({
   cacheControl: 'no-store',
 } as const);
 
+/**
+ * The project instruction files a Hosted turn reads from the Session's
+ * working directory, in prompt order.
+ */
+export const MANAGED_WORKSPACE_CONTEXT_FILES = [
+  'QWEN.md',
+  'AGENTS.md',
+] as const;
+
+/**
+ * Each file's text is capped in characters so the whole result stays under
+ * the 1 MiB control limit even when every character JSON-escapes to six bytes.
+ */
+export const MANAGED_WORKSPACE_CONTEXT_FILE_CHARS = 64 * 1024;
+
+export interface ManagedWorkspaceContextFile {
+  name: (typeof MANAGED_WORKSPACE_CONTEXT_FILES)[number];
+  text: string;
+}
+
 export interface ManagedRuntimeProviderSession {
   readonly harnessSessionId: string;
   readonly runtimeSessionId: string;
@@ -45,7 +73,8 @@ export interface ManagedRuntimeProviderSession {
 }
 
 export type ManagedRuntimeProviderControl =
-  | { kind: 'manifest' | 'history' }
+  | RawFileHistoryOperation
+  | { kind: 'manifest' | 'history' | 'workspace-context' }
   | { kind: 'begin-turn'; identity: ManagedToolCallIdentity }
   | {
       kind: 'prepare';
@@ -194,10 +223,30 @@ export function parseManagedRuntimeProviderOperation(
   if (!boundedByCaller)
     managedToolDigest(value, managedRuntimeProviderLimit(kind));
   switch (kind) {
+    case 'raw-file-history': {
+      const action = op['action'];
+      if (action === 'bind') {
+        keys(op, ['kind', 'action', 'state']);
+        if (op['state'] !== null)
+          parseHostedFileHistoryState(op['state'], session.harnessSessionId);
+      } else if (action === 'prepare') {
+        keys(op, ['kind', 'action', 'promptId', 'paths']);
+        parseManagedToolFileHistoryPromptId(op['promptId']);
+        if (!Array.isArray(op['paths']) || !op['paths'].length)
+          throw new ManagedRuntimeProviderProtocolError();
+        op['paths'].forEach(historyPath);
+      } else if (action === 'rewind') {
+        keys(op, ['kind', 'action', 'promptId']);
+        parseManagedToolFileHistoryPromptId(op['promptId']);
+      } else if (action === 'snapshot') keys(op, ['kind', 'action']);
+      else throw new ManagedRuntimeProviderProtocolError();
+      break;
+    }
     case 'acquire':
     case 'release':
     case 'manifest':
     case 'history':
+    case 'workspace-context':
       keys(op, ['kind']);
       break;
     case 'begin-turn':
@@ -342,6 +391,61 @@ export function parseManagedRuntimeProviderResult(
   }
   const result = object(value);
   switch (operation.kind) {
+    case 'raw-file-history': {
+      if (operation.action !== 'rewind')
+        return parseHostedFileHistoryState(value, session.harnessSessionId);
+      keys(result, ['state', 'filesChanged', 'filesFailed', 'conflict']);
+      const state = parseHostedFileHistoryState(
+        result['state'],
+        session.harnessSessionId,
+      );
+      if (
+        !Array.isArray(result['filesChanged']) ||
+        !Array.isArray(result['filesFailed']) ||
+        typeof result['conflict'] !== 'boolean'
+      )
+        throw new ManagedRuntimeProviderProtocolError();
+      result['filesChanged'].forEach(historyPath);
+      result['filesFailed'].forEach(historyPath);
+      if (
+        new Set(result['filesChanged']).size !==
+          result['filesChanged'].length ||
+        result['filesChanged'].some(
+          (file) => !Object.hasOwn(state.files, file),
+        ) ||
+        !state.snapshots.some(
+          (snapshot) => snapshot.promptId === operation.promptId,
+        ) ||
+        (result['conflict'] && result['filesChanged'].length !== 0)
+      )
+        throw new ManagedRuntimeProviderProtocolError(
+          'Invalid Hosted file history rewind outcome.',
+        );
+      break;
+    }
+    case 'workspace-context': {
+      keys(result, ['files']);
+      if (!Array.isArray(result['files']))
+        throw new ManagedRuntimeProviderProtocolError();
+      let next = 0;
+      for (const entry of result['files']) {
+        const file = object(entry);
+        keys(file, ['name', 'text']);
+        const index = MANAGED_WORKSPACE_CONTEXT_FILES.indexOf(
+          file['name'] as ManagedWorkspaceContextFile['name'],
+        );
+        if (
+          index < next ||
+          typeof file['text'] !== 'string' ||
+          file['text'].length > MANAGED_WORKSPACE_CONTEXT_FILE_CHARS
+        )
+          throw new ManagedRuntimeProviderProtocolError(
+            'Invalid Workspace context result.',
+          );
+        next = index + 1;
+      }
+      return result['files'] as ManagedWorkspaceContextFile[];
+    }
     case 'bind-history':
     case 'checkpoint':
     case 'history': {
@@ -662,6 +766,8 @@ function providerFitLevel(
  * through `firstAvailableSeq`/`progressGap`), then bulk text fields are cut
  * head-and-tail with an inline notice; `truncated` is set on shell displays.
  * Mutates and returns `value`; the caller owns a JSON-round-tripped copy.
+ * Invalid or unadmitted media is refused before fitting. An impossible media
+ * envelope is refused after auxiliary fields may have been trimmed.
  */
 export function fitManagedRuntimeProviderResult(
   operation: ManagedRuntimeProviderOperation,
@@ -678,11 +784,45 @@ export function fitManagedRuntimeProviderResult(
   const root = value as Record<string, unknown>;
   const fits = () =>
     Buffer.byteLength(JSON.stringify(root), 'utf8') <= budgetBytes;
-  if (fits()) return value;
   const status = operation.kind === 'execute' ? undefined : root;
   const execution = (
     operation.kind === 'execute' ? root : status?.['result']
   ) as Record<string, unknown> | undefined;
+  const toolResult = execution?.['result'];
+  const content =
+    toolResult && typeof toolResult === 'object' && !Array.isArray(toolResult)
+      ? (toolResult as Record<string, unknown>)['llmContent']
+      : undefined;
+  const mediaResult = (Array.isArray(content) ? content : [content]).some(
+    (part) =>
+      part !== null &&
+      typeof part === 'object' &&
+      !Array.isArray(part) &&
+      Object.hasOwn(part, 'inlineData'),
+  );
+  if (mediaResult) {
+    let mediaBytes: number;
+    try {
+      mediaBytes = managedToolResponseMediaBytes(
+        { executionStatus: execution?.['executionStatus'], result: toolResult },
+        'execute',
+      );
+    } catch {
+      throw new ManagedRuntimeProviderProtocolError(
+        'Managed Runtime provider returned invalid inline media.',
+      );
+    }
+    if (
+      mediaBytes > MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES ||
+      Buffer.byteLength(JSON.stringify(toolResult), 'utf8') >
+        MAX_PROVIDER_MEDIA_RESULT_BYTES
+    ) {
+      throw new ManagedRuntimeProviderProtocolError(
+        'Managed Runtime provider media result exceeds its admitted budget.',
+      );
+    }
+  }
+  if (fits()) return value;
 
   // 1. Evict oldest progress events; they re-derive from the settled result.
   const progress = status?.['progress'];
@@ -717,6 +857,58 @@ export function fitManagedRuntimeProviderResult(
         break;
       retained = retained.slice(1);
     }
+  }
+
+  // The Runtime already retained this result. Only auxiliary fields may be
+  // fitted; changing the media or its caption would create another receipt.
+  if (mediaResult && execution) {
+    if (!fits()) {
+      const hook = execution['postHook'];
+      if (
+        hook &&
+        typeof hook === 'object' &&
+        !Array.isArray(hook) &&
+        typeof (hook as Record<string, unknown>)['shouldStop'] === 'boolean'
+      ) {
+        const fields = hook as Record<string, unknown>;
+        const reason = fields['stopReason'];
+        const hookError = fields['hookError'];
+        execution['postHook'] = {
+          shouldStop: fields['shouldStop'],
+          ...(typeof reason === 'string'
+            ? {
+                stopReason: reason,
+              }
+            : {}),
+          ...(typeof hookError === 'string' ? { hookError } : {}),
+        };
+      } else {
+        delete execution['postHook'];
+      }
+      delete execution['failureHook'];
+      const retained = execution['postHook'] as
+        | Record<string, unknown>
+        | undefined;
+      if (retained) {
+        const diagnostics = ['stopReason', 'hookError']
+          .filter((field) => typeof retained[field] === 'string')
+          .sort(
+            (a, b) =>
+              Buffer.byteLength(retained[b] as string, 'utf8') -
+              Buffer.byteLength(retained[a] as string, 'utf8'),
+          );
+        for (const field of diagnostics) {
+          if (fits()) break;
+          retained[field] =
+            `Runtime Hook ${field} omitted to fit the media response.`;
+        }
+      }
+    }
+    if (!fits())
+      throw new ManagedRuntimeProviderProtocolError(
+        'Managed Runtime provider media observation exceeds its wire budget.',
+      );
+    return value;
   }
 
   // 2. Cut the bulk text fields once, down to one common size. Each field is
@@ -769,8 +961,8 @@ export function fitManagedRuntimeProviderResult(
     }
   }
 
-  // 3. Last resort: when even that cannot fit (content the cut cannot reach,
-  //    such as inline media), the model content becomes an explicit stub so
+  // 3. Last resort: when other content the cut cannot reach cannot fit,
+  //    the model content becomes an explicit stub so
   //    the terminal observation always fits.
   if (!fits() && execution) {
     const result = execution['result'];

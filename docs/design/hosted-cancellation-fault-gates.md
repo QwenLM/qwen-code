@@ -20,12 +20,16 @@ separate processes. No production protocol or behavior change is proposed.
 | Case                 | Injection                                                           | Required result                                                                                                                                                             |
 | -------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `prepared`           | Cancel through the Harness API while the real prepare reply is held | No start, Runtime execute or Runtime cancel; dispatch generation zero; cancelled result and Turn; released owner; cold load succeeds                                        |
-| `running`            | Cancel after Edit enters a FIFO read                                | Cancellation first remains pending with no terminal Turn or result and the same owner; only after the operation returns may the cancelled Turn settle and ownership release |
+| `running`            | Cancel after Edit enters the worker read barrier                    | Cancellation first remains pending with no terminal Turn or result and the same owner; only after the operation returns may the cancelled Turn settle and ownership release |
 | `status-unavailable` | After running cancellation, fail the Harness's status request       | Session blocks, with no terminal Turn, outcome commit or release; later physical settlement cannot unblock it; cold load returns exact recovery-required 409                |
 | `cancel-reply`       | Drop the real running-cancel reply after it applied                 | Same blocked contract, even after best-effort cancellation and later physical settlement; every request retains the original execution identity                             |
 
-A nonblocking FIFO writer can open only once the actual Edit is reading. Keep
-that writer open without input while testing cancellation. Observe the real
+The worker imports the test-only `hosted-file-read-gate.mjs` wrapper around
+`fs.promises.readFile`. After backup preparation, the driver creates
+`proof.txt.read-gate` before forwarding start. The wrapper writes
+`proof.txt.read-entered` when native Edit reaches the read and waits until the
+gate is removed before calling the original reader. Keep the regular file
+unchanged as `x` while testing cancellation. Observe the real
 Runtime transport without changing its results: prepared cancellation has zero
 execute/cancel calls, and running cancellation has no completed execute yet.
 Independent JDBC checks require `CANCEL_REQUESTED`, null result, the original
@@ -33,7 +37,7 @@ storage owner, an `await_runtime` checkpoint and no terminal/result records.
 
 For the confirmed running case, hold the first post-cancel status reply while
 checking these facts. For the two unavailable-confirmation cases, keep the tool
-parked until the Harness reports blocked. Then supply `x` and close the writer.
+parked until the Harness reports blocked. Then remove `proof.txt.read-gate`.
 The real Edit may finish its one write as `xx` even though its execution status
 is cancelled: this profile's Edit is not interrupted halfway through its file
 read. Only prepared cancellation guarantees zero physical effects.
@@ -48,16 +52,17 @@ or Broker during reload. A decoy file in the Harness directory stays unchanged.
 ## Implementation boundaries
 
 - `integration-tests/helpers/hosted-cancellation-driver.ts`: actual HTTP faults,
-  FIFO coordination, public status/transcript checks and fresh-Harness reload.
+  worker read-barrier coordination, public status/transcript checks and fresh-Harness reload.
 - `HostedWorkspaceToolTurnIT.java`: add the four-case test to the existing real
   database fixture. Existing Hosted CI selection automatically includes it.
 - A test-only cancellation probe: observe real Runtime calls and inspect SQL
   during the barrier and after completion, independently of driver assertions.
 
 Use bounded HTTP, driver and test deadlines, restore transport observation on
-exit, close FIFO handles and forcibly terminate and reap this fixture's owned
-workers, including failures before a FIFO writer opens. Preserve
-existing normal/FG6a/FG6b/FG6c gates. Keep documentation in both languages.
+exit, close driver-owned listeners and let the parent fixture forcibly terminate
+and reap its owned workers, including failures before read-barrier entry. Do not
+remove a held read gate during uncertain-effect cleanup merely to unblock Edit.
+Preserve existing normal/FG6a/FG6b/FG6c gates. Keep documentation in both languages.
 
 ## Validation and acceptance
 
@@ -76,4 +81,6 @@ not count. Restore the exact source and runtime before final verification.
 Audit the full diff in open-ended and reverse passes until two consecutive
 passes are clean. After round five, accept only Critical fixes. No Shell/provider
 cancellation, SSE recovery, automatic continuation, orphan adoption, reclamation
-or Windows FIFO support is included. No unresolved design question remains.
+or native Windows execution validation is included. The read barrier uses
+regular files; the current process fixture still relies on POSIX process cleanup.
+No unresolved design question remains.

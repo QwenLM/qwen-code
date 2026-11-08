@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-base",
-  "version": "0.24.7",
+  "version": "0.27.0",
   "description": "Base channel infrastructure for Qwen Code",
   "repository": {
     "type": "git",
@@ -18,6 +18,10 @@
     "./recallTokenizer": {
       "types": "./dist/recall-tokenizer.d.ts",
       "default": "./dist/recall-tokenizer.js"
+    },
+    "./markdown-chunks": {
+      "types": "./dist/markdown-chunks.d.ts",
+      "default": "./dist/markdown-chunks.js"
     }
   },
   "files": [
@@ -29,9 +33,13 @@
     "test:ci": "vitest run"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.14.1"
+    "@agentclientprotocol/sdk": "^0.14.1",
+    "remark-gfm": "^4.0.0",
+    "remark-parse": "^11.0.0",
+    "unified": "^11.0.0"
   },
   "devDependencies": {
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "@types/mdast": "^4.0.4"
   }
 }

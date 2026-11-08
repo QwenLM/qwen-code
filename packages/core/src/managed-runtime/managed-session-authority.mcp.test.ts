@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -83,7 +84,10 @@ it('reopens MCP chains and resource closure without tasks, preserves unknown ope
       transcriptPath,
     });
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',
@@ -286,6 +290,21 @@ it('reopens MCP chains and resource closure without tasks, preserves unknown ope
     await expect(
       reopened.authority.commitExtensionRecord(
         command('operation-2'),
+        { domain: 'mcp_operation', record: newOperation },
+        actor,
+      ),
+    ).rejects.toThrow('active committed configuration');
+    await reopened.authority.commitExtensionRecord(
+      command('drain-receipt'),
+      {
+        domain: 'mcp_configuration',
+        record: { ...releasing, releaseState: 'drained' },
+      },
+      actor,
+    );
+    await expect(
+      reopened.authority.commitExtensionRecord(
+        command('operation-after-drain'),
         { domain: 'mcp_operation', record: newOperation },
         actor,
       ),

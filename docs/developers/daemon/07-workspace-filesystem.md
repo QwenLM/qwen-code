@@ -5,13 +5,13 @@
 Daemon HTTP file routes and ordinary delegated ACP `readTextFile` / `writeTextFile` calls go through the `WorkspaceFileSystem` boundary (`packages/cli/src/serve/fs/`), which provides:
 
 - **Path resolution** — canonicalize paths and reject anything escaping the bound workspace, including via symlinks.
-- **Trust gating** — refuse writes when the workspace is not trusted (`untrusted_workspace`).
+- **Trust gating** — refuse writes, edits, and deletes when the workspace is not trusted (`untrusted_workspace`).
 - **Size & content policy** — full-snapshot/output cap (`MAX_READ_BYTES = 256 KiB`), large-text windows bounded in both output and scan cost (`MAX_TEXT_SCAN_BYTES = 8 MiB`), write cap (`MAX_WRITE_BYTES = 5 MiB`), binary detection.
 - **Atomicity** — write-then-rename with target mode preservation; new files default to `0o600`, or follow the process umask under the factory's `system` new-file mode policy (`QWEN_SERVE_NEW_FILE_MODE`).
 - **Audit** — every access / denial emits a structured event for `PermissionAuditRing` / monitoring.
 - **Typed errors** — closed `FsErrorKind` union mapped to HTTP statuses.
 
-The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST /file/edit`, `GET /list`, `GET /glob`, `GET /stat`) use this boundary and never receive the same-host exception. In the production daemon, ACP calls that remain delegated reach the injected bridge adapter; generic bridge callers use WFS only when they inject such an adapter. Production same-host `qwen serve` runtimes advertise `readTextFile: false`, so all child `FileSystemService.readTextFile` consumers use the regular CLI filesystem service. Final ACP `writeTextFile` content writes remain delegated: workspace targets use WFS, while a strict built-in-tool marker may select an equivalent host writer for an external path only on daemon-created same-host adapters. See [the external write design](../../design/daemon-external-tool-text-writes.md).
+The HTTP file routes (`GET /file`, `GET /file/bytes`, `POST /file/write`, `POST /file/edit`, `GET /list`, `GET /glob`, `GET /stat`) and the local directory routes (`POST /workspaces/:workspace/directory/create`, `POST /workspaces/:workspace/directory/delete`) use this boundary and never receive the same-host exception. In the production daemon, ACP calls that remain delegated reach the injected bridge adapter; generic bridge callers use WFS only when they inject such an adapter. Production same-host `qwen serve` runtimes advertise `readTextFile: false`, so all child `FileSystemService.readTextFile` consumers use the regular CLI filesystem service. Final ACP `writeTextFile` content writes remain delegated: workspace targets use WFS, while a strict built-in-tool marker may select an equivalent host writer for an external path only on daemon-created same-host adapters. See [the external write design](../../design/daemon-external-tool-text-writes.md).
 
 That text-read capability slice covers direct `read_file` plus the shared pre-reads used by write, edit, notebook, sed, and artifact operations:
 
@@ -27,7 +27,7 @@ That text-read capability slice covers direct `read_file` plus the shared pre-re
 - Resolve user-supplied paths into branded `ResolvedPath` values that the rest of the boundary can safely use.
 - Refuse paths outside the bound workspace (`path_outside_workspace`) and paths whose target is a symlink (`symlink_escape`).
 - Refuse full-snapshot reads above `MAX_READ_BYTES`, while allowing explicit windows with output capped at `MAX_READ_BYTES` and scan cost capped at `MAX_TEXT_SCAN_BYTES`; refuse writes above `MAX_WRITE_BYTES` and binary files (`binary_file`).
-- Refuse writes/edits when the workspace is untrusted (`untrusted_workspace`) — gated by `assertTrustedForIntent(trusted, intent)`.
+- Refuse writes/edits/deletes when the workspace is untrusted (`untrusted_workspace`) — gated by `assertTrustedForIntent(trusted, intent)`.
 - Honor `.gitignore` / `.qwenignore` patterns via `shouldIgnore`.
 - Perform atomic write-then-rename with target mode preservation; new files default to `0o600` (umask-derived `0o666 & ~umask` under the `system` new-file mode policy).
 - Emit `fs.access` / `fs.denied` audit events on every operation.
@@ -37,32 +37,32 @@ That text-read capability slice covers direct `read_file` plus the shared pre-re
 
 ### Module layout
 
-| File                       | Purpose                                                                                                                                                                                                                                               |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `paths.ts`                 | `canonicalizeWorkspace`, `resolveWithinWorkspace`, `hasSuspiciousPathPattern`, branded `ResolvedPath`, `Intent` union (`read \| write \| list \| stat \| glob`).                                                                                      |
-| `policy.ts`                | `MAX_READ_BYTES`, `MAX_TEXT_SCAN_BYTES`, `MAX_WRITE_BYTES`, `MAX_UPLOAD_BYTES`, `BINARY_PROBE_BYTES`, `assertTrustedForIntent`, `detectBinary`, `enforceReadBytesSize`, `enforceReadSize`, `enforceWriteSize`, `shouldIgnore`.                        |
-| `audit.ts`                 | `FS_ACCESS_EVENT_TYPE`, `FS_DENIED_EVENT_TYPE`, `createAuditPublisher`, audit payload types.                                                                                                                                                          |
-| `errors.ts`                | `FsError` class, `isFsError`, `FsErrorKind` union (14 kinds), `FsErrorStatus` union (`400 / 403 / 404 / 409 / 413 / 422 / 500 / 503`).                                                                                                                |
-| `workspace-file-system.ts` | `createWorkspaceFileSystemFactory`, `WorkspaceFileSystem` (the orchestrator that reads/writes/lists), `WriteMode`, `ContentHash`, `FsEntry`, `FsStat`, `ListOptions`, `GlobOptions`, `ReadTextOptions`, `ReadBytesOptions`, `WriteTextAtomicOptions`. |
+| File                       | Purpose                                                                                                                                                                                                                                                                               |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `paths.ts`                 | `canonicalizeWorkspace`, `resolveWithinWorkspace`, `hasSuspiciousPathPattern`, branded `ResolvedPath`, `Intent` union (`read \| write \| edit \| delete \| list \| glob \| stat`).                                                                                                    |
+| `policy.ts`                | `MAX_READ_BYTES`, `MAX_TEXT_SCAN_BYTES`, `MAX_WRITE_BYTES`, `MAX_UPLOAD_BYTES`, `BINARY_PROBE_BYTES`, `assertTrustedForIntent`, `detectBinary`, `enforceReadBytesSize`, `enforceReadSize`, `enforceWriteSize`, `shouldIgnore`.                                                        |
+| `audit.ts`                 | `FS_ACCESS_EVENT_TYPE`, `FS_DENIED_EVENT_TYPE`, `createAuditPublisher`, audit payload types.                                                                                                                                                                                          |
+| `errors.ts`                | `FsError` class, `isFsError`, `FsErrorKind` union (14 kinds), `FsErrorStatus` union (`400 / 403 / 404 / 409 / 413 / 422 / 500 / 503`).                                                                                                                                                |
+| `workspace-file-system.ts` | `createWorkspaceFileSystemFactory`, `WorkspaceFileSystem` (the orchestrator that reads/writes/lists and creates/deletes directories), `WriteMode`, `ContentHash`, `FsEntry`, `FsStat`, `ListOptions`, `GlobOptions`, `ReadTextOptions`, `ReadBytesOptions`, `WriteTextAtomicOptions`. |
 
 ### `FsErrorKind` taxonomy
 
-| Kind                     | Default HTTP | Meaning                                                                                                                                                                                       |
-| ------------------------ | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `path_outside_workspace` | 400          | Resolved path is outside the bound workspace.                                                                                                                                                 |
-| `symlink_escape`         | 400          | Target is a symlink (rejected per the conservative PR 18 + PR 20 posture).                                                                                                                    |
-| `path_not_found`         | 404          | `ENOENT`.                                                                                                                                                                                     |
-| `binary_file`            | 422          | Content sniffed binary on a text route, or large text in an encoding the text route cannot decode.                                                                                            |
-| `file_too_large`         | 413          | Windowless/full-snapshot text above `MAX_READ_BYTES`, a line offset beyond `MAX_TEXT_SCAN_BYTES`, or a write above `MAX_WRITE_BYTES`.                                                         |
-| `hash_mismatch`          | 409          | Optimistic-concurrency `expectedSha256` failed, or the file changed during a stable read.                                                                                                     |
-| `file_already_exists`    | 409          | `mode: 'create'` against an existing file.                                                                                                                                                    |
-| `text_not_found`         | 422          | `POST /file/edit`'s search string wasn't in the file.                                                                                                                                         |
-| `ambiguous_text_match`   | 422          | Multiple matches when exactly one was required.                                                                                                                                               |
-| `untrusted_workspace`    | 403          | Write attempted in an untrusted workspace.                                                                                                                                                    |
-| `permission_denied`      | 403          | OS-level `EACCES` / `EPERM`.                                                                                                                                                                  |
-| `io_error`               | 503          | `ENOSPC` / `EIO` / `EBUSY` / `ETXTBSY` / `ENAMETOOLONG` / `EMFILE` / `ENFILE`. **Distinct from `permission_denied`** so monitoring pipelines do not page security responders for "disk full". |
-| `internal_error`         | 500          | Non-errno error that reaches the boundary (`TypeError`, programmer bug).                                                                                                                      |
-| `parse_error`            | 400 / 422    | Request-body parse error (400) or service-level invariant breach (422).                                                                                                                       |
+| Kind                     | Default HTTP | Meaning                                                                                                                                                                                                                                             |
+| ------------------------ | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `path_outside_workspace` | 400          | Resolved path is outside the bound workspace.                                                                                                                                                                                                       |
+| `symlink_escape`         | 400          | Target is a symlink (rejected per the conservative PR 18 + PR 20 posture).                                                                                                                                                                          |
+| `path_not_found`         | 404          | `ENOENT`.                                                                                                                                                                                                                                           |
+| `binary_file`            | 422          | Content sniffed binary on a text route, or large text in an encoding the text route cannot decode.                                                                                                                                                  |
+| `file_too_large`         | 413          | Windowless/full-snapshot text above `MAX_READ_BYTES`, a line offset beyond `MAX_TEXT_SCAN_BYTES`, or a write above `MAX_WRITE_BYTES`.                                                                                                               |
+| `hash_mismatch`          | 409          | Optimistic-concurrency `expectedSha256` failed, or the file changed during a stable read.                                                                                                                                                           |
+| `file_already_exists`    | 409          | `mode: 'create'` against an existing file.                                                                                                                                                                                                          |
+| `text_not_found`         | 422          | `POST /file/edit`'s search string wasn't in the file.                                                                                                                                                                                               |
+| `ambiguous_text_match`   | 422          | Multiple matches when exactly one was required.                                                                                                                                                                                                     |
+| `untrusted_workspace`    | 403          | Write, edit, or delete attempted in an untrusted workspace.                                                                                                                                                                                         |
+| `permission_denied`      | 403          | OS-level `EACCES` / `EPERM`.                                                                                                                                                                                                                        |
+| `io_error`               | 503          | `ENOSPC` / `EIO` / `EBUSY` / `ETXTBSY` / `ENAMETOOLONG` / `EMFILE` / `ENFILE`, plus `ENOTEMPTY` during recursive directory deletion. **Distinct from `permission_denied`** so monitoring pipelines do not page security responders for "disk full". |
+| `internal_error`         | 500          | Non-errno error that reaches the boundary (`TypeError`, programmer bug).                                                                                                                                                                            |
+| `parse_error`            | 400 / 422    | Request-body parse error (400) or service-level invariant breach (422).                                                                                                                                                                             |
 
 ### `BridgeFileSystem` (the ACP-side adapter)
 
@@ -122,8 +122,8 @@ Two design notes:
 
 `assertTrustedForIntent(trusted, intent)` consumes the trust boolean injected by
 the caller; the policy layer does not read `Config.isTrustedFolder()` directly.
-Read / list / stat / glob are always allowed (trust is only for writes). Write
-intents in untrusted workspaces throw
+Read / list / stat / glob are always allowed. Mutating intents (`write`,
+`edit`, and `delete`) in untrusted workspaces throw
 `FsError('untrusted_workspace', ..., status: 403)`. The trust signal flows in
 via `WorkspaceFileSystemFactoryDeps.trusted: boolean` — `runQwenServe` passes
 `true` because the operator booted the daemon against a workspace they
@@ -219,11 +219,38 @@ flowchart LR
 
 `FS_ACCESS_EVENT_TYPE` / `FS_DENIED_EVENT_TYPE` carry context (`ctx`), path, intent, outcome, errorKind?, bytesRead/written, sha256?.
 
+### Directory mutations
+
+`createDirectory(input)` and `deleteDirectory(input)` are optional local-factory
+operations exposed only through `POST /workspaces/:workspace/directory/create`
+and `POST /workspaces/:workspace/directory/delete`. Preflight
+`workspace_qualified_rest_core` and the respective `workspace_directory_create`
+or `workspace_directory_delete` capability. Both routes require strict mutation
+authority and a trusted active selected runtime; neither falls back to primary
+or exposes a legacy-primary route. SSH workspaces are unsupported, and custom
+factories without the operation return `422`.
+
+Creation requires an existing parent and fails on an occupied name rather than
+reusing or overwriting it. Deletion removes empty or nonempty directories
+recursively, rejecting workspace roots, regular files, and final symlinks.
+Nested symlink entries are removed without following their targets. Both
+operations resolve the parent while preserving the lexical final name, check
+trust/runtime generation under the path lock, and emit ignore classification
+when matched; directory creation also records `sizeBytes: 0`.
+
+Deletion is permanent and can leave partial removal if it fails. A concurrent
+child write can produce `ENOTEMPTY`, classified locally as `503 io_error` so the
+caller can retry. Portable path-based checks cannot make external directory
+replacement atomic. The TypeScript SDK methods are
+`WorkspaceDaemonClient.createWorkspaceDirectory(path, clientId?)` and
+`WorkspaceDaemonClient.deleteWorkspaceDirectory(path, clientId?)`; both use
+workspace-qualified REST.
+
 ## State & Lifecycle
 
 - The factory is built once at daemon boot (`runQwenServe` → `resolveBridgeFsFactory` → adapter).
 - Each request constructs a `RequestContext` and invokes the factory's orchestrator for that call only — no long-lived per-file state.
-- Per-path locks live only for the duration of the write operation (no cross-call locking; concurrent writes to the same path race on the lock and serialize).
+- Per-path locks live for each mutation and serialize operations on the same canonical path; they do not lock ancestor and descendant paths together.
 - Audit ring is owned by `runQwenServe` and shared with the permission audit publisher.
 
 ## Dependencies
@@ -235,16 +262,16 @@ flowchart LR
 
 ## Configuration
 
-| Source                                            | Knob                                                                                           | Effect                                                                                                            |
-| ------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `WorkspaceFileSystemFactoryDeps.trusted: boolean` | Constructor input                                                                              | Whether writes are allowed; defaults to `true` from `runQwenServe`, `false` from `createServeApp` (with warning). |
-| Constant                                          | `MAX_READ_BYTES = 256 KiB`                                                                     | Full-snapshot and returned-text cap; larger text requires an explicit window argument.                            |
-| Constant                                          | `MAX_TEXT_SCAN_BYTES = 8 MiB`                                                                  | Bytes a large-text read may scan to locate a line offset; past it, `file_too_large`.                              |
-| Constant                                          | `MAX_WRITE_BYTES = 5 MiB`                                                                      | Write cap; sized below `express.json({ limit: '10mb' })`.                                                         |
-| Constant                                          | `MAX_UPLOAD_BYTES = 50 MiB`                                                                    | Binary upload cap for `POST /file/upload`; uploads never overwrite and auto-number occupied names.                |
-| Constant                                          | `BINARY_PROBE_BYTES = 4096`                                                                    | Sample size for content-based binary detection.                                                                   |
-| Capability tags                                   | `workspace_file_read`, `workspace_file_bytes`, `workspace_file_write`, `workspace_file_upload` | See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md).                                           |
-| Workspace files                                   | `.gitignore`, `.qwenignore`                                                                    | Ignored paths surface as `ignored: true` from `shouldIgnore`.                                                     |
+| Source                                            | Knob                                                                                                                                                                                                              | Effect                                                                                                                                |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `WorkspaceFileSystemFactoryDeps.trusted: boolean` | Constructor input                                                                                                                                                                                                 | Whether writes, edits, and deletes are allowed; defaults to `true` from `runQwenServe`, `false` from `createServeApp` (with warning). |
+| Constant                                          | `MAX_READ_BYTES = 256 KiB`                                                                                                                                                                                        | Full-snapshot and returned-text cap; larger text requires an explicit window argument.                                                |
+| Constant                                          | `MAX_TEXT_SCAN_BYTES = 8 MiB`                                                                                                                                                                                     | Bytes a large-text read may scan to locate a line offset; past it, `file_too_large`.                                                  |
+| Constant                                          | `MAX_WRITE_BYTES = 5 MiB`                                                                                                                                                                                         | Write cap; sized below `express.json({ limit: '10mb' })`.                                                                             |
+| Constant                                          | `MAX_UPLOAD_BYTES = 50 MiB`                                                                                                                                                                                       | Binary upload cap for `POST /file/upload`; uploads never overwrite and auto-number occupied names.                                    |
+| Constant                                          | `BINARY_PROBE_BYTES = 4096`                                                                                                                                                                                       | Sample size for content-based binary detection.                                                                                       |
+| Capability tags                                   | `workspace_file_read`, `workspace_file_bytes`, `workspace_file_read_cursor`, `workspace_file_write`, `workspace_file_upload`, `workspace_file_delete`, `workspace_directory_create`, `workspace_directory_delete` | See [`11-capabilities-versioning.md`](./11-capabilities-versioning.md).                                                               |
+| Workspace files                                   | `.gitignore`, `.qwenignore`                                                                                                                                                                                       | Ignored paths surface as `ignored: true` from `shouldIgnore`.                                                                         |
 
 ## Caveats & Known Limits
 

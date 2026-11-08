@@ -5,15 +5,14 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
-import { lstat, open, readFile, unlink, writeFile } from 'node:fs/promises';
-import type { FileHandle } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { lstat, readFile, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { isLegitimateMountRelease } from './hosted-mount-release.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -46,7 +45,6 @@ let modelCalls = 0;
 let cancels = 0;
 let injected = false;
 let statusHeld = false;
-let writer: FileHandle | undefined;
 let resumeStatus = () => {};
 let operations: string[] = [];
 let proxyFailure: unknown;
@@ -80,16 +78,9 @@ async function evidence(phase: string) {
 }
 
 async function enteredTool() {
-  await waitUntil(async () => {
-    try {
-      writer = await open(proof, constants.O_WRONLY | constants.O_NONBLOCK);
-      return true;
-    } catch (cause) {
-      if ((cause as NodeJS.ErrnoException).code !== 'ENXIO') throw cause;
-      return false;
-    }
-  });
-  assert((await lstat(proof)).isFIFO());
+  await waitUntil(() => existsSync(`${proof}.read-entered`));
+  assert((await lstat(proof)).isFile());
+  assert.equal(await readFile(proof, 'utf8'), 'x');
   await evidence('entered');
 }
 
@@ -104,17 +95,51 @@ const proxy = createServer(async (req, res) => {
       : Object.fromEntries(url.searchParams);
     const operation =
       req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!;
+    if (
+      operation === 'release-mount' &&
+      fields.harnessSessionId !== sessionId
+    ) {
+      // An earlier case's owed handback (#13800) keeps retrying on its own
+      // clock: forward it outside this case's ledger.
+      const upstream = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer hosted-tools-broker-token',
+          'Content-Type': 'application/json',
+        },
+        body,
+        signal: AbortSignal.timeout(30_000),
+      });
+      const text = await upstream.text();
+      assert(
+        isLegitimateMountRelease(upstream.status, JSON.parse(text).code),
+        `${upstream.status}: ${text}`,
+      );
+      res.writeHead(upstream.status, { 'Content-Type': 'application/json' });
+      res.end(text);
+      return;
+    }
+    const harnessScoped =
+      req.method === 'POST' &&
+      [
+        '/internal/runtime-broker/v1/runtimes:warm',
+        '/internal/runtime-broker/v1/runtimes:capabilities',
+        '/internal/runtime-broker/v1/tool-sessions:active-holds',
+      ].includes(url.pathname);
     assert.equal(fields.harnessSessionId, sessionId);
-    assert.equal(fields.runtimeSessionId, promptId);
+    assert.equal(fields.runtimeSessionId, harnessScoped ? undefined : promptId);
     const id = url.pathname.match(/\/executions\/([^/:]+)/)?.[1];
     if (id) assert.equal(id, executionCallId);
-    operations.push(operation);
-    if (operation === 'start')
+    if (!(harnessScoped && operation === 'active-holds'))
+      operations.push(operation);
+    if (operation === 'start') {
       assert.notEqual(
         fault,
         'prepared',
         'Cancelled reservation must not start',
       );
+      await writeFile(`${proof}.read-gate`, '');
+    }
     if (operation === 'release') {
       assert.equal(
         blocked(),
@@ -133,7 +158,15 @@ const proxy = createServer(async (req, res) => {
       signal: AbortSignal.timeout(30_000),
     });
     const text = await upstream.text();
-    assert.equal(upstream.status, 200, text);
+    if (url.pathname.endsWith(':release-mount')) {
+      const replyBody = JSON.parse(text) as { code?: unknown };
+      assert(
+        isLegitimateMountRelease(upstream.status, replyBody.code),
+        `${upstream.status}: ${text}`,
+      );
+    } else {
+      assert.equal(upstream.status, 200, text);
+    }
     const reply = JSON.parse(text);
     if (id) assert.equal(reply.executionCallId, executionCallId);
     if (operation === 'prepare') {
@@ -180,7 +213,10 @@ const proxy = createServer(async (req, res) => {
         statusHeld = true;
       });
     }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(
+      url.pathname.endsWith(':release-mount') ? upstream.status : 200,
+      { 'Content-Type': 'application/json' },
+    );
     res.end(text);
   } catch (cause) {
     proxyFailure = cause;
@@ -273,10 +309,6 @@ try {
     injected = false;
     statusHeld = false;
     operations = [];
-    if (fault !== 'prepared') {
-      await unlink(proof);
-      execFileSync('mkfifo', [proof]);
-    }
     await start();
     const connection = () => ({
       managedSessionStore: {
@@ -321,10 +353,9 @@ try {
     if (fault !== 'prepared') {
       await evidence('pending');
       await transcript(false);
-      assert((await lstat(proof)).isFIFO());
-      await writer!.write('x');
-      await writer!.close();
-      writer = undefined;
+      assert((await lstat(proof)).isFile());
+      assert.equal(await readFile(proof, 'utf8'), 'x');
+      await unlink(`${proof}.read-gate`);
       resumeStatus();
       await waitUntil(
         async () => (await evidence('state')).state === 'SETTLED',
@@ -388,7 +419,7 @@ try {
     assert.equal(
       operations.length,
       traffic,
-      'Cold load must not contact Broker',
+      'Cold load must not execute Broker operations',
     );
     assert.equal(modelCalls, 1, 'Cold load must not contact model');
     assert.equal(
@@ -410,7 +441,6 @@ try {
 } finally {
   resumeStatus();
   await cli.close();
-  await writer?.close();
   await model.close();
   proxy.closeAllConnections();
   await new Promise<void>((resolve) => proxy.close(() => resolve()));

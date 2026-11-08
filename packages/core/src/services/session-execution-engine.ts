@@ -5,10 +5,22 @@
  */
 
 import { parseLineTolerantWithIntegrity } from '../utils/jsonl-utils.js';
-import { validateTranscriptRecord } from '../utils/transcript-records.js';
+import {
+  validateTranscriptRecord,
+  type TranscriptRecordInput,
+} from '../utils/transcript-records.js';
 
 export type SessionExecutionEngine = 'legacy' | 'managed';
 export const SESSION_EXECUTION_ENGINE_META_KEY = 'qwen.session.executionEngine';
+
+/**
+ * One recovered physical record with the validation the accumulator already
+ * ran for ownership tracking, so indexing callers do not validate it again.
+ */
+export interface ValidatedTranscriptLineRecord {
+  readonly value: unknown;
+  readonly record: TranscriptRecordInput | undefined;
+}
 
 export interface SessionExecutionEnginePayload {
   version: 1;
@@ -75,14 +87,16 @@ export class SessionExecutionEngineAccumulator {
 
   constructor(private readonly sessionId: string) {}
 
-  parseLine(line: string, filePath: string): unknown[] {
+  parseLine(line: string, filePath: string): ValidatedTranscriptLineRecord[] {
     if (!line.trim()) return [];
     const parsed = parseLineTolerantWithIntegrity<unknown>(line, filePath);
     if (!parsed.complete) this.reason ??= 'incomplete transcript';
     this.complete &&= parsed.complete;
+    const validated: ValidatedTranscriptLineRecord[] = [];
     for (const value of parsed.records) {
       this.hasRecords = true;
       const { record, diagnostics } = validateTranscriptRecord(value);
+      validated.push({ value, record });
       if (
         !record ||
         record.sessionId !== this.sessionId ||
@@ -111,7 +125,7 @@ export class SessionExecutionEngineAccumulator {
       }
       this.engine = payload.engine;
     }
-    return parsed.records;
+    return validated;
   }
 
   /**

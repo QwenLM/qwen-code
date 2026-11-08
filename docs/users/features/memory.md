@@ -1,9 +1,10 @@
 # Memory
 
-Every Qwen Code session starts with a fresh context window. Two mechanisms carry knowledge across sessions so you don't have to re-explain yourself every time:
+Every Qwen Code session starts with a fresh context window. Three mechanisms carry knowledge across sessions so you don't have to re-explain yourself every time:
 
 - **QWEN.md** — instructions _you_ write once and Qwen reads every session
 - **Auto-memory** — notes Qwen writes itself based on what it learns from you
+- **External memory (`context_search`)** — an optional MCP tool Qwen calls on demand to search Mem0 or a local session index
 
 ---
 
@@ -77,6 +78,8 @@ Auto-memory runs in the background. After each of your conversations, Qwen quiet
 
 This is different from QWEN.md: you don't write it, Qwen does.
 
+When a turn that answers a message relayed by a [channel](./channels/overview) — GitHub, Telegram, DingTalk and the others — ends, Qwen runs no extraction and schedules no [periodic cleanup](#periodic-cleanup): the sender is often not you, and extracting after every relayed message would add model calls to each one. In a session that also takes your own prompts, such as one bound to a pull request, extraction after your next prompt still reads the recent conversation, so relayed messages still in it can be learned from. Memory recall is unaffected: a reply to a channel message can draw on what is already saved. A channel chat keeps durable context in [channel memory](./channels/overview#channel-memory) instead.
+
 ### What Qwen saves
 
 Qwen looks for four kinds of things worth remembering:
@@ -95,6 +98,14 @@ Qwen doesn't save everything — only things that would actually be useful next 
 Auto-memory files live at `~/.qwen/projects/<project>/memory/`. All branches of the same checkout share the same memory folder, so what Qwen learns in one branch is available in others. Each linked git worktree gets its own memory folder, matching the per-worktree isolation of chats and other session state — repository-wide conventions you want in every worktree belong in [team memory](#team-memory-shared-with-collaborators).
 
 Everything saved is plain markdown — you can open, edit, or delete any file at any time.
+
+`MEMORY.md` is a compact index, rather than the full memory store. Its generated body and the portion loaded into prompts share a limit of 200 lines and 25,000 UTF-16 code units; truncation notices are added separately. Line endings are normalized before prompt budgeting. Under size pressure, complete ordinary entries (up to 150 code units) get space before longer entries, and retained entries keep their original order. An entry that cannot fit is skipped whole, so its Markdown link is never cut in the middle. Keep detail in the linked topic files.
+
+When rebuilding omits entries, the saved warning reports the dropped count and up to three names for each limit: the topic-file scan cap and the index-body budget. The counts stay separate because one grouped team entry can represent several files. The warning remains visible when the index is loaded into a prompt while it is the file's last paragraph. Insert new index pointers above the trailing warning to preserve it. Omission from the index does not delete the linked topic files. For index-body pressure, merge topic files or remove obsolete ones, or shorten their frontmatter names and descriptions. An overlong link already has no description: shorten its topic-file path or frontmatter name instead. Editing only the generated index does not survive the next rebuild. For the file-count scan cap, merge topic files or remove obsolete ones; editing only the generated index does not reduce the number of files scanned.
+
+The warning for a partially loaded index distinguishes the line and character budgets. Shortening descriptions can help with the total character budget even when no entry exceeds the ordinary line length. For entries matching the generated format, that advice accounts for names and links, including grouped links; prune or merge entries when those links alone consume the budget. Hand-edited formats or grouped suffixes that could instead be description text receive possible remedies without a promise that shortening will fit. If the entry-count limit is exceeded, entries must still be pruned or merged: shortening a description does not reduce the number of entries. When both budgets are exceeded, reducing the index to 200 entries may still require shorter descriptions or fewer entries to meet the character budget; the warning reports the actual candidate count. Shortening to 150 units per entry is not always enough to meet the 25,000-unit total.
+
+A bounded, single-paragraph trailing writer notice is excluded from prompt budgeting. When all saved entries fit, Qwen preserves that notice without claiming that more entries were omitted while loading. Regenerating a saturated index can refill space freed by shorter descriptions, so the size of the saved file need not shrink immediately. For project, user, and team memory, edit the topic files' `description` frontmatter and check the regenerated index. An empty description can fall back to the memory type, so shortening frontmatter does not guarantee that every entry will fit. Direct index-line edits can be replaced by the next managed write. Keep full link targets intact even when a link exceeds 150 units; shorten display metadata or prune or merge topic files instead of cutting links.
 
 #### Pinned memory
 
@@ -262,6 +273,61 @@ Runs the memory cleanup now instead of waiting for the automatic schedule:
 ```
 /dream
 ```
+
+---
+
+## External Memory (`context_search`)
+
+In addition to `QWEN.md` and auto-memory, Qwen Code can query external memory services and local session indexes through the `context_search` MCP tool. Unlike `QWEN.md` and auto-memory, `context_search` is called by the model on demand — nothing is recalled or sent automatically at each turn:
+
+- **Mem0 (built-in adapter):** Configure `memory.mem0` in `~/.qwen/settings.json` to connect to Mem0 Platform V3, PolarDB, or self-hosted Mem0 OSS. See [Mem0](./mem0.md) for setup and optional write confirmation.
+- **External Context MCP Profile v1 servers:** Any stdio or HTTP MCP server implementing the `context_search({ query })` contract can be registered with `qwen mcp add` or `mcpServers` in `settings.json` (set `"includeTools": ["context_search"]` so only `context_search` is exposed for a Profile v1 server).
+
+Each entry registers its own server, and more than one can be active at once — Qwen exposes each server's `context_search` separately (for example, `mcp__external-context__context_search` and `mcp__deja-context__context_search`) and the model chooses between them, so enable only the corpus you want searched, or name the backend in your request.
+
+Whichever backend you use, the matches `context_search` returns are added to Qwen's context and sent to the model provider configured for the session, and calls are approval-gated unless you allow them — a local index keeps the search local, not the results. In Auto Mode the query and a bounded copy of the arguments also go to the classifier model.
+
+### deja-vu
+
+A local CLI and MCP server that indexes the session transcripts coding agents (Qwen Code, Claude Code, Codex, Cursor, and others) already write to disk using local BM25 search, with no model calls or API keys required to build or query the index.
+
+- **Repository:** https://github.com/vshulcz/deja-vu
+- **Cost:** Free and open source (MIT)
+- **Best for:** Searching past sessions across Qwen Code and other local coding agents on the same machine
+
+#### Available Tools
+
+- `context_search` — Search indexed local session transcripts (`deja mcp --context-search`)
+
+#### Setup
+
+1. Install the `deja` binary (for example, `brew install deja-vu`, `npm install -g @vshulcz/deja-vu`, or from the [GitHub releases](https://github.com/vshulcz/deja-vu/releases)) and build the initial index (`deja index`).
+2. Register the server using either method below:
+
+**Method 1: CLI command**
+
+```bash
+qwen mcp add deja-context deja mcp --context-search --timeout 8000 --include-tools context_search
+```
+
+**Method 2: `settings.json`**
+
+```json
+{
+  "mcpServers": {
+    "deja-context": {
+      "command": "deja",
+      "args": ["mcp", "--context-search"],
+      "timeout": 8000,
+      "includeTools": ["context_search"]
+    }
+  }
+}
+```
+
+3. Restart Qwen Code so the new MCP server is loaded at session startup, then run `/mcp` to confirm `deja-context` is connected (see [MCP Servers](./mcp.md)).
+
+To remove the server later, run `qwen mcp remove deja-context` (or delete the `deja-context` entry from `mcpServers` in `~/.qwen/settings.json`) and restart Qwen Code.
 
 ---
 

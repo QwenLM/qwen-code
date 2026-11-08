@@ -46,7 +46,10 @@ Expose two side-effect-free helpers from a narrow channel-base subpath:
   code points rather than UTF-16 code units.
 
 Core keeps its combined CJK run expression, Unicode non-CJK token policy,
-deduplication, and 64-token edge bound. Channel memory keeps unsafe-invisible
+deduplication, and 64-token query edge bound. Its exported query tokenizer
+(`tokenizeMemoryRecallText`) and unbounded document-term tokenizer
+(`tokenizeMemoryRecallTerms`), also consumed by CLI memory import, share the
+same run generator. Channel memory keeps unsafe-invisible
 sanitization, per-script expressions, namespaces, minimum lengths, and its
 unbounded term set. These existing caller-specific functions are the thin
 adapters; no new class or configuration layer is needed.

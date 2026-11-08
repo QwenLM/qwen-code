@@ -8,6 +8,25 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 import { HookEventName } from './types.js';
 
+type HookEntry = Parameters<AsyncHookRegistry['register']>[0];
+
+/** A fresh PostToolUse hook in session-1; cases override what they vary. */
+const entry = (overrides: Partial<HookEntry> = {}): HookEntry => ({
+  hookId: 'test-hook-1',
+  hookName: 'Test Hook',
+  hookEvent: HookEventName.PostToolUse,
+  sessionId: 'session-1',
+  startTime: Date.now(),
+  timeout: 60000,
+  stdout: '',
+  stderr: '',
+  ...overrides,
+});
+
+/** Hook `test-hook-<n>` named `Hook <n>`. */
+const hookN = (n: number, overrides: Partial<HookEntry> = {}) =>
+  entry({ hookId: `test-hook-${n}`, hookName: `Hook ${n}`, ...overrides });
+
 describe('AsyncHookRegistry', () => {
   let registry: AsyncHookRegistry;
 
@@ -26,16 +45,7 @@ describe('AsyncHookRegistry', () => {
 
   describe('register', () => {
     it('should register a new async hook', () => {
-      const hookId = registry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Test Hook',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
+      const hookId = registry.register(entry());
 
       expect(hookId).toBe('test-hook-1');
       expect(registry.hasRunningHooks()).toBe(true);
@@ -44,16 +54,7 @@ describe('AsyncHookRegistry', () => {
 
   describe('updateOutput', () => {
     it('should update stdout', () => {
-      registry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Test Hook',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
+      registry.register(entry());
 
       registry.updateOutput('test-hook-1', 'stdout data', undefined);
 
@@ -62,16 +63,7 @@ describe('AsyncHookRegistry', () => {
     });
 
     it('should update stderr', () => {
-      registry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Test Hook',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
+      registry.register(entry());
 
       registry.updateOutput('test-hook-1', undefined, 'stderr data');
 
@@ -82,16 +74,7 @@ describe('AsyncHookRegistry', () => {
 
   describe('complete', () => {
     it('should mark hook as completed and remove from pending', () => {
-      registry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Test Hook',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
+      registry.register(entry());
 
       registry.complete('test-hook-1', { continue: true });
 
@@ -99,16 +82,9 @@ describe('AsyncHookRegistry', () => {
     });
 
     it('should process JSON output for system message', () => {
-      registry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Test Hook',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '{"systemMessage": "Build completed"}',
-        stderr: '',
-      });
+      registry.register(
+        entry({ stdout: '{"systemMessage": "Build completed"}' }),
+      );
 
       registry.complete('test-hook-1');
 
@@ -121,16 +97,7 @@ describe('AsyncHookRegistry', () => {
 
   describe('fail', () => {
     it('should mark hook as failed and add error message', () => {
-      registry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Test Hook',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
+      registry.register(entry());
 
       registry.fail('test-hook-1', new Error('Hook failed'));
 
@@ -143,17 +110,22 @@ describe('AsyncHookRegistry', () => {
   });
 
   describe('timeout', () => {
+    /** Times out a hook that owns a mock child process, returned for checks. */
+    const timeOutWithProcess = (killed: boolean) => {
+      const mockProcess = { killed, kill: vi.fn(), once: vi.fn() };
+      registry.register(
+        entry({
+          timeout: 1000,
+          process:
+            mockProcess as unknown as import('child_process').ChildProcess,
+        }),
+      );
+      registry.timeout('test-hook-1');
+      return mockProcess;
+    };
+
     it('should mark hook as timed out', () => {
-      registry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Test Hook',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 1500,
-        stdout: '',
-        stderr: '',
-      });
+      registry.register(entry({ timeout: 1500 }));
       const [hook] = registry.getPendingHooks();
 
       registry.timeout('test-hook-1');
@@ -170,25 +142,7 @@ describe('AsyncHookRegistry', () => {
     });
 
     it('should terminate process on timeout', () => {
-      const mockProcess = {
-        killed: false,
-        kill: vi.fn(),
-        once: vi.fn(),
-      };
-
-      registry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Test Hook',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 1000,
-        stdout: '',
-        stderr: '',
-        process: mockProcess as unknown as import('child_process').ChildProcess,
-      });
-
-      registry.timeout('test-hook-1');
+      const mockProcess = timeOutWithProcess(false);
 
       expect(mockProcess.kill).toHaveBeenCalledWith('SIGTERM');
       expect(mockProcess.once).toHaveBeenCalledWith(
@@ -198,53 +152,14 @@ describe('AsyncHookRegistry', () => {
     });
 
     it('should not call kill if process is already killed', () => {
-      const mockProcess = {
-        killed: true,
-        kill: vi.fn(),
-        once: vi.fn(),
-      };
-
-      registry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Test Hook',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 1000,
-        stdout: '',
-        stderr: '',
-        process: mockProcess as unknown as import('child_process').ChildProcess,
-      });
-
-      registry.timeout('test-hook-1');
-
-      expect(mockProcess.kill).not.toHaveBeenCalled();
+      expect(timeOutWithProcess(true).kill).not.toHaveBeenCalled();
     });
   });
 
   describe('getPendingHooks', () => {
     it('should return all pending hooks', () => {
-      registry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Hook 1',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
-
-      registry.register({
-        hookId: 'test-hook-2',
-        hookName: 'Hook 2',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
+      registry.register(hookN(1));
+      registry.register(hookN(2));
 
       const pending = registry.getPendingHooks();
       expect(pending.length).toBe(2);
@@ -253,27 +168,8 @@ describe('AsyncHookRegistry', () => {
 
   describe('getPendingHooksForSession', () => {
     it('should return hooks for specific session', () => {
-      registry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Hook 1',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
-
-      registry.register({
-        hookId: 'test-hook-2',
-        hookName: 'Hook 2',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-2',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
+      registry.register(hookN(1));
+      registry.register(hookN(2, { sessionId: 'session-2' }));
 
       const session1Hooks = registry.getPendingHooksForSession('session-1');
       expect(session1Hooks.length).toBe(1);
@@ -283,23 +179,12 @@ describe('AsyncHookRegistry', () => {
 
   describe('getPendingOutput', () => {
     it('should return and clear pending output', () => {
-      registry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Test Hook',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: 'plain text output',
-        stderr: '',
-      });
+      registry.register(entry({ stdout: 'plain text output' }));
 
       registry.complete('test-hook-1');
 
       const output1 = registry.getPendingOutput();
       expect(output1.messages.length).toBe(1);
-
-      // Second call should return empty
       const output2 = registry.getPendingOutput();
       expect(output2.messages.length).toBe(0);
     });
@@ -307,27 +192,8 @@ describe('AsyncHookRegistry', () => {
 
   describe('clearSession', () => {
     it('should clear all hooks for a session', () => {
-      registry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Hook 1',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
-
-      registry.register({
-        hookId: 'test-hook-2',
-        hookName: 'Hook 2',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-2',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
+      registry.register(hookN(1));
+      registry.register(hookN(2, { sessionId: 'session-2' }));
 
       registry.clearSession('session-1');
 
@@ -339,18 +205,8 @@ describe('AsyncHookRegistry', () => {
 
   describe('checkTimeouts', () => {
     it('should timeout expired hooks', () => {
-      const pastTime = Date.now() - 70000; // 70 seconds ago
-
-      registry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Test Hook',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: pastTime,
-        timeout: 60000, // 60 second timeout
-        stdout: '',
-        stderr: '',
-      });
+      // Started 70s ago with a 60s timeout.
+      registry.register(entry({ startTime: Date.now() - 70000 }));
 
       registry.checkTimeouts();
 
@@ -363,89 +219,20 @@ describe('AsyncHookRegistry', () => {
     it('should respect maxConcurrentHooks limit', () => {
       const limitedRegistry = new AsyncHookRegistry({ maxConcurrentHooks: 2 });
 
-      // Register first hook
-      const id1 = limitedRegistry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Hook 1',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
-      expect(id1).toBe('test-hook-1');
-
-      // Register second hook
-      const id2 = limitedRegistry.register({
-        hookId: 'test-hook-2',
-        hookName: 'Hook 2',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
-      expect(id2).toBe('test-hook-2');
-
-      // Third hook should be rejected
-      const id3 = limitedRegistry.register({
-        hookId: 'test-hook-3',
-        hookName: 'Hook 3',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
-      expect(id3).toBeNull();
+      expect(limitedRegistry.register(hookN(1))).toBe('test-hook-1');
+      expect(limitedRegistry.register(hookN(2))).toBe('test-hook-2');
+      expect(limitedRegistry.register(hookN(3))).toBeNull();
     });
 
     it('should allow registration after hook completes', () => {
       const limitedRegistry = new AsyncHookRegistry({ maxConcurrentHooks: 1 });
 
-      // Register first hook
-      limitedRegistry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Hook 1',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
+      limitedRegistry.register(hookN(1));
+      expect(limitedRegistry.register(hookN(2))).toBeNull();
 
-      // Second hook should be rejected
-      const id2Before = limitedRegistry.register({
-        hookId: 'test-hook-2',
-        hookName: 'Hook 2',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
-      expect(id2Before).toBeNull();
-
-      // Complete first hook
       limitedRegistry.complete('test-hook-1');
 
-      // Now second hook should be accepted
-      const id2After = limitedRegistry.register({
-        hookId: 'test-hook-2',
-        hookName: 'Hook 2',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
-      expect(id2After).toBe('test-hook-2');
+      expect(limitedRegistry.register(hookN(2))).toBe('test-hook-2');
     });
 
     it('should report correct running count', () => {
@@ -454,16 +241,7 @@ describe('AsyncHookRegistry', () => {
       expect(limitedRegistry.getRunningCount()).toBe(0);
       expect(limitedRegistry.canAcceptMore()).toBe(true);
 
-      limitedRegistry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Hook 1',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: Date.now(),
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
+      limitedRegistry.register(hookN(1));
 
       expect(limitedRegistry.getRunningCount()).toBe(1);
       expect(limitedRegistry.canAcceptMore()).toBe(true);
@@ -480,28 +258,13 @@ describe('AsyncHookRegistry', () => {
         enableAutoTimeoutCheck: true,
         timeoutCheckInterval: 100,
       });
+      autoRegistry.register(entry({ startTime: Date.now() - 70000 }));
 
-      // Register an expired hook
-      const pastTime = Date.now() - 70000;
-      autoRegistry.register({
-        hookId: 'test-hook-1',
-        hookName: 'Test Hook',
-        hookEvent: HookEventName.PostToolUse,
-        sessionId: 'session-1',
-        startTime: pastTime,
-        timeout: 60000,
-        stdout: '',
-        stderr: '',
-      });
-
-      // Stop the checker to prevent interference with other tests
+      // Stop the checker before it can run, so it cannot interfere with other
+      // tests: the expired hook is still there until checked by hand.
       autoRegistry.stopTimeoutChecker();
-
-      // Manually check - hook should still be there since we stopped the checker
-      // before it could run
       expect(autoRegistry.hasRunningHooks()).toBe(true);
 
-      // Now manually trigger timeout check
       autoRegistry.checkTimeouts();
       expect(autoRegistry.hasRunningHooks()).toBe(false);
     });
@@ -512,10 +275,9 @@ describe('AsyncHookRegistry', () => {
         timeoutCheckInterval: 50,
       });
 
-      // Stop immediately
       autoRegistry.stopTimeoutChecker();
 
-      // Should not throw or cause issues
+      // A second stop is harmless.
       expect(() => autoRegistry.stopTimeoutChecker()).not.toThrow();
     });
   });

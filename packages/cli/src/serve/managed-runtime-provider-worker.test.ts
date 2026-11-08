@@ -20,6 +20,7 @@ import {
 } from 'vitest';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { FileHistoryService } from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import {
@@ -52,6 +53,9 @@ import {
 import {
   MANAGED_RUNTIME_PROVIDER_PROTOCOL,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
+  MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
+  managedRuntimeProviderLimit,
+  MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES,
   type ManagedRuntimeProviderSession,
 } from './managed-runtime-provider-protocol.js';
 import { MANAGED_CONTEXT_PROTOCOL } from './managed-context-envelope.js';
@@ -63,6 +67,32 @@ import {
   WORKSPACE_CONTEXT_CONFIG_REF,
   WORKSPACE_EXECUTION_PROFILE,
 } from './managed-workspace-activation.js';
+import { ManagedRuntimeProviderWorker } from './managed-runtime-provider-worker.js';
+import {
+  ManagedToolExecutor,
+  ManagedToolUnavailableError,
+} from './managed-runtime-tool-executor.js';
+
+const retirementWarning = vi.hoisted(() => vi.fn());
+
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/debugLogger.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/debugLogger.js')
+      >();
+    return {
+      ...actual,
+      createDebugLogger: (tag?: string) => {
+        const logger = actual.createDebugLogger(tag);
+        return tag === 'MANAGED_RUNTIME_PROVIDER'
+          ? { ...logger, warn: retirementWarning }
+          : logger;
+      },
+    };
+  },
+);
 
 const SESSION: ManagedRuntimeProviderSession = {
   harnessSessionId: '550e8400-e29b-41d4-a716-446655440001',
@@ -93,6 +123,296 @@ const HEADERS = {
   'x-qwen-managed-lease-epoch': '4',
 };
 
+describe('Managed Runtime provider admission seal', () => {
+  let workspace: string;
+  let executor: ManagedToolExecutor;
+  let provider: ManagedRuntimeProviderWorker;
+  const retirementId = '550e8400-e29b-41d4-a716-446655440000';
+
+  beforeEach(() => {
+    workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-provider-seal-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(
+      path.join(workspace, 'global'),
+    );
+    executor = new ManagedToolExecutor(async () => undefined);
+    provider = new ManagedRuntimeProviderWorker(executor, async () => ({
+      directory: workspace,
+      workspaceRoot: workspace,
+      preapproved: true,
+    }));
+    executor.attachProvider(provider);
+  });
+  afterEach(async () => {
+    await executor.close();
+    vi.restoreAllMocks();
+    fs.rmSync(workspace, { recursive: true, force: true });
+  });
+
+  it('refuses a pending acquire after the original context lookup resumes', async () => {
+    let enter!: () => void;
+    let resume!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    provider = new ManagedRuntimeProviderWorker(executor, async () => {
+      enter();
+      await gate;
+      return {
+        directory: workspace,
+        workspaceRoot: workspace,
+        preapproved: true,
+      };
+    });
+    executor.attachProvider(provider);
+    const manifest = vi.spyOn(ManagedToolRuntime.prototype, 'manifest');
+    const request = provider.control(SESSION, { kind: 'acquire' });
+    const refusal = request.catch((error: unknown) => error);
+    await entered;
+    executor.sealAdmission(retirementId);
+    expect(
+      executor.getDrainObservation(retirementId).pendingInvocations,
+    ).toBeGreaterThan(0);
+    resume();
+    expect(await refusal).toBeInstanceOf(ManagedToolUnavailableError);
+    expect(manifest).not.toHaveBeenCalled();
+    expect(getSessionModel(SESSION.runtimeSessionId)).toBeUndefined();
+    expect(executor.getDrainObservation(retirementId).blockers).toContain(
+      'provider_lifecycle_unqualified',
+    );
+    await expect(
+      provider.control(
+        { ...SESSION, runtimeSessionId: 'fresh-provider' },
+        { kind: 'acquire' },
+      ),
+    ).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+  });
+
+  it('preserves original manifest, status, cancellation, history and release without clearing blockers', async () => {
+    fs.writeFileSync(path.join(workspace, 'input.txt'), 'provider bytes');
+    await provider.control(SESSION, { kind: 'acquire' });
+    const manifest = (await provider.control(SESSION, {
+      kind: 'manifest',
+    })) as ReturnType<ManagedToolRuntime['manifest']>;
+    const identity: ManagedToolCallIdentity = {
+      sessionId: SESSION.runtimeSessionId,
+      promptId: 'turn-a',
+      callId: 'call-a',
+      capabilityDigest: manifest.capabilityDigest,
+      policyRevision: manifest.policyRevision,
+    };
+    await provider.control(SESSION, {
+      kind: 'bind-history',
+      binding: {
+        ownerSessionId: SESSION.harnessSessionId,
+        ownerRuntimeSessionId: SESSION.runtimeSessionId,
+        executionCwd: workspace,
+        snapshots: [],
+      },
+    });
+    await provider.control(SESSION, { kind: 'begin-turn', identity });
+    const prepared = (await provider.control(SESSION, {
+      kind: 'prepare',
+      identity,
+      toolName: 'read_file',
+      input: { file_path: path.join(workspace, 'input.txt') },
+    })) as ManagedToolPrepareResponse;
+    const original = reference(prepared);
+    await provider.control(SESSION, { kind: 'preflight', reference: original });
+    await provider.control(SESSION, { kind: 'execute', reference: original });
+    executor.sealAdmission(retirementId);
+    expect(await provider.control(SESSION, { kind: 'manifest' })).toEqual(
+      manifest,
+    );
+    expect(
+      await provider.control(SESSION, { kind: 'status', reference: original }),
+    ).toMatchObject({
+      state: 'settled',
+      result: { executionStatus: 'success' },
+    });
+    expect(
+      await provider.control(SESSION, { kind: 'cancel', reference: original }),
+    ).toMatchObject({ state: 'settled' });
+    expect(await provider.control(SESSION, { kind: 'history' })).toMatchObject({
+      ownerSessionId: SESSION.harnessSessionId,
+    });
+    await expect(
+      provider.control(SESSION, { kind: 'checkpoint', promptId: 'fresh-turn' }),
+    ).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+    await expect(
+      provider.control(SESSION, {
+        kind: 'prepare',
+        identity: { ...identity, callId: 'fresh-call' },
+        toolName: 'read_file',
+        input: { file_path: path.join(workspace, 'input.txt') },
+      }),
+    ).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+    expect(await provider.control(SESSION, { kind: 'release' })).toBe(true);
+    expect(executor.getDrainObservation(retirementId).blockers).toContain(
+      'provider_lifecycle_unqualified',
+    );
+    await executor.close();
+    expect(executor.getDrainObservation(retirementId).workState).toBe(
+      'BLOCKED',
+    );
+  });
+
+  it.each([false, true])(
+    'settles execution queued behind a checkpoint when admission sealed=%s',
+    async (sealed) => {
+      fs.writeFileSync(path.join(workspace, 'input.txt'), 'provider bytes');
+      await provider.control(SESSION, { kind: 'acquire' });
+      const manifest = (await provider.control(SESSION, {
+        kind: 'manifest',
+      })) as ReturnType<ManagedToolRuntime['manifest']>;
+      const identity: ManagedToolCallIdentity = {
+        sessionId: SESSION.runtimeSessionId,
+        promptId: 'turn-a',
+        callId: 'call-a',
+        capabilityDigest: manifest.capabilityDigest,
+        policyRevision: manifest.policyRevision,
+      };
+      await provider.control(SESSION, {
+        kind: 'bind-history',
+        binding: {
+          ownerSessionId: SESSION.harnessSessionId,
+          ownerRuntimeSessionId: SESSION.runtimeSessionId,
+          executionCwd: workspace,
+          snapshots: [],
+        },
+      });
+      await provider.control(SESSION, { kind: 'begin-turn', identity });
+      let enterCheckpoint!: () => void;
+      let enterExecute!: () => void;
+      let resume!: () => void;
+      const checkpointEntered = new Promise<void>((resolve) => {
+        enterCheckpoint = resolve;
+      });
+      const executeEntered = new Promise<void>((resolve) => {
+        enterExecute = resolve;
+      });
+      const held = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const makeSnapshot = FileHistoryService.prototype.makeSnapshot;
+      vi.spyOn(FileHistoryService.prototype, 'makeSnapshot').mockImplementation(
+        async function (this: FileHistoryService, promptId) {
+          if (promptId === 'held-turn') {
+            enterCheckpoint();
+            await held;
+          }
+          return makeSnapshot.call(this, promptId);
+        },
+      );
+      const execute = ManagedToolRuntime.prototype.execute;
+      vi.spyOn(ManagedToolRuntime.prototype, 'execute').mockImplementation(
+        function (this: ManagedToolRuntime, ref) {
+          const pending = execute.call(this, ref);
+          enterExecute();
+          return pending;
+        },
+      );
+      const checkpoint = provider.control(SESSION, {
+        kind: 'checkpoint',
+        promptId: 'held-turn',
+      });
+      try {
+        await checkpointEntered;
+        const prepared = (await provider.control(SESSION, {
+          kind: 'prepare',
+          identity,
+          toolName: 'read_file',
+          input: { file_path: path.join(workspace, 'input.txt') },
+        })) as ManagedToolPrepareResponse;
+        const ref = reference(prepared);
+        await provider.control(SESSION, { kind: 'preflight', reference: ref });
+        const pending = provider.control(SESSION, {
+          kind: 'execute',
+          reference: ref,
+        });
+        const outcome = pending.catch((error: unknown) => error);
+        await executeEntered;
+        expect(
+          await provider.control(SESSION, { kind: 'status', reference: ref }),
+        ).toMatchObject({ state: 'executing' });
+        if (sealed) executor.sealAdmission(retirementId);
+        resume();
+        await checkpoint;
+        if (sealed)
+          expect(await outcome).toBeInstanceOf(ManagedToolUnavailableError);
+        else
+          expect(await outcome).toMatchObject({ executionStatus: 'success' });
+        expect(
+          await provider.control(SESSION, { kind: 'status', reference: ref }),
+        ).toMatchObject({
+          state: 'settled',
+          result: { executionStatus: sealed ? 'not_started' : 'success' },
+        });
+        expect(provider.getDrainInspection().pendingInvocations).toBe(0);
+        expect(provider.hasActiveSession(SESSION.runtimeSessionId)).toBe(false);
+        expect(
+          await provider.control(SESSION, { kind: 'cancel', reference: ref }),
+        ).toMatchObject({ state: 'settled' });
+        await expect(
+          provider.control(SESSION, { kind: 'release' }),
+        ).resolves.toBe(true);
+      } finally {
+        resume();
+        await checkpoint;
+      }
+    },
+  );
+
+  it('rechecks admission after the context lookup before beginning a new turn', async () => {
+    let enter!: () => void;
+    let resume!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    let parked = false;
+    provider = new ManagedRuntimeProviderWorker(executor, async () => {
+      if (parked) {
+        enter();
+        await gate;
+      }
+      return {
+        directory: workspace,
+        workspaceRoot: workspace,
+        preapproved: true,
+      };
+    });
+    executor.attachProvider(provider);
+    await provider.control(SESSION, { kind: 'acquire' });
+    const manifest = (await provider.control(SESSION, {
+      kind: 'manifest',
+    })) as ReturnType<ManagedToolRuntime['manifest']>;
+    const identity: ManagedToolCallIdentity = {
+      sessionId: SESSION.runtimeSessionId,
+      promptId: 'turn-a',
+      callId: 'call-a',
+      capabilityDigest: manifest.capabilityDigest,
+      policyRevision: manifest.policyRevision,
+    };
+    const begin = vi.spyOn(ManagedToolRuntime.prototype, 'beginTurn');
+    parked = true;
+    const request = provider.control(SESSION, { kind: 'begin-turn', identity });
+    const refusal = request.catch((error: unknown) => error);
+    await entered;
+    executor.sealAdmission(retirementId);
+    resume();
+    expect(await refusal).toBeInstanceOf(ManagedToolUnavailableError);
+    expect(begin).not.toHaveBeenCalled();
+    expect(executor.getDrainObservation(retirementId).pendingInvocations).toBe(
+      0,
+    );
+  });
+});
+
 function reference(
   prepared: ManagedToolPrepareResponse,
 ): ManagedToolInvocationReference {
@@ -116,6 +436,30 @@ function reference(
   };
 }
 
+function providerPdf(): Buffer {
+  const stream = 'BT /F1 12 Tf 20 100 Td (Provider media fixture) Tj ET';
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+  ];
+  const offsets: number[] = [];
+  let pdf = '%PDF-1.4\n';
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(pdf));
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const xref = Buffer.byteLength(pdf);
+  pdf += `xref\n0 6\n0000000000 65535 f \n`;
+  pdf += offsets
+    .map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`)
+    .join('');
+  pdf += `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(pdf);
+}
+
 describe('Managed Runtime provider worker', () => {
   let workspace: string;
   let storage: string;
@@ -125,6 +469,7 @@ describe('Managed Runtime provider worker', () => {
   const holds: Array<() => void> = [];
 
   beforeEach(async () => {
+    retirementWarning.mockClear();
     workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-provider-')),
     );
@@ -224,6 +569,215 @@ describe('Managed Runtime provider worker', () => {
     await control({ kind: 'preflight', reference: ref });
     return control<T>({ kind: 'execute', reference: ref });
   }
+
+  it('delivers invocation-local images without inheriting Omni uploads or later file bytes', async () => {
+    vi.stubEnv('QWEN_CODE_ENABLE_OMNI', '1');
+    onTestFinished(() => {
+      vi.unstubAllEnvs();
+    });
+    const upload = vi
+      .spyOn(Config.prototype, 'loadOmniMediaReader')
+      .mockRejectedValue(
+        new Error('Execution worker must not load the upload pipeline.'),
+      );
+    const data = 'R0lGODlhAQABAIAAAP8AAP///yH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==';
+    const file = path.join(workspace, 'pixel.gif');
+    fs.writeFileSync(file, Buffer.from(data, 'base64'));
+    await begin();
+    const prepareImage = (callId: string, enabled?: boolean) =>
+      control<ManagedToolPrepareResponse>({
+        kind: 'prepare',
+        identity: { ...identity, callId },
+        toolName: 'read_file',
+        input: { file_path: file },
+        ...(enabled === undefined
+          ? {}
+          : { mediaContext: { inputModalities: { image: enabled } } }),
+      });
+    const [enabled, disabled, missing] = await Promise.all([
+      prepareImage('image-enabled', true),
+      prepareImage('image-disabled', false),
+      prepareImage('image-missing'),
+    ]);
+    type Execution = {
+      executionStatus: string;
+      result: { llmContent: unknown; returnDisplay: unknown };
+    };
+    const first = await execute<Execution>(reference(enabled));
+    expect(first.executionStatus).toBe('success');
+    expect(first.result.llmContent).toMatchObject({
+      inlineData: { mimeType: 'image/gif', data },
+    });
+    for (const prepared of [disabled, missing]) {
+      const answer = await execute<Execution>(reference(prepared));
+      expect(answer.executionStatus).toBe('success');
+      expect(answer.result.llmContent).toContain('Unsupported image file');
+    }
+    fs.writeFileSync(file, 'changed after settlement');
+    const ref = reference(enabled);
+    expect(await control({ kind: 'execute', reference: ref })).toEqual(first);
+    for (const kind of ['status', 'cancel']) {
+      expect(await control({ kind, reference: ref })).toMatchObject({
+        state: 'settled',
+        result: first,
+      });
+    }
+    expect(upload).not.toHaveBeenCalled();
+    expect(await control({ kind: 'release' })).toBe(true);
+  });
+
+  it('delivers native PDF bytes and settles an oversized PDF as a tool error', async () => {
+    const file = path.join(workspace, 'document.pdf');
+    const pdf = providerPdf();
+    fs.writeFileSync(file, pdf);
+    await begin();
+    const preparePdf = (callId: string) =>
+      control<ManagedToolPrepareResponse>({
+        kind: 'prepare',
+        identity: { ...identity, callId },
+        toolName: 'read_file',
+        input: { file_path: file },
+        mediaContext: { inputModalities: { pdf: true } },
+      });
+    const ref = reference(await preparePdf('native-pdf'));
+    const answer = await execute(ref);
+    expect(answer).toMatchObject({
+      executionStatus: 'success',
+      result: {
+        llmContent: {
+          inlineData: {
+            mimeType: 'application/pdf',
+            data: pdf.toString('base64'),
+          },
+        },
+      },
+    });
+    fs.appendFileSync(
+      file,
+      Buffer.alloc(MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES),
+    );
+    const large = reference(await preparePdf('large-pdf'));
+    const refused = await execute(large);
+    expect(refused).toMatchObject({
+      executionStatus: 'error',
+      result: { error: { type: 'file_too_large' } },
+    });
+    expect(await control({ kind: 'status', reference: large })).toMatchObject({
+      state: 'settled',
+      result: refused,
+    });
+    expect(await control({ kind: 'release' })).toBe(true);
+  });
+
+  it('isolates media capabilities across concurrently prepared and executed Sessions', async () => {
+    const data = 'R0lGODlhAQABAIAAAP8AAP///yH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==';
+    const file = path.join(workspace, 'shared.gif');
+    fs.writeFileSync(file, Buffer.from(data, 'base64'));
+    await begin();
+    const second: ManagedRuntimeProviderSession = {
+      harnessSessionId: '550e8400-e29b-41d4-a716-446655440011',
+      runtimeSessionId: '550e8400-e29b-41d4-a716-446655440012',
+      turnKind: 'bootstrap',
+    };
+    await control({ kind: 'acquire' }, second);
+    const manifest = await control<{
+      capabilityDigest: string;
+      policyRevision: string;
+    }>({ kind: 'manifest' }, second);
+    const otherIdentity = {
+      ...identity,
+      sessionId: second.runtimeSessionId,
+      capabilityDigest: manifest.capabilityDigest,
+      policyRevision: manifest.policyRevision,
+    };
+    await control(
+      {
+        kind: 'bind-history',
+        binding: {
+          ...binding(),
+          ownerSessionId: second.harnessSessionId,
+          ownerRuntimeSessionId: second.runtimeSessionId,
+        },
+      },
+      second,
+    );
+    await control({ kind: 'begin-turn', identity: otherIdentity }, second);
+    const prepareFor = (
+      session: ManagedRuntimeProviderSession,
+      call: ManagedToolCallIdentity,
+      image: boolean,
+    ) =>
+      control<ManagedToolPrepareResponse>(
+        {
+          kind: 'prepare',
+          identity: call,
+          toolName: 'read_file',
+          input: { file_path: file },
+          mediaContext: { inputModalities: { image } },
+        },
+        session,
+      );
+    const [enabled, disabled] = await Promise.all([
+      prepareFor(SESSION, identity, true),
+      prepareFor(second, otherIdentity, false),
+    ]);
+    const executeFor = async (
+      session: ManagedRuntimeProviderSession,
+      prepared: ManagedToolPrepareResponse,
+    ) => {
+      const ref = reference(prepared);
+      await control({ kind: 'preflight', reference: ref }, session);
+      return control<{
+        executionStatus: string;
+        result: { llmContent: unknown };
+      }>({ kind: 'execute', reference: ref }, session);
+    };
+    const [first, other] = await Promise.all([
+      executeFor(SESSION, enabled),
+      executeFor(second, disabled),
+    ]);
+    expect(first.executionStatus).toBe('success');
+    expect(first.result.llmContent).toMatchObject({
+      inlineData: { mimeType: 'image/gif', data },
+    });
+    expect(other.executionStatus).toBe('success');
+    expect(other.result.llmContent).toContain('Unsupported image file');
+    expect(await control({ kind: 'release' })).toBe(true);
+    expect(await control({ kind: 'release' }, second)).toBe(true);
+  });
+
+  it.each([
+    ['audio', 'mp3'],
+    ['video', 'mp4'],
+  ])(
+    'does not enable %s from a multimodal provider context',
+    async (modality, extension) => {
+      const file = path.join(workspace, `clip.${extension}`);
+      fs.writeFileSync(
+        file,
+        Buffer.from('ID3\u0000\u0000\u0000\u0000\u0000\u0000\u0000'),
+      );
+      await begin();
+      const prepared = await control<ManagedToolPrepareResponse>({
+        kind: 'prepare',
+        identity,
+        toolName: 'read_file',
+        input: { file_path: file },
+        mediaContext: {
+          inputModalities: { image: true, pdf: true, audio: true, video: true },
+        },
+      });
+      const answer = await execute<{
+        executionStatus: string;
+        result: { llmContent: unknown };
+      }>(reference(prepared));
+      expect(answer.executionStatus).toBe('success');
+      expect(answer.result.llmContent).toContain(
+        `Unsupported ${modality} file`,
+      );
+      expect(await control({ kind: 'release' })).toBe(true);
+    },
+  );
 
   it('reports input errors separately from identity conflicts and permits corrected preparation', async () => {
     await begin();
@@ -358,6 +912,66 @@ describe('Managed Runtime provider worker', () => {
     });
     expect((await post({ kind: 'acquire' })).status).toBe(409);
     expect((await post({ kind: 'manifest' })).status).toBe(409);
+  });
+
+  it('refuses a PreToolUse replacement over HTTP without running either input', async () => {
+    const original = path.join(workspace, 'original.txt');
+    const replaced = path.join(workspace, 'replaced.txt');
+    // A test MessageBus stands in for a deployed command hook.
+    const request = vi.fn(async (hookRequest: { eventName: string }) => ({
+      success: true,
+      output:
+        hookRequest.eventName === 'PreToolUse'
+          ? {
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                updatedInput: { file_path: replaced, content: 'B' },
+              },
+            }
+          : {},
+    }));
+    vi.spyOn(Config.prototype, 'getDisableAllHooks').mockReturnValue(false);
+    vi.spyOn(Config.prototype, 'getMessageBus').mockReturnValue({
+      request,
+    } as unknown as ReturnType<Config['getMessageBus']>);
+    await begin();
+    const ref = reference(
+      await prepare('write_file', { file_path: original, content: 'A' }),
+    );
+    await control({ kind: 'confirmation', reference: ref });
+    await control({
+      kind: 'confirm',
+      reference: ref,
+      outcome: ToolConfirmationOutcome.ProceedOnce,
+    });
+
+    const refused = await control({ kind: 'preflight', reference: ref });
+    expect(refused).toEqual({
+      shouldProceed: false,
+      blockType: 'denied',
+      blockReason: expect.stringContaining('not supported'),
+    });
+    expect(await control({ kind: 'preflight', reference: ref })).toEqual(
+      refused,
+    );
+    expect(
+      (
+        await post({
+          kind: 'confirm',
+          reference: ref,
+          outcome: ToolConfirmationOutcome.ProceedOnce,
+          phase: 'preflight',
+        })
+      ).status,
+    ).toBe(409);
+    expect((await post({ kind: 'execute', reference: ref })).status).toBe(409);
+    expect(
+      request.mock.calls.filter(
+        ([hookRequest]) => hookRequest.eventName === 'PreToolUse',
+      ),
+    ).toHaveLength(1);
+    expect(fs.existsSync(original)).toBe(false);
+    expect(fs.existsSync(replaced)).toBe(false);
   });
 
   it('fences Session identity, changed prepared input and legacy raw execution', async () => {
@@ -571,6 +1185,95 @@ describe('Managed Runtime provider worker', () => {
     });
   });
 
+  it.each([false, true])(
+    'reads Workspace context without a provider Session, confined to the Workspace (linked root: %s)',
+    async (linkedRoot) => {
+      if (linkedRoot) {
+        await worker.close();
+        const linkedWorkspace = path.join(storage, 'workspace-link');
+        fs.symlinkSync(workspace, linkedWorkspace, 'dir');
+        worker = await startManagedRuntimeAttestationWorker({
+          ...BOOT,
+          workspaceCwd: linkedWorkspace,
+        });
+      }
+      fs.writeFileSync(path.join(workspace, 'QWEN.md'), 'project rules');
+      const outside = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-provider-outside-'),
+      );
+      try {
+        // A planted symlink must not promote a host file into the system
+        // instruction.
+        fs.writeFileSync(path.join(outside, 'secret.txt'), 'host-secret');
+        fs.symlinkSync(
+          path.join(outside, 'secret.txt'),
+          path.join(workspace, 'AGENTS.md'),
+        );
+        expect(await control({ kind: 'workspace-context' })).toEqual({
+          files: [{ name: 'QWEN.md', text: 'project rules' }],
+        });
+
+        fs.rmSync(path.join(workspace, 'AGENTS.md'));
+        fs.writeFileSync(
+          path.join(workspace, 'AGENTS.md'),
+          'x'.repeat(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS + 10),
+        );
+        const { files } = await control<{
+          files: Array<{ name: string; text: string }>;
+        }>({ kind: 'workspace-context' });
+        expect(files.map((file) => file.name)).toEqual([
+          'QWEN.md',
+          'AGENTS.md',
+        ]);
+        expect(files[1].text).toHaveLength(
+          MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
+        );
+        expect(files[1].text).toContain('[Truncated');
+
+        // An astral character at the cut must not leave a lone surrogate:
+        // one of the two offsets splits a pair whatever the note's length.
+        for (const prefix of ['', 'x']) {
+          fs.writeFileSync(
+            path.join(workspace, 'AGENTS.md'),
+            prefix + '😀'.repeat(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS),
+          );
+          const astral = await control<{
+            files: Array<{ name: string; text: string }>;
+          }>({ kind: 'workspace-context' });
+          expect(astral.files[1].text).not.toMatch(
+            /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+          );
+          expect(astral.files[1].text).toContain('[Truncated');
+        }
+
+        // One file under both names is injected once.
+        fs.rmSync(path.join(workspace, 'AGENTS.md'));
+        fs.symlinkSync('QWEN.md', path.join(workspace, 'AGENTS.md'));
+        expect(await control({ kind: 'workspace-context' })).toEqual({
+          files: [{ name: 'QWEN.md', text: 'project rules' }],
+        });
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+      // The read claimed no provider Session, so the legacy protocol is intact.
+      await acquire();
+    },
+  );
+
+  it('reads Workspace context for an already-claimed provider Session', async () => {
+    // The production ordering: the Harness reads from inside acquire(), after
+    // the acquire control claimed this Session. Refusing that state answered
+    // 409 managed_runtime_identity_conflict, which the best-effort catch
+    // swallowed — every Hosted turn ran without instructions and looked
+    // healthy.
+    fs.writeFileSync(path.join(workspace, 'QWEN.md'), 'project rules');
+    await acquire();
+
+    expect(await control({ kind: 'workspace-context' })).toEqual({
+      files: [{ name: 'QWEN.md', text: 'project rules' }],
+    });
+  });
+
   it('keeps shell calls inside the Session workspace', async () => {
     await begin();
     // The kernel follows a link before the `..` after it.
@@ -580,6 +1283,8 @@ describe('Managed Runtime provider worker', () => {
     for (const directory of [
       storage,
       `${path.join(workspace, 'link')}${path.sep}..`,
+      // An unresolved path fails the containment check closed, before execution.
+      path.join(workspace, 'missing-directory'),
     ]) {
       const outside = await post({
         kind: 'prepare',
@@ -971,6 +1676,281 @@ describe('Managed Runtime provider worker', () => {
     ).toMatchObject({ revision: expect.any(Number) });
   });
 
+  it('returns only progress after a nonzero status cursor', async () => {
+    await begin();
+    const gate = path.join(workspace, 'second-output');
+    const script = path.join(workspace, 'progress.cjs');
+    fs.writeFileSync(
+      script,
+      `const fs = require('node:fs');
+process.stdout.write('first');
+const timer = setInterval(() => {
+  if (fs.existsSync(${JSON.stringify(gate)})) {
+    clearInterval(timer);
+    process.stdout.write('second');
+  }
+}, 20);`,
+    );
+    const ref = reference(
+      await prepare('run_shell_command', {
+        command: `"${process.execPath}" "${script}"`,
+      }),
+    );
+    const executing = execute(ref);
+    try {
+      await vi.waitFor(
+        async () => {
+          const status = await control<ManagedToolInvocationStatus>({
+            kind: 'status',
+            reference: ref,
+          });
+          expect(status.progress.length).toBeGreaterThan(0);
+        },
+        { timeout: 5000 },
+      );
+    } finally {
+      fs.writeFileSync(gate, '');
+      await executing;
+    }
+    const full = await control<ManagedToolInvocationStatus>({
+      kind: 'status',
+      reference: ref,
+    });
+    expect(full.progress.length).toBeGreaterThan(1);
+    const cursor = full.progress[0].seq;
+    expect(cursor).toBeGreaterThan(0);
+    const after = await control<ManagedToolInvocationStatus>({
+      kind: 'status',
+      reference: ref,
+      afterSequence: cursor,
+    });
+    expect(after.lastSeq).toBe(full.lastSeq);
+    expect(after.progress).toEqual(
+      full.progress.filter((event) => event.seq > cursor),
+    );
+  });
+
+  it('accepts a manifest whose full envelope exactly fits the wire limit', async () => {
+    await acquire();
+    const manifest = await control<ReturnType<ManagedToolRuntime['manifest']>>({
+      kind: 'manifest',
+    });
+    const limit = managedRuntimeProviderLimit('manifest');
+    const envelope = {
+      protocolVersion: 1,
+      providerProtocol: MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+      session: SESSION,
+      result: 0,
+    };
+    const overhead = Buffer.byteLength(JSON.stringify(envelope)) - 1;
+    manifest.tools[0] = { ...manifest.tools[0], description: '' };
+    const padding =
+      limit - overhead - Buffer.byteLength(JSON.stringify(manifest));
+    manifest.tools[0] = {
+      ...manifest.tools[0],
+      description: 'x'.repeat(padding),
+    };
+    manifest.capabilityDigest = managedToolDigest(manifest.tools, limit);
+    vi.spyOn(ManagedToolRuntime.prototype, 'manifest').mockReturnValue(
+      manifest,
+    );
+    const response = await post({ kind: 'manifest' });
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(Buffer.byteLength(body)).toBe(limit);
+    expect(JSON.parse(body)).toEqual({ ...envelope, result: manifest });
+  });
+
+  it.each([0, 1])(
+    'enforces the 8 MiB history response budget with an envelope %i bytes over',
+    async (extraBytes) => {
+      await begin();
+      const history = await control<ManagedToolFileHistoryState>({
+        kind: 'history',
+      });
+      const snapshot = history.snapshots[0];
+      const backup = {
+        backupFileName: null,
+        version: 1,
+        backupTime: snapshot.timestamp,
+      };
+      const files = Array.from({ length: 2048 }, (_, i) => `file-${i}`);
+      snapshot.trackedFileBackups = Object.fromEntries(
+        files.map((file) => [file, backup]),
+      );
+      const envelope = {
+        protocolVersion: 1,
+        providerProtocol: MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+        session: SESSION,
+        result: history,
+      };
+      const limit = 8 * 1024 * 1024;
+      const padding =
+        limit + extraBytes - Buffer.byteLength(JSON.stringify(envelope));
+      // Spread padding across valid history paths (at most 4096 characters).
+      snapshot.trackedFileBackups = Object.fromEntries(
+        files.map((file, i) => [
+          file +
+            'x'.repeat(
+              Math.floor(padding / files.length) +
+                (i < padding % files.length ? 1 : 0),
+            ),
+          backup,
+        ]),
+      );
+      expect(Buffer.byteLength(JSON.stringify(envelope))).toBe(
+        limit + extraBytes,
+      );
+      expect(Buffer.byteLength(JSON.stringify(history))).toBeLessThan(limit);
+      vi.spyOn(ManagedToolFileHistory.prototype, 'state').mockReturnValue(
+        history,
+      );
+
+      const response = await post({ kind: 'history' });
+      if (extraBytes === 0) {
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        expect(Buffer.byteLength(body)).toBe(limit);
+        expect(JSON.parse(body)).toEqual(envelope);
+      } else {
+        expect(response.status).toBe(413);
+        expect(await response.json()).toEqual({
+          code: 'managed_runtime_provider_too_large',
+          error:
+            'Managed Runtime provider response exceeds its body size limit.',
+        });
+      }
+    },
+  );
+
+  it('fits a status whose envelope is one byte over the wire limit', async () => {
+    await begin();
+    const ref = reference(
+      await prepare('read_file', {
+        file_path: path.join(workspace, 'input.txt'),
+      }),
+    );
+    await execute(ref);
+    const status = await control<ManagedToolInvocationStatus>({
+      kind: 'status',
+      reference: ref,
+    });
+    const result = { llmContent: '', returnDisplay: '' };
+    status.result = { executionStatus: 'success', result };
+    const limit = managedRuntimeProviderLimit('status');
+    const overhead =
+      Buffer.byteLength(
+        JSON.stringify({
+          protocolVersion: 1,
+          providerProtocol: MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+          session: SESSION,
+          result: 0,
+        }),
+      ) - 1;
+    result.llmContent = 'x'.repeat(
+      limit - overhead + 1 - Buffer.byteLength(JSON.stringify(status)),
+    );
+    expect(Buffer.byteLength(JSON.stringify(status)) + overhead).toBe(
+      limit + 1,
+    );
+    vi.spyOn(ManagedToolRuntime.prototype, 'status').mockReturnValue(status);
+    const response = await post({ kind: 'status', reference: ref });
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(Buffer.byteLength(body)).toBeLessThanOrEqual(limit);
+    expect(JSON.parse(body).result).toMatchObject({
+      state: 'settled',
+      result: { executionStatus: 'success' },
+    });
+    expect(body).toContain('Managed Runtime provider omitted');
+  });
+
+  it('refuses an unfitted manifest whose envelope exceeds the wire limit', async () => {
+    await acquire();
+    const manifest = await control<ReturnType<ManagedToolRuntime['manifest']>>({
+      kind: 'manifest',
+    });
+    const limit = managedRuntimeProviderLimit('manifest');
+    manifest.tools[0] = { ...manifest.tools[0], description: '' };
+    const padding = limit - Buffer.byteLength(JSON.stringify(manifest));
+    manifest.tools[0] = {
+      ...manifest.tools[0],
+      description: 'x'.repeat(padding),
+    };
+    manifest.capabilityDigest = managedToolDigest(manifest.tools, limit);
+    expect(Buffer.byteLength(JSON.stringify(manifest))).toBe(limit);
+    vi.spyOn(ManagedToolRuntime.prototype, 'manifest').mockReturnValue(
+      manifest,
+    );
+    const response = await post({ kind: 'manifest' });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({
+      code: 'managed_runtime_provider_too_large',
+      error: 'Managed Runtime provider response exceeds its body size limit.',
+    });
+  });
+
+  it('preserves a prepared invocation when release is refused over a pending history read', async () => {
+    await begin();
+    const ref = reference(
+      await prepare('read_file', {
+        file_path: path.join(workspace, 'input.txt'),
+      }),
+    );
+    const drain = hold(ManagedToolFileHistory.prototype, 'drain');
+    const observed = control({ kind: 'history' });
+    await drain.entered();
+    const refused = await post({ kind: 'release' });
+    expect(refused.status).toBe(409);
+    expect(await control({ kind: 'status', reference: ref })).toMatchObject({
+      state: 'prepared',
+    });
+    expect(await refused.json()).toEqual({
+      code: 'managed_runtime_owner_hold_pending',
+      error: 'Managed Runtime Session still owns unfinished work.',
+    });
+    drain.release();
+    await observed;
+    expect(await execute(ref)).toMatchObject({ executionStatus: 'success' });
+  });
+
+  it('rechecks pending controls that arrive while release preparation is waiting', async () => {
+    await begin();
+    const ref = reference(
+      await prepare('read_file', {
+        file_path: path.join(workspace, 'input.txt'),
+      }),
+    );
+    const preparedRelease = hold(
+      ManagedToolRuntime.prototype,
+      'releasePrepared',
+    );
+    const releasing = post({ kind: 'release' });
+    await preparedRelease.entered();
+    const drain = hold(ManagedToolFileHistory.prototype, 'drain');
+    const observed = control({ kind: 'history' });
+    await drain.entered();
+    preparedRelease.release();
+    const refused = await releasing;
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({
+      code: 'managed_runtime_owner_hold_pending',
+      error: 'Managed Runtime Session still owns unfinished work.',
+    });
+    // Preparation already cancelled pending work before this late refusal.
+    expect(await control({ kind: 'status', reference: ref })).toMatchObject({
+      state: 'settled',
+      cancelRequested: true,
+      result: { executionStatus: 'not_started' },
+    });
+    drain.release();
+    await observed;
+    expect(await control({ kind: 'manifest' })).toMatchObject({
+      tools: expect.any(Array),
+    });
+    expect(await control({ kind: 'release' })).toBe(true);
+  });
+
   it('keeps an oversized shell result observable instead of failing the wire contract', async () => {
     await begin();
     const ref = reference(
@@ -1122,6 +2102,7 @@ describe('Managed Runtime provider worker', () => {
         .map((config) => (config as Config).getSessionId())
         .sort(),
     ).toEqual(others.map((other) => other.runtimeSessionId).sort());
+    expect(retirementWarning).not.toHaveBeenCalled();
   });
 
   /**
@@ -1206,6 +2187,7 @@ describe('Managed Runtime provider worker', () => {
     expect(released).toBe(false);
     dispose.release();
     expect(await ninth).toBe(true);
+    expect(retirementWarning).not.toHaveBeenCalled();
   });
 
   it('waits in close() for a retirement in flight and shuts each Config down once', async () => {
@@ -1234,6 +2216,7 @@ describe('Managed Runtime provider worker', () => {
         .map((config) => (config as Config).getSessionId())
         .sort(),
     ).toEqual(sessions.map((session) => session.runtimeSessionId).sort());
+    expect(retirementWarning).not.toHaveBeenCalled();
   });
 
   it('waits in close() for an acquire in flight and shuts its Config down', async () => {
@@ -1266,6 +2249,12 @@ describe('Managed Runtime provider worker', () => {
       expect(await control({ kind: 'acquire' }, session)).toBe(true);
       expect(await control({ kind: 'release' }, session)).toBe(true);
     }
+    expect(retirementWarning).toHaveBeenCalledExactlyOnceWith(
+      'Retiring a released Session failed:',
+      expect.objectContaining({
+        errors: [expect.objectContaining({ message: 'dispose failed' })],
+      }),
+    );
     // The later steps still ran, and the Session is a tombstone.
     expect(
       shutdown.mock.contexts.map((config) => (config as Config).getSessionId()),
@@ -1297,6 +2286,7 @@ describe('Managed Runtime provider worker', () => {
     ).toEqual([sessions[0].runtimeSessionId]);
     drain.release();
     expect(await observed).toMatchObject({ revision: expect.any(Number) });
+    expect(retirementWarning).not.toHaveBeenCalled();
   });
 
   it('retires the Session just released when every retained one is being observed', async () => {
@@ -1334,6 +2324,7 @@ describe('Managed Runtime provider worker', () => {
     drain.release();
     for (const history of await Promise.all(observed))
       expect(history).toMatchObject({ revision: expect.any(Number) });
+    expect(retirementWarning).not.toHaveBeenCalled();
   });
 
   it('answers a release that came before any acquire with a forgetful tombstone', async () => {
@@ -1565,5 +2556,56 @@ describe('Managed Runtime provider worker', () => {
     expect(response.status).toBe(409);
     expect(fs.existsSync(marker)).toBe(false);
     await control({ kind: 'release' });
+  });
+});
+
+describe('Managed Runtime provider release deadline', () => {
+  let workspace: string;
+  let storage: string;
+  let executor: ManagedToolExecutor;
+  let provider: ManagedRuntimeProviderWorker;
+
+  beforeEach(() => {
+    workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-provider-release-')),
+    );
+    storage = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-provider-release-storage-'),
+    );
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(storage);
+    executor = new ManagedToolExecutor(async () => undefined);
+    provider = new ManagedRuntimeProviderWorker(
+      executor,
+      async () => ({
+        directory: workspace,
+        workspaceRoot: workspace,
+        preapproved: true,
+      }),
+      50,
+    );
+    executor.attachProvider(provider);
+  });
+
+  afterEach(async () => {
+    await executor.close();
+    vi.restoreAllMocks();
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(storage, { recursive: true, force: true });
+  });
+
+  it('abandons a release that outlives its deadline and retries it', async () => {
+    await expect(provider.control(SESSION, { kind: 'acquire' })).resolves.toBe(
+      true,
+    );
+    const stuck = vi
+      .spyOn(ManagedToolRuntime.prototype, 'releasePrepared')
+      .mockImplementation(() => new Promise(() => {}));
+    await expect(
+      provider.control(SESSION, { kind: 'release' }),
+    ).rejects.toMatchObject({ code: 'managed_runtime_release_timeout' });
+    stuck.mockRestore();
+    await expect(provider.control(SESSION, { kind: 'release' })).resolves.toBe(
+      true,
+    );
   });
 });

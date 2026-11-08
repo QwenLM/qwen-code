@@ -78,7 +78,12 @@ export function validateHostedLatency(report: HostedLatencyMeasurement) {
       first.firstTextMs < sample.runtimeReadyMs,
       'model text precedes readiness',
     );
-    assert(sample.modelRounds.at(-1)!.finishedMs <= sample.firstVisibleTextMs);
+    // Text streams as durable message.delta events, so it becomes visible
+    // while the model round is still running, not only after it finishes.
+    assert(
+      first.firstTextMs <= sample.firstVisibleTextMs,
+      'visible text follows the first provider delta',
+    );
     if (sample.scenario === 'no-tool') {
       assert(
         sample.warmRequestedMs <= sample.turnCompleteMs,

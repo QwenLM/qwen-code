@@ -11,6 +11,7 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import { z } from 'zod';
+import { sortModelEntriesForDisplay } from './model-display-order.js';
 
 export const ACP_ROUTE_ID_PREFIX = 'qwen-route:v1:';
 
@@ -102,7 +103,7 @@ export function buildAcpModelOptions(
   }
   const discriminators = new Set<string>();
 
-  return candidates.map(({ model, effectiveModelId, legacyModelId }) => {
+  const rows = candidates.map(({ model, effectiveModelId, legacyModelId }) => {
     const discriminator = [
       legacyModelId,
       model.label,
@@ -133,6 +134,7 @@ export function buildAcpModelOptions(
               .slice(0, 16)}`,
     };
   });
+  return sortModelEntriesForDisplay(rows);
 }
 
 export function resolveAcpModelOption(
@@ -160,6 +162,23 @@ export function resolveAcpModelOption(
       : {}),
     isRuntime: matched.model.isRuntimeModel === true,
   };
+}
+
+export function resolveAcpFastModelSelector(
+  input: string,
+  models: readonly AvailableModel[],
+): string | null {
+  const option = buildAcpModelOptions(models).find(
+    (candidate) => candidate.modelId === input.trim(),
+  );
+  if (!option || option.model.isRuntimeModel || option.model.visionOnly) {
+    return null;
+  }
+  const { model } = option;
+  const selector = `${model.authType}:${model.id}`;
+  return model.authType === AuthType.QWEN_OAUTH
+    ? selector
+    : `${selector}\0${model.registryBaseUrl ?? ''}`;
 }
 
 export function getCurrentAcpModelId(

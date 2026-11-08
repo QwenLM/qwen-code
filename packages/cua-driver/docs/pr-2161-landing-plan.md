@@ -1,5 +1,10 @@
 # PR #2161 Landing Plan - Second-Wave E2E Convergence
 
+> Historical record, superseded by the 2026-10 X11-only upgrade. Native Wayland
+> implementations, helpers, dependencies and validation lanes described below
+> have been removed; these historical results do not describe current support.
+
+
 **Historical execution plan.** This file records how the original draft was
 split and landed. It is not the current test or platform support reference.
 

@@ -97,6 +97,8 @@ export interface WebShellDaemonScenario {
   pairingApprovals: Record<string, string[]>;
   pairingGroupApprovals: Record<string, string[]>;
   sessions: DaemonSessionSummary[];
+  workspaceOrder: string[];
+  workspaceOrderSaveError?: boolean;
   standaloneSessions: DaemonStandaloneSessionSummary[];
   standaloneCreateError?: {
     status: number;
@@ -308,6 +310,7 @@ export function createWebShellDaemonScenario(
       'session_permission_vote',
       'session_scope_override',
       'session_source_metadata',
+      'session_btw_stream',
       'workspace_settings',
       'workspace_voice',
     ],
@@ -460,6 +463,8 @@ export function createWebShellDaemonScenario(
     pairingApprovals: overrides.pairingApprovals ?? {},
     pairingGroupApprovals: overrides.pairingGroupApprovals ?? {},
     sessions,
+    workspaceOrder: overrides.workspaceOrder ?? [],
+    workspaceOrderSaveError: overrides.workspaceOrderSaveError,
     standaloneSessions: overrides.standaloneSessions ?? [],
     standaloneCreateError: overrides.standaloneCreateError,
     sessionGroups: overrides.sessionGroups ?? [],
@@ -701,7 +706,7 @@ export function replayCompleteEvent(
 
 export function permissionRequestEvent(
   requestId: string,
-  options: { id?: number; sessionId?: string } = {},
+  options: { id?: number; sessionId?: string; toolCall?: unknown } = {},
 ): DaemonEvent {
   return {
     ...(options.id !== undefined ? { id: options.id } : {}),
@@ -710,15 +715,15 @@ export function permissionRequestEvent(
     data: {
       requestId,
       sessionId: options.sessionId,
-      toolCall: {
+      toolCall: options.toolCall ?? {
         name: 'Bash',
         input: {
           command: 'printf web-shell-e2e',
         },
       },
       options: [
-        { optionId: 'allow_once', label: 'Allow once' },
-        { optionId: 'reject_once', label: 'Reject' },
+        { optionId: 'allow_once', label: 'Allow', kind: 'allow_once' },
+        { optionId: 'cancel', label: 'Reject', kind: 'reject_once' },
       ],
     },
   };
@@ -825,6 +830,7 @@ function isDaemonPath(path: string): boolean {
   return (
     path === '/health' ||
     path === '/capabilities' ||
+    path === '/workspace-order' ||
     path === '/brand' ||
     path === '/workspace/settings' ||
     path === '/workspace/providers' ||
@@ -886,6 +892,7 @@ function isDaemonPath(path: string): boolean {
     /^\/session\/[^/]+\/saved-workflows\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-message\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-messages(?:\/[^/]+)?\/?$/.test(path) ||
+    /^\/session\/[^/]+\/btw\/stream(?:\/[^/]+)?\/?$/.test(path) ||
     /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
       path,
     )
@@ -893,6 +900,8 @@ function isDaemonPath(path: string): boolean {
 }
 
 function isDaemonRoute(method: string, path: string): boolean {
+  if ((method === 'GET' || method === 'POST') && path === '/workspace-order')
+    return true;
   if (
     method === 'GET' &&
     (path === '/health' || path === '/capabilities' || path === '/brand')
@@ -1037,7 +1046,13 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   if (method === 'POST' && /^\/workspace\/github\/prs\/create\/?$/.test(path))
     return true;
-  if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) return true;
+  if (method === 'POST' && /^\/session\/[^/]+\/btw(?:\/stream)?\/?$/.test(path))
+    return true;
+  if (
+    method === 'DELETE' &&
+    /^\/session\/[^/]+\/btw\/stream\/[^/]+$/.test(path)
+  )
+    return true;
   if (method === 'GET' && /^\/file\/?$/.test(path)) return true;
   if (method === 'GET' && /^\/session\/[^/]+\/artifacts\/?$/.test(path)) {
     return true;
@@ -1243,8 +1258,26 @@ async function handleDaemonRoute(
   searchParams: URLSearchParams = new URLSearchParams(),
   resolvePeer?: (origin: string) => DaemonPeer | undefined,
 ): Promise<void> {
+  if (path === '/workspace-order') {
+    if (method === 'POST') {
+      if (scenario.workspaceOrderSaveError) {
+        await json(
+          route,
+          {
+            error: 'Failed to persist workspace order',
+            code: 'workspace_registration_store_error',
+          },
+          500,
+        );
+        return;
+      }
+      scenario.workspaceOrder = getRecordValue(body, 'cwds') as string[];
+    }
+    await json(route, { cwds: scenario.workspaceOrder });
+    return;
+  }
   if (method === 'GET' && path === '/health') {
-    await json(route, { ok: true, healthy: true });
+    await json(route, { status: 'ok' });
     return;
   }
   if (method === 'GET' && path === '/capabilities') {
@@ -1967,6 +2000,28 @@ async function handleDaemonRoute(
     );
     return;
   }
+  if (method === 'POST' && /^\/session\/[^/]+\/btw\/stream\/?$/.test(path)) {
+    const requestId = (body as Record<string, unknown>)['requestId'];
+    const answer = scenario.btwAnswer ?? 'A side answer.';
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: ['answer', 'done']
+        .map(
+          (type) =>
+            `event: ${type}\ndata: ${JSON.stringify({ v: 1, type, requestId, answer })}\n\n`,
+        )
+        .join(''),
+    });
+    return;
+  }
+  if (
+    method === 'DELETE' &&
+    /^\/session\/[^/]+\/btw\/stream\/[^/]+$/.test(path)
+  ) {
+    await route.fulfill({ status: 204 });
+    return;
+  }
   if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) {
     await json(route, {
       sessionId: path.split('/')[2],
@@ -2398,6 +2453,46 @@ async function handleDaemonRoute(
       const configId = readStringField(body, 'configId');
       const value = readStringField(body, 'value');
       const persist = getRecordValue(body, 'persist');
+      if (configId === 'workflow_mode') {
+        const currentConfigOptions = Array.isArray(scenario.state.configOptions)
+          ? scenario.state.configOptions
+          : [];
+        const workflow = currentConfigOptions.find(
+          (option) => isRecord(option) && option['id'] === configId,
+        );
+        const metadata = getRecordValue(
+          getRecordValue(workflow, '_meta'),
+          'qwen.workflowMode',
+        );
+        if (
+          (value !== 'on' && value !== 'off') ||
+          (isRecord(body) && 'persist' in body) ||
+          !isRecord(metadata) ||
+          typeof metadata['available'] !== 'boolean' ||
+          (value === 'on' && !metadata['available'])
+        ) {
+          await badRequest(route, 'Unsupported workflow mode request.');
+          return;
+        }
+        const configOptions = currentConfigOptions.map((option) =>
+          isRecord(option) && option['id'] === configId
+            ? {
+                ...option,
+                currentValue: value,
+                _meta: {
+                  ...(isRecord(option['_meta']) ? option['_meta'] : {}),
+                  'qwen.workflowMode': {
+                    ...metadata,
+                    effective: value === 'on' && metadata['available'],
+                  },
+                },
+              }
+            : option,
+        );
+        scenario.state.configOptions = configOptions;
+        await json(route, { configOptions, persisted: true });
+        return;
+      }
       if (
         configId !== 'reasoning_effort' ||
         !value ||

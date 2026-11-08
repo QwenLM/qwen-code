@@ -10,6 +10,8 @@ O2 作为一个交付，内部按阶段提交。[O2a 契约与归属基础](2026
 
 首个后端确定为专用私有 OSS bucket。共享持久卷属于另一种持久性配置，不能证明 Runtime 宿主丢失后结果仍可用。私有 Shell profile 默认关闭。若真实 OSS 或替代宿主证据暂不可得，统一实现先提交 Draft PR，补齐验证后再转 Ready for review。通用孤立 worker 接管不属于 O2。
 
+发布过期分类和按字节量固定的扫描窗口见 [R15-1 恢复设计](2026-09-30-managed-tool-publication-expiry-recovery.zh-CN.md)。该后续修复保持 O2 默认关闭，要求部署显式配置校验预算。
+
 ## 2. 调研发现与依赖
 
 | 固定基线中的来源                                                                                                                                                                                                                    | 已观察行为                                                                                                                         | 设计影响                                                     |
@@ -231,8 +233,8 @@ W0e 将 Broker 执行标记为 `ABANDONED` 后，其 ledger 保持终态，不�
 | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `packages/core/src/managed-runtime/`           | 远端 segment/resource 适配器、共享接纳校验、HTTP Session commit/reader；保持本地 O1b/O1c 和通用资源调用方可用              |
 | `packages/cli/src/serve/`                      | worker publisher 注入、grant binding、v3 pending result、Hosted owner 接线；默认 no-tool 与 file-only profile 不变         |
-| `packages/sdk-java/managed-agent-server/`      | Store/controller/catalog/OSS 适配器、迁移和 Workspace transport；兼容现有 inline Session 事务/恢复                         |
-| `packages/sdk-java/runtime-broker/`            | transport 接口、延迟调度携带原始 v3 binding 与 ACK；普通 v2 调度不变                                                       |
+| `packages/managed-agent-server/`               | Store/controller/catalog/OSS 适配器、迁移和 Workspace transport；兼容现有 inline Session 事务/恢复                         |
+| `packages/managed-agent-server/`               | transport 接口、延迟调度携带原始 v3 binding 与 ACK；普通 v2 调度不变                                                       |
 | `packages/core/src/managed-runtime/contracts/` | 新私有 publication/binding fixture 及现有 O1a conformance fixture；TS/Java 的 call ID 映射、闭合字段、限制和错误优先级一致 |
 
 这些切片不涉及 WebShell 修改。这是跨 package 的 core 功能工作，遵循仓库 maintainer 知会/评审门禁。本设计不授权合并或绕过门禁。

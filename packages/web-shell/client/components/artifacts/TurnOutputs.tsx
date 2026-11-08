@@ -4,7 +4,7 @@ import type {
   DaemonSessionArtifact,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
-import { DownloadIcon, SquareArrowOutUpRightIcon } from 'lucide-react';
+import { DownloadIcon, EyeIcon, SquareArrowOutUpRightIcon } from 'lucide-react';
 import { memo, useEffect, useRef, useState } from 'react';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { useI18n } from '../../i18n';
@@ -12,12 +12,14 @@ import { extractErrorDetail } from '../../utils/errorDetail';
 import { isExternalOpenUrl } from '../../utils/externalOpen';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
+  artifactDisplayName,
   formatArtifactSize,
   downloadWorkspaceFile,
+  getArtifactImageMimeType,
   getArtifactTypeLabel,
   getImageMimeTypeFromPath,
   isSamePath,
-  normalizePath,
+  normalizeArtifactMimeType,
   stripWorkspacePath,
 } from './artifactUtils';
 import { LineStats, sumLineStats } from './LineStats';
@@ -86,6 +88,7 @@ export type TurnOutputOpenRequest = (
       title: string;
       turnId: string;
       changes: readonly TurnOutputFileChange[];
+      unfilteredChanges?: readonly TurnOutputFileChange[];
       selectedPath?: string;
       workspaceCwd?: string;
       workspaceId?: string;
@@ -233,7 +236,7 @@ function TurnOutputsComponent({
       onOpenRequest({
         id: `artifact:${artifact.id}`,
         kind: 'artifact',
-        title: artifact.title ?? 'Artifact',
+        title: artifactDisplayName(artifact),
         turnId,
         artifactId: artifact.id,
         ...(artifact.managedId ? { managedId: artifact.managedId } : {}),
@@ -466,10 +469,7 @@ function ArtifactCard({
   }, []);
   const size = formatArtifactSize(artifact.sizeBytes);
   const blockedReason = getWorkspaceArtifactOpenBlockReason(artifact, t);
-  const downloadName =
-    (artifact.workspacePath &&
-      normalizePath(artifact.workspacePath).split('/').at(-1)) ||
-    artifact.title;
+  const displayName = artifactDisplayName(artifact);
   const handleDownload = async () => {
     if (!onDownload || downloading) return;
     setDownloading(true);
@@ -489,20 +489,29 @@ function ArtifactCard({
   const openIcon = (
     <SquareArrowOutUpRightIcon size={16} strokeWidth={1.8} aria-hidden="true" />
   );
+  // Rendered artifacts (HTML, Markdown, images) open straight into a rendered
+  // preview tab, so label the action Preview rather than the generic Open.
+  // External-URL artifacts only show metadata and an Open link in the panel,
+  // so they keep Open even when their kind would otherwise render.
+  const rendered =
+    isRenderedArtifact(artifact) && artifact.storage !== 'external_url';
   return (
     <div className={styles.card}>
-      <div className={styles.summary}>
+      <div className={`${styles.summary} ${styles.artifactSummary}`}>
         <span className={styles.icon} aria-hidden="true">
           <ArtifactIcon artifact={artifact} className={styles.iconSvg} />
         </span>
         <div className={styles.artifactInfo}>
-          <div className={styles.title}>{artifact.title}</div>
+          <div className={`${styles.title} ${styles.artifactTitle}`}>
+            {displayName}
+          </div>
           <div className={styles.artifactMeta}>
             {[
               artifact.metadata?.['artifactType'] === 'web_preview_snapshot'
                 ? t('webPreview.saved')
                 : getArtifactTypeLabel(artifact),
               size,
+              artifact.status === 'changed' && t('turnOutputs.artifactChanged'),
             ]
               .filter(Boolean)
               .join(' · ')}
@@ -514,7 +523,7 @@ function ArtifactCard({
               type="button"
               className={styles.reviewButton}
               onClick={() => void handleDownload()}
-              title={`${t('common.download')} ${downloadName}`}
+              title={`${t('common.download')} ${displayName}`}
               disabled={downloading}
             >
               <DownloadIcon size={16} strokeWidth={1.8} aria-hidden="true" />
@@ -523,7 +532,7 @@ function ArtifactCard({
           )}
           <span
             className={styles.openButtonWrapper}
-            title={blockedReason ?? artifact.title}
+            title={blockedReason ?? displayName}
           >
             {externalUrl ? (
               <a
@@ -543,8 +552,12 @@ function ArtifactCard({
                 onClick={onOpen}
                 disabled={!onOpen}
               >
-                {openIcon}
-                {t('common.open')}
+                {rendered ? (
+                  <EyeIcon size={16} strokeWidth={1.8} aria-hidden="true" />
+                ) : (
+                  openIcon
+                )}
+                {t(rendered ? 'turnOutputs.preview' : 'common.open')}
               </button>
             )}
           </span>
@@ -676,12 +689,17 @@ export function getFileChangePreviewContent(change: TurnOutputFileChange) {
 
 function isRenderedArtifact(artifact: DaemonSessionArtifact) {
   const path = artifact.workspacePath?.toLowerCase() ?? '';
-  const mimeType = artifact.mimeType?.toLowerCase() ?? '';
+  // Match the panel's predicates for the relabelled kinds (HTML, Markdown,
+  // images): normalise mime parameters (text/html; charset=utf-8) and honour
+  // image/* mime even when the path has no extension. PDF/DOCX/XLSX are
+  // rendered by the panel through their own viewers but keep "Open" here.
+  const mimeType = normalizeArtifactMimeType(artifact.mimeType);
   return (
     artifact.kind === 'html' ||
     isRenderedFilePath(path) ||
     mimeType === 'text/html' ||
-    mimeType === 'text/markdown'
+    mimeType === 'text/markdown' ||
+    Boolean(getArtifactImageMimeType(artifact))
   );
 }
 
@@ -705,7 +723,7 @@ function canDownloadArtifact(
 ): artifact is DaemonSessionArtifact & { workspacePath: string } {
   return (
     artifact.storage === 'workspace' &&
-    artifact.status === 'available' &&
+    (artifact.status === 'available' || artifact.status === 'changed') &&
     Boolean(artifact.workspacePath)
   );
 }

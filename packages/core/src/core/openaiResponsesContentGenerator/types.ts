@@ -41,7 +41,16 @@ export interface ResponsesApiToolFunction {
   strict?: boolean;
 }
 
-export type ResponsesApiTool = ResponsesApiToolFunction;
+export interface ResponsesApiToolCustom {
+  type: 'custom';
+  name: string;
+  description?: string;
+  format: { type: 'text' };
+}
+
+export type ResponsesApiTool =
+  | ResponsesApiToolFunction
+  | ResponsesApiToolCustom;
 
 export type ResponsesApiTruncation =
   | 'auto'
@@ -58,6 +67,10 @@ export interface ResponsesApiRequest {
   truncation?: ResponsesApiTruncation;
   previous_response_id?: string;
   prompt_cache_key?: string;
+  prompt_cache_options?: {
+    mode?: 'implicit' | 'explicit';
+    ttl?: '30m' | '12h';
+  };
   reasoning?: ResponsesApiReasoning;
   text?: ResponsesApiTextControls;
   service_tier?: ResponsesApiServiceTier;
@@ -76,6 +89,8 @@ export type ResponsesApiInputItem =
   | ResponsesApiMessageItem
   | ResponsesApiFunctionCallItem
   | ResponsesApiFunctionCallOutputItem
+  | ResponsesApiCustomToolCallItem
+  | ResponsesApiCustomToolCallOutputItem
   | ResponsesApiItemReference
   | ResponsesApiReasoningItem;
 
@@ -100,6 +115,7 @@ export type ResponsesApiContentPart =
 export interface ResponsesApiTextPart {
   type: 'input_text';
   text: string;
+  prompt_cache_breakpoint?: { mode: 'explicit'; ttl?: '30m' | '12h' };
 }
 
 export interface ResponsesApiImagePart {
@@ -117,6 +133,19 @@ export interface ResponsesApiFunctionCallItem {
 
 export interface ResponsesApiFunctionCallOutputItem {
   type: 'function_call_output';
+  call_id: string;
+  output: string | ResponsesApiContentPart[];
+}
+
+export interface ResponsesApiCustomToolCallItem {
+  type: 'custom_tool_call';
+  call_id: string;
+  name: string;
+  input: string;
+}
+
+export interface ResponsesApiCustomToolCallOutputItem {
+  type: 'custom_tool_call_output';
   call_id: string;
   output: string;
 }
@@ -173,6 +202,7 @@ export interface ResponsesApiReasoningSummaryContent {
 export type ResponsesApiOutputItem =
   | ResponsesApiOutputMessage
   | ResponsesApiOutputFunctionCall
+  | (ResponsesApiCustomToolCallItem & { id: string })
   | ResponsesApiOutputReasoningSummary;
 
 // ── Response envelope ──────────────────────────────────────────────────
@@ -217,6 +247,8 @@ export type ResponsesSSEEventType =
   | 'response.refusal.done'
   | 'response.function_call_arguments.delta'
   | 'response.function_call_arguments.done'
+  | 'response.custom_tool_call_input.delta'
+  | 'response.custom_tool_call_input.done'
   | 'response.reasoning_text.delta'
   | 'response.reasoning_text.done'
   | 'response.reasoning_summary_part.added'

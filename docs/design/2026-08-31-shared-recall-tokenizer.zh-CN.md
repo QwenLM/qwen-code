@@ -44,8 +44,10 @@ Core 自动记忆召回与 Channel 记忆召回分别实现了 NFKC 标准化、
 - `codePointBigrams(run)` 按 Unicode code point 而不是 UTF-16 code unit 遍历，并依次
   生成每一对相邻字符。
 
-Core 保留组合式 CJK 连续片段表达式、Unicode 非 CJK token 策略、去重逻辑和 64-token
-首尾上限。Channel 记忆保留不安全不可见字符清理、按 script 划分的表达式、namespace、
+Core 保留组合式 CJK 连续片段表达式、Unicode 非 CJK token 策略、去重逻辑和查询的 64-token
+首尾上限。导出的查询分词器 `tokenizeMemoryRecallText` 与无上限文档 term 分词器
+`tokenizeMemoryRecallTerms` 共享同一个连续片段生成器，CLI memory import 也会使用这两个接口。
+Channel 记忆保留不安全不可见字符清理、按 script 划分的表达式、namespace、
 最小长度和无上限 term 集合。这些现有的调用方函数就是薄适配器，无需引入新的类或配置层。
 
 当前选择的 package 归属是无副作用的

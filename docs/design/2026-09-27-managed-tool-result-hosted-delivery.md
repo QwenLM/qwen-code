@@ -10,6 +10,8 @@ Implement a private OSS-backed publication service inside the existing Java Mana
 
 The selected first backend is a dedicated private OSS bucket. A shared persistent volume has a different durability profile and does not prove survival of Runtime host loss. The private Shell profile stays disabled by default. If real OSS or replacement-host evidence is unavailable, submit the unified implementation as a Draft PR and retain that validation gap before Ready for review. General orphan-worker adoption remains outside O2.
 
+Publication expiry classification and fixed byte-aware scan windows are specified in [the R15-1 recovery design](2026-09-30-managed-tool-publication-expiry-recovery.md). That follow-up leaves O2 disabled by default and requires an explicit deployment verification budget.
+
 ## 2. Findings and dependencies
 
 | Source at the pinned baseline                                                                                                                                                                                                       | Observed behavior                                                                                                                                    | Consequence                                                                                              |
@@ -231,8 +233,8 @@ Submit the slices as staged commits in one Draft PR. O2a does not open Shell. Re
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `packages/core/src/managed-runtime/`           | Remote segment/resource adapters, shared admission validation, HTTP Session commit/reader; local O1b/O1c and generic resource callers remain supported             |
 | `packages/cli/src/serve/`                      | Worker publisher injection, grant binding, v3 pending result and Hosted owner integration; default no-tool and file-only profiles remain unchanged                 |
-| `packages/sdk-java/managed-agent-server/`      | Store/controller/catalog/OSS adapter, migrations and Workspace transport; existing inline Session transactions/recovery remain compatible                          |
-| `packages/sdk-java/runtime-broker/`            | Transport interface and deferred dispatch carry original v3 binding and ACK; ordinary v2 dispatch remains unchanged                                                |
+| `packages/managed-agent-server/`               | Store/controller/catalog/OSS adapter, migrations and Workspace transport; existing inline Session transactions/recovery remain compatible                          |
+| `packages/managed-agent-server/`               | Transport interface and deferred dispatch carry original v3 binding and ACK; ordinary v2 dispatch remains unchanged                                                |
 | `packages/core/src/managed-runtime/contracts/` | New private publication/binding fixtures plus existing O1a conformance fixtures; TS/Java must agree on call-ID mapping, closed shapes, limits and error precedence |
 
 No WebShell change belongs in these slices. This is cross-package core feature work; apply the repository's maintainer awareness/review gate. The design does not authorize merging or bypassing that gate.

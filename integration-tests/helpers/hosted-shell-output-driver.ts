@@ -14,6 +14,9 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { relayUpstream } from './hosted-relay-headers.js';
+import { isLegitimateMountRelease } from './hosted-mount-release.js';
+import { quotePosix } from './hosted-shell-quote.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -43,6 +46,7 @@ const reports = config.sessions.map((session) => ({
   signals: [] as unknown[],
   prefix: undefined as { resourceId: string; digest: string } | undefined,
   target: undefined as Transaction | undefined,
+  targetDigest: '',
   receipt: undefined as Record<string, unknown> | undefined,
   restoreTransactions: [] as Transaction[],
 }));
@@ -131,11 +135,26 @@ const proxy = createServer(async (req, res) => {
       req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!;
     const executionId = url.pathname.match(/\/executions\/([^/:]+)/)?.[1];
     if (!store) {
-      assert.equal(restoring, false, 'Cold load must not contact Broker');
-      assert.equal(fields.runtimeSessionId, current.promptId);
+      const harnessScoped =
+        req.method === 'POST' &&
+        [
+          '/internal/runtime-broker/v1/runtimes:warm',
+          '/internal/runtime-broker/v1/runtimes:capabilities',
+          '/internal/runtime-broker/v1/tool-sessions:active-holds',
+        ].includes(url.pathname);
+      const holdInventory = harnessScoped && operation === 'active-holds';
+      assert.equal(
+        restoring && !holdInventory,
+        false,
+        'Cold load must not execute Broker operations',
+      );
+      assert.equal(
+        fields.runtimeSessionId,
+        harnessScoped ? undefined : current.promptId,
+      );
       assert.notEqual(operation, 'acknowledge');
       assert.notEqual(operation, 'release');
-      current.operations.push(operation);
+      if (!holdInventory) current.operations.push(operation);
       if (executionId) assert.equal(executionId, current.executionCallId);
     }
     const target =
@@ -145,10 +164,19 @@ const proxy = createServer(async (req, res) => {
       events(fields).some((event) => event.kind === 'tool.receipt');
     if (target) {
       assert(current.fault.startsWith('receipt-'));
-      assert.equal(current.injections++, 0);
+      assert(
+        current.injections < 3,
+        'Harness exceeded the commit retry budget',
+      );
+      current.injections++;
       assert.equal(fields.operation, 'recordToolResult');
       assert.equal(fields.commandId, current.executionCallId);
-      current.target = fields;
+      const digest = createHash('sha256').update(body).digest('hex');
+      if (current.target) assert.equal(digest, current.targetDigest);
+      else {
+        current.target = fields;
+        current.targetDigest = digest;
+      }
     }
     const upstream = await fetch(url, {
       method: req.method,
@@ -164,8 +192,16 @@ const proxy = createServer(async (req, res) => {
       : undefined;
     if (target && current.fault === 'receipt-failure') {
       assert.equal(upstream.status, 500, bytes.toString());
+    } else if (!store && url.pathname.endsWith(':release-mount')) {
+      assert(
+        isLegitimateMountRelease(upstream.status, json?.code),
+        `${upstream.status}: ${bytes.toString()}`,
+      );
     } else if (!store && upstream.status === 409) {
-      assert.equal(current.injections, 1);
+      assert.equal(
+        current.injections,
+        current.fault.startsWith('receipt-') ? 3 : 1,
+      );
       assert(['status', 'cancel'].includes(operation));
       assert(
         [
@@ -214,18 +250,17 @@ const proxy = createServer(async (req, res) => {
       }
     }
     if (target && current.fault === 'receipt-reply') {
-      assert.equal(json.replayed, false);
-      current.receipt = json;
+      assert.equal(json.replayed, current.injections > 1);
+      if (current.receipt)
+        assert.deepEqual(json, { ...current.receipt, replayed: true });
+      else current.receipt = json;
+      // Lose every bounded retry's reply to retain the unknown-write probe.
       res.destroy();
       return;
     }
     if (restoring && store && url.pathname.endsWith('/transactions'))
       current.restoreTransactions.push(...json.transactions);
-    for (const [name, value] of upstream.headers)
-      if (!['content-length', 'transfer-encoding', 'connection'].includes(name))
-        res.setHeader(name, value);
-    res.writeHead(upstream.status);
-    res.end(bytes);
+    relayUpstream(res, upstream, bytes);
   } catch (cause) {
     proxyFailure = cause;
     res.destroy();
@@ -248,13 +283,12 @@ const model = await startFakeOpenAIServer(() => {
     "process.stderr.write('stderr-tail\\n');",
     '});',
   ].join('\n');
-  const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
   return {
     toolCalls: [
       fakeToolCall(
         'run_shell_command',
         {
-          command: quote(process.execPath) + ' -e ' + quote(producer),
+          command: quotePosix(process.execPath) + ' -e ' + quotePosix(producer),
           timeout: 60_000,
         },
         'shell-effect',
@@ -338,7 +372,7 @@ try {
     await json(route + '/prompt', input, 202);
     await waitUntil(() => {
       if (proxyFailure) throw proxyFailure;
-      return current.injections === 1;
+      return current.injections > 0;
     });
     if (current.fault === 'publisher-kill') {
       await waitUntil(() => cli.child!.signalCode === 'SIGKILL');
@@ -365,6 +399,10 @@ try {
     );
     await control('finished');
     await assertEffect();
+    assert.equal(
+      current.injections,
+      current.fault.startsWith('receipt-') ? 3 : 1,
+    );
     assert.equal(current.modelCalls, 1);
     assert(current.prefix);
     for (const operation of ['acquire', 'publisher', 'prepare', 'start'])

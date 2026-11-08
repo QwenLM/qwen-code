@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ProviderInfo
 import android.net.Uri
 import android.os.Process
 import android.webkit.MimeTypeMap
@@ -90,9 +91,12 @@ internal class NativeFilePicker(
             }
         }.distinct()
         if (uris.isEmpty() || uris.size > 100 || (!multiple && uris.size != 1)) return null
+        val providers = mutableMapOf<String, ProviderInfo>()
         for (uri in uris) {
             if (uri.scheme != "content" || uri.authority.isNullOrBlank()) return null
-            val provider = context.packageManager.resolveContentProvider(uri.authority!!, 0) ?: return null
+            val provider = providers.getOrPut(uri.authority!!) {
+                context.packageManager.resolveContentProvider(uri.authority!!, 0) ?: return null
+            }
             if (provider.applicationInfo.uid == context.applicationInfo.uid) return null
             if (context.checkUriPermission(uri, Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_READ_URI_PERMISSION) != PackageManager.PERMISSION_GRANTED) return null
         }

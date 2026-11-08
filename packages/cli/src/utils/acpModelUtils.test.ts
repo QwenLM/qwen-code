@@ -14,10 +14,159 @@ import {
   parseAcpModelOption,
   publicProviderBaseUrl,
   resolveAcpModelOption,
+  resolveAcpFastModelSelector,
   sanitizeProviderBaseUrl,
 } from './acpModelUtils.js';
 
 describe('acpModelUtils', () => {
+  it('prioritizes authorized Qwen models without changing routes or input order', () => {
+    const models = [
+      {
+        id: 'runtime',
+        label: 'Runtime',
+        authType: AuthType.USE_OPENAI,
+        isRuntimeModel: true,
+        runtimeSnapshotId: '$runtime|openai|runtime',
+      },
+      { id: 'api-first', label: 'API first', authType: AuthType.USE_ANTHROPIC },
+      {
+        id: 'future-first',
+        label: 'Future first',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      },
+      {
+        id: 'qwen3.8-flash',
+        label: 'Flash',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      },
+      { id: 'qwen3.8-max', label: 'Max', authType: AuthType.QWEN_SUBSCRIPTION },
+      {
+        id: 'future-second',
+        label: 'Future second',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      },
+      {
+        id: 'coder-model',
+        label: 'Legacy OAuth',
+        authType: AuthType.QWEN_OAUTH,
+      },
+      { id: 'qwen3.8-max', label: 'API Max', authType: AuthType.USE_OPENAI },
+    ];
+    const original = [...models];
+    const options = buildAcpModelOptions(models);
+    expect(options.map(({ model }) => model.label)).toEqual([
+      'Max',
+      'Flash',
+      'Future first',
+      'Future second',
+      'Legacy OAuth',
+      'Runtime',
+      'API first',
+      'API Max',
+    ]);
+    expect(models).toEqual(original);
+    expect(
+      getCurrentAcpModelId(
+        options,
+        '$runtime|openai|runtime',
+        AuthType.USE_OPENAI,
+      ),
+    ).toBe('$runtime|openai|runtime(openai)');
+    expect(
+      resolveAcpModelOption('qwen3.8-max(qwen-subscription)', models),
+    ).toMatchObject({
+      modelId: 'qwen3.8-max',
+      authType: AuthType.QWEN_SUBSCRIPTION,
+    });
+    expect(resolveAcpModelOption('qwen3.8-max(openai)', models)).toMatchObject({
+      modelId: 'qwen3.8-max',
+      authType: AuthType.USE_OPENAI,
+    });
+  });
+
+  it('preserves ordering without an authorized membership catalog', () => {
+    const models = [
+      { id: 'api', label: 'API', authType: AuthType.USE_OPENAI },
+      {
+        id: 'qwen3.8-max',
+        label: 'Runtime Max',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        isRuntimeModel: true,
+        runtimeSnapshotId: '$runtime|qwen-subscription|max',
+      },
+      {
+        id: 'coder-model',
+        label: 'Legacy OAuth',
+        authType: AuthType.QWEN_OAUTH,
+      },
+    ];
+    expect(buildAcpModelOptions(models).map(({ model }) => model)).toEqual(
+      models,
+    );
+  });
+
+  it.each(['qwen3.8-max', 'qwen3.8-flash', 'future-model'])(
+    'does not invent missing membership models when only %s is available',
+    (id) => {
+      const models = [
+        { id: 'api', label: 'API', authType: AuthType.USE_OPENAI },
+        { id, label: 'Membership', authType: AuthType.QWEN_SUBSCRIPTION },
+      ];
+      expect(buildAcpModelOptions(models).map(({ model }) => model.id)).toEqual(
+        [id, 'api'],
+      );
+    },
+  );
+
+  it('resolves fast-model ACP rows without exposing or losing endpoint identity', () => {
+    const privateUrl = 'https://user:secret@two.example/v1?token=value';
+    const models = [
+      {
+        id: 'shared',
+        label: 'First',
+        authType: AuthType.USE_OPENAI,
+        registryBaseUrl: 'https://one.example/v1',
+      },
+      {
+        id: 'shared',
+        label: 'Second',
+        authType: AuthType.USE_OPENAI,
+        registryBaseUrl: privateUrl,
+      },
+      { id: 'implicit', label: 'Implicit', authType: AuthType.USE_OPENAI },
+      { id: 'oauth', label: 'OAuth', authType: AuthType.QWEN_OAUTH },
+      {
+        id: 'vision',
+        label: 'Vision only',
+        authType: AuthType.USE_OPENAI,
+        visionOnly: true,
+      },
+      {
+        id: 'runtime',
+        label: 'Runtime',
+        authType: AuthType.USE_OPENAI,
+        isRuntimeModel: true,
+      },
+    ];
+    const second = buildAcpModelOptions(models)[1]!.modelId;
+    expect(resolveAcpFastModelSelector(second, models)).toBe(
+      `openai:shared\0${privateUrl}`,
+    );
+    expect(resolveAcpFastModelSelector('implicit(openai)', models)).toBe(
+      'openai:implicit\0',
+    );
+    expect(resolveAcpFastModelSelector('oauth(qwen-oauth)', models)).toBe(
+      'qwen-oauth:oauth',
+    );
+    for (const input of [
+      'qwen-route:v1:stale',
+      'vision(openai)',
+      'runtime(openai)',
+    ]) {
+      expect(resolveAcpFastModelSelector(input, models)).toBeNull();
+    }
+  });
+
   it('uses opaque ids only to disambiguate colliding model routes', () => {
     const models = [
       {

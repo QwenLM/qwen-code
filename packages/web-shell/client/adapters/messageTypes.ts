@@ -8,7 +8,10 @@ import type {
   DaemonBackgroundTurn,
   DaemonSessionArtifactInput,
   DaemonInputAnnotation,
+  QwenAgentMessageMeta,
 } from '@qwen-code/sdk/daemon';
+
+import type { components } from '../components/managed/generated/managed-agent-api.js';
 
 export interface AttachmentPreviewRequest {
   name: string;
@@ -60,15 +63,28 @@ export interface DaemonMessageToolCall {
   backgroundResultPending?: boolean;
   status: DaemonMessageToolCallStatus;
   parentToolCallId?: string;
+  /** The producer's own call ID when `callId` is keyed by something else. */
+  toolCallId?: string;
+  /** Stable producer identity from the daemon tool-block projection only. */
+  generatedUiToolCallId?: string;
   title?: string;
   content?: readonly DaemonMessageToolCallContent[];
   rawOutput?: unknown;
+  toolResult?: components['schemas']['PublicToolResult'];
+  toolDetailsRevision?: number;
   locations?: DaemonMessageToolCallLocation[];
   kind?: DaemonMessageToolKind;
   startTime?: number;
   endTime?: number;
   wasCancelled?: boolean;
   subContent?: string;
+  /**
+   * Path-style identity of the agent that produced this call's sub-content,
+   * e.g. `/root/general-purpose`. Carried from the transcript block's `agent`
+   * field so the panel can name a subagent precisely instead of by type alone
+   * — two parallel subagents of the same type are otherwise indistinguishable.
+   */
+  agentPath?: string;
   subTools?: DaemonMessageToolCall[];
   /** Transcript blocks folded into this tool presentation. */
   sourceBlockIds?: string[];
@@ -98,6 +114,8 @@ export interface DaemonMessageAuthor {
  * cross-cutting field is declared once rather than on each role.
  */
 export interface DaemonMessageMeta {
+  sourceRecordIds?: string[];
+  localCommandId?: string;
   backgroundTurn?: DaemonBackgroundTurn;
   /**
    * Admitted prompt this message belongs to, copied from the daemon-stamped
@@ -140,6 +158,8 @@ export interface DaemonUserMessage extends DaemonMessageMeta {
   }>;
   inputAnnotations?: DaemonInputAnnotation[];
   source?: string;
+  /** `_meta.qwenAgentMessage` of an @-mention (`kind: 'agent_mention'`). */
+  agentMessage?: QwenAgentMessageMeta;
 }
 
 export interface DaemonAssistantMessage extends DaemonMessageMeta {
@@ -156,6 +176,11 @@ export interface DaemonAssistantMessage extends DaemonMessageMeta {
    * Absent on sessions whose agent predates usage stamping.
    */
   usage?: { inputTokens: number; outputTokens: number; cachedTokens?: number };
+  /**
+   * `_meta.qwenAgentMessage` of a workspace agent's reply in this session
+   * (`kind: 'agent_message'`): its run status, error, steps and tokens.
+   */
+  agentMessage?: QwenAgentMessageMeta;
 }
 
 export interface DaemonThinkingMessage extends DaemonMessageMeta {

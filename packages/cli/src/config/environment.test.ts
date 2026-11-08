@@ -10,18 +10,30 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildRuntimeEnvironment,
+  findEnvFiles,
   hasLoadedEnvironmentValues,
   isFileSourcedEnvKey,
   loadEnvironment,
+  preResolveHomeEnvOverrides,
+  readProjectEnvFiles,
   reloadEnvironment,
   resetEnvironmentTrackingForTesting,
+  resetHomeEnvBootstrapForTesting,
   SETTINGS_DIRECTORY_NAME,
 } from './environment.js';
+import {
+  hashProjectHooks,
+  LoadedHookApprovals,
+  type ProjectHooksApproval,
+} from './hook-approvals.js';
 import {
   ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
 } from './shared-env-keys.js';
-import { RELAUNCH_SUPERVISED_ENV } from '../utils/env-provenance.js';
+import {
+  NPM_RUNTIME_CONTEXT,
+  RELAUNCH_SUPERVISED_ENV,
+} from '../utils/env-provenance.js';
 import type { Settings } from './settingsSchema.js';
 import { TrustLevel, resetTrustedFoldersForTesting } from './trustedFolders.js';
 import {
@@ -31,6 +43,8 @@ import {
 
 const TRACKED_ENV = [
   AGENT_EXECUTION_BACKEND_ENV,
+  'QWEN_VERIFY_ASSETS_REPO',
+  'QWEN_VERIFY_ASSETS_BRANCH',
   'CLOUD_SHELL',
   'GOOGLE_CLOUD_PROJECT',
   'RUNTIME_DOTENV',
@@ -43,6 +57,7 @@ const TRACKED_ENV = [
   'ENV',
   'LD_PRELOAD',
   'NODE_OPTIONS',
+  'BUN_OPTIONS',
   'NODE_PATH',
   'npm_config_node_options',
   'npm_config_node-options',
@@ -102,10 +117,14 @@ const TRACKED_ENV = [
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
   PRIVATE_RELAUNCH_ENV_PROVENANCE.toLowerCase(),
   RELAUNCH_SUPERVISED_ENV,
+  NPM_RUNTIME_CONTEXT,
+  NPM_RUNTIME_CONTEXT.toLowerCase(),
   ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   'QWEN_CODE_PENDING_COMPILE_CACHE',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
   'QWEN_RUNTIME_DIR',
+  'QWEN_CONVERSATIONS_DIR',
+  'qwen_conversations_dir',
   'QWEN_SERVE_MAX_WORKSPACES',
   'QWEN_SERVER_TOKEN',
   'qwen_server_token',
@@ -125,6 +144,12 @@ const TRACKED_ENV = [
   'DASHSCOPE_PROXY_BASE_URL',
   'QWEN_TEST_PROVIDER_KEY',
   'DEMO_VAR',
+  'QWEN_CODE_MODELS_DEV_URL',
+  // The CLI test setup exports QWEN_CODE_MODELS_DEV=off process-wide, so the
+  // switch keys must be cleared per test (and restored after) for an
+  // undefined assertion to mean "the project file was rejected".
+  'QWEN_CODE_MODELS_DEV',
+  'QWEN_CODE_MODELS_DEV_REFRESH',
 ] as const;
 
 let tmpDirs: string[] = [];
@@ -218,6 +243,38 @@ describe('operator container requirement across environment reload', () => {
         expect(stderr).toHaveBeenCalledWith(
           expect.stringContaining(
             'cannot set QWEN_AGENT_EXECUTION_BACKEND; ignored. Export it in the launch environment instead.',
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+    },
+  );
+
+  it.each(['QWEN_VERIFY_ASSETS_BRANCH', 'qwen_verify_assets_branch'])(
+    'warns when settings.env tries to set a publishing coordinate as %s',
+    (spelling) => {
+      // The exclusion folds case, so the diagnostic has to as well. The
+      // lowercase spelling is what reddens this before the fix: the gate
+      // dropped it while the exact-spelling lookup reported nothing.
+      resetEnvironmentTrackingForTesting();
+      const workspace = makeWorkspace();
+      const settingsFile = path.join(os.homedir(), '.qwen', 'settings.json');
+      fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+      fs.writeFileSync(
+        settingsFile,
+        JSON.stringify({ env: { [spelling]: 'assets/wenshao' } }),
+      );
+      const settings = testSettings(
+        JSON.parse(fs.readFileSync(settingsFile, 'utf8')),
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        loadEnvironment(settings, workspace);
+        expect(process.env['QWEN_VERIFY_ASSETS_BRANCH']).toBeUndefined();
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `cannot set ${spelling}; ignored. Set verifyPr.assetsBranch at user scope in settings.json, or export it in the launch environment.`,
           ),
         );
       } finally {
@@ -617,6 +674,84 @@ describe('update download source environment', () => {
   );
 });
 
+describe('model catalog download source environment', () => {
+  beforeEach(() => {
+    resetEnvironmentTrackingForTesting();
+  });
+
+  afterEach(() => {
+    resetEnvironmentTrackingForTesting();
+  });
+
+  it.each(['.env', '.qwen/.env', 'settings.env'])(
+    'rejects the project-scoped catalog keys from %s',
+    (source) => {
+      const workspace = makeWorkspace();
+      const settings = testSettings({ advanced: { excludedEnvVars: [] } });
+      // All three catalog keys are operator decisions: the URL picks where
+      // the shared global cache comes from, and the two switches decide
+      // whether it is consulted or refreshed at all — on the serve fast path
+      // one workspace's file would otherwise freeze that choice for every
+      // other workspace the daemon hosts.
+      const projectKeys = {
+        QWEN_CODE_MODELS_DEV_URL: 'https://project.example.com/api.json',
+        // `on` is the attack shape: the value that would flip the catalog
+        // daemon-wide, or over an operator's exported `off`.
+        QWEN_CODE_MODELS_DEV: 'on',
+        QWEN_CODE_MODELS_DEV_REFRESH: 'on',
+      } as const;
+      if (source === 'settings.env') {
+        settings.env = { ...projectKeys, RUNTIME_SETTINGS_ONLY: 'allowed' };
+      } else {
+        const envPath = path.join(workspace, source);
+        fs.mkdirSync(path.dirname(envPath), { recursive: true });
+        fs.writeFileSync(
+          envPath,
+          `${Object.entries(projectKeys)
+            .map(([key, value]) => `${key}=${value}`)
+            .join('\n')}\nRUNTIME_DOTENV=allowed\n`,
+        );
+      }
+      // The allowed control proves the project file itself was applied; the
+      // exclusion, not a discovery failure, is what drops the catalog keys.
+      const allowedKey =
+        source === 'settings.env' ? 'RUNTIME_SETTINGS_ONLY' : 'RUNTIME_DOTENV';
+
+      loadEnvironment(settings, workspace);
+      for (const key of Object.keys(projectKeys)) {
+        expect(process.env[key]).toBeUndefined();
+      }
+      expect(process.env[allowedKey]).toBe('allowed');
+
+      reloadEnvironment(settings, workspace);
+      for (const key of Object.keys(projectKeys)) {
+        expect(process.env[key]).toBeUndefined();
+      }
+      expect(process.env[allowedKey]).toBe('allowed');
+
+      const snapshot = buildRuntimeEnvironment(settings, workspace, {});
+      for (const key of Object.keys(projectKeys)) {
+        expect(snapshot.effectiveEnv[key]).toBeUndefined();
+      }
+      expect(snapshot.effectiveEnv[allowedKey]).toBe('allowed');
+    },
+  );
+
+  it('preserves the operator-supplied catalog URL against project configuration', () => {
+    const workspace = makeWorkspace();
+    process.env['QWEN_CODE_MODELS_DEV_URL'] = 'https://mirror.corp/api.json';
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      'QWEN_CODE_MODELS_DEV_URL=https://project.example.com/api.json\n',
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['QWEN_CODE_MODELS_DEV_URL']).toBe(
+      'https://mirror.corp/api.json',
+    );
+  });
+});
+
 describe('daemon registration capacity environment', () => {
   it.each([undefined, '32'])(
     'keeps project files from overriding operator capacity %s',
@@ -643,6 +778,99 @@ describe('daemon registration capacity environment', () => {
       );
     },
   );
+});
+
+describe('Conversations root environment', () => {
+  beforeEach(() => {
+    resetHomeEnvBootstrapForTesting();
+    resetEnvironmentTrackingForTesting();
+  });
+
+  afterEach(() => {
+    resetHomeEnvBootstrapForTesting();
+    resetEnvironmentTrackingForTesting();
+  });
+
+  it.each(['.env', '.qwen/.env'])(
+    'rejects root selection from project %s and settings.env',
+    (file) => {
+      const workspace = makeWorkspace();
+      const envPath = path.join(workspace, file);
+      fs.mkdirSync(path.dirname(envPath), { recursive: true });
+      fs.writeFileSync(
+        envPath,
+        'QWEN_CONVERSATIONS_DIR=/project/root\nqwen_conversations_dir=/project/lowercase\nRUNTIME_DOTENV=loaded\n',
+      );
+      const settings = testSettings({
+        env: {
+          QWEN_CONVERSATIONS_DIR: '/settings/root',
+          qwen_conversations_dir: '/settings/lowercase',
+          RUNTIME_SETTINGS: 'loaded',
+        },
+      });
+      loadEnvironment(settings, workspace);
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBeUndefined();
+      expect(process.env['qwen_conversations_dir']).toBeUndefined();
+      expect(process.env['RUNTIME_DOTENV']).toBe('loaded');
+      expect(process.env['RUNTIME_SETTINGS']).toBe('loaded');
+      const snapshot = buildRuntimeEnvironment(settings, workspace, {});
+      expect(snapshot.effectiveEnv['QWEN_CONVERSATIONS_DIR']).toBeUndefined();
+      expect(snapshot.effectiveEnv['qwen_conversations_dir']).toBeUndefined();
+    },
+  );
+
+  it.each(['', '/persistent/Qwen Conversations '])(
+    'preserves a user .env root %j despite a project .env',
+    (root) => {
+      const workspace = makeWorkspace();
+      const qwenHome = path.join(os.homedir(), '.qwen');
+      fs.mkdirSync(qwenHome, { recursive: true });
+      fs.writeFileSync(
+        path.join(qwenHome, '.env'),
+        `QWEN_CONVERSATIONS_DIR=${JSON.stringify(root)}\n`,
+      );
+      fs.writeFileSync(
+        path.join(workspace, '.env'),
+        'QWEN_CONVERSATIONS_DIR=/project/root\nRUNTIME_DOTENV=loaded\n',
+      );
+      preResolveHomeEnvOverrides();
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
+      loadEnvironment(testSettings({}), workspace);
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
+      expect(process.env['RUNTIME_DOTENV']).toBe('loaded');
+    },
+  );
+
+  it('does not replace an explicit empty launch value with user .env', () => {
+    const workspace = makeWorkspace();
+    process.env['QWEN_CONVERSATIONS_DIR'] = '';
+    fs.writeFileSync(
+      path.join(os.homedir(), '.env'),
+      'QWEN_CONVERSATIONS_DIR=/home/root\n',
+    );
+    preResolveHomeEnvOverrides();
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe('');
+  });
+
+  it('keeps the initial root when user .env is reloaded', () => {
+    const workspace = makeWorkspace();
+    const envPath = path.join(os.homedir(), '.env');
+    fs.writeFileSync(envPath, 'QWEN_CONVERSATIONS_DIR=/initial/root\n');
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe('/initial/root');
+    fs.writeFileSync(envPath, 'QWEN_CONVERSATIONS_DIR=/changed/root\n');
+    const settings = testSettings({
+      env: { QWEN_CONVERSATIONS_DIR: '/settings/root' },
+    });
+    reloadEnvironment(settings, workspace);
+    expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe('/initial/root');
+    expect(
+      buildRuntimeEnvironment(settings, workspace, {
+        QWEN_CONVERSATIONS_DIR: '/initial/root',
+      }).effectiveEnv['QWEN_CONVERSATIONS_DIR'],
+    ).toBe('/initial/root');
+  });
 });
 
 describe('buildRuntimeEnvironment', () => {
@@ -960,6 +1188,41 @@ describe('loadEnvironment', () => {
   // initial .env load afterwards. That load must not refill the scrubbed
   // slots, or one workspace's .env loader hook reaches every other
   // workspace's session subprocesses through the shared daemon env.
+  it.each(['project .env', '.qwen/.env', 'home .env', 'settings.env'])(
+    'rejects Bun preload options from %s on load, reload and runtime snapshots',
+    (source) => {
+      const workspace = makeWorkspace();
+      const settings = testSettings({ advanced: { excludedEnvVars: [] } });
+      if (source === 'settings.env') {
+        settings.env = {
+          BUN_OPTIONS: '--preload ./payload.mjs',
+          RUNTIME_SETTINGS: 'allowed',
+        };
+      } else {
+        const directory =
+          source === 'home .env'
+            ? os.homedir()
+            : source === '.qwen/.env'
+              ? path.join(workspace, SETTINGS_DIRECTORY_NAME)
+              : workspace;
+        fs.mkdirSync(directory, { recursive: true });
+        fs.writeFileSync(
+          path.join(directory, '.env'),
+          'BUN_OPTIONS=--preload ./payload.mjs\nRUNTIME_SETTINGS=allowed\n',
+        );
+      }
+      loadEnvironment(settings, workspace);
+      expect(process.env['BUN_OPTIONS']).toBeUndefined();
+      expect(process.env['RUNTIME_SETTINGS']).toBe('allowed');
+      reloadEnvironment(settings, workspace);
+      expect(process.env['BUN_OPTIONS']).toBeUndefined();
+      expect(process.env['RUNTIME_SETTINGS']).toBe('allowed');
+      const snapshot = buildRuntimeEnvironment(settings, workspace, {});
+      expect(snapshot.effectiveEnv['BUN_OPTIONS']).toBeUndefined();
+      expect(snapshot.effectiveEnv['RUNTIME_SETTINGS']).toBe('allowed');
+    },
+  );
+
   it('never applies loader-affecting keys from .env files, even on initial load', () => {
     const workspace = makeWorkspace();
     fs.writeFileSync(
@@ -1376,6 +1639,50 @@ describe('loadEnvironment', () => {
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
   });
 
+  it.each(['project .env', 'home .env', 'settings.env'])(
+    'preserves launcher npm identity against %s, including reload and child snapshots',
+    (source) => {
+      const workspace = makeWorkspace();
+      const original = JSON.stringify({
+        node: '/trusted/node',
+        bun: '/private/bun',
+        cli: '/installed/cli.js',
+      });
+      const forged = JSON.stringify({
+        node: '/workspace/attacker',
+        bun: '/private/bun',
+        cli: '/installed/cli.js',
+      });
+      process.env[NPM_RUNTIME_CONTEXT] = original;
+      const keys = [NPM_RUNTIME_CONTEXT, NPM_RUNTIME_CONTEXT.toLowerCase()];
+      const settings = testSettings({ advanced: { excludedEnvVars: [] } });
+      if (source === 'settings.env') {
+        settings.env = Object.fromEntries(keys.map((key) => [key, forged]));
+      } else {
+        fs.writeFileSync(
+          path.join(source === 'home .env' ? os.homedir() : workspace, '.env'),
+          keys.map((key) => `${key}=${forged}`).join('\n'),
+        );
+      }
+      loadEnvironment(settings, workspace);
+      reloadEnvironment(settings, workspace);
+      expect(process.env[NPM_RUNTIME_CONTEXT]).toBe(original);
+      expect(process.env[NPM_RUNTIME_CONTEXT.toLowerCase()]).toBeUndefined();
+      const child = buildRuntimeEnvironment(
+        settings,
+        workspace,
+        process.env,
+      ).effectiveEnv;
+      expect(child[NPM_RUNTIME_CONTEXT]).toBe(original);
+      expect(child[NPM_RUNTIME_CONTEXT.toLowerCase()]).toBeUndefined();
+      expect(
+        buildRuntimeEnvironment(settings, workspace, {}).effectiveEnv[
+          NPM_RUNTIME_CONTEXT
+        ],
+      ).toBeUndefined();
+    },
+  );
+
   // The private Conversations provenance marker is a fixed constant rather
   // than a per-spawn nonce, so the home-scoped exemption from
   // PROJECT_ENV_HARDCODED_EXCLUSIONS must not apply to it: a home `.env`
@@ -1641,6 +1948,32 @@ describe('loadEnvironment', () => {
     }
   });
 
+  // The serve daemon bearer token is the same operator-only class as the
+  // keys above: `qwen serve` takes it from --token, an exported env var, or
+  // a home-scoped .env, and generates a one-time random bearer otherwise.
+  // Repository content must never preset that credential, on the initial
+  // load included — under either case spelling.
+  it('never applies the serve daemon token from a project .env, including case variants', () => {
+    const workspace = makeWorkspace();
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      [
+        'QWEN_SERVER_TOKEN=project-env-token',
+        'qwen_server_token=project-env-token-lower',
+        // Positive control: proves the initial .env load ran and rejected
+        // only the token keys, not the whole file.
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['qwen_server_token']).toBeUndefined();
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+  });
+
   // Windows env lookup is case-insensitive, so exact-case membership would
   // let case variants through every application gate on that platform.
   it('rejects entrypoint and trust-anchor keys regardless of case', () => {
@@ -1673,11 +2006,11 @@ describe('loadEnvironment', () => {
     expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
   });
 
-  // The reload-only tier (QWEN_SERVER_TOKEN, PATH, HOME, LD_LIBRARY_PATH, …)
-  // must match case-folded for the same reason: on Windows a lowercase twin
-  // names the same OS variable, so an exact-case gate would let a
-  // mid-session settings.env/.env edit rotate the daemon token or rewrite
-  // PATH.
+  // The daemon token lives in the hardcoded tier now, but the reload-only
+  // tier (PATH, HOME, LD_LIBRARY_PATH, …) and the settings.env rejection must
+  // match case-folded for the same reason: on Windows a lowercase twin names
+  // the same OS variable, so an exact-case gate would let a mid-session
+  // settings.env/.env edit rotate the daemon token or rewrite PATH.
   it('rejects case variants of reload-only excluded keys', () => {
     const workspace = makeWorkspace();
     const envPath = path.join(workspace, '.env');
@@ -1941,5 +2274,152 @@ describe('hasLoadedEnvironmentValues', () => {
 
     expect(process.env[key]).toBe(value);
     expect(hasLoadedEnvironmentValues()).toBe(true);
+  });
+});
+
+describe('project hook approval env files stay inside the workspace', () => {
+  // #16313: the docker sandbox mounts only the workspace, so an ancestor .env
+  // the host hashed is absent in the container. Hashing it made the two sides
+  // disagree and silently withheld approved project hooks in the container.
+  function trustFolder(workspace: string, folder: string): void {
+    const trustedFoldersPath = path.join(workspace, 'trustedFolders.json');
+    fs.writeFileSync(
+      trustedFoldersPath,
+      JSON.stringify({ [folder]: TrustLevel.TRUST_FOLDER }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = trustedFoldersPath;
+    resetTrustedFoldersForTesting();
+  }
+
+  it('keeps an approved record approved when the ancestor .env is absent', async () => {
+    const parent = makeWorkspace();
+    const root = path.join(parent, 'workspace');
+    fs.mkdirSync(root);
+    const ancestorEnv = path.join(parent, '.env');
+    fs.writeFileSync(ancestorEnv, 'ANCESTOR_ONLY=host\n');
+    const previousTrustedFoldersPath =
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    trustFolder(parent, root);
+
+    try {
+      const settings = testSettings({
+        security: { folderTrust: { enabled: true } },
+      });
+      const hooks = {
+        Stop: [{ hooks: [{ type: 'command', command: 'true' }] }],
+      };
+      const approval = (): ProjectHooksApproval => ({
+        root,
+        hooks,
+        resolved: hooks,
+        env: { files: readProjectEnvFiles(settings, root), settings: null },
+      });
+
+      // The host sees the ancestor .env, and approves the hooks with it hashed.
+      const hostApproval = approval();
+      // Positive control: discovery still walks above the workspace for the
+      // runtime env — only the approval hash input is narrowed.
+      expect(findEnvFiles(settings, root)).toContain(ancestorEnv);
+
+      const approvalsPath = path.join(parent, 'hookApprovals.json');
+      fs.writeFileSync(approvalsPath, '{}');
+      const loaded = new LoadedHookApprovals(
+        { path: approvalsPath, config: {} },
+        [],
+      );
+      await loaded.setState(hostApproval, 'approved');
+
+      // Container view: the mount point stops at the workspace, so the
+      // ancestor .env the host read does not exist there.
+      fs.rmSync(ancestorEnv);
+      const containerApproval = approval();
+      expect(containerApproval.env.files).not.toHaveProperty(ancestorEnv);
+      expect(containerApproval.env.files).toEqual(hostApproval.env.files);
+      expect(loaded.getState(containerApproval)).toBe('approved');
+    } finally {
+      if (previousTrustedFoldersPath === undefined) {
+        delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+      } else {
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
+          previousTrustedFoldersPath;
+      }
+      resetTrustedFoldersForTesting();
+    }
+  });
+
+  it('still hashes a .env inside the root and settings.env', () => {
+    const root = makeWorkspace();
+    const previousTrustedFoldersPath =
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    trustFolder(root, root);
+
+    try {
+      const settings = testSettings({
+        security: { folderTrust: { enabled: true } },
+      });
+      const hooks = { Stop: [] };
+      const hashOf = (
+        files: Record<string, unknown>,
+        settingsEnv: unknown,
+      ): string =>
+        hashProjectHooks({ hooks, env: { files, settings: settingsEnv } });
+
+      const before = hashOf(readProjectEnvFiles(settings, root), null);
+      fs.writeFileSync(path.join(root, '.env'), 'INSIDE_ROOT=1\n');
+      const after = hashOf(readProjectEnvFiles(settings, root), null);
+
+      expect(Object.keys(readProjectEnvFiles(settings, root))).toContain(
+        path.join(root, '.env'),
+      );
+      expect(after).not.toBe(before);
+      expect(hashOf({}, { INSIDE_ROOT: '1' })).not.toBe(hashOf({}, null));
+    } finally {
+      if (previousTrustedFoldersPath === undefined) {
+        delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+      } else {
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
+          previousTrustedFoldersPath;
+      }
+      resetTrustedFoldersForTesting();
+    }
+  });
+
+  it('does not hash a .env symlinked outside the workspace', () => {
+    const parent = makeWorkspace();
+    const root = path.join(parent, 'workspace');
+    fs.mkdirSync(root);
+    const outsideEnv = path.join(parent, 'secrets.env');
+    fs.writeFileSync(outsideEnv, 'OUTSIDE_SECRET=1\n');
+    const workspaceEnv = path.join(root, '.env');
+    fs.symlinkSync(outsideEnv, workspaceEnv);
+    const previousTrustedFoldersPath =
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    trustFolder(parent, root);
+
+    try {
+      const settings = testSettings({
+        security: { folderTrust: { enabled: true } },
+      });
+      // Discovery follows the link, so the runtime env still sees the file.
+      expect(findEnvFiles(settings, root)).toContain(workspaceEnv);
+
+      // The approval hash input must not: the link target is outside the
+      // workspace, so the container mount cannot supply it.
+      const hostFiles = readProjectEnvFiles(settings, root);
+      expect(hostFiles).not.toHaveProperty(workspaceEnv);
+
+      // Container view: the target is gone and the link dangles; the hash
+      // input has to stay identical to what the host recorded.
+      fs.rmSync(outsideEnv);
+      expect(readProjectEnvFiles(settings, root)).toEqual(hostFiles);
+    } finally {
+      if (previousTrustedFoldersPath === undefined) {
+        delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+      } else {
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
+          previousTrustedFoldersPath;
+      }
+      resetTrustedFoldersForTesting();
+    }
   });
 });

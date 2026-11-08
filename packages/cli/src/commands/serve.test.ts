@@ -10,11 +10,21 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yargs, { type Argv } from 'yargs';
-import { maybeOpenWebShellBrowser, serveCommand } from './serve.js';
+import {
+  DEFAULT_RING_MAX_BYTES,
+  MAX_RING_MAX_BYTES,
+} from '@qwen-code/acp-bridge/eventBus';
+import {
+  maybeOpenWebShellBrowser,
+  serveCommand,
+  validateManagedLocalFlags,
+  validateManagedWebFlags,
+} from './serve.js';
 
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 const mockShouldLaunchBrowser = vi.hoisted(() => vi.fn(() => true));
 const mockRunQwenServe = vi.hoisted(() => vi.fn());
+const mockRunManagedWebServe = vi.hoisted(() => vi.fn());
 const mockApplyOpenWithAuth = vi.hoisted(() =>
   vi.fn((options: { token?: string }) => {
     options.token ??= 'generated-token';
@@ -43,6 +53,26 @@ vi.mock('qrcode-terminal', () => ({ default: mockQr }));
 vi.mock('../serve/run-qwen-serve.js', () => ({
   runQwenServe: mockRunQwenServe,
 }));
+vi.mock('../serve/managed-web-serve.js', () => ({
+  runManagedWebServe: mockRunManagedWebServe,
+}));
+const mockListLanCandidates = vi.hoisted(() =>
+  vi.fn((): Array<{ interfaceName: string; address: string }> => []),
+);
+const mockListExplicitCandidates = vi.hoisted(() =>
+  vi.fn((): Array<{ interfaceName: string; address: string }> => []),
+);
+vi.mock('../serve/local-control/lan-interfaces.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../serve/local-control/lan-interfaces.js')
+    >();
+  return {
+    ...actual,
+    listLanCandidates: mockListLanCandidates,
+    listExplicitCandidates: mockListExplicitCandidates,
+  };
+});
 vi.mock('../serve/open-with-auth.js', () => ({
   applyOpenWithAuth: mockApplyOpenWithAuth,
 }));
@@ -54,12 +84,155 @@ function buildParser(): Argv {
 }
 
 describe('serve command args', () => {
+  it('accepts a Conversations root without changing the supplied path', () => {
+    const root = '/persistent/Qwen Conversations ';
+    expect(
+      buildParser().parseSync(['--conversations-dir', root])[
+        'conversations-dir'
+      ],
+    ).toBe(root);
+    expect(buildParser().parseSync([])['conversations-dir']).toBeUndefined();
+    expect(() => buildParser().parseSync('--conversations-dir')).toThrow(
+      /Not enough arguments/u,
+    );
+  });
+
+  it.each([
+    ['--conversations-dir', '/srv/a', '--conversations-dir', '/srv/b'],
+    ['--conversations-dir=/srv/a', '--conversations-dir=/srv/b'],
+  ])(
+    'rejects repeated Conversations roots in %j before dispatch',
+    (...args) => {
+      const handler = vi.fn();
+      const parser = yargs([])
+        .exitProcess(false)
+        .fail(false)
+        .locale('en')
+        .command({ ...serveCommand, handler });
+
+      expect(() => parser.parseSync(['serve', ...args])).toThrow(
+        'pass --conversations-dir once.',
+      );
+      expect(handler).not.toHaveBeenCalled();
+    },
+  );
+
+  it('parses and isolates the Managed Web gateway deployment options', () => {
+    const parsed = buildParser().parseSync(
+      '--managed-web-config /etc/qwen-web/gateway.json --hostname 0.0.0.0 --port 4171 --allow-origin https://managed.example',
+    );
+    expect(parsed['managed-web-config']).toBe('/etc/qwen-web/gateway.json');
+    expect(parsed['allow-origin']).toEqual(['https://managed.example']);
+    expect(() => buildParser().parseSync('--managed-web-config')).toThrow(
+      /Not enough arguments/u,
+    );
+    expect(() =>
+      validateManagedWebFlags([
+        '--managed-web-config=x',
+        '--hostname',
+        '0.0.0.0',
+        '--require-auth',
+      ]),
+    ).not.toThrow();
+    for (const flag of [
+      '--managed',
+      '--workspace=/run/secrets',
+      '--conversations-dir=/persistent/conversations',
+      '--profile=hosted-harness',
+      '--enable-session-shell',
+      '--channel=telegram',
+      '--no-require-auth',
+      '--open',
+    ]) {
+      expect(() =>
+        validateManagedWebFlags(['--managed-web-config=x', flag]),
+      ).toThrow('not supported with --managed-web-config');
+    }
+  });
+
+  it('dispatches the gateway without starting the ordinary daemon', async () => {
+    mockRunManagedWebServe.mockResolvedValueOnce({
+      url: 'http://0.0.0.0:4171',
+      finished: new Promise(() => {}),
+    });
+    mockRunQwenServe.mockClear();
+    const argv = buildParser().parseSync(
+      '--managed-web-config /etc/qwen-web/gateway.json --hostname 0.0.0.0 --port 4171',
+    );
+    void serveCommand.handler!(
+      argv as Parameters<NonNullable<typeof serveCommand.handler>>[0],
+    );
+    await vi.waitFor(() => expect(mockRunManagedWebServe).toHaveBeenCalled());
+    expect(mockRunManagedWebServe).toHaveBeenLastCalledWith({
+      configFile: '/etc/qwen-web/gateway.json',
+      hostname: '0.0.0.0',
+      port: 4171,
+      token: undefined,
+      allowOrigins: undefined,
+    });
+    expect(mockRunQwenServe).not.toHaveBeenCalled();
+  });
+
+  it('keeps a dash-leading numeric gateway token as an option value', () => {
+    const token = '-1234567890123456789012345678901234567890';
+    const args = ['--managed-web-config=x', '--token', token];
+    expect(buildParser().parseSync(args)['token']).toBe(token);
+    expect(() => validateManagedWebFlags(args)).not.toThrow();
+  });
+
+  it('refuses flags whose ordinary-daemon behavior is unavailable in Managed mode', () => {
+    expect(() =>
+      validateManagedLocalFlags(['--managed', '--port=0', '--no-open']),
+    ).not.toThrow();
+    for (const flag of [
+      '--workspace',
+      '--max-sessions=2',
+      '--profile=hosted-harness',
+      '--token=secret',
+      '--no-require-auth',
+    ]) {
+      expect(() => validateManagedLocalFlags(['--managed', flag])).toThrow(
+        'not supported with --managed',
+      );
+    }
+  });
+  it('parses the isolated Managed mode and private data directory', () => {
+    const parsed = buildParser().parseSync(
+      '--managed --managed-data-dir /private/data --port 0',
+    );
+    expect(parsed['managed']).toBe(true);
+    expect(parsed['managed-data-dir']).toBe('/private/data');
+    expect(parsed['port']).toBe(0);
+    expect(buildParser().parseSync('')['managed']).toBe(false);
+    expect(() => buildParser().parseSync('--managed-data-dir')).toThrow(
+      /Not enough arguments/u,
+    );
+  });
   it('documents the complete IPv4 loopback range', async () => {
     // Remove whitespace before checking so a long option name forcing yargs
     // to wrap the description does not split the CIDR literal across lines.
     expect((await buildParser().getHelp()).replace(/\s/g, '')).toContain(
       '127.0.0.0/8',
     );
+  });
+
+  it('documents Hosted Runtime Broker options and does not declare them unimplemented', async () => {
+    // yargs hard-wraps the description column mid-word at its 80-column
+    // default, so compare with whitespace and type hints removed. The next
+    // row starts with "--", so stale text appended to a row cannot hide.
+    const squash = (text: string) => text.replace(/\[string\]|\s+/g, '');
+    const help = squash(await buildParser().getHelp());
+    expect(help).toContain(
+      squash(
+        '--managed-runtime-broker-url Private Broker URL for --profile hosted-harness; required together with token for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_URL. --',
+      ),
+    );
+    expect(help).toContain(
+      squash(
+        '--managed-runtime-broker-token Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_TOKEN; prefer the variable, since this option puts the credential in the process list. --',
+      ),
+    );
+    expect(help).not.toContain('ReservedBroker');
   });
 
   it('defaults authenticated open to disabled', () => {
@@ -89,9 +262,14 @@ describe('serve command args', () => {
     expect(parsed['enable-session-shell']).toBe(false);
   });
 
-  it('defaults max sessions to 32', () => {
+  it('leaves max sessions unset when the flag is omitted', () => {
     const parsed = buildParser().parseSync('');
-    expect(parsed['max-sessions']).toBe(32);
+    expect(parsed['max-sessions']).toBeUndefined();
+  });
+
+  it('parses --max-sessions as a number', () => {
+    const parsed = buildParser().parseSync('--max-sessions 64');
+    expect(parsed['max-sessions']).toBe(64);
   });
 
   it('accepts --experimental-lsp in strict parser mode', () => {
@@ -104,6 +282,37 @@ describe('serve command args', () => {
       '--permission-response-timeout-ms 60000',
     );
     expect(parsed['permission-response-timeout-ms']).toBe(60000);
+  });
+
+  it('defaults and parses --event-ring-max-bytes', () => {
+    expect(buildParser().parseSync('')['event-ring-max-bytes']).toBe(
+      DEFAULT_RING_MAX_BYTES,
+    );
+    for (const value of [1, 1024 * 1024, MAX_RING_MAX_BYTES]) {
+      expect(
+        buildParser().parseSync(`--event-ring-max-bytes ${value}`)[
+          'event-ring-max-bytes'
+        ],
+      ).toBe(value);
+    }
+    expect(() => buildParser().parseSync('--event-ring-max-bytes')).toThrow(
+      /Not enough arguments/,
+    );
+  });
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER + 1,
+    MAX_RING_MAX_BYTES + 1,
+  ])('rejects --event-ring-max-bytes=%s', (value) => {
+    expect(() =>
+      buildParser().parseSync(`--event-ring-max-bytes=${value}`),
+    ).toThrow(/eventRingMaxBytes/);
   });
 
   it('parses --compacted-replay-max-bytes as a number', () => {
@@ -435,6 +644,23 @@ describe('serve rate limit env parsing', () => {
     ).toBe(expected);
   });
 
+  it.each([
+    ['', DEFAULT_RING_MAX_BYTES],
+    ['--event-ring-max-bytes 1048576', 1024 * 1024],
+  ] as const)(
+    'forwards the event ring byte cap %s to the daemon',
+    async (args, expected) => {
+      mockRunQwenServe.mockResolvedValueOnce({
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: false,
+      });
+      await startServeHandlerWithArgs(`--no-web ${args}`);
+      expect(mockRunQwenServe.mock.calls[0]?.[0]).toMatchObject({
+        eventRingMaxBytes: expected,
+      });
+    },
+  );
+
   it('applies authenticated open before the yargs path starts the daemon', async () => {
     let tokenAtBoot: string | undefined;
     mockRunQwenServe.mockImplementationOnce(
@@ -492,6 +718,23 @@ describe('serve rate limit env parsing', () => {
     const options = mockRunQwenServe.mock.calls[0]?.[0];
     expect(options).not.toHaveProperty('maxJournalEvents');
     expect(options).not.toHaveProperty('maxJournalBytes');
+  });
+
+  it('forwards the explicit Conversations root to runQwenServe', async () => {
+    process.env['QWEN_CONVERSATIONS_DIR'] = '/environment/conversations';
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+    await startServeHandlerWithArgs(
+      '--conversations-dir "/persistent/Qwen Conversations" --no-web',
+    );
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationsDir: '/persistent/Qwen Conversations',
+      }),
+      expect.anything(),
+    );
   });
 
   it('forwards pinned journal caps to runQwenServe', async () => {
@@ -730,6 +973,231 @@ describe('serve rate limit env parsing', () => {
     expect(mockQr.generate).not.toHaveBeenCalled();
   });
 
+  it('marks --local-control-address as the operator explicit opt-in (#14136)', async () => {
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const enable = vi.fn().mockResolvedValue({
+      active: true,
+      url: 'http://203.0.113.10:4170/#token=pairing',
+      interfaceName: 'en0',
+      sleepInhibited: false,
+      encrypted: false,
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      getLocalControl: () => ({ enable }),
+    });
+
+    await startServeHandlerWithArgs(
+      '--local-control --local-control-address 203.0.113.10',
+    );
+    await vi.waitFor(() => expect(mockQr.generate).toHaveBeenCalled());
+
+    // The flag is what distinguishes the operator's explicit pick from an
+    // HTTP-posted string; the service records it as the standing grant.
+    expect(enable).toHaveBeenCalledWith({
+      address: '203.0.113.10',
+      allowExplicitAddress: true,
+    });
+  });
+
+  it('points a no-LAN-interface failure at --local-control-address (#14136)', async () => {
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    // No private candidate exists; the escape hatch is exactly the flag the
+    // CLI must name. The shared error message stays client-neutral, so the
+    // hint is added here and not in NoLanInterfaceError itself.
+    const enable = vi.fn().mockRejectedValue(
+      Object.assign(new Error('No private IPv4 address is available.'), {
+        code: 'no_lan_interface',
+      }),
+    );
+    const close = vi.fn().mockResolvedValue(undefined);
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      close,
+      getLocalControl: () => ({ enable }),
+    });
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync('--local-control');
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+
+    const stderr = stderrWrites.join('');
+    expect(stderr).toContain('No private IPv4 address is available.');
+    expect(stderr).toContain('--local-control-address');
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("lists the host's current addresses when a named address is unknown (#14136)", async () => {
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    // The named address is gone (typo, or the network changed after the hint
+    // was read): the retry must not be a blind guess. The shared error stays
+    // client-neutral; the candidate list is the CLI-only remedy, added here.
+    const enable = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(
+          new Error(
+            '203.0.113.99 is not an IPv4 address this host can expose right now.',
+          ),
+          { code: 'unknown_lan_interface' },
+        ),
+      );
+    const close = vi.fn().mockResolvedValue(undefined);
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      close,
+      getLocalControl: () => ({ enable }),
+    });
+    mockListExplicitCandidates.mockReturnValue([
+      { interfaceName: 'eth0', address: '172.21.106.31' },
+    ]);
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(
+      '--local-control --local-control-address 203.0.113.99',
+    );
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+
+    const stderr = stderrWrites.join('');
+    expect(stderr).toContain(
+      '203.0.113.99 is not an IPv4 address this host can expose right now.',
+    );
+    expect(stderr).toContain('eth0 (172.21.106.31)');
+    expect(close).toHaveBeenCalledOnce();
+    mockListExplicitCandidates.mockReturnValue([]);
+  });
+
+  it('enumerates addresses the automatic filter excludes when a named address is unknown (#14136)', async () => {
+    // The host shapes --local-control-address was widened for — VPN-only or
+    // public-range intranet — have an EMPTY automatic candidate list; listing
+    // only that list would tell the operator nothing about what the host
+    // holds. The hint enumerates the acceptance space instead.
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    const enable = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(
+          new Error(
+            '203.0.113.99 is not an IPv4 address this host can expose right now.',
+          ),
+          { code: 'unknown_lan_interface' },
+        ),
+      );
+    const close = vi.fn().mockResolvedValue(undefined);
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      close,
+      getLocalControl: () => ({ enable }),
+    });
+    mockListLanCandidates.mockReturnValue([]);
+    mockListExplicitCandidates.mockReturnValue([
+      { interfaceName: 'en0', address: '203.0.113.10' },
+    ]);
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(
+      '--local-control --local-control-address 203.0.113.99',
+    );
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+
+    const stderr = stderrWrites.join('');
+    expect(stderr).toContain(
+      '203.0.113.99 is not an IPv4 address this host can expose right now.',
+    );
+    expect(stderr).toContain('en0 (203.0.113.10)');
+    expect(close).toHaveBeenCalledOnce();
+    mockListExplicitCandidates.mockReturnValue([]);
+  });
+
+  it('omits the enumeration when the host has no exposable address at all (#14136)', async () => {
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    const enable = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(
+          new Error(
+            '203.0.113.99 is not an IPv4 address this host can expose right now.',
+          ),
+          { code: 'unknown_lan_interface' },
+        ),
+      );
+    const close = vi.fn().mockResolvedValue(undefined);
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: true,
+      runtimeReady: Promise.resolve(),
+      close,
+      getLocalControl: () => ({ enable }),
+    });
+    mockListLanCandidates.mockReturnValue([]);
+    mockListExplicitCandidates.mockReturnValue([]);
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit(${code}) called`);
+    });
+
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(
+      '--local-control --local-control-address 203.0.113.99',
+    );
+    await expect(
+      handler(argv as Parameters<typeof handler>[0]),
+    ).rejects.toThrow('process.exit(1) called');
+
+    const stderr = stderrWrites.join('');
+    expect(stderr).toContain(
+      '203.0.113.99 is not an IPv4 address this host can expose right now.',
+    );
+    expect(stderr).not.toContain('This host currently has');
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it('passes normalized named channels to runQwenServe', async () => {
     mockRunQwenServe.mockResolvedValueOnce({
       url: 'http://127.0.0.1:4170/',
@@ -940,6 +1408,71 @@ describe('serve rate limit env parsing', () => {
       handler(argv as Parameters<typeof handler>[0]),
     ).rejects.toThrow('process.exit(1) called');
     expect(mockRunQwenServe).not.toHaveBeenCalled();
+  });
+
+  it('takes the Broker pair from the environment and removes it', async () => {
+    process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'] = 'http://127.0.0.1:4182';
+    process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'] = 'env-broker-secret';
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    // The runtime snapshots process.env for every process it starts, so the
+    // pair must already be gone when it begins.
+    let brokerEnvAtRuntimeStart: Array<string | undefined> = [];
+    mockRunQwenServe.mockImplementationOnce(async () => {
+      brokerEnvAtRuntimeStart = [
+        process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'],
+        process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'],
+      ];
+      return { url: 'http://127.0.0.1:4170/', webShellMounted: false };
+    });
+
+    await startServeHandlerWithArgs('--profile hosted-harness --no-web');
+
+    expect(brokerEnvAtRuntimeStart).toEqual([undefined, undefined]);
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).toMatchObject({
+      managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
+      managedRuntimeBrokerToken: 'env-broker-secret',
+    });
+    expect(process.env['QWEN_MANAGED_RUNTIME_BROKER_URL']).toBeUndefined();
+    expect(process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN']).toBeUndefined();
+    expect(stderrWrites.join('')).not.toContain(
+      '--managed-runtime-broker-token',
+    );
+  });
+
+  it('prefers the Broker options and warns about the token on the command line', async () => {
+    process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'] = 'http://127.0.0.1:4182';
+    process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'] = 'env-broker-secret';
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--profile hosted-harness --no-web' +
+        ' --managed-runtime-broker-url http://127.0.0.1:4200' +
+        ' --managed-runtime-broker-token flag-broker-secret',
+    );
+
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).toMatchObject({
+      managedRuntimeBrokerUrl: 'http://127.0.0.1:4200',
+      managedRuntimeBrokerToken: 'flag-broker-secret',
+    });
+    // The unused environment copy is removed too.
+    expect(process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN']).toBeUndefined();
+    const stderr = stderrWrites.join('');
+    expect(stderr).toContain(
+      'qwen serve: --managed-runtime-broker-token is visible in the process command line; prefer the QWEN_MANAGED_RUNTIME_BROKER_TOKEN env var.',
+    );
+    expect(stderr).not.toContain('flag-broker-secret');
   });
 });
 
