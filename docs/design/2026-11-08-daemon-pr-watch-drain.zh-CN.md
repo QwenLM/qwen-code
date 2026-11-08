@@ -63,7 +63,7 @@ drain 经注入的 `wakeSession(sessionId, workspaceCwd)` 恢复休眠接收者�
 
 ### role-aware 动作与 prompt 构造
 
-设置 actions 时，投递使用共享 channel-base 契约：对四个裸转换类型（无 lane）跑 `validateBoundActionEntries`，每角色组跑 `resolveBoundActionTemplate`（`<role>:<type>` → `<role>:default` → `<type>` → `default`；untyped 只解析裸链），用各值（`%repo%`/`%pr%`/`%url%`/`%title%`/`%event%`/`%sender%`/`%role%`，`%event%` 为裸类型）跑 `renderBoundActionTemplate`。每个匹配组有自己的赢家、自己在组后缀键下的准入、以及由 `buildBoundEventPrompt` 构造、在带标签可信指令块中携带渲染指令的 prompt；每转换至多四次投递。无合格绑定者的匹配组在完整扫描被跳过、在 partial 扫描等待。无 actions 时投递是单赢家与通用 prompt（有角色时用内置角色指导）。prompt 的 GitHub 派生行经 `sanitizePromptText`，正文保持 6,000 code-point 上限。不设置 display text；回复留在会话内。
+设置 actions 时，投递使用共享 channel-base 契约。`deps.actions` 作为**已校验**的 map 被消费：对四个裸转换类型（无 lane）的封闭键词表与 2,000 code-point 模板上限，由 `validateBoundActionEntries` 在 daemon 构造该 map 处（§6 配置，PR B）强制，而非由 drain 强制。投递随后每角色组跑 `resolveBoundActionTemplate`（`<role>:<type>` → `<role>:default` → `<type>` → `default`；untyped 只解析裸链），用各值（`%repo%`/`%pr%`/`%url%`/`%title%`/`%event%`/`%sender%`/`%role%`，`%event%` 为裸类型）跑 `renderBoundActionTemplate`。每个匹配组有自己的赢家、自己在组后缀键下的准入、以及由 `buildBoundEventPrompt` 构造、在带标签可信指令块中携带渲染指令的 prompt；每转换至多四次投递。无合格绑定者的匹配组在完整扫描被跳过、在 partial 扫描等待。无 actions 时投递是单赢家与通用 prompt（有角色时用内置角色指导）。prompt 的 GitHub 派生行经 `sanitizePromptText`，正文保持 6,000 code-point 上限。不设置 display text；回复留在会话内。
 
 ### 扫描完整性：lastBoundAt 与删除
 

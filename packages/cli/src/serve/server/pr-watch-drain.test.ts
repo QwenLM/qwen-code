@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,6 +17,7 @@ import {
   mergeBindingRows,
   resolvePrRecipients,
   runPrWatchDrainTick,
+  PR_WATCH_MAX_CONCURRENT_RESTORES,
   PR_WATCH_MAX_PARTIAL_RETAINED,
   type PrWatchDrainDeps,
   type PrWatchDrainState,
@@ -547,5 +548,132 @@ describe('runPrWatchDrainTick', () => {
       expect(stored.state.pending).toBeUndefined();
       expect(stored.state.delivered).toHaveLength(2);
     }
+  });
+
+  it('drains pending entries oldest-first', async () => {
+    const first = {
+      type: 'head_change' as const,
+      key: 'k-first',
+      summary: 'first',
+      detectedAt: T0,
+    };
+    const second = {
+      type: 'ci_failure' as const,
+      key: 'k-second',
+      summary: 'second',
+      detectedAt: T0,
+    };
+    writePrWatchStateSync(
+      dir,
+      identity,
+      pendingState({ pending: [first, second] }),
+    );
+    const admit = vi.fn(
+      async (
+        _runtime: WorkspaceRuntime,
+        _sessionId: string,
+        _promptText: string,
+        _idempotencyKey: string,
+      ) => ({ deduplicated: false }),
+    );
+    const deps = makeDeps({ admitPrompt: admit });
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(result.delivered).toBe(2);
+    expect(admit).toHaveBeenCalledTimes(2);
+    expect(admit.mock.calls[0][3]).toBe('k-first');
+    expect(admit.mock.calls[1][3]).toBe('k-second');
+  });
+
+  it('keeps the admitted mark when the recording write fails, then retries only the write', async () => {
+    writePrWatchStateSync(dir, identity, pendingState());
+    const store = await import('./pr-watch-store.js');
+    const key = 'pr-state:owner/repo#42:ci_failure:aaa';
+    const admit = vi.fn(
+      async (
+        _runtime: WorkspaceRuntime,
+        _sessionId: string,
+        _promptText: string,
+        _idempotencyKey: string,
+      ) => ({ deduplicated: false }),
+    );
+    const deps = makeDeps({ admitPrompt: admit });
+    // First drain: admission lands but the recording write fails.
+    const writeSpy = vi
+      .spyOn(store, 'writePrWatchStateSync')
+      .mockImplementationOnce(() => {
+        throw new Error('disk full');
+      });
+    await runPrWatchDrainTick([runtime()], deps, state);
+    expect(admit).toHaveBeenCalledTimes(1);
+    expect(state.inFlight.get(key)?.admitted).toBe(true);
+    const stored = readPrWatchStateSync(dir, identity);
+    if (stored.kind === 'state') expect(stored.state.pending).toHaveLength(1);
+    writeSpy.mockRestore();
+    // Second drain: the admitted mark retries only the write, never re-admits.
+    const second = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(second.delivered).toBe(0);
+    expect(admit).toHaveBeenCalledTimes(1);
+    expect(state.inFlight.has(key)).toBe(false);
+    const after = readPrWatchStateSync(dir, identity);
+    if (after.kind === 'state') {
+      expect(after.state.pending).toBeUndefined();
+      expect(after.state.delivered).toContain(key);
+    }
+  });
+
+  it('starts at most PR_WATCH_MAX_CONCURRENT_RESTORES dormant restores per tick', async () => {
+    const ids = [1, 2, 3, 4, 5].map((n) => ({
+      host: 'github.com',
+      repo: 'owner/repo',
+      number: n,
+    }));
+    for (const id of ids) {
+      writePrWatchStateSync(dir, id, {
+        pr: id,
+        observedAt: T0,
+        state: 'open',
+        headSha: 'a'.repeat(40),
+        checks: 'passing',
+        pending: [
+          {
+            type: 'ci_failure',
+            key: `k-${id.number}`,
+            summary: 's',
+            detectedAt: T0,
+          },
+        ],
+      });
+    }
+    let releaseWake: () => void = () => {};
+    const wakeGate = new Promise<void>((resolve) => {
+      releaseWake = resolve;
+    });
+    const deps = makeDeps({
+      scanBindings: async () => ({
+        bindings: ids.map((id) =>
+          summary(`s-${id.number}`, { number: id.number }),
+        ),
+        partial: false,
+      }),
+      isSessionLive: () => false,
+      wakeSession: () =>
+        wakeGate.then(() => ({ kind: 'unavailable' as const })),
+    });
+    await runPrWatchDrainTick([runtime()], deps, state);
+    expect(state.restoring.size).toBe(PR_WATCH_MAX_CONCURRENT_RESTORES);
+    releaseWake();
+    await vi.waitFor(() => {
+      expect(state.restoring.size).toBe(0);
+    });
+  });
+
+  it('skips an unreadable watch file and still drains the healthy ones', async () => {
+    writePrWatchStateSync(dir, identity, pendingState());
+    writeFileSync(path.join(dir, 'corrupt.json'), '{');
+    const deps = makeDeps();
+    const result = await runPrWatchDrainTick([runtime()], deps, state);
+    expect(result.claimed).toBe(true);
+    expect(result.delivered).toBe(1);
+    expect(deps.admitPrompt).toHaveBeenCalledTimes(1);
   });
 });
