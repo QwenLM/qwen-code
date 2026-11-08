@@ -72,6 +72,8 @@ const IM_DELIVERY_TRUNCATION_NOTICE =
 
 interface DwsConfig extends ChannelConfig {
   profile?: unknown;
+  quotePrivateReply?: unknown;
+  quoteGroupReply?: unknown;
   startReaction?: unknown;
   endReaction?: unknown;
   watchTodos?: unknown;
@@ -122,6 +124,7 @@ interface PersistedImDelivery {
   idempotencyKey: string;
   directTarget?: Extract<DwsImTarget, { kind: 'direct' }>;
   isGroup?: boolean;
+  quoteReply?: boolean;
   attempts: number;
   localDeferrals?: number;
   nextRetryAt: number;
@@ -413,6 +416,8 @@ function isPersistedImDelivery(value: unknown): value is PersistedImDelivery {
         typeof delivery.directTarget.openDingTalkId === 'string' &&
         Boolean(delivery.directTarget.openDingTalkId))) &&
     (delivery.isGroup === undefined || typeof delivery.isGroup === 'boolean') &&
+    (delivery.quoteReply === undefined ||
+      typeof delivery.quoteReply === 'boolean') &&
     Number.isSafeInteger(delivery.attempts) &&
     delivery.attempts >= 0 &&
     (delivery.localDeferrals === undefined ||
@@ -609,6 +614,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly startReactionName: string;
   private readonly endReactionName?: string;
   private readonly watchTodos: boolean;
+  private readonly quotePrivateReply: boolean;
+  private readonly quoteGroupReply: boolean;
   private readonly inboundReactionTargets = new Map<
     string,
     { conversationId: string; messageId: string }
@@ -655,6 +662,14 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       DEFAULT_START_REACTION;
     const endReactionName = configuredString(config.endReaction, 'endReaction');
     const watchTodos = configuredBoolean(config.watchTodos, 'watchTodos');
+    const quotePrivateReply = configuredBoolean(
+      config.quotePrivateReply,
+      'quotePrivateReply',
+    );
+    const quoteGroupReply = configuredBoolean(
+      config.quoteGroupReply,
+      'quoteGroupReply',
+    );
     if (profile?.includes(',')) {
       throw new Error(
         'DWS channel profile must select exactly one login profile.',
@@ -671,7 +686,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
             ([conversationId, group]) =>
               conversationId !== '*' &&
               conversationId.trim().length > 0 &&
-              group.requireMention === false,
+              (group.requireMention ?? config.groups['*']?.requireMention) ===
+                false,
           )
           .map(
             ([conversationId]): DwsImSource => ({
@@ -683,7 +699,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       config.groupPolicy === 'disabled'
         ? []
         : [{ kind: 'at' }, ...groupSources];
-    if (config.dmPolicy !== 'disabled') imSources.push({ kind: 'direct' });
 
     if (
       config.approvalMode !== undefined &&
@@ -704,6 +719,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
 
     this.userInstructions = userInstructions;
     this.client = client ?? new DwsClient({ executable: 'dws', profile });
+    if (this.privatePolicy !== 'disabled') imSources.push({ kind: 'direct' });
     this.imStates = imSources.map((source) => ({
       source,
       restartAttempts: 0,
@@ -711,6 +727,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     this.startReactionName = startReactionName;
     this.endReactionName = endReactionName;
     this.watchTodos = watchTodos;
+    this.quotePrivateReply = quotePrivateReply;
+    this.quoteGroupReply = quoteGroupReply;
   }
 
   protected createInitialCursor(): DwsCursor {
@@ -1021,13 +1039,19 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     return TODO_POLL_INTERVAL_MS;
   }
 
+  /** Document comments and native todos are one person's requests. */
+  protected override isPersonalConversation(target: {
+    chatId: string;
+  }): boolean {
+    return (
+      this.documentSet.has(target.chatId) || this.todoTargets.has(target.chatId)
+    );
+  }
+
   protected override preflightInbound(
     envelope: Envelope,
   ): boolean | Promise<boolean> {
-    if (
-      !this.documentSet.has(envelope.chatId) &&
-      !this.todoTargets.has(envelope.chatId)
-    ) {
+    if (!this.isPersonalConversation(envelope)) {
       return super.preflightInbound(envelope);
     }
     const result = this.gate.check(envelope.senderId, envelope.senderName);
@@ -1244,8 +1268,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       `${this.name}\0${chatId}\0${messageId}\0${text}`,
     );
     const target = this.findImTarget(chatId);
+    // Collected turns outlive their source message's kind entry; the active
+    // prompt still carries the originating conversation kind.
     const isGroup =
       this.imResponseKinds.get(`${chatId}\0${messageId}`) ??
+      this.getResponseIsGroup(sessionId) ??
       target?.kind !== 'direct';
     const delivery: PersistedImDelivery = {
       conversationId: chatId,
@@ -1253,8 +1280,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       senderId,
       content: boundedImDeliveryContent(this.formatAttributedText(text, label)),
       idempotencyKey,
-      ...(target?.kind === 'direct' ? { directTarget: target } : {}),
+      ...(!isGroup
+        ? { directTarget: { kind: 'direct', openDingTalkId: senderId } }
+        : {}),
       isGroup,
+      quoteReply: isGroup ? this.quoteGroupReply : this.quotePrivateReply,
       attempts: 0,
       nextRetryAt: 0,
     };
@@ -1336,17 +1366,23 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     this.activeImDeliveries.add(delivery.idempotencyKey);
     try {
       try {
-        if (delivery.directTarget) {
-          await this.client.sendImMessage(
-            delivery.directTarget,
-            delivery.content,
-            delivery.idempotencyKey,
-          );
-        } else {
+        // Older queued replies must retain their original transport on retry.
+        const quoteReply =
+          delivery.quoteReply ?? delivery.directTarget === undefined;
+        if (quoteReply) {
           await this.client.replyToImMessage(
             delivery.conversationId,
             delivery.messageId,
             delivery.senderId,
+            delivery.content,
+            delivery.idempotencyKey,
+          );
+        } else {
+          await this.client.sendImMessage(
+            delivery.directTarget ?? {
+              kind: 'group',
+              conversationId: delivery.conversationId,
+            },
             delivery.content,
             delivery.idempotencyKey,
           );
@@ -1405,10 +1441,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       return this.config.groupPolicy === 'pairing' ? 'unknown' : 'denied';
     }
     if (!this.dmGate.check(envelope).allowed) return 'denied';
-    if (isGroup && this.config.groupPolicy === 'pairing') return 'allowed';
-    const senderGate = this.senderGateFor(isGroup);
+    const senderGate = this.senderGateFor(envelope);
     if (senderGate.isAllowed(delivery.senderId)) return 'allowed';
-    return senderGate === this.gate && this.config.senderPolicy === 'pairing'
+    return senderGate === this.gate && this.privatePolicy === 'pairing'
       ? 'unknown'
       : 'denied';
   }
@@ -1555,7 +1590,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         );
       }
     }
-    if (this.config.dmPolicy !== 'disabled') {
+    if (this.privatePolicy !== 'disabled') {
       try {
         const checkpoint = this.cursor.notificationCheckpoint ?? {
           startTime: Math.max(
@@ -1725,6 +1760,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       threadId: summary.taskId,
       messageId: `todo-${fingerprint}`,
       text: `Process this DingTalk todo:\n${truncateCodePoints(title, MAX_COMMENT_CHARS)}`,
+      bypassMessageRoutes: true,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
@@ -2041,7 +2077,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
 
   private isImSourceEnabled(source: DwsImSource): boolean {
     return source.kind === 'direct'
-      ? this.config.dmPolicy !== 'disabled'
+      ? this.privatePolicy !== 'disabled'
       : this.config.groupPolicy !== 'disabled';
   }
 
@@ -2552,7 +2588,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     key: string,
     notification: DwsDocumentMentionNotification,
   ): Promise<void> {
-    if (this.config.dmPolicy === 'disabled') return;
+    if (this.privatePolicy === 'disabled') return;
     const notificationKey = documentNotificationKey(notification);
     if (this.cursor.processedMessages.includes(notificationKey)) {
       this.markProcessedMessage(key);
@@ -2628,6 +2664,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         threadId: notification.commentKey,
         messageId: message.messageId,
         text: truncateCodePoints(notification.request, MAX_COMMENT_CHARS),
+        bypassMessageRoutes: true,
         isGroup: true,
         isMentioned: true,
         isReplyToBot: false,
@@ -2771,7 +2808,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private async replayPendingDocumentNotifications(
     signal: AbortSignal,
   ): Promise<void> {
-    if (this.config.dmPolicy === 'disabled') return;
+    if (this.privatePolicy === 'disabled') return;
     for (const pending of [
       ...(this.cursor.pendingDocumentNotifications ?? []),
     ]) {

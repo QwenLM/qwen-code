@@ -1,3 +1,4 @@
+import { createDaemonRestRequest } from '../daemon/rest-request.js';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
   confirmDaemonTarget,
@@ -64,10 +65,16 @@ export async function fetchRemotePathSuggestions(
   prefix: string,
 ): Promise<RemotePathSuggestions> {
   const query = new URLSearchParams({ daemon: daemonOrigin, prefix });
-  const res = await fetch(
-    `/remote-workspace-path-suggestions?${query.toString()}`,
-    { headers: remoteProxyHeaders(daemonOrigin) },
-  );
+  // The proxy answers for a remote target, so its failures must not be
+  // attributed to the local daemon's availability.
+  const res = await createDaemonRestRequest(
+    '',
+    getDaemonToken(window.location.origin),
+    undefined,
+    true,
+  )(`/remote-workspace-path-suggestions?${query.toString()}`, {
+    headers: remoteProxyHeaders(daemonOrigin),
+  });
   if (!res.ok) {
     if (res.status === 401) recoverRejectedTargetCredential(daemonOrigin);
     throw new DaemonHttpError(
@@ -92,7 +99,12 @@ export async function addWorkspaceToDaemon(
   persist: boolean,
   displayName?: string,
 ): Promise<void> {
-  const res = await fetch('/remote-workspaces', {
+  const res = await createDaemonRestRequest(
+    '',
+    getDaemonToken(window.location.origin),
+    undefined,
+    true,
+  )('/remote-workspaces', {
     method: 'POST',
     headers: remoteProxyHeaders(daemonOrigin, {
       'Content-Type': 'application/json',
@@ -126,7 +138,7 @@ export function clearRemoteWorkspaceAddStep(): void {
   const url = new URL(window.location.href);
   if (!url.searchParams.has(FLOW_PARAM)) return;
   url.searchParams.delete(FLOW_PARAM);
-  window.history.replaceState(null, '', url);
+  window.history.replaceState(window.history.state, '', url);
 }
 
 export function startRemoteWorkspaceAdd(
@@ -149,7 +161,7 @@ export function startRemoteWorkspaceAdd(
   });
   if (started) return true;
 
-  window.history.replaceState(null, '', returnUrl);
+  window.history.replaceState(window.history.state, '', returnUrl);
   try {
     window.sessionStorage.removeItem(RETURN_URL_KEY);
   } catch {

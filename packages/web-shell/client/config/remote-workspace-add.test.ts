@@ -18,6 +18,11 @@ const getAllowedDaemonOrigin = vi.hoisted(() =>
   }),
 );
 
+import {
+  DaemonAvailability,
+  registerDaemonAvailability,
+} from '../daemon/availability.js';
+
 vi.mock('./daemon', () => ({
   confirmDaemonTarget,
   getAllowedDaemonOrigin,
@@ -170,6 +175,33 @@ describe('remote workspace add navigation', () => {
     );
   });
 
+  it.each(['clear', 'failed-switch'] as const)(
+    'preserves host state and page return context during %s',
+    (operation) => {
+      const state = {
+        host: 'kept',
+        __qwenWebShellNavigation: {
+          basePath: '',
+          source: `${testOrigin}/session/original?workspace=local`,
+        },
+      };
+      window.history.replaceState(
+        state,
+        '',
+        '/plugins?addRemoteWorkspace=browse',
+      );
+      setLocation(`${testOrigin}/plugins?addRemoteWorkspace=browse`);
+      if (operation === 'clear') clearRemoteWorkspaceAddStep();
+      else {
+        navigateToDaemon.mockReturnValue(false);
+        expect(startRemoteWorkspaceAdd('https://remote.example')).toBe(false);
+      }
+      expect(window.history.state).toEqual(state);
+      expect(originalLocation.pathname).toBe('/plugins');
+      expect(originalLocation.search).toBe('');
+    },
+  );
+
   it('reports the add flow inactive outside a document', () => {
     vi.stubGlobal('window', undefined);
     try {
@@ -228,10 +260,56 @@ describe('remote daemon proxy calls', () => {
     expect(url).toBe(
       `/remote-workspace-path-suggestions?daemon=${encodeURIComponent(REMOTE)}&prefix=%2Fsrv%2F`,
     );
-    expect(init.headers).toEqual({
-      Authorization: 'Bearer serving-secret',
-      'X-Daemon-Token': 'target-secret',
+    expect(new Headers(init.headers)).toEqual(
+      new Headers({
+        Authorization: 'Bearer serving-secret',
+        'X-Daemon-Token': 'target-secret',
+      }),
+    );
+  });
+
+  it('attributes a failed remote proxy call to the target, not the local daemon', async () => {
+    setLocation(`${testOrigin}/?daemon=${encodeURIComponent(REMOTE)}`);
+    stubTokens();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/remote-workspace-path-suggestions')) {
+        return {
+          ok: false,
+          status: 502,
+          json: async () => ({}),
+          text: async () => '',
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ status: 'ok', features: [] }),
+        text: async () => '',
+      };
     });
+    vi.stubGlobal('fetch', fetchMock);
+    const availability = new DaemonAvailability(
+      testOrigin,
+      'serving-secret',
+      fetchMock as typeof fetch,
+    );
+    const unregister = registerDaemonAvailability(
+      testOrigin,
+      'serving-secret',
+      availability,
+    );
+    try {
+      await expect(fetchRemotePathSuggestions(REMOTE, '/srv/')).rejects.toThrow(
+        'Failed to fetch directory suggestions',
+      );
+      await Promise.resolve();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(availability.getSnapshot()).toBe('available');
+    } finally {
+      unregister();
+      availability.dispose();
+    }
   });
 
   it('authenticates the workspace-registration proxy to the daemon serving it', async () => {
@@ -247,11 +325,13 @@ describe('remote daemon proxy calls', () => {
     ];
     expect(url).toBe('/remote-workspaces');
     expect(init.method).toBe('POST');
-    expect(init.headers).toEqual({
-      'Content-Type': 'application/json',
-      Authorization: 'Bearer serving-secret',
-      'X-Daemon-Token': 'target-secret',
-    });
+    expect(new Headers(init.headers)).toEqual(
+      new Headers({
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer serving-secret',
+        'X-Daemon-Token': 'target-secret',
+      }),
+    );
     expect(JSON.parse(init.body)).toEqual({
       daemon: REMOTE,
       cwd: '/srv/shared-checkout/',
@@ -271,7 +351,7 @@ describe('remote daemon proxy calls', () => {
       string,
       { headers: Record<string, string> },
     ];
-    expect(init.headers).toEqual({});
+    expect(new Headers(init.headers)).toEqual(new Headers({}));
     expect(navigateToDaemon).not.toHaveBeenCalled();
   });
 

@@ -1498,6 +1498,12 @@ describe('sub-session launcher', () => {
 
     await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
     expect('label' in fake.notifications[0]!.notification).toBe(false);
+    expect(fake.notifications[0]!.notification.modelText).toContain(
+      '<result>Result.</result>',
+    );
+    expect(fake.notifications[0]!.notification.modelText).not.toContain(
+      'result truncated',
+    );
     launcher.stop();
   });
 
@@ -1521,7 +1527,7 @@ describe('sub-session launcher', () => {
     await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
     const modelText = fake.notifications[0]!.notification.modelText;
     expect(modelText.length).toBeLessThanOrEqual(32_768);
-    expect(modelText).toContain('…');
+    expect(modelText).toContain('\n[…result truncated]');
     expect(modelText).toMatch(
       /<result>[\s\S]*<\/result><\/task-notification>$/,
     );

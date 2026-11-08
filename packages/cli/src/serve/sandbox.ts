@@ -22,6 +22,11 @@ import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { resolveBundleDir } from '@qwen-code/qwen-code-core/utils/bundlePaths.js';
 import { FatalSandboxError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { MODEL_CATALOG_ENV } from '@qwen-code/qwen-code-core/models/model-catalog.js';
+import {
+  MODEL_CATALOG_REFRESH_ENV,
+  MODEL_CATALOG_URL_ENV,
+} from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { BWRAP_MIGRATION_MESSAGE } from '../config/execution-sandbox-settings.js';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
@@ -83,11 +88,18 @@ export function getSandboxPassthroughEnvArgs(
   return [
     'QWEN_DEBUG_LOG_FILE',
     'QWEN_CODE_LEGACY_MCP_BLOCKING',
+    MODEL_CATALOG_ENV,
+    MODEL_CATALOG_REFRESH_ENV,
+    MODEL_CATALOG_URL_ENV,
     SKIP_UPDATE_CHECK_ENV_VAR,
     CUSTOM_SANDBOX_IMAGE_ENV_VAR,
     HOST_UPDATE_RELAUNCH_ENV_VAR,
     QWEN_CODE_SERVE_ENV,
     QWEN_CODE_DESKTOP_ENV,
+    // Workflow enablement is an operator decision; the inner CLI would
+    // otherwise read only the mounted settings and ignore the exported switch.
+    'QWEN_CODE_ENABLE_WORKFLOWS',
+    'QWEN_CODE_DISABLE_WORKFLOWS',
   ].flatMap((envVar) =>
     env[envVar] === undefined ? [] : ['--env', `${envVar}=${env[envVar]}`],
   );
@@ -685,6 +697,25 @@ export async function start_sandbox(
       '--env',
       `QWEN_CODE_MCP_APPROVALS_PATH=${getContainerPath(
         process.env['QWEN_CODE_MCP_APPROVALS_PATH'],
+      )}`,
+    );
+  }
+  if (process.env['QWEN_CODE_HOOK_APPROVALS_PATH']) {
+    args.push(
+      '--env',
+      `QWEN_CODE_HOOK_APPROVALS_PATH=${getContainerPath(
+        process.env['QWEN_CODE_HOOK_APPROVALS_PATH'],
+      )}`,
+    );
+  }
+  // A custom trust store is the folder-trust feature's only authority; the
+  // container cannot see the host path, and its fallback (QWEN_HOME) may not
+  // hold the decision either, so workspace hooks and settings stay withheld.
+  if (process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH']) {
+    args.push(
+      '--env',
+      `QWEN_CODE_TRUSTED_FOLDERS_PATH=${getContainerPath(
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
       )}`,
     );
   }

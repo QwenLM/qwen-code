@@ -5,6 +5,7 @@
  */
 
 import { devices, expect, test, type Page } from '@playwright/test';
+import { plugin as githubChannelPlugin } from '@qwen-code/channel-github';
 import type {
   DaemonEvent,
   DaemonSessionSummary,
@@ -23,7 +24,9 @@ import {
 import {
   captureScreenshot,
   completeReplay,
+  FIXED_CAPTURE_TIME,
   fillComposer,
+  freezeWallClock,
   gotoNewSession,
   gotoSession,
   gotoSettingsHarness,
@@ -35,6 +38,13 @@ import {
 } from './harness';
 
 const THEMES: readonly VisualTheme[] = ['dark', 'light'];
+
+// The action-template editor captures use the plugin's own descriptor so the
+// screenshots show the production key vocabulary, not a hand-pruned fixture.
+const githubManagement = githubChannelPlugin.management;
+if (!githubManagement) {
+  throw new Error('@qwen-code/channel-github declares no management metadata.');
+}
 
 test.use({ viewport: { ...VISUAL_VIEWPORT } });
 
@@ -65,6 +75,9 @@ function trajectoryRecordMeta(recordId: string): Record<string, unknown> {
 function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
   const agentCallId = 'call_delegate01';
   const subagentId = `general-purpose-${agentCallId}`;
+  // Recorded start times, in ms from the first request. The second turn opens
+  // over a minute later, which the overview cuts out of its axis.
+  const at = (offset: number) => 1_760_000_000_000 + offset;
   return [
     trajectoryUpdate({
       sessionUpdate: 'user_message_chunk',
@@ -78,6 +91,7 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'request',
           durationMs: 1840,
+          startedAt: at(0),
           status: 'error',
           model: 'qwen3.8-max',
         },
@@ -91,6 +105,7 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'request',
           durationMs: 7823,
+          startedAt: at(2100),
           ttftMs: 3908,
           status: 'ok',
           model: 'qwen3.8-max',
@@ -124,6 +139,7 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'tool',
           durationMs: 16,
+          startedAt: at(9923),
           callId: 'call_read01',
           toolName: 'read_file',
           toolStatus: 'success',
@@ -152,6 +168,7 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'request',
           durationMs: 4879,
+          startedAt: at(9960),
           ttftMs: 1102,
           status: 'ok',
           model: 'qwen3.8-max',
@@ -168,12 +185,28 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'tool',
           durationMs: 31,
+          startedAt: at(14839),
           callId: 'call_subglob01',
           toolName: 'glob',
           toolStatus: 'success',
           promptId: `${sessionId}#${subagentId}#0`,
         },
         'qwen.session.recordId': 'rec-1-subtool',
+      },
+    }),
+    trajectoryUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        timing: {
+          kind: 'tool',
+          durationMs: 5101,
+          startedAt: at(9939),
+          callId: agentCallId,
+          toolName: 'agent',
+          toolStatus: 'success',
+        },
+        'qwen.session.recordId': 'rec-1-agenttiming',
       },
     }),
     trajectoryUpdate({
@@ -194,6 +227,7 @@ function trajectoryTranscriptEvents(sessionId: string): DaemonEvent[] {
         timing: {
           kind: 'request',
           durationMs: 3972,
+          startedAt: at(75_000),
           ttftMs: 1030,
           status: 'ok',
           model: 'qwen3.8-max',
@@ -379,6 +413,65 @@ async function openSettingsPanel(page: Page): Promise<void> {
 
 for (const theme of THEMES) {
   test.describe(`web-shell screenshots (${theme})`, () => {
+    test('simple mobile composer', async ({ browser }, testInfo) => {
+      const baseURL = resolveBaseURL(testInfo);
+      const context = await browser.newContext({
+        ...devices['Pixel 7'],
+        viewport: { width: 390, height: 844 },
+        baseURL,
+        reducedMotion: 'reduce',
+      });
+      try {
+        const page = await context.newPage();
+        const scenario = createWebShellDaemonScenario({
+          voice: { enabled: true },
+        });
+        scenario.capabilities.features.push('voice_transcribe');
+        const daemon = await installScenario(page, scenario, baseURL);
+        await freezeWallClock(page);
+        const params = new URLSearchParams({
+          composerVariant: 'simple',
+          tags: 'false',
+          theme,
+          sessionId: scenario.sessionId,
+        });
+        await page.goto(
+          `/e2e/composer-layout-harness.html?${params.toString()}`,
+        );
+        const root = page
+          .locator('[data-web-shell-root]:not([data-web-shell-gate])')
+          .last();
+        await expect(root).toBeVisible();
+        expect(
+          (await root.getAttribute('class'))?.split(/\s+/).includes('dark'),
+        ).toBe(theme === 'dark');
+        await completeReplay(page, daemon, scenario.sessionId);
+        const composer = page.locator('[data-web-shell-composer]');
+        const microphone = composer.getByRole('button', {
+          name: 'Start voice dictation',
+          exact: true,
+        });
+        const send = composer.locator('[data-web-shell-composer-submit]');
+        await expect(microphone).toBeVisible();
+        await expect(send).toBeHidden();
+        await composer
+          .locator('textarea[data-web-shell-composer-editor]')
+          .fill('Review the simple composer.\nKeep this working draft.');
+        await composer.locator('[data-web-shell-composer-expand]').tap();
+        await expect(microphone).toBeVisible();
+        await composer.locator('[data-web-shell-composer-collapse]').tap();
+        await expect(composer).toHaveAttribute(
+          'data-web-shell-composer-variant',
+          'simple',
+        );
+        await expect(microphone).toBeHidden();
+        await expect(send).toBeVisible();
+        await captureScreenshot(page, `simple-composer-${theme}`);
+      } finally {
+        await context.close();
+      }
+    });
+
     test('mobile composer controls', async ({ browser }, testInfo) => {
       const baseURL = resolveBaseURL(testInfo);
       const context = await browser.newContext({
@@ -479,6 +572,84 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `context-usage-${theme}`);
     });
 
+    test('context instruction file preview', async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd: '/workspace',
+        workspaceFiles: {
+          '/workspace/AGENTS.md':
+            '# AGENTS.md\n\n## Working Principles\n\n- Simplicity first: minimum code that solves the problem.\n- No abstractions for single-use code.\n',
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route(/\/session\/[^/]+\/context-usage(?:\?|$)/, (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            sessionId: scenario.sessionId,
+            workspaceCwd: scenario.workspaceCwd,
+            formattedText: '',
+            usage: {
+              modelName: 'Qwen Test',
+              totalTokens: 60_000,
+              contextWindowSize: 100_000,
+              breakdown: {
+                systemPrompt: 10_000,
+                builtinTools: 10_000,
+                mcpTools: 0,
+                instructionFiles: 5_000,
+                memoryFiles: 1_000,
+                skills: 10_000,
+                messages: 24_000,
+                freeSpace: 30_000,
+                autocompactBuffer: 10_000,
+              },
+              builtinTools: [],
+              mcpTools: [],
+              instructionFiles: [
+                {
+                  path: 'AGENTS.md',
+                  tokens: 5_000,
+                  absolutePath: '/workspace/AGENTS.md',
+                },
+              ],
+              memoryFiles: [{ path: 'auto memory', tokens: 1_000 }],
+              skills: [],
+              showDetails: true,
+            },
+          } satisfies DaemonSessionContextUsageStatus,
+        }),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page
+        .getByRole('button', { name: 'Context Usage', exact: true })
+        .click();
+      const panel = page.locator('[class*="panel"][aria-busy]');
+      await expect(panel).toContainText('Remaining 40.0k');
+      await panel.locator('summary').filter({ hasText: 'Advanced' }).click();
+      await panel
+        .locator('summary')
+        .filter({ hasText: 'Instruction files' })
+        .click();
+      await expect(
+        panel.getByRole('button', { name: 'AGENTS.md', exact: true }),
+      ).toBeVisible();
+      await captureScreenshot(page, `context-instruction-files-panel-${theme}`);
+      await panel
+        .getByRole('button', { name: 'AGENTS.md', exact: true })
+        .click();
+      await expect(
+        page.getByText('Simplicity', { exact: false }).first(),
+      ).toBeVisible();
+      await captureScreenshot(
+        page,
+        `context-instruction-file-preview-${theme}`,
+      );
+    });
+
     test('trajectory', async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         transcriptPage: {
@@ -499,7 +670,43 @@ for (const theme of THEMES) {
       await expect(
         page.locator('[data-testid="trajectory-row-request"]').first(),
       ).toContainText('qwen3.8-max');
+      // The failed request and its retry, the read, the delegation, the
+      // subagent's own request and the second turn. The subagent's glob has
+      // no row in the window, so it has nowhere to be drawn.
+      await expect(page.getByTestId('trajectory-span')).toHaveCount(6);
       await captureScreenshot(page, `trajectory-${theme}`);
+
+      // The same run with a stretch of it selected on the overview.
+      const plot = await page.getByTestId('trajectory-plot').boundingBox();
+      expect(plot).not.toBeNull();
+      const y = plot!.y + 10;
+      await page.mouse.move(plot!.x + plot!.width * 0.3, y);
+      await page.mouse.down();
+      await page.mouse.move(plot!.x + plot!.width * 0.7, y, { steps: 8 });
+      await page.mouse.up();
+      await expect(page.getByTestId('trajectory-range')).toBeVisible();
+      await expect(page.getByTestId('trajectory-range-status')).toBeVisible();
+      await captureScreenshot(page, `trajectory-range-${theme}`);
+
+      // Zoomed in on the middle of the run, the selection still drawn.
+      await page.mouse.move(plot!.x + plot!.width * 0.5, y);
+      await page.mouse.wheel(0, -900);
+      await expect(page.getByTestId('trajectory-domain')).toHaveAttribute(
+        'data-zoomed',
+        'true',
+      );
+      await captureScreenshot(page, `trajectory-zoom-${theme}`);
+
+      // The whole run again, over real time: the wait before the retry and
+      // the pause between turns stay on the axis. Switching drops the zoom
+      // and the selection, which belong to the other axis.
+      const clock = page.getByTestId('trajectory-mode-clock');
+      await clock.click();
+      await expect(clock).toHaveAttribute('aria-pressed', 'true');
+      await expect(page.getByTestId('trajectory-domain')).not.toHaveAttribute(
+        'data-zoomed',
+      );
+      await captureScreenshot(page, `trajectory-clock-${theme}`);
     });
 
     test('session overview', async ({ page }, testInfo) => {
@@ -537,6 +744,7 @@ for (const theme of THEMES) {
         resolveBaseURL(testInfo),
       );
       await gotoSession(page, scenario, daemon, theme);
+      await page.getByRole('button', { name: 'More', exact: true }).click();
       await page
         .getByRole('button', { name: 'Session Overview', exact: true })
         .click();
@@ -557,6 +765,178 @@ for (const theme of THEMES) {
         }),
       ).toBeVisible();
       await captureScreenshot(page, `session-overview-details-${theme}`);
+    });
+
+    test('session overview bulk delete batches at the route limit', async ({
+      page,
+    }, testInfo) => {
+      const workspaceCwd = '/workspace/session-overview-bulk-delete';
+      // The mock catalog deliberately exceeds the real daemon's 100-row page cap.
+      const sessions = Array.from({ length: 101 }, (_, index) => ({
+        sessionId: `bulk-delete-${index}`,
+        displayName: `Bulk delete fixture ${index}`,
+        workspaceCwd,
+        clientCount: 0,
+        hasActivePrompt: false,
+        updatedAt: '2026-07-01T12:00:00.000Z',
+      }));
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd,
+        sessions: [
+          ...sessions,
+          {
+            sessionId: 'web-shell-e2e-session',
+            displayName: 'Current session to keep',
+            workspaceCwd,
+            clientCount: 1,
+            hasActivePrompt: true,
+          },
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      const batches: string[][] = [];
+      const browserErrors: string[] = [];
+      page.on('pageerror', (error) => browserErrors.push(error.message));
+      page.on('console', (message) => {
+        if (['error', 'warning'].includes(message.type())) {
+          browserErrors.push(message.text());
+        }
+      });
+      await page.route('**/workspace/models', (route) =>
+        route.fulfill({ json: { models: [] } }),
+      );
+      await page.route('**/daemon/status?*', (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            detail: 'full',
+            generatedAt: '2026-07-01T12:00:00.000Z',
+            status: 'ok',
+            issues: [],
+            daemon: { pid: 0, uptimeMs: 0, mode: 'http-bridge', workspaceCwd },
+            full: {
+              sessions: scenario.sessions.map((session) => ({
+                ...session,
+                subscriberCount: 0,
+                attachCount: 0,
+                pendingPromptCount: 0,
+                pendingPermissionCount: 0,
+                lastEventId: 0,
+              })),
+            },
+          },
+        }),
+      );
+      await page.route('**/sessions/delete', async (route) => {
+        const { sessionIds } = route.request().postDataJSON() as {
+          sessionIds: string[];
+        };
+        batches.push(sessionIds);
+        if (sessionIds.length > 100) {
+          await route.fulfill({
+            status: 400,
+            json: { error: 'max 100 session IDs', code: 'invalid_request' },
+          });
+          return;
+        }
+        const removed = scenario.sessions
+          .filter((session) => sessionIds.includes(session.sessionId))
+          .map((session) => session.sessionId);
+        scenario.sessions = scenario.sessions.filter(
+          (session) => !removed.includes(session.sessionId),
+        );
+        await route.fulfill({
+          json: {
+            removed,
+            notFound: sessionIds.filter((id) => !removed.includes(id)),
+            errors: [],
+          },
+        });
+      });
+      await gotoSession(page, scenario, daemon, theme);
+      await page.getByRole('button', { name: 'More', exact: true }).click();
+      await page
+        .getByRole('button', { name: 'Session Overview', exact: true })
+        .click();
+      const panel = page.locator('[data-web-shell-session-panel]');
+      await panel
+        .getByRole('textbox', { name: 'Search title, branch, PR or ID…' })
+        .fill('Bulk delete fixture');
+      await expect(panel).toContainText('101 session(s)');
+      await panel
+        .getByRole('checkbox', { name: 'Select all', exact: true })
+        .check();
+      await expect(panel).toContainText('101 of 101 row(s) selected');
+      await panel
+        .locator('[data-web-shell-session-footer]')
+        .getByRole('button', { name: 'Delete', exact: true })
+        .click();
+      await expect(page.getByRole('alertdialog')).toContainText(
+        'Delete 101 sessions?',
+      );
+      await captureScreenshot(
+        page,
+        `session-overview-bulk-delete-confirm-${theme}`,
+      );
+      await page.locator('[data-slot="alert-dialog-action"]').click();
+      await expect(
+        panel
+          .getByText('No data', { exact: true })
+          .or(panel.getByText(/Failed to delete session/)),
+      ).toBeVisible();
+      await captureScreenshot(
+        page,
+        `session-overview-bulk-delete-result-${theme}`,
+      );
+      expect(batches.map((ids) => ids.length)).toEqual([100, 1]);
+      expect(batches.flat().sort()).toEqual(
+        sessions.map((session) => session.sessionId).sort(),
+      );
+      expect(scenario.sessions.map((session) => session.sessionId)).toEqual([
+        scenario.sessionId,
+      ]);
+      await expect(panel.getByText('No data', { exact: true })).toBeVisible();
+      await expect(panel).not.toContainText('Failed to delete session');
+      expect(browserErrors).toEqual([]);
+    });
+
+    test('conversation search', async ({ page }, testInfo) => {
+      const events = Array.from({ length: 12 }, (_, index) => [
+        userTextEvent(`Explain synthetic example ${index + 1}.`, {
+          id: index * 2 + 1,
+        }),
+        assistantTextEvent(
+          index === 2
+            ? 'The sample uses **search-marker** to locate an earlier answer.'
+            : `Synthetic answer ${index + 1}: review the example and its expected output.`,
+          { id: index * 2 + 2 },
+        ),
+      ]).flat();
+      const scenario = createWebShellDaemonScenario({ events });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      const search = page.getByRole('button', {
+        name: 'Search this conversation',
+        exact: true,
+      });
+      await expect(search).toBeVisible();
+      await captureScreenshot(page, `conversation-search-entry-${theme}`);
+      await search.click();
+      const dialog = page.getByRole('dialog', {
+        name: 'Search this conversation',
+        exact: true,
+      });
+      await dialog.getByRole('combobox').fill('search-marker');
+      await expect(dialog.locator('mark')).toHaveText('search-marker');
+      await captureScreenshot(page, `conversation-search-dialog-${theme}`);
     });
 
     test(`session transcript`, async ({ page }, testInfo) => {
@@ -924,12 +1304,13 @@ for (const theme of THEMES) {
                 envResolvable: true,
               },
               {
-                key: 'senderPolicy',
-                label: 'Sender Policy',
+                key: 'privatePolicy',
+                label: 'Private Policy',
                 kind: 'enum',
                 required: true,
                 default: 'allowlist',
                 options: [
+                  { value: 'disabled', label: 'Disabled' },
                   { value: 'pairing', label: 'Pairing' },
                   { value: 'allowlist', label: 'Allowlist' },
                   { value: 'open', label: 'Open' },
@@ -1030,7 +1411,7 @@ for (const theme of THEMES) {
               config: {
                 type: 'dingtalk',
                 clientId: 'ding-visual-app',
-                senderPolicy: 'pairing',
+                privatePolicy: 'pairing',
                 groupPolicy: 'disabled',
                 sessionScope: 'user',
               },
@@ -1093,7 +1474,7 @@ for (const theme of THEMES) {
 
       await page.getByRole('button', { name: 'Channels' }).click();
       await expect(
-        page.getByRole('heading', { name: 'Channels', level: 1 }),
+        page.getByRole('heading', { name: 'Settings', level: 1 }),
       ).toBeVisible();
       const configuredChannels = page.getByLabel('Configured channels');
       await expect(
@@ -1125,6 +1506,338 @@ for (const theme of THEMES) {
         .getByRole('heading', { name: 'Pairing approvals' })
         .scrollIntoViewIfNeeded();
       await captureScreenshot(page, `channel-editor-existing-${theme}`);
+    });
+
+    test(`Channel action template editor`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'github',
+            displayName: 'GitHub',
+            manageable: true,
+            fields: githubManagement.fields,
+          },
+        ],
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await page.getByRole('button', { name: 'Configure GitHub' }).click();
+      const editor = page.getByRole('dialog');
+      await expect(
+        editor.getByRole('heading', { name: 'Configure GitHub' }),
+      ).toBeVisible();
+      await editor
+        .getByRole('switch', { name: 'Use Local GitHub CLI Authentication' })
+        .click();
+      await editor
+        .getByRole('switch', { name: 'Deliver To PR-Bound Sessions' })
+        .click();
+
+      // Anchors: the on-demand editor shows the add picker and zero rows on a
+      // fresh draft. The pre-change renderer (one input per key, no picker
+      // control behind the label) fails here instead of silently shipping an
+      // old-UI capture.
+      const addPicker = editor.getByLabel('Bound Session Actions');
+      await addPicker.scrollIntoViewIfNeeded();
+      await expect(addPicker).toBeVisible();
+      await expect(editor.locator('textarea')).toHaveCount(0);
+      await captureScreenshot(page, `channel-action-templates-empty-${theme}`);
+
+      await addPicker.click();
+      const reviewOption = page.getByRole('option', {
+        name: /review:watch:ci_failure/,
+      });
+      await expect(reviewOption).toBeVisible();
+      await captureScreenshot(page, `channel-action-templates-picker-${theme}`);
+      await reviewOption.click();
+      await editor
+        .getByRole('textbox', { name: 'review:watch:ci_failure' })
+        .fill('Review the CI failure on %repo%#%pr% and propose a fix.');
+      await addPicker.click();
+      await page.getByRole('option', { name: /^fix:comment/ }).click();
+      await editor
+        .getByRole('textbox', { name: 'fix:comment' })
+        .fill('Address the new comments on %repo%#%pr%.');
+      await expect(editor.locator('textarea')).toHaveCount(2);
+      await editor
+        .getByRole('textbox', { name: 'review:watch:ci_failure' })
+        .scrollIntoViewIfNeeded();
+      await captureScreenshot(
+        page,
+        `channel-action-templates-configured-${theme}`,
+      );
+
+      const fullscreenToggle = editor.locator('button[aria-pressed]');
+      await fullscreenToggle.click();
+      await expect(fullscreenToggle).toHaveAttribute('aria-pressed', 'true');
+      await captureScreenshot(
+        page,
+        `channel-action-templates-fullscreen-${theme}`,
+      );
+    });
+
+    test(`Channel repository filter editor`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'github',
+            displayName: 'GitHub',
+            manageable: true,
+            fields: githubManagement.fields,
+          },
+        ],
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await page.getByRole('button', { name: 'Configure GitHub' }).click();
+      const editor = page.getByRole('dialog');
+      await expect(
+        editor.getByRole('heading', { name: 'Configure GitHub' }),
+      ).toBeVisible();
+      await editor
+        .getByRole('switch', { name: 'Use Local GitHub CLI Authentication' })
+        .click();
+
+      // Anchors: the filter defaults to Off and the repository list stays
+      // hidden until a mode is chosen. A renderer that always shows the list
+      // (or lacks the field) fails here instead of shipping a stale capture.
+      const modeSelect = editor.getByLabel('Repository Filter');
+      await modeSelect.scrollIntoViewIfNeeded();
+      await expect(editor.getByLabel('Filtered Repositories')).toHaveCount(0);
+      await captureScreenshot(page, `channel-repo-filter-off-${theme}`);
+
+      await modeSelect.click();
+      await page
+        .getByRole('option', {
+          name: 'Blocklist — all except listed repositories',
+        })
+        .click();
+      const repositories = editor.getByLabel('Filtered Repositories');
+      await expect(repositories).toBeVisible();
+      await repositories.fill(
+        'https://github.com/QwenLM/qwen-code/pull/16117, octo/noisy-repo',
+      );
+      await captureScreenshot(page, `channel-repo-filter-blocklist-${theme}`);
+    });
+
+    test(`Channel events`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'channel_management',
+          ],
+        },
+        channels: {
+          revision: '1',
+          instances: {
+            'github-bot': {
+              name: 'github-bot',
+              config: { type: 'github' },
+              secrets: { token: { present: true, source: 'environment' } },
+              startsWithServe: true,
+              runtime: { state: 'connected' },
+            },
+            dingtalk: {
+              name: 'dingtalk',
+              config: { type: 'dingtalk' },
+              secrets: {},
+              startsWithServe: false,
+              runtime: { state: 'stopped' },
+            },
+          },
+        },
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      // The shared mock daemon does not serve the journal route yet; fulfill
+      // it with a fixed GitHub-heavy journal registered after the catch-all
+      // so this route wins. `user-gh` is deliberately absent from the channel
+      // listing: it mirrors a channel inherited from user settings, whose
+      // link metadata rides on the journal response instead.
+      await page.route('**/channels/events*', async (route) => {
+        await route.fulfill({
+          json: {
+            truncated: false,
+            channelLinkMeta: { 'user-gh': { type: 'github' } },
+            events: [
+              {
+                at: '2026-11-02T01:58:00.000Z',
+                channel: 'github-bot',
+                type: 'poll',
+                outcome: 'ok',
+                durationMs: 840,
+                detail: { notifications: 4 },
+              },
+              {
+                at: '2026-11-02T01:58:05.000Z',
+                channel: 'github-bot',
+                type: 'inbound',
+                outcome: 'accepted',
+                triggerKind: 'comment',
+                repository: 'QwenLM/qwen-code',
+                thread: 'pr:16117',
+                number: 16117,
+                actor: 'wenshao',
+              },
+              {
+                at: '2026-11-02T01:58:30.000Z',
+                channel: 'github-bot',
+                type: 'task',
+                outcome: 'running',
+                repository: 'QwenLM/qwen-code',
+                thread: 'pr:16117',
+                number: 16117,
+              },
+              {
+                at: '2026-11-02T01:59:10.000Z',
+                channel: 'github-bot',
+                type: 'outbound',
+                outcome: 'posted',
+                triggerKind: 'comment',
+                repository: 'QwenLM/qwen-code',
+                thread: 'pr:16117',
+                number: 16117,
+              },
+              {
+                at: '2026-11-02T02:00:00.000Z',
+                channel: 'github-bot',
+                type: 'inbound',
+                outcome: 'skipped',
+                reason: 'reason_filter',
+                triggerKind: 'ci_activity',
+                repository: 'QwenLM/qwen-code',
+                thread: 'issue:16171',
+                number: 16171,
+              },
+              {
+                at: '2026-11-02T02:01:00.000Z',
+                channel: 'github-bot',
+                type: 'inbound',
+                outcome: 'accepted',
+                triggerKind: 'mention',
+                repository: 'QwenLM/qwen-code',
+                thread: 'issue:16171',
+                number: 16171,
+                actor: 'contributor',
+              },
+              {
+                at: '2026-11-02T02:02:00.000Z',
+                channel: 'dingtalk',
+                type: 'inbound',
+                outcome: 'accepted',
+                thread: 'group-42',
+                actor: 'ada',
+              },
+              {
+                at: '2026-11-02T02:03:00.000Z',
+                channel: 'user-gh',
+                type: 'inbound',
+                outcome: 'accepted',
+                triggerKind: 'review_requested',
+                repository: 'QwenLM/qwen-code',
+                thread: 'pr:16226',
+                number: 16226,
+                actor: 'wenshao',
+              },
+            ],
+          },
+        });
+      });
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channel events' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Channel events', level: 1 }),
+      ).toBeVisible();
+      const list = page.getByTestId('channel-events-list');
+      await expect(list).toBeVisible();
+      // Anchored assertions: the GitHub targets must render as links with the
+      // right web URLs, and the non-GitHub row must stay plain text.
+      await expect(
+        list
+          .getByRole('link', {
+            name: 'Open QwenLM/qwen-code#16117 on GitHub',
+          })
+          .first(),
+      ).toHaveAttribute(
+        'href',
+        'https://github.com/QwenLM/qwen-code/pull/16117',
+      );
+      await expect(
+        list
+          .getByRole('link', {
+            name: 'Open QwenLM/qwen-code#16171 on GitHub',
+          })
+          .first(),
+      ).toHaveAttribute(
+        'href',
+        'https://github.com/QwenLM/qwen-code/issues/16171',
+      );
+      // The inherited user-scope channel links through journal metadata.
+      await expect(
+        list
+          .getByRole('link', {
+            name: 'Open QwenLM/qwen-code#16226 on GitHub',
+          })
+          .first(),
+      ).toHaveAttribute(
+        'href',
+        'https://github.com/QwenLM/qwen-code/pull/16226',
+      );
+      await expect(list.getByRole('link')).toHaveCount(6);
+      await expect(list.getByText('group-42')).toBeVisible();
+      await captureScreenshot(page, `channel-events-github-links-${theme}`);
     });
 
     test(`GitHub channel editor`, async ({ page }, testInfo) => {
@@ -1177,11 +1890,39 @@ for (const theme of THEMES) {
                 ],
               },
               {
-                key: 'senderPolicy',
-                label: 'Sender Policy',
+                key: 'reasonFilter',
+                label: 'Reason Filter',
+                kind: 'string-list',
+                options: [
+                  { value: 'mention', label: 'mention' },
+                  { value: 'review_requested', label: 'review_requested' },
+                  { value: 'assign', label: 'assign' },
+                  { value: 'ci_activity', label: 'ci_activity' },
+                ],
+              },
+              {
+                key: 'deliverToBoundSessions',
+                label: 'Deliver To PR-Bound Sessions',
+                kind: 'boolean',
+              },
+              {
+                key: 'prWatchEvents',
+                label: 'PR Watch Events',
+                kind: 'string-list',
+                options: [
+                  { value: 'ci_failure', label: 'ci_failure' },
+                  { value: 'merge_conflict', label: 'merge_conflict' },
+                  { value: 'head_change', label: 'head_change' },
+                  { value: 'state_change', label: 'state_change' },
+                ],
+              },
+              {
+                key: 'privatePolicy',
+                label: 'Private Policy',
                 kind: 'enum',
                 required: true,
                 options: [
+                  { value: 'disabled', label: 'Disabled' },
                   { value: 'allowlist', label: 'Allowlist' },
                   { value: 'pairing', label: 'Pairing' },
                   { value: 'open', label: 'Open' },
@@ -1209,7 +1950,7 @@ for (const theme of THEMES) {
 
       await page.getByRole('button', { name: 'Channels' }).click();
       await expect(
-        page.getByRole('heading', { name: 'Channels', level: 1 }),
+        page.getByRole('heading', { name: 'Settings', level: 1 }),
       ).toBeVisible();
       await page.getByRole('button', { name: 'Configure GitHub' }).click();
       await expect(
@@ -1220,7 +1961,63 @@ for (const theme of THEMES) {
           name: 'Use local GitHub CLI authentication',
         }),
       ).toBeVisible();
+      // Anchor the slim default view: tuning lives behind the collapsed
+      // advanced panel, so a regression that flattens it back out fails here
+      // instead of shipping a stale picture.
+      const advancedTrigger = page.getByRole('button', {
+        name: 'Advanced settings',
+      });
+      await expect(advancedTrigger).toBeVisible();
+      await expect(advancedTrigger).toHaveAttribute('data-state', 'closed');
+      // The panel title must be reachable by heading navigation (a real h3
+      // wrapping the trigger, not a span inside the button).
+      await expect(
+        page.getByRole('heading', { name: 'Advanced settings' }),
+      ).toBeVisible();
+      const reasonFilter = page.getByRole('group', { name: 'Reason Filter' });
+      await expect(reasonFilter).toHaveCount(0);
       await captureScreenshot(page, `github-channel-editor-${theme}`);
+      // Expand the panel and anchor the capture to the checklist so a
+      // regression that falls back to a free-text filter fails here too.
+      await advancedTrigger.click();
+      await expect(reasonFilter.getByRole('checkbox')).toHaveCount(4);
+      await expect(
+        reasonFilter.getByRole('checkbox', {
+          name: /mention — the bot is @mentioned/,
+        }),
+      ).toBeChecked({ checked: false });
+      // The dialog body scrolls, and the checklist sits below the fold at this
+      // viewport. Capture it separately and pin that it is fully on screen, so
+      // the published picture cannot quietly omit the feature it documents.
+      await page
+        .getByText('Reason Filter', { exact: true })
+        .first()
+        .scrollIntoViewIfNeeded();
+      await expect(reasonFilter).toBeInViewport({ ratio: 1 });
+      await captureScreenshot(page, `github-channel-editor-reasons-${theme}`);
+      // The bound-session panel gates watch events on delivery. Capture the
+      // gated state (disabled boxes + hint), then enabled with a selection,
+      // so the published pictures document the dependency itself.
+      const watchGroup = page.getByRole('group', { name: 'PR Watch Events' });
+      await watchGroup.scrollIntoViewIfNeeded();
+      await expect(watchGroup).toBeInViewport({ ratio: 1 });
+      await expect(watchGroup.getByRole('checkbox')).toHaveCount(4);
+      const ciFailure = watchGroup.getByRole('checkbox', {
+        name: /ci_failure/,
+      });
+      await expect(ciFailure).toBeDisabled();
+      await captureScreenshot(
+        page,
+        `github-channel-editor-watch-gated-${theme}`,
+      );
+      await page
+        .getByRole('switch', { name: 'Deliver To PR-Bound Sessions' })
+        .click();
+      await expect(ciFailure).toBeEnabled();
+      await ciFailure.check();
+      await watchGroup.scrollIntoViewIfNeeded();
+      await expect(watchGroup).toBeInViewport({ ratio: 1 });
+      await captureScreenshot(page, `github-channel-editor-watch-on-${theme}`);
       await page.getByLabel('Instance name').fill('github-bot');
       await page.getByRole('button', { name: 'Save' }).click();
       await expect(
@@ -1264,6 +2061,179 @@ for (const theme of THEMES) {
             }),
           }),
         ]);
+    });
+
+    test(`GitHub channel repository settings`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'github',
+            displayName: 'GitHub',
+            manageable: true,
+            fields: [
+              {
+                key: 'token',
+                label: 'Personal Access Token',
+                kind: 'secret',
+                envResolvable: true,
+              },
+              {
+                key: 'useLocalGh',
+                label: 'Use Local GitHub CLI Authentication',
+                kind: 'boolean',
+              },
+              {
+                key: 'baseUrl',
+                label: 'Base URL',
+                kind: 'string',
+                envResolvable: true,
+              },
+              {
+                key: 'pollInterval',
+                label: 'Poll Interval (ms)',
+                kind: 'number',
+                exclusiveMinimum: 0,
+                default: '60000',
+              },
+              {
+                key: 'groupPolicy',
+                label: 'Group Policy',
+                kind: 'enum',
+                required: true,
+                default: 'open',
+                options: [
+                  { value: 'open', label: 'Open' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'disabled', label: 'Disabled' },
+                ],
+              },
+              {
+                key: 'privatePolicy',
+                label: 'Private Policy',
+                kind: 'enum',
+                required: true,
+                options: [
+                  { value: 'disabled', label: 'Disabled' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'allowedUsers',
+                label: 'Allowed Users',
+                kind: 'string-list',
+              },
+            ],
+          },
+        ],
+        channels: {
+          revision: '1',
+          instances: {
+            'github-bot': {
+              name: 'github-bot',
+              config: {
+                type: 'github',
+                useLocalGh: true,
+                pollInterval: 30000,
+                groupPolicy: 'allowlist',
+                groups: {
+                  '*': { senders: 'allowlist', allowedUsers: ['operator'] },
+                  'qwenlm/qwen-code': {
+                    requireMention: false,
+                    senders: 'allowlist',
+                    allowedUsers: ['alice', 'bob'],
+                  },
+                  'acme/widgets': {},
+                },
+              },
+              secrets: {},
+              startsWithServe: false,
+              runtime: { state: 'stopped' },
+            },
+          },
+        },
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await page.getByRole('button', { name: 'Edit github-bot' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Edit GitHub' }),
+      ).toBeVisible();
+
+      // Anchor the capture to the rows themselves: a regression that drops them
+      // must fail here rather than republish a picture of the old form.
+      await expect(page.getByText('Per-repository settings')).toBeVisible();
+      await expect(page.getByLabel('Require a mention')).toHaveCount(2);
+      await expect(page.getByLabel('Who may speak')).toHaveCount(2);
+      await expect(page.getByLabel('Allowed speakers')).toHaveCount(2);
+      // Scope every assertion to its own row: counting controls alone would
+      // still pass if the rows were wired to the wrong repository, or if the
+      // speaker boxes all showed the channel-wide list.
+      const customized = page.getByRole('group', { name: 'qwenlm/qwen-code' });
+      const inheriting = page.getByRole('group', { name: 'acme/widgets' });
+      await expect(customized.getByLabel('Require a mention')).toContainText(
+        'Answer without a mention',
+      );
+      await expect(customized.getByLabel('Who may speak')).toContainText(
+        'Allowlist only',
+      );
+      await expect(customized.getByLabel('Allowed speakers')).toHaveValue(
+        'alice, bob',
+      );
+      await expect(inheriting.getByLabel('Require a mention')).toContainText(
+        'Inherit (require a mention)',
+      );
+      await expect(inheriting.getByLabel('Who may speak')).toContainText(
+        'Inherit (allowlist only)',
+      );
+      await expect(inheriting.getByLabel('Allowed speakers')).toHaveValue('');
+      await expect(page.getByLabel('Poll Interval (ms)')).toHaveValue('30000');
+
+      // Browser-side proof of the auto-open mitigation: this instance stores
+      // an advanced value, so the panel must open on edit, and collapsing it
+      // must report the configured count instead of hiding the value silently.
+      const advancedTrigger = page.getByRole('button', {
+        name: /Advanced settings/,
+      });
+      await expect(advancedTrigger).toHaveAttribute('data-state', 'open');
+      await advancedTrigger.click();
+      await expect(advancedTrigger).toHaveAttribute('data-state', 'closed');
+      await expect(advancedTrigger).toContainText('1 configured');
+      await advancedTrigger.click();
+      await expect(advancedTrigger).toHaveAttribute('data-state', 'open');
+
+      // Put the last row in frame, not just the section title: a capture can
+      // otherwise show the heading with every row below the fold. Only the last
+      // row is required to fit — at this viewport the two rows together are
+      // taller than the dialog body, so demanding both would fail on geometry
+      // rather than on a regression.
+      await inheriting.evaluate((element) =>
+        element.scrollIntoView({ block: 'center', inline: 'nearest' }),
+      );
+      await expect(inheriting).toBeInViewport({ ratio: 1 });
+      await captureScreenshot(page, `github-channel-repositories-${theme}`);
     });
 
     test(`mermaid diagram`, async ({ page }, testInfo) => {
@@ -1599,6 +2569,147 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `slash-menu-${theme}`);
     });
 
+    test(`PR watches`, async ({ page }, testInfo) => {
+      // The PR watches page and a watch's scheduled-task card render only
+      // from `GET /autofix-pr/watches`, which no other scenario answers. One
+      // watch fixes in the background with an item for a person, one runs in
+      // a terminal, one's PR merged with nothing running it.
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'workspace_settings',
+            'scheduled_task_gate',
+            'autofix_pr_watches',
+          ],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      const now = FIXED_CAPTURE_TIME.getTime();
+      const ago = (minutes: number) =>
+        new Date(now - minutes * 60_000).toISOString();
+      const watch = (over: Record<string, unknown>) => ({
+        pr: 12,
+        repo: 'acme/widgets',
+        host: 'github.com',
+        url: 'https://github.com/acme/widgets/pull/12',
+        headRefName: 'feat/cache',
+        headSha: 'a'.repeat(40),
+        pushes: 3,
+        maxPushes: 10,
+        session: scenario.sessionId,
+        preparedAt: ago(120),
+        lastCheck: ago(1),
+        checkedRecently: true,
+        lastRound: ago(9),
+        stopped: null,
+        watch: {
+          every: 2,
+          reply: true,
+          instructions: '',
+          task: 'feedc0ffee12',
+        },
+        ended: null,
+        needsHuman: [],
+        worktreeExists: true,
+        fix: null,
+        ...over,
+      });
+      const origin = new URL(resolveBaseURL(testInfo)).origin;
+      await page.route(`${origin}/autofix-pr/watches`, (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            available: true,
+            root: scenario.capabilities.workspaceCwd,
+            now: FIXED_CAPTURE_TIME.toISOString(),
+            watches: [
+              watch({
+                needsHuman: [
+                  {
+                    sha: 'a'.repeat(40),
+                    at: ago(30),
+                    text: 'Should the cache key include the locale? The reviewer and the issue disagree.',
+                  },
+                ],
+                fix: {
+                  attempt: '0123456789ab',
+                  startedAt: ago(6),
+                  fresh: true,
+                },
+              }),
+              watch({
+                pr: 40,
+                url: 'https://github.com/acme/widgets/pull/40',
+                session: 'a-terminal-session',
+                pushes: 0,
+                lastRound: null,
+              }),
+              watch({
+                pr: 7,
+                url: 'https://github.com/acme/widgets/pull/7',
+                session: 'gone-session',
+                stopped: 'merged',
+                checkedRecently: false,
+              }),
+            ],
+          },
+        }),
+      );
+      await page.route(`${origin}/scheduled-tasks`, (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            tasks: [
+              {
+                id: 'watch-task',
+                name: null,
+                cron: '*/2 * * * *',
+                prompt:
+                  'Run /autofix-pr tick acme/widgets#12 --task feedc0ffee12',
+                gate: '"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot 12 --gate --repo acme/widgets --host github.com --session web-shell-e2e-session --task feedc0ffee12',
+                gateStatus: {
+                  lastAt: now - 60_000,
+                  lastOutcome: 'quiet',
+                  quietSinceDelivery: 4,
+                  lastDeliveredAt: now - 9 * 60_000,
+                  consecutiveFailures: 0,
+                },
+                recurring: true,
+                enabled: true,
+                createdAt: now - 3_600_000,
+                lastFiredAt: now - 60_000,
+                nextRunAt: now + 60_000,
+                sessionId: scenario.sessionId,
+                sessionMode: 'persistent',
+                modelServiceId: null,
+                groupId: null,
+                runs: [],
+              },
+            ],
+          },
+        }),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'PR watches' }).first().click();
+      const watchesPage = page.getByTestId('pr-watches-page');
+      await expect(watchesPage.getByTestId('autofix-pr-watch')).toHaveCount(3);
+      await watchesPage.getByText('Needs your decision (1)').click();
+      await captureScreenshot(page, `pr-watches-${theme}`);
+
+      await page
+        .getByRole('button', { name: 'Scheduled tasks' })
+        .first()
+        .click();
+      await expect(page.getByTestId('autofix-pr-watch')).toHaveCount(1);
+      await captureScreenshot(page, `scheduled-task-pr-watch-${theme}`);
+    });
+
     test(`model dialog`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario();
       const daemon = await installScenario(
@@ -1627,6 +2738,52 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `theme-dialog-${theme}`);
     });
 
+    test('archived conversations settings', async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: ['session_events', 'workspace_settings', 'session_archive'],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route(
+        /\/workspaces?\/[^/]+\/sessions(?:\?|$)/,
+        async (route) => {
+          const url = new URL(route.request().url());
+          const cwd = decodeURIComponent(url.pathname.split('/')[2]!);
+          await route.fulfill({
+            json: {
+              sessions:
+                url.searchParams.get('archiveState') === 'archived'
+                  ? [
+                      {
+                        sessionId: 'visual-archive',
+                        workspaceCwd: cwd,
+                        displayName: 'Archived project discussion',
+                        isArchived: true,
+                        updatedAt: '2026-10-25T00:00:00Z',
+                      },
+                    ]
+                  : [],
+            },
+          });
+        },
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await submitLocalCommand(page, '/settings');
+      await page
+        .getByRole('navigation', { name: 'Settings' })
+        .getByRole('button', { name: 'Archived conversations', exact: true })
+        .click();
+      await expect(
+        page.locator('[data-web-shell-archived-sessions]'),
+      ).toContainText('Archived project discussion');
+      await captureScreenshot(page, `archived-settings-${theme}`);
+    });
+
     test(`settings panel`, async ({ page }, testInfo) => {
       const scenario = createSettingsPanelScenario(theme);
       const daemon = await installScenario(
@@ -1653,6 +2810,92 @@ for (const theme of THEMES) {
       await expect(page.getByText('Fast Model', { exact: true })).toBeVisible();
       await expect(page.getByTestId('model-management')).toBeVisible();
       await captureScreenshot(page, `settings-panel-${theme}`);
+    });
+
+    test('settings panel with model management disabled', async ({
+      page,
+    }, testInfo) => {
+      const scenario = createSettingsPanelScenario(theme);
+      scenario.providers.providers.push({
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'openai',
+        current: false,
+        models: [
+          {
+            modelId: 'managed-test-model',
+            configurationKey: 'managed-test-key',
+            baseModelId: 'managed-test-model',
+            name: 'Managed Test Model',
+            isCurrent: false,
+            isRuntime: false,
+          },
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route('**/workspace/models', async (route) => {
+        if (route.request().method() === 'GET') {
+          await route.fulfill({
+            json: {
+              models: [
+                {
+                  key: 'managed-test-key',
+                  authType: 'openai',
+                  modelId: 'managed-test-model',
+                  name: 'Managed Test Model',
+                  purpose: 'chat',
+                  contextWindowSize: 131072,
+                },
+              ],
+            },
+          });
+        } else {
+          await route.fallback();
+        }
+      });
+      await gotoSettingsHarness(page, scenario, daemon, theme, [], {
+        allowAdd: false,
+        allowDelete: false,
+      });
+      await openSettingsPanel(page);
+      await page
+        .getByRole('navigation', { name: 'Settings' })
+        .getByRole('button', { name: /^Model/ })
+        .click();
+      const models = page.getByTestId('model-management');
+      await expect(
+        models.getByText('Managed Test Model', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        models.getByText('Qwen Test', { exact: true }),
+      ).toBeVisible();
+      await expect(models.getByText('Current', { exact: true })).toBeVisible();
+      await expect(
+        models.getByRole('button', { name: '+ Add Model', exact: true }),
+      ).toHaveCount(0);
+      await expect(
+        models.getByRole('button', { name: /^Delete / }),
+      ).toHaveCount(0);
+      await expect(
+        models.getByRole('button', {
+          name: 'Set current Managed Test Model',
+          exact: true,
+        }),
+      ).toBeVisible();
+      await expect(
+        models.getByRole('button', {
+          name: 'Edit context window Managed Test Model',
+          exact: true,
+        }),
+      ).toBeVisible();
+      await captureScreenshot(
+        page,
+        `settings-panel-model-management-disabled-${theme}`,
+      );
     });
 
     test(`settings panel with host exclusions`, async ({ page }, testInfo) => {

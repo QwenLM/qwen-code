@@ -7,11 +7,24 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SESSION_TRANSCRIPT_MAX_LIMIT } from '@qwen-code/qwen-code-core';
-import { DaemonClient } from '@qwen-code/sdk/daemon';
+import {
+  APPROVAL_MODES,
+  SESSION_TRANSCRIPT_MAX_LIMIT,
+  REASONING_EFFORT_TIERS,
+} from '@qwen-code/qwen-code-core';
+import { DaemonClient, WorkspaceDaemonClient } from '@qwen-code/sdk/daemon';
 import * as ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
+import {
+  RESTORE_LOAD_REQUEST_FIELDS,
+  RESTORE_RESUME_REQUEST_FIELDS,
+} from './routes/restore-request-fields.js';
+import {
+  MAX_BATCH_WORKSPACES,
+  MAX_MEMBER_BYTES,
+  MAX_SELECTOR_CHARS,
+} from './workspace-route-runtime.js';
 
 const REPO_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -337,10 +350,10 @@ function resolvesPointer(document: unknown, ref: string): boolean {
 }
 
 /** Every member the client exposes, including inherited accessors. */
-function sdkMethods(): Set<string> {
+function sdkMethods(root: object = DaemonClient.prototype): Set<string> {
   const names = new Set<string>();
   for (
-    let proto: object | null = DaemonClient.prototype;
+    let proto: object | null = root;
     proto && proto !== Object.prototype;
     proto = Object.getPrototypeOf(proto) as object | null
   ) {
@@ -560,6 +573,116 @@ describe('REST integration documentation contract', () => {
     expect([...operations.keys()].filter((key) => !seen.has(key))).toEqual([]);
   });
 
+  it('pins the grouped reference rows to registered capabilities and SDK methods', () => {
+    // The grouped "Additional documented APIs" rows begin with an Area name
+    // rather than a link, so the OpenAPI row check above never sees them.
+    const capabilities = new Set(Object.keys(SERVE_CAPABILITY_REGISTRY));
+    const sdkMethodSets = {
+      DaemonClient: sdkMethods(DaemonClient.prototype),
+      WorkspaceDaemonClient: sdkMethods(WorkspaceDaemonClient.prototype),
+    };
+    const lines = readFileSync(REFERENCE, 'utf8').split('\n');
+    // Header-derived column indices make a column insert or reorder fail
+    // loudly instead of silently emptying both assertion loops.
+    const headerIndex = lines.findIndex((line) => /^\| Area\s*\|/.test(line));
+    const headerCells = (lines[headerIndex] ?? '')
+      .split('|')
+      .map((cell) => cell.trim());
+    const capabilityColumn = headerCells.indexOf('Capability and scope');
+    const sdkColumn = headerCells.indexOf('TypeScript SDK');
+    expect(
+      capabilityColumn,
+      'grouped table must have a "Capability and scope" column',
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      sdkColumn,
+      'grouped table must have a "TypeScript SDK" column',
+    ).toBeGreaterThanOrEqual(0);
+    // Rows come from the body of that one table rather than a document-wide
+    // line shape, so a row the shape heuristic would skip is still checked
+    // and another table's rows are never read at these columns.
+    const rows: string[] = [];
+    for (const line of lines.slice(headerIndex + 2)) {
+      if (!line.startsWith('|')) {
+        break;
+      }
+      rows.push(line);
+    }
+    expect(rows.length).toBeGreaterThan(0);
+    // Deriving the qualifier alternation from sdkMethodSets keeps a third
+    // client class from silently going un-asserted.
+    const sdkToken = new RegExp(
+      `\`(?:(${Object.keys(sdkMethodSets).join('|')})\\.)?([A-Za-z0-9_]+)\``,
+      'g',
+    );
+    const backtickSpans = /`[^`]*`/g;
+    for (const row of rows) {
+      const cells = row.split('|').map((cell) => cell.trim());
+      const area = cells[1];
+      expect(
+        cells.length,
+        `${area}: grouped row must have ${headerCells.length} columns`,
+      ).toBe(headerCells.length);
+      const capabilityCell = cells[capabilityColumn] ?? '';
+      let capabilityMatched = 0;
+      for (const match of capabilityCell.matchAll(/`([a-z][a-z0-9_]*)`/g)) {
+        capabilityMatched += 1;
+        expect(
+          capabilities.has(match[1]),
+          `${area}: \`${match[1]}\` is not a registered serve capability`,
+        ).toBe(true);
+      }
+      expect(
+        capabilityMatched,
+        `${area}: row must name at least one backticked capability`,
+      ).toBeGreaterThan(0);
+      expect(
+        capabilityMatched,
+        `${area}: capability cell has backticked spans this test cannot read`,
+      ).toBe([...capabilityCell.matchAll(backtickSpans)].length);
+      // A bare method name continues the class the cell last qualified; one
+      // cell can switch classes mid-way. A bare name that exists on more
+      // than one client routes differently per client, so it must always be
+      // qualified.
+      let sdkClass: keyof typeof sdkMethodSets | undefined;
+      const sdkCell = cells[sdkColumn] ?? '';
+      let sdkMatched = 0;
+      for (const match of sdkCell.matchAll(sdkToken)) {
+        const [, className, method] = match;
+        if (className) {
+          sdkClass = className as keyof typeof sdkMethodSets;
+        } else {
+          expect(
+            sdkClass,
+            `${area}: \`${method}\` must follow a class-qualified SDK method`,
+          ).toBeDefined();
+          const owners = Object.values(sdkMethodSets).filter((methods) =>
+            methods.has(method),
+          ).length;
+          expect(
+            owners,
+            `${area}: \`${method}\` exists on more than one SDK client and must be qualified`,
+          ).toBeLessThanOrEqual(1);
+        }
+        sdkMatched += 1;
+        if (sdkClass) {
+          expect(
+            sdkMethodSets[sdkClass].has(method),
+            `${area}: \`${method}\` is not an SDK method`,
+          ).toBe(true);
+        }
+      }
+      expect(
+        sdkMatched,
+        `${area}: row must name at least one backticked SDK method`,
+      ).toBeGreaterThan(0);
+      expect(
+        sdkMatched,
+        `${area}: SDK cell has backticked spans this test cannot read`,
+      ).toBe([...sdkCell.matchAll(backtickSpans)].length);
+    }
+  });
+
   it('indexes every operation with a dedicated protocol section', () => {
     const headings = protocolHeadings();
     const operationPattern = /`((?:GET|POST|PATCH|PUT|DELETE) \/[^`]+)`/g;
@@ -724,6 +847,54 @@ describe('REST integration documentation contract', () => {
     );
   });
 
+  it('publishes startup request and acknowledgment schemas without opening unknown properties', () => {
+    const api = JSON.parse(readFileSync(OPENAPI, 'utf8')) as OpenApiDocument;
+    const schemas = api.components?.schemas ?? {};
+    for (const name of [
+      'CreateSessionRequest',
+      'CreateStandaloneSessionRequest',
+    ]) {
+      expect(schemas[name]).toMatchObject({
+        additionalProperties: false,
+        properties: {
+          startupConfig: { $ref: '#/components/schemas/SessionStartupConfig' },
+        },
+      });
+    }
+    expect(schemas['SessionStartupConfig']).toMatchObject({
+      required: ['modelServiceId'],
+      additionalProperties: false,
+      properties: {
+        modelServiceId: { maxLength: 256 },
+        reasoningEffort: {
+          enum: ['none', 'default', ...REASONING_EFFORT_TIERS],
+        },
+      },
+    });
+    // The published enum must cover every approval mode the standalone
+    // route's parseApprovalMode accepts — a narrower list certifies a
+    // request set the daemon implements but generated clients refuse.
+    const standalone = schemas['CreateStandaloneSessionRequest'] as {
+      properties?: Record<string, { enum?: string[] }>;
+    };
+    expect(standalone.properties?.['approvalMode']?.enum).toEqual([
+      ...APPROVAL_MODES,
+    ]);
+    expect(schemas['Session']).toMatchObject({
+      properties: {
+        startupConfigApplied: {
+          $ref: '#/components/schemas/SessionStartupConfigApplied',
+        },
+      },
+    });
+    expect(api.paths?.['/session']?.post?.responses).toHaveProperty('422');
+    for (const filename of [PROTOCOL, REFERENCE, GUIDE]) {
+      expect(readFileSync(filename, 'utf8')).toContain(
+        'session_startup_config',
+      );
+    }
+  });
+
   it('publishes the resume request schema without the load-only fields', () => {
     const openApi = JSON.parse(
       readFileSync(OPENAPI, 'utf8'),
@@ -742,19 +913,14 @@ describe('REST integration documentation contract', () => {
         (schema['properties'] ?? {}) as Record<string, unknown>,
       ).sort();
     };
+    // Field lists come from the runtime-owned definition, not a second
+    // hardcoded literal, so the published schema cannot drift from what the
+    // handler parses.
     expect(
       requestFields(openApi.paths?.['/session/{id}/resume']?.post),
-    ).toEqual(['approvalMode', 'cwd', 'sourceId', 'sourceType']);
+    ).toEqual(RESTORE_RESUME_REQUEST_FIELDS);
     const loadPost = openApi.paths?.['/session/{id}/load']?.post;
-    expect(requestFields(loadPost)).toEqual([
-      'approvalMode',
-      'compactedReplayMode',
-      'cwd',
-      'historyPageSize',
-      'liveReplayMode',
-      'sourceId',
-      'sourceType',
-    ]);
+    expect(requestFields(loadPost)).toEqual(RESTORE_LOAD_REQUEST_FIELDS);
     const loadSchema = resolveRef(
       openApi,
       (
@@ -802,6 +968,16 @@ describe('REST integration documentation contract', () => {
       (parameter) => parameter.in === 'query' && parameter.name === 'limit',
     );
     expect(transcriptLimit?.schema?.maximum).toBe(SESSION_TRANSCRIPT_MAX_LIMIT);
+  });
+
+  it('publishes the runtime-owned batch bounds in the protocol prose', () => {
+    const protocol = readFileSync(PROTOCOL, 'utf8');
+    expect(protocol).toContain(
+      `1–${MAX_BATCH_WORKSPACES} explicitly selected registered workspaces`,
+    );
+    expect(protocol).toContain(`more than ${MAX_BATCH_WORKSPACES} selectors`);
+    expect(protocol).toContain(`longer than ${MAX_SELECTOR_CHARS} characters`);
+    expect(protocol).toContain(`exceeding ${MAX_MEMBER_BYTES / 1024} KiB`);
   });
 
   it('still sees the bulk of the route surface', () => {

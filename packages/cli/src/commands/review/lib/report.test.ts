@@ -7,7 +7,11 @@
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
 import { buildDiffPlan } from './diff-plan.js';
-import { buildPlanReport, stringifyPlanReport } from './report.js';
+import {
+  buildPlanReport,
+  displayAnchor,
+  stringifyPlanReport,
+} from './report.js';
 import { selectionDrift } from './selection.js';
 import { makeDiff } from './test-utils.js';
 
@@ -41,6 +45,31 @@ function planReportOf(
 }
 
 describe('buildPlanReport', () => {
+  it('records the old path of a rename, and nothing for a file that was not renamed', () => {
+    // build-test reads it to keep every suite whole across a rename.
+    const rename =
+      [
+        'diff --git a/old.ts b/new.ts',
+        'similarity index 95%',
+        'rename from old.ts',
+        'rename to new.ts',
+        '--- a/old.ts',
+        '+++ b/new.ts',
+        '@@ -1 +1 @@',
+        '-a',
+        '+b',
+      ].join('\n') + '\n';
+    const report = planReportOf(rename + editFile('src/a.ts', 3, 2), () => 3);
+    expect(report.files.map((f) => [f.path, f.renameFrom])).toEqual([
+      ['new.ts', 'old.ts'],
+      ['src/a.ts', undefined],
+    ]);
+    expect(Object.keys(report.files[1])).not.toContain('renameFrom');
+    expect(JSON.parse(stringifyPlanReport(report)).files[0].renameFrom).toBe(
+      'old.ts',
+    );
+  });
+
   it('resolves the post-image through the injected dependency', () => {
     const asked: string[] = [];
     const report = planReportOf(editFile('src/a.ts', 3, 2), (p) => {
@@ -271,5 +300,20 @@ describe('stringifyPlanReport', () => {
     const report = planReportOf(diff, () => 1);
     const parsed = JSON.parse(stringifyPlanReport(report)) as typeof report;
     expect(parsed.files[0].path).toBe(weird);
+  });
+});
+
+describe('displayAnchor', () => {
+  it('truncates sha-shaped labels and renders every other label whole', () => {
+    const sha40 = 'a'.repeat(40);
+    expect(displayAnchor(sha40)).toBe('a'.repeat(12));
+    expect(displayAnchor('A'.repeat(64))).toHaveLength(12);
+    // The regression it exists for: a 12-char slice printed `content-verd`
+    // in the summary line and in every brief.
+    expect(displayAnchor('content-verdicts')).toBe('content-verdicts');
+    // A local round's state id is a 64-hex sha256 — truncating it is right.
+    expect(displayAnchor('f'.repeat(64))).toHaveLength(12);
+    // Too short to be an object id: rendered whole rather than mangled.
+    expect(displayAnchor('abc123')).toBe('abc123');
   });
 });

@@ -55,10 +55,6 @@ import {
 } from './workflow-orchestrator.js';
 import { WorkflowBudgetImpl } from './workflow-budget.js';
 import {
-  describeWorkflowDeterminismViolations,
-  scanWorkflowScriptShape,
-} from './workflow-script-shape.js';
-import {
   evaluateWorkflowSize,
   resolveWorkflowSizeCaps,
   resolveWorkflowSizeGuidelineSetting,
@@ -72,9 +68,8 @@ import {
   type ResolvedSavedWorkflow,
 } from './workflow-saved.js';
 import {
-  compileWorkflowScript,
-  describeWorkflowCompileError,
   type WorkflowMeta,
+  workflowPreLaunchGate,
 } from './workflow-sandbox.js';
 import {
   resolveReviewWorkflowLimits,
@@ -100,6 +95,8 @@ export interface WorkflowRunnerOptions {
   dispatch?: WorkflowAgentDispatch;
   onUpdate?: (entry: WorkflowTask) => void;
   runInBackground?: boolean;
+  /** Client-started tools have no model tool-result continuation. */
+  notifyOnCompletion?: boolean;
   /**
    * Where this session's authoring reference is, sent with a failed background
    * run's completion notification. Omitted for a script the model did not
@@ -112,6 +109,20 @@ export interface WorkflowRunnerOptions {
    * host starts itself is not the model's and is left unrestricted.
    */
   restrictNestedScriptPaths?: boolean;
+  /**
+   * Refuse every nested `workflow()` resolution, by name or path. Set by a
+   * host whose launch pinned exactly one script (the managed workflow
+   * child): any nested resolution would run bytes the pin never examined.
+   */
+  refuseNestedWorkflows?: boolean;
+  /**
+   * Give this run's `agent()` subagents no tools at all. Set by a host
+   * whose sandbox cannot honour the manager's tool calls (the managed
+   * workflow child): a text-only `agent()` runs against an empty
+   * declaration list while a tool-bearing `agent()` is refused, never
+   * letting a tool dispatch reach the wrong tree or host.
+   */
+  refuseSubagentTools?: boolean;
 }
 
 /**
@@ -194,11 +205,13 @@ export class WorkflowRunHandle {
 const WORKFLOW_SCRIPT_SYNTAX_HINT =
   'Workflow scripts must be plain JavaScript — the usual causes are ' +
   'TypeScript syntax (type annotations, interfaces, generics) and ' +
-  'broken string quoting or escaping. Metadata must use literal values.';
+  'broken string quoting or escaping. Metadata must be the first ' +
+  'non-comment statement and use literal values.';
 
 /**
- * The script was refused before a run was created: it did not compile, or it
- * calls something a resumable workflow cannot replay.
+ * The script was refused before a run was created: it did not compile, it
+ * uses syntax a workflow cannot run, or it calls something a resumable
+ * workflow cannot replay.
  *
  * Distinct from `WorkflowExecutionError` on purpose: that one describes a run
  * that existed and failed, and callers report it as such. This one means there
@@ -387,27 +400,16 @@ export class WorkflowRunner {
         loaded?.savedWorkflowName ??
         registry?.get(runId)?.workflowName;
 
-      try {
-        scriptMeta = compileWorkflowScript(script).meta;
-      } catch (error) {
+      // The gate's own compile hands its meta back: one compile, one
+      // error taxonomy for the bytes this run launches.
+      const gate = workflowPreLaunchGate(script);
+      if (gate.refusal !== undefined) {
         throw new WorkflowScriptNotLaunchedError(
-          describeWorkflowCompileError(
-            error,
-            script.split(/\r\n|[\n\r\u2028\u2029]/).length,
-          ),
+          gate.refusal.detail,
+          gate.refusal.suppressSyntaxHint ? '' : undefined,
         );
       }
-      // A script that reads a clock or a random source cannot be replayed on
-      // resume. Refused here, before any agent spends a token, rather than on
-      // whichever call reaches the sandbox guard first.
-      const determinismViolations =
-        scanWorkflowScriptShape(script).determinismViolations;
-      if (determinismViolations.length > 0) {
-        throw new WorkflowScriptNotLaunchedError(
-          describeWorkflowDeterminismViolations(determinismViolations),
-          '',
-        );
-      }
+      scriptMeta = gate.meta;
 
       if (options.resumeFromRunId) {
         // A resume replays a journal. With none to replay it would dispatch
@@ -532,11 +534,14 @@ export class WorkflowRunner {
                   : () => undefined
             : undefined,
           reviewLimits?.subagent,
+          options.refuseSubagentTools,
+          options.toolUseId,
         );
       orchestrator = new WorkflowOrchestrator(dispatch);
       const registration: WorkflowTaskRegistration = {
         runId,
         toolUseId: options.toolUseId,
+        parentSessionId: config.getSessionId?.(),
         ...(workflowName ? { workflowName } : {}),
         ...(sourceRef ? { sourceRef } : {}),
         meta: null,
@@ -550,6 +555,7 @@ export class WorkflowRunner {
         script,
         scriptPath,
         ...(journalPath ? { journalPath } : {}),
+        snapshotPath: storage?.getWorkflowRunSnapshotPath?.(runId),
         // A saved workflow is the user's file, and the recovery advice says to
         // copy it first. The name is resolved here — from the resumed run
         // too, which a caller re-running a saved workflow's inline source
@@ -566,6 +572,7 @@ export class WorkflowRunner {
             }
           : {}),
         isBackgrounded: runInBackground,
+        notifyOnCompletion: options.notifyOnCompletion,
         resumeInBackground:
           runInBackground &&
           config.isInteractive?.() === true &&
@@ -765,6 +772,11 @@ export class WorkflowRunner {
             emitter,
             budget,
             resolveSavedWorkflow: async (ref) => {
+              if (options.refuseNestedWorkflows === true) {
+                throw new Error(
+                  'workflow(): nested workflow runs are unavailable here; this run executes only its pinned script.',
+                );
+              }
               // A model call in a name-only session runs no script it cannot
               // name, nested or not. Any other malformed ref falls through to
               // the resolver's own type error.
@@ -842,6 +854,7 @@ export class WorkflowRunner {
           return { ok: false, message, details };
         } finally {
           controller.abort();
+          emitUpdate();
           if (entry && isTerminalWorkflowStatus(entry.status)) {
             // Capture the telemetry projection before the first await:
             // the finally path from complete()/fail() up to here has no
@@ -880,13 +893,13 @@ export class WorkflowRunner {
               // deletion must win over the stale in-memory copy.
               registry?.notifySnapshotPersisted(entry.runId);
             }
-            await journal?.drain();
             try {
               logWorkflowRun(config, telemetryEvent);
             } catch {
               // Telemetry must not affect workflow execution.
             }
           }
+          await journal?.drain();
           // The run settled, so nothing is left for a later process to
           // claim — even when the snapshot write failed, since a claim would
           // then call a run interrupted that was not.

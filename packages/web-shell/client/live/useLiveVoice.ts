@@ -8,9 +8,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DaemonLiveMuteUpdate, DaemonLiveStatus } from '@qwen-code/sdk';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../daemon/availability.js';
+import { useI18n } from '../i18n';
+import { useSessionCatalogController } from '../session-catalog/session-catalog-hooks';
+import {
   useLiveBrowserHost,
   type UseLiveBrowserHostResult,
 } from './useLiveBrowserHost';
+import { getLivePresence, setLivePresence } from './live-presence';
 
 // A native macOS Host can attach (`/live/host`).
 const LIVE_NATIVE_FEATURE = 'realtime_voice';
@@ -29,6 +37,8 @@ export interface UseLiveVoiceResult {
   loading: boolean;
   mutating: boolean;
   refresh: () => Promise<void>;
+  begin: () => void;
+  cancelPending: () => void;
   start: (mode?: 'resume' | 'new') => Promise<void>;
   stop: () => Promise<void>;
   setMute: (update: DaemonLiveMuteUpdate) => Promise<void>;
@@ -46,6 +56,12 @@ function unavailableStatus(message: string): DaemonLiveStatus {
 
 export function useLiveVoice(): UseLiveVoiceResult {
   const workspace = useWorkspace();
+  const availability = useDaemonAvailability();
+  const availabilityController = useDaemonAvailabilityController();
+  const { t } = useI18n();
+  const translateRef = useRef(t);
+  translateRef.current = t;
+  const sessionCatalog = useSessionCatalogController(workspace.client);
   const features = workspace.capabilities?.features ?? [];
   const nativeSupported = features.includes(LIVE_NATIVE_FEATURE);
   const browserSupported = features.includes(LIVE_BROWSER_FEATURE);
@@ -62,6 +78,13 @@ export function useLiveVoice(): UseLiveVoiceResult {
   const contextRef = useRef({ client: workspace.client, supported });
   const requestRef = useRef<Promise<void> | undefined>(undefined);
   const mutationRef = useRef<number | undefined>(undefined);
+  const discoveredSessionRef = useRef<
+    | {
+        client: typeof workspace.client;
+        sessionId: string;
+      }
+    | undefined
+  >(undefined);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -71,7 +94,12 @@ export function useLiveVoice(): UseLiveVoiceResult {
   }, []);
 
   const refresh = useCallback(async (): Promise<void> => {
-    if (!supported) return;
+    if (
+      !supported ||
+      (availabilityController &&
+        availabilityController.getSnapshot() !== 'available')
+    )
+      return;
     // A mutation in flight delivers its own status; polling now would race it.
     if (mutationRef.current !== undefined) return;
     // Dedupe on the in-flight request itself. The poll generation cannot key
@@ -92,7 +120,11 @@ export function useLiveVoice(): UseLiveVoiceResult {
         if (mountedRef.current && pollGenerationRef.current === generation) {
           setStatus(
             unavailableStatus(
-              error instanceof Error ? error.message : String(error),
+              isDaemonUnavailableError(error)
+                ? translateRef.current('daemon.connection.unavailable')
+                : error instanceof Error
+                  ? error.message
+                  : String(error),
             ),
           );
         }
@@ -108,7 +140,7 @@ export function useLiveVoice(): UseLiveVoiceResult {
     const request = run();
     requestRef.current = request;
     return await request;
-  }, [supported, workspace.client]);
+  }, [supported, workspace.client, availabilityController]);
 
   useEffect(() => {
     if (
@@ -126,6 +158,19 @@ export function useLiveVoice(): UseLiveVoiceResult {
     setStatus(undefined);
     setLoading(false);
     setMutating(false);
+  }, [supported, workspace.client]);
+
+  useEffect(() => {
+    if (availability !== 'available') {
+      pollGenerationRef.current += 1;
+      requestRef.current = undefined;
+      setLoading(false);
+      // A torn-down call must stop advertising itself: nothing else clears a
+      // published 'listening' presence while the outage keeps every poll
+      // parked, and the sidebar would keep offering a call that is gone.
+      setLivePresence(workspace.client, undefined);
+      return;
+    }
     if (!supported) return undefined;
     void refresh();
     const timer = window.setInterval(() => {
@@ -141,7 +186,7 @@ export function useLiveVoice(): UseLiveVoiceResult {
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', onVisible);
     };
-  }, [refresh, supported, workspace.client]);
+  }, [availability, refresh, supported, workspace.client]);
 
   const mutate = useCallback(
     async (operation: () => Promise<DaemonLiveStatus>): Promise<void> => {
@@ -168,7 +213,11 @@ export function useLiveVoice(): UseLiveVoiceResult {
         ) {
           setStatus(
             unavailableStatus(
-              error instanceof Error ? error.message : String(error),
+              isDaemonUnavailableError(error)
+                ? translateRef.current('daemon.connection.unavailable')
+                : error instanceof Error
+                  ? error.message
+                  : String(error),
             ),
           );
         }
@@ -197,6 +246,64 @@ export function useLiveVoice(): UseLiveVoiceResult {
     [mutate, workspace.client],
   );
 
+  const begin = useCallback(() => {
+    if (!getLivePresence(workspace.client)) {
+      setLivePresence(workspace.client, { state: 'connecting' });
+    }
+  }, [workspace.client]);
+  const cancelPending = useCallback(() => {
+    if (getLivePresence(workspace.client)?.state === 'connecting') {
+      setLivePresence(workspace.client, undefined);
+    }
+  }, [workspace.client]);
+
+  useEffect(() => {
+    if (!status) return;
+    if (
+      ['starting', 'listening', 'thinking', 'speaking', 'stopping'].includes(
+        status.state,
+      )
+    ) {
+      setLivePresence(workspace.client, {
+        callId: status.callId,
+        state: status.state,
+        coordinator: status.coordinator,
+      });
+    } else if (
+      status.state === 'error' ||
+      (status.state === 'unavailable' &&
+        status.blocker !== 'host_missing' &&
+        status.blocker !== 'host_disconnected') ||
+      (status.state === 'idle' &&
+        getLivePresence(workspace.client)?.state !== 'connecting')
+    ) {
+      setLivePresence(workspace.client, undefined);
+    }
+  }, [status, workspace.client]);
+
+  useEffect(() => {
+    const coordinator = status?.coordinator;
+    if (!coordinator) return;
+    if (
+      discoveredSessionRef.current?.client === workspace.client &&
+      discoveredSessionRef.current.sessionId === coordinator.sessionId
+    ) {
+      return;
+    }
+    discoveredSessionRef.current = {
+      client: workspace.client,
+      sessionId: coordinator.sessionId,
+    };
+    sessionCatalog.sessionCreated(
+      coordinator.workspaceCwd,
+      coordinator.sessionId,
+    );
+    void workspace.refreshCapabilities?.().catch((error: unknown) => {
+      console.warn('[live] failed to refresh conversation workspace:', error);
+      discoveredSessionRef.current = undefined;
+    });
+  }, [sessionCatalog, status?.coordinator, workspace]);
+
   const pushStatus = useCallback((next: DaemonLiveStatus) => {
     if (!mountedRef.current) return;
     // A poll already in flight was answered before this push, so it is older
@@ -217,15 +324,35 @@ export function useLiveVoice(): UseLiveVoiceResult {
     onStatus: pushStatus,
   });
 
+  useEffect(() => {
+    if (
+      browserHost.closeReason &&
+      getLivePresence(workspace.client)?.state === 'connecting'
+    ) {
+      setLivePresence(workspace.client, undefined);
+    }
+  }, [browserHost.closeReason, workspace.client]);
+
   return {
     supported,
     nativeSupported,
     browserSupported,
     browserHost,
-    status,
+    status:
+      availability === 'available'
+        ? status
+        : unavailableStatus(
+            t(
+              availability === 'auth-required'
+                ? 'daemon.connection.authRequired'
+                : 'daemon.connection.unavailable',
+            ),
+          ),
     loading,
     mutating,
     refresh,
+    begin,
+    cancelPending,
     start,
     stop,
     setMute,

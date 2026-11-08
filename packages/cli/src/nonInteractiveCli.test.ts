@@ -20,7 +20,7 @@ import type {
   SessionMetrics,
   WorkflowApprovalRequestCallback,
 } from '@qwen-code/qwen-code-core';
-import type { CLIUserMessage } from './nonInteractive/types.js';
+import type { CLIMessage, CLIUserMessage } from './nonInteractive/types.js';
 import {
   executeToolCall,
   isTelemetrySdkInitialized,
@@ -34,9 +34,14 @@ import {
   ApprovalMode,
   SendMessageType,
   SYSTEM_REMINDER_OPEN,
+  LoopReason,
   LoopType,
   getToolCallFingerprint,
   CronScheduler,
+  Storage,
+  readCronTasks,
+  updateCronTasks,
+  withTaskGate,
   AUTONOMOUS_SENTINEL_CRON,
   AUTONOMOUS_SENTINEL_DYNAMIC,
   LOOP_SENTINEL_CRON,
@@ -51,9 +56,13 @@ import {
   goalPauseReasonForHeadlessFailure,
   goalPauseReasonForRunBudget,
   GoalPersistenceUnavailableError,
+  LlmClient,
 } from '@qwen-code/qwen-code-core';
-import type { Part } from '@google/genai';
-import { EventEmitter } from 'node:events';
+import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
+import type { Content, Part } from '@google/genai';
+import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import { EventEmitter, getEventListeners } from 'node:events';
 import {
   runNonInteractive,
   formatGoalState,
@@ -66,10 +75,24 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadedSettings } from './config/settings.js';
 import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
+import { ModSession } from './services/mod-session.js';
 import type { ControlService } from './nonInteractive/control/ControlService.js';
-import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
+import {
+  CommandKind,
+  type ExecutionMode,
+  type SlashCommand,
+} from './ui/commands/types.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
+import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
+import { BundledSkillLoader } from './services/BundledSkillLoader.js';
+import { FileCommandLoader } from './services/FileCommandLoader.js';
+import { McpPromptLoader } from './services/McpPromptLoader.js';
+import { SavedWorkflowLoader } from './services/saved-workflow-loader.js';
+import { SkillCommandLoader } from './services/SkillCommandLoader.js';
+import type { ICommandLoader } from './services/types.js';
+import { frameModPrompt } from './services/mod-prompt-frame.js';
+import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import {
   _resetCleanupFunctionsForTest,
   runExitCleanup,
@@ -263,11 +286,14 @@ describe('runNonInteractive', () => {
   let processStderrSpy: MockInstance;
   let mockLlmClient: {
     sendMessageStream: Mock;
+    admitUserPrompt: Mock;
     getChatRecordingService: Mock;
     getChat: Mock;
     stripOrphanedUserEntriesFromHistory: Mock;
     getHistoryToolCallFingerprints: Mock;
     consumePendingMemoryTaskPromises: Mock;
+    getPendingMemoryTaskPromises: Mock;
+    removePendingMemoryTaskPromises: Mock;
     recordCompletedToolCall: Mock;
     addHistory: Mock;
   };
@@ -334,7 +360,10 @@ describe('runNonInteractive', () => {
 
     mockLlmClient = {
       sendMessageStream: vi.fn(),
+      admitUserPrompt: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
+      getPendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
+      removePendingMemoryTaskPromises: vi.fn(),
       recordCompletedToolCall: vi.fn(),
       addHistory: vi.fn(),
       stripOrphanedUserEntriesFromHistory: vi.fn(),
@@ -355,6 +384,7 @@ describe('runNonInteractive', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
       getChatRecordingService: vi.fn().mockReturnValue({
+        readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
         flush: vi.fn().mockResolvedValue(undefined),
         finalize: vi.fn().mockResolvedValue(undefined),
       }),
@@ -449,6 +479,30 @@ describe('runNonInteractive', () => {
     vi.restoreAllMocks();
   });
 
+  const bothLoops = [
+    { loop: 'current loop', shared: false },
+    { loop: 'shared loop with Mod tool hooks', shared: true },
+  ] as const;
+
+  // With Mod tool hooks the shared loop runs each call through
+  // `executeToolCall`, which these tests mock.
+  function useSharedLoopWithModToolHooks(): void {
+    Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => true });
+    vi.spyOn(ModSession, 'create').mockReturnValue({
+      initialize: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      flushOutput: vi.fn().mockResolvedValue(undefined),
+      flushLogs: vi.fn(),
+      syncSession: vi.fn().mockResolvedValue(undefined),
+      hasToolHooks: true,
+      toolCall: () => undefined,
+      submitPrompt: vi.fn(async (text: string) => ({ text })),
+      takeSubmittedPrompt: () => undefined,
+      discardSubmittedPrompts: () => {},
+      notePersonPrompt: vi.fn(),
+    } as unknown as ModSession);
+  }
+
   /**
    * Creates a default mock SessionMetrics object.
    * Can be overridden in individual tests if needed.
@@ -504,6 +558,205 @@ describe('runNonInteractive', () => {
       yield event;
     }
   }
+
+  it.each([
+    { reason: 'SIGINT', stderr: 'once' },
+    { reason: 'budget', stderr: 'once' },
+    { reason: 'SIGINT', stderr: 'always' },
+    { reason: 'budget', stderr: 'always' },
+    { reason: 'SIGINT', stderr: 'healthy' },
+    { reason: 'budget', stderr: 'healthy' },
+  ] as const)(
+    'preserves terminal output after $reason with stderr=$stderr',
+    async ({ reason, stderr }) => {
+      setupMetricsMock();
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      vi.mocked(mockConfig.getIncludePartialMessages).mockReturnValue(true);
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      if (reason === 'budget') {
+        vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(1);
+      }
+      const controller = new AbortController();
+      const beforeSigint = process.listeners('SIGINT');
+      const beforeSigterm = process.listeners('SIGTERM');
+      const beforeStdout = process.stdout.listeners('error');
+      const beforeAbort = getEventListeners(controller.signal, 'abort');
+      const stderrError = new Error('stderr write failed');
+      const exitSentinel = new Error('committed process.exit');
+      vi.mocked(process.exit).mockImplementation(() => {
+        throw exitSentinel;
+      });
+      let failedWrites = 0;
+      processStderrSpy.mockImplementation(() => {
+        if (
+          controller.signal.aborted &&
+          (stderr === 'always' || (stderr === 'once' && failedWrites === 0))
+        ) {
+          failedWrites++;
+          throw stderrError;
+        }
+        return true;
+      });
+      let notifyBackground: Parameters<
+        ReturnType<
+          Config['getBackgroundTaskRegistry']
+        >['setNotificationCallback']
+      >[0];
+      let notifyMonitor: Parameters<
+        ReturnType<Config['getMonitorRegistry']>['setNotificationCallback']
+      >[0];
+      mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+        (callback) => {
+          notifyBackground = callback;
+        },
+      );
+      mockMonitorRegistry.setNotificationCallback.mockImplementation(
+        (callback) => {
+          notifyMonitor = callback;
+        },
+      );
+      mockMonitorRegistry.abortAll.mockImplementation(
+        (options?: { notify?: boolean }) => {
+          if (options?.notify !== false) {
+            notifyMonitor?.('Monitor cancelled', 'Monitor cancelled', {
+              monitorId: 'abort-monitor',
+              toolUseId: 'monitor-tool',
+              status: 'cancelled',
+              eventCount: 1,
+            });
+          }
+        },
+      );
+      mockLlmClient.sendMessageStream.mockImplementation(async function* () {
+        yield { type: LlmEventType.Content, value: 'Partial answer' };
+        notifyBackground?.('Task completed', 'Task completed', {
+          agentId: 'abort-task',
+          toolUseId: 'task-tool',
+          status: 'completed',
+        });
+        notifyMonitor?.('Monitor running', 'Monitor running', {
+          monitorId: 'abort-monitor',
+          toolUseId: 'monitor-tool',
+          status: 'running',
+          eventCount: 1,
+        });
+        if (reason === 'SIGINT') {
+          process.emit('SIGINT');
+        } else {
+          await new Promise<void>((resolve) =>
+            controller.signal.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          );
+        }
+        // Resume the actual loop's abort guard after a real partial message.
+        yield {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        };
+      });
+      let settled = false;
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Abort during streaming',
+        'abort-stderr',
+        { abortController: controller },
+      )
+        .catch((error: unknown) => error)
+        .finally(() => {
+          settled = true;
+        });
+      try {
+        await vi.waitFor(() =>
+          expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce(),
+        );
+        if (reason === 'budget') await vi.advanceTimersByTimeAsync(1_000);
+        // A re-entered exit latch must fail this assertion, not Vitest's timeout.
+        await vi.waitFor(() => expect(settled).toBe(true), { timeout: 500 });
+        const frames = processStdoutSpy.mock.calls.flatMap(
+          ([chunk]) => JSON.parse(String(chunk)) as CLIMessage | CLIMessage[],
+        );
+        expect(frames.filter((frame) => frame.type === 'result')).toEqual([
+          expect.objectContaining({ is_error: true }),
+        ]);
+        expect(
+          frames.filter(
+            (frame) =>
+              frame.type === 'system' && frame.subtype === 'task_notification',
+          ),
+        ).toEqual([
+          expect.objectContaining({
+            data: expect.objectContaining({
+              task_id: 'abort-task',
+              status: 'completed',
+            }),
+          }),
+          expect.objectContaining({
+            data: expect.objectContaining({
+              task_id: 'abort-monitor',
+              status: 'running',
+            }),
+          }),
+          expect.objectContaining({
+            data: expect.objectContaining({
+              task_id: 'abort-monitor',
+              status: 'cancelled',
+            }),
+          }),
+        ]);
+        expect(
+          frames.filter(
+            (frame) =>
+              frame.type === 'stream_event' &&
+              frame.event.type === 'message_start',
+          ),
+        ).toHaveLength(1);
+        expect(
+          frames.filter(
+            (frame) =>
+              frame.type === 'stream_event' &&
+              frame.event.type === 'message_stop',
+          ),
+        ).toHaveLength(1);
+        expect(mockMonitorRegistry.abortAll).toHaveBeenCalledExactlyOnceWith();
+        expect(notifyBackground).toBeUndefined();
+        expect(notifyMonitor).toBeUndefined();
+        if (stderr === 'always') {
+          await expect(run).resolves.toBe(stderrError);
+          expect(failedWrites).toBe(2);
+          expect(process.exit).not.toHaveBeenCalled();
+        } else {
+          const code = reason === 'budget' ? 55 : 130;
+          await expect(run).resolves.toBe(exitSentinel);
+          expect(process.exit).toHaveBeenCalledExactlyOnceWith(code);
+          expect(failedWrites).toBe(stderr === 'once' ? 1 : 0);
+        }
+        expect(process.listeners('SIGINT')).toEqual(beforeSigint);
+        expect(process.listeners('SIGTERM')).toEqual(beforeSigterm);
+        expect(process.stdout.listeners('error')).toEqual(beforeStdout);
+        expect(getEventListeners(controller.signal, 'abort')).toEqual(
+          beforeAbort,
+        );
+      } finally {
+        vi.useRealTimers();
+        // Keep a failed no-reentry assertion from leaking this run's listeners.
+        for (const listener of process.listeners('SIGINT')) {
+          if (!beforeSigint.includes(listener)) process.off('SIGINT', listener);
+        }
+        for (const listener of process.listeners('SIGTERM')) {
+          if (!beforeSigterm.includes(listener))
+            process.off('SIGTERM', listener);
+        }
+        for (const listener of process.stdout.listeners('error')) {
+          if (!beforeStdout.includes(listener))
+            process.stdout.off('error', listener);
+        }
+      }
+    },
+  );
 
   it.each([false, true])(
     'scopes review lease cleanup to the ordinary runtime (sandbox=%s)',
@@ -1169,6 +1422,53 @@ describe('runNonInteractive', () => {
     },
   );
 
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'surfaces retry classification scalars on a bare Retry in %s',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'abandoned answer' },
+          {
+            type: LlmEventType.Retry,
+            retryDiagnostics: {
+              kind: 'transport',
+              reason: 'transport-error',
+              transportCode: 'UND_ERR_SOCKET',
+            },
+          },
+          { type: LlmEventType.Content, value: 'final answer' },
+          {
+            type: LlmEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'test',
+          'retry-diagnostics',
+        ),
+      ).resolves.toBe(0);
+
+      const stderr = processStderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      expect(stderr).toContain(
+        'Retrying provider attempt (0 buffered tool call(s) discarded) ' +
+          '[kind=transport, reason=transport-error, transportCode=UND_ERR_SOCKET].',
+      );
+      expect(stderr).not.toContain('undefined');
+    },
+  );
+
   function mockFinishedGoalWorker(): void {
     vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
     mockLlmClient.sendMessageStream.mockImplementation(() =>
@@ -1269,6 +1569,10 @@ describe('runNonInteractive', () => {
   it('runs resume with the exact permit scheduled by Core', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
+    mockToolRegistry.getAllToolNames.mockReturnValue([
+      'tool_search',
+      'tool_call',
+    ]);
     await prepareGoalState('paused');
     mockFinishedGoalWorker();
     const abortController = new AbortController();
@@ -1284,6 +1588,8 @@ describe('runNonInteractive', () => {
     expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
     const [parts, , , options] = mockLlmClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain('Continue working on the active Goal.');
+    expect(parts[0]?.text).toContain('In Direct mode:');
+    expect(parts[0]?.text).not.toContain('In Code Mode, discover');
     expect(parts[0]?.text).toContain(
       `<goal_runtime_data>\n{"goalId":"${options.goalPermit.goalId}","revision":${options.goalPermit.revision},"objective":"existing goal"}\n</goal_runtime_data>`,
     );
@@ -2313,35 +2619,81 @@ describe('runNonInteractive', () => {
     });
   });
 
-  it('records a user interrupt when a Goal run is cancelled outside any budget', async () => {
-    // `routeAbort` is the writer here, and with no budget tripped the stop
-    // is the user's own, not a run that ran out of its allowance.
-    setupMetricsMock();
-    mockGetCommands.mockReturnValue([goalCommand]);
-    await prepareGoalState('paused');
-    const runAbortController = new AbortController();
-    mockLlmClient.sendMessageStream.mockImplementation(() =>
-      (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
-        runAbortController.abort();
-        yield {
-          type: LlmEventType.UserCancelled,
-        } as ServerLlmStreamEvent;
-      })(),
-    );
+  it.each([false, true])(
+    'records a user interrupt when a Goal run is cancelled outside any budget (shared loop: %s)',
+    async (shared) => {
+      // `routeAbort` is the writer here, and with no budget tripped the stop
+      // is the user's own, not a run that ran out of its allowance.
+      setupMetricsMock();
+      Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => shared });
+      mockGetCommands.mockReturnValue([goalCommand]);
+      await prepareGoalState('paused');
+      const runAbortController = new AbortController();
+      mockLlmClient.sendMessageStream.mockImplementation(() =>
+        (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
+          runAbortController.abort();
+          yield {
+            type: LlmEventType.UserCancelled,
+          } as ServerLlmStreamEvent;
+        })(),
+      );
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      '/goal resume',
-      'goal-user-cancel',
-      { abortController: runAbortController, recoverableCancellation: true },
-    ).catch(() => undefined);
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/goal resume',
+        'goal-user-cancel',
+        { abortController: runAbortController, recoverableCancellation: true },
+      ).catch(() => undefined);
 
-    expect(goalRuntime.getSnapshot().goal).toMatchObject({
-      status: 'paused',
-      lastReason: GOAL_PAUSE_REASON_USER_INTERRUPT,
-    });
-  });
+      expect(goalRuntime.getSnapshot().goal).toMatchObject({
+        status: 'paused',
+        lastReason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+      });
+    },
+  );
+
+  it.each([false, true])(
+    'finishes a Goal turn that a Goal pause preempts mid-stream (shared loop: %s)',
+    async (shared) => {
+      // The pause aborts only the Goal signal the client merges in, so the
+      // client reports a cancel while the run itself goes on.
+      setupMetricsMock();
+      Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => shared });
+      mockGetCommands.mockReturnValue([goalCommand]);
+      await prepareGoalState('paused');
+      mockLlmClient.sendMessageStream.mockImplementation(
+        (
+          _parts: unknown,
+          _signal: AbortSignal,
+          _promptId: string,
+          sendOptions: { goalPermit: GoalTurnPermit },
+        ) =>
+          (async function* (): AsyncGenerator<ServerLlmStreamEvent> {
+            await goalRuntime.dispatch({
+              action: 'pause',
+              expectedGoalId: sendOptions.goalPermit.goalId,
+              expectedRevision: sendOptions.goalPermit.revision,
+              reason: 'paused by another client',
+            });
+            yield { type: LlmEventType.UserCancelled } as ServerLlmStreamEvent;
+          })(),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/goal resume',
+        'goal-preempted',
+      );
+
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+      expect(goalRuntime.getSnapshot().goal).toMatchObject({
+        status: 'paused',
+        lastReason: 'paused by another client',
+      });
+    },
+  );
 
   it('records the headless register when a Goal run ends with structured output', async () => {
     setupMetricsMock();
@@ -2416,43 +2768,48 @@ describe('runNonInteractive', () => {
     });
   });
 
-  it('waits for an active Goal turn before admitting real user input', async () => {
-    setupMetricsMock();
-    await prepareGoalState('active');
-    const occupyingPermit = goalRuntime.beginTurn('occupying-turn');
-    expect(occupyingPermit).toBeDefined();
-    const finishOccupyingTurn = goalRuntime.finishTurn.bind(goalRuntime);
-    mockFinishedGoalWorker();
-    const beginTurn = vi.spyOn(goalRuntime, 'beginTurn');
+  it.each(bothLoops)(
+    'waits for an active Goal turn before admitting real user input ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      await prepareGoalState('active');
+      const occupyingPermit = goalRuntime.beginTurn('occupying-turn');
+      expect(occupyingPermit).toBeDefined();
+      const finishOccupyingTurn = goalRuntime.finishTurn.bind(goalRuntime);
+      mockFinishedGoalWorker();
+      const beginTurn = vi.spyOn(goalRuntime, 'beginTurn');
 
-    const run = runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'A queued user update',
-      'goal-queued-user',
-    );
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'A queued user update',
+        'goal-queued-user',
+      );
 
-    await vi.waitFor(() =>
-      expect(beginTurn).toHaveBeenCalledWith('goal-queued-user'),
-    );
-    expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+      await vi.waitFor(() =>
+        expect(beginTurn).toHaveBeenCalledWith('goal-queued-user'),
+      );
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
 
-    await finishOccupyingTurn(occupyingPermit!);
-    await run;
+      await finishOccupyingTurn(occupyingPermit!);
+      await run;
 
-    const sendOptions = mockLlmClient.sendMessageStream.mock.calls[0]![3];
-    expect(sendOptions).toMatchObject({
-      type: SendMessageType.UserQuery,
-      goalOrigin: 'user',
-      goalTurnKey: 'goal-queued-user',
-      goalPermit: {
-        goalId: occupyingPermit!.goalId,
-        revision: occupyingPermit!.revision,
-        turnId: expect.any(String),
-      },
-    });
-    expect(sendOptions.goalPermit.turnId).not.toBe(occupyingPermit!.turnId);
-  });
+      const sendOptions = mockLlmClient.sendMessageStream.mock.calls[0]![3];
+      expect(sendOptions).toMatchObject({
+        type: SendMessageType.UserQuery,
+        workflowModeEligible: false,
+        goalOrigin: 'user',
+        goalTurnKey: 'goal-queued-user',
+        goalPermit: {
+          goalId: occupyingPermit!.goalId,
+          revision: occupyingPermit!.revision,
+          turnId: expect.any(String),
+        },
+      });
+      expect(sendOptions.goalPermit.turnId).not.toBe(occupyingPermit!.turnId);
+    },
+  );
 
   it('emits Goal v2 state as the only Goal stream event with partial messages on', async () => {
     setupMetricsMock();
@@ -2526,40 +2883,46 @@ describe('runNonInteractive', () => {
     return { resolveForModel, runtimeView };
   }
 
-  it('should process input and write text output', async () => {
-    setupMetricsMock();
-    const events: ServerLlmStreamEvent[] = [
-      { type: LlmEventType.Content, value: 'Hello' },
-      { type: LlmEventType.Content, value: ' World' },
-      {
-        type: LlmEventType.Finished,
-        value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
-      },
-    ];
-    mockLlmClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents(events),
-    );
+  it.each(bothLoops)(
+    'should process input and write text output ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      const events: ServerLlmStreamEvent[] = [
+        { type: LlmEventType.Content, value: 'Hello' },
+        { type: LlmEventType.Content, value: ' World' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
+        },
+      ];
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents(events),
+      );
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Test input',
-      'prompt-id-1',
-    );
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-1',
+      );
 
-    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
-      [{ text: 'Test input' }],
-      expect.any(AbortSignal),
-      'prompt-id-1',
-      {
-        type: SendMessageType.UserQuery,
-        modelOverride: undefined,
-        submittedPrompt: 'Test input',
-      },
-    );
-    expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
-    expect(mockShutdownTelemetry).toHaveBeenCalled();
-  });
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
+        [{ text: 'Test input' }],
+        expect.any(AbortSignal),
+        'prompt-id-1',
+        {
+          type: SendMessageType.UserQuery,
+          workflowModeEligible: true,
+          modelOverride: undefined,
+          submittedPrompt: 'Test input',
+          ...(shared ? { onPromptAdmitted: expect.any(Function) } : {}),
+        },
+      );
+      expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
+      expect(mockShutdownTelemetry).toHaveBeenCalled();
+    },
+  );
 
   it('registers and clears the stream-json workflow approval channel', async () => {
     setupMetricsMock();
@@ -2683,6 +3046,7 @@ describe('runNonInteractive', () => {
     );
     mockLlmClient.getChat = vi.fn(() => ({
       getDebugResponses: mockGetDebugResponses,
+      getHistoryShallow: vi.fn().mockReturnValue([]),
       getHistory: vi.fn().mockReturnValue([
         {
           role: 'model',
@@ -2856,80 +3220,121 @@ describe('runNonInteractive', () => {
   });
 
   describe('continueInterrupted', () => {
-    it('re-submits an orphaned trailing user prompt with Retry semantics', async () => {
-      setupMetricsMock();
-      // The orphan strip + restore is owned by the Retry send path in
-      // client.ts (covered by client.test.ts); here we only assert the
-      // continuation hands off to that path with Retry semantics.
-      mockLlmClient.getChat = vi.fn(() => ({
-        getDebugResponses: mockGetDebugResponses,
-        getHistory: vi
-          .fn()
-          .mockReturnValue([
-            { role: 'user', parts: [{ text: 'do the thing' }] },
+    it.each(bothLoops)(
+      're-submits an orphaned trailing user prompt with Retry semantics ($loop)',
+      async ({ shared }) => {
+        if (shared) useSharedLoopWithModToolHooks();
+        setupMetricsMock();
+        // The orphan strip + restore is owned by the Retry send path in
+        // client.ts (covered by client.test.ts); here we only assert the
+        // continuation hands off to that path with Retry semantics.
+        mockLlmClient.getChat = vi.fn(() => ({
+          getDebugResponses: mockGetDebugResponses,
+          getHistoryShallow: vi.fn().mockReturnValue([]),
+          getHistory: vi
+            .fn()
+            .mockReturnValue([
+              { role: 'user', parts: [{ text: 'do the thing' }] },
+            ]),
+        }));
+        mockLlmClient.sendMessageStream.mockReturnValue(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 5 },
+              },
+            },
           ]),
-      }));
-      mockLlmClient.sendMessageStream.mockReturnValue(
-        createStreamFromEvents([
-          {
-            type: LlmEventType.Finished,
-            value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
-          },
-        ]),
-      );
+        );
 
-      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c1', {
-        continueInterrupted: true,
-      });
+        await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c1', {
+          continueInterrupted: true,
+        });
 
-      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
-        [{ text: 'do the thing' }],
-        expect.any(AbortSignal),
-        'prompt-c1',
-        expect.objectContaining({ type: SendMessageType.Retry }),
-      );
-    });
+        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
+          [{ text: 'do the thing' }],
+          expect.any(AbortSignal),
+          'prompt-c1',
+          expect.objectContaining({
+            type: SendMessageType.Retry,
+            workflowModeEligible: false,
+          }),
+        );
+      },
+    );
 
-    it('adds plan mode reminders to an interrupted prompt replay', async () => {
-      setupMetricsMock();
-      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
-      mockLlmClient.stripOrphanedUserEntriesFromHistory = vi.fn();
-      mockLlmClient.getChat = vi.fn(() => ({
-        getDebugResponses: mockGetDebugResponses,
-        getHistory: vi
-          .fn()
-          .mockReturnValue([
-            { role: 'user', parts: [{ text: 'do the thing' }] },
+    it.each([
+      { name: 'plain prompt', withSnapshot: false, withReminder: false },
+      { name: 'catalog snapshot', withSnapshot: true, withReminder: false },
+      {
+        name: 'catalog and existing reminder',
+        withSnapshot: true,
+        withReminder: true,
+      },
+    ])(
+      'adds or deduplicates plan reminders on interrupted replay: $name',
+      async ({ withSnapshot, withReminder }) => {
+        setupMetricsMock();
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+        mockLlmClient.stripOrphanedUserEntriesFromHistory = vi.fn();
+        const parts: Part[] = [{ text: 'do the thing' }];
+        if (withSnapshot) {
+          parts.push(
+            getAutoMemorySnapshot(
+              [],
+              '<system-reminder>CATALOG</system-reminder>',
+            )!,
+          );
+        }
+        if (withReminder) {
+          parts.unshift({
+            text: '<system-reminder>Existing plan reminder</system-reminder>',
+          });
+        }
+        mockLlmClient.getChat = vi.fn(() => ({
+          getDebugResponses: mockGetDebugResponses,
+          getHistoryShallow: vi.fn().mockReturnValue([]),
+          getHistory: vi.fn().mockReturnValue([{ role: 'user', parts }]),
+        }));
+        mockLlmClient.sendMessageStream.mockReturnValue(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 5 },
+              },
+            },
           ]),
-      }));
-      mockLlmClient.sendMessageStream.mockReturnValue(
-        createStreamFromEvents([
-          {
-            type: LlmEventType.Finished,
-            value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
-          },
-        ]),
-      );
+        );
 
-      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c-plan', {
-        continueInterrupted: true,
-      });
+        await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c-plan', {
+          continueInterrupted: true,
+        });
 
-      const [request, , , options] =
-        mockLlmClient.sendMessageStream.mock.calls[0]!;
-      expect(options).toEqual(
-        expect.objectContaining({ type: SendMessageType.Retry }),
-      );
-      expect(request).toEqual([
-        { text: expect.stringContaining(SYSTEM_REMINDER_OPEN) },
-        { text: 'do the thing' },
-      ]);
-    });
+        const [request, , , options] =
+          mockLlmClient.sendMessageStream.mock.calls[0]!;
+        expect(options).toEqual(
+          expect.objectContaining({ type: SendMessageType.Retry }),
+        );
+        expect(request).toEqual(
+          withReminder
+            ? parts
+            : [
+                { text: expect.stringContaining('Plan mode is active.') },
+                ...parts,
+              ],
+        );
+      },
+    );
 
     it('closes dangling tool calls with synthesized ToolResult parts', async () => {
       setupMetricsMock();
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi.fn().mockReturnValue([
           {
             role: 'model',
@@ -2971,6 +3376,7 @@ describe('runNonInteractive', () => {
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi.fn().mockReturnValue([
           {
             role: 'model',
@@ -3018,6 +3424,7 @@ describe('runNonInteractive', () => {
       setupMetricsMock();
       mockLlmClient.getChat = vi.fn(() => ({
         getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         getHistory: vi
           .fn()
           .mockReturnValue([{ role: 'model', parts: [{ text: 'all done' }] }]),
@@ -3027,6 +3434,117 @@ describe('runNonInteractive', () => {
         continueInterrupted: true,
       });
 
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('refuses a cancelled model prompt after a completed local command', async () => {
+      setupMetricsMock();
+      const content: Content = {
+        role: 'user',
+        parts: [{ text: 'do the thing' }],
+      };
+      markApiHistoryPrompt(content, 'client-A');
+      const historyOwner = {
+        history: [content],
+        unaccountedMemorySnapshots: new WeakSet(),
+      } as unknown as LlmChat;
+      mockLlmClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistory: () => LlmChat.prototype.getHistory.call(historyOwner),
+        getHistoryShallow: () =>
+          LlmChat.prototype.getHistoryShallow.call(historyOwner),
+      }));
+      mockConfig
+        .getChatRecordingService()
+        .readActiveTranscriptChain.mockResolvedValue([
+          {
+            uuid: 'user-A',
+            type: 'user',
+            promptId: 'client-A',
+            daemonPromptId: 'daemon-A',
+            message: content,
+          },
+          {
+            uuid: 'cancel-A',
+            type: 'system',
+            subtype: 'turn_result',
+            promptId: 'client-A',
+            systemPayload: {
+              promptId: 'daemon-A',
+              state: 'cancelled',
+              cancelledAt: 1,
+              cancelReason: 'user',
+              endedAt: 2,
+            },
+          },
+          {
+            uuid: 'docs-B',
+            type: 'user',
+            promptId: 'client-B',
+            daemonPromptId: 'daemon-B',
+            message: { role: 'user', parts: [{ text: '/docs' }] },
+          },
+          {
+            uuid: 'complete-B',
+            type: 'system',
+            subtype: 'turn_result',
+            systemPayload: {
+              promptId: 'daemon-B',
+              state: 'completed',
+              endedAt: 3,
+            },
+          },
+        ]);
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-continue-A',
+        { continueInterrupted: true },
+      );
+
+      expect(exitCode).toBe(0);
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+      expect(processStdoutSpy).toHaveBeenCalledWith(
+        expect.stringContaining('No interrupted turn to continue.'),
+      );
+    });
+
+    it('refuses direct continuation of an unknown legacy cancellation', async () => {
+      setupMetricsMock();
+      mockConfig
+        .getChatRecordingService()
+        .readActiveTranscriptChain.mockResolvedValue([
+          {
+            type: 'system',
+            subtype: 'turn_result',
+            uuid: 'cancel',
+            systemPayload: {
+              promptId: 'turn-9',
+              state: 'cancelled',
+              cancelledAt: 1,
+              endedAt: 2,
+            },
+          },
+        ]);
+      mockLlmClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
+        getHistory: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+          ]),
+      }));
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-c5',
+        { continueInterrupted: true },
+      );
+      expect(exitCode).toBe(0);
       expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
     });
   });
@@ -3225,18 +3743,14 @@ describe('runNonInteractive', () => {
     );
 
     expect(exitCode).toBe(1);
-    // The consecutive guard is always-on, so the headless message must flag it
-    // as always-on and must NOT suggest the skipLoopDetection escape hatch,
-    // which cannot disable it.
+    // The consecutive guard runs before the skipLoopDetection gate, so the
+    // headless message must point at model.loopProtection, which governs it,
+    // and must NOT suggest skipLoopDetection, which cannot disable it.
     expect(processStderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'always-on guard and cannot be disabled via `model.skipLoopDetection`',
-      ),
+      expect.stringContaining('Set `model.loopProtection` to "warn"'),
     );
     expect(processStderrSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining(
-        'Set the `model.skipLoopDetection` setting to true',
-      ),
+      expect.stringContaining('`model.skipLoopDetection`'),
     );
   });
 
@@ -3348,6 +3862,77 @@ describe('runNonInteractive', () => {
       expect.stringContaining(
         'Set the `model.skipLoopDetection` setting to true',
       ),
+    );
+  });
+
+  it('names the cause when the stop carries its loop reason', async () => {
+    setupMetricsMock();
+    const events: ServerLlmStreamEvent[] = [
+      { type: LlmEventType.Content, value: 'Partial work' },
+      {
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.TURN_TOOL_CALL_CAP,
+          loopReason: LoopReason.EXPLICIT_CAP,
+          toolCallCount: 4,
+          toolCallLimit: 3,
+        },
+      },
+    ];
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Long turn',
+      'prompt-id-turn-cap-reason',
+    );
+
+    expect(exitCode).toBe(1);
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)',
+      ),
+    );
+    // The reason replaces the hedged hint that lists every cause.
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('A per-turn tool-call cap was reached'),
+    );
+  });
+
+  it('offers the skipLoopDetection escape for the heuristic global duplicate', async () => {
+    setupMetricsMock();
+    const events: ServerLlmStreamEvent[] = [
+      {
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          loopReason: LoopReason.REPEATED_CALL,
+        },
+      },
+    ];
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Repeat',
+      'prompt-id-global-dup-reason',
+    );
+
+    // The heuristic detector runs only with skipLoopDetection: false, so the
+    // always-on hint the provider-id breaker gets would be wrong here.
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '`model.skipLoopDetection` to true to disable this check',
+      ),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('always-on guard'),
     );
   });
 
@@ -3507,362 +4092,1742 @@ describe('runNonInteractive', () => {
     expect(finalize).not.toHaveBeenCalled();
   });
 
-  it('should handle a single tool call and respond', async () => {
-    setupMetricsMock();
-    const toolCallEvent: ServerLlmStreamEvent = {
-      type: LlmEventType.ToolCallRequest,
-      value: {
-        callId: 'tool-1',
-        name: 'testTool',
-        args: { arg1: 'value1' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-id-2',
-      },
-    };
-    const toolResponse: Part[] = [{ text: 'Tool response' }];
-    mockCoreExecuteToolCall.mockResolvedValue({
-      responseParts: toolResponse,
-      executionStatus: 'success',
+  it.each(bothLoops)(
+    'should handle a single tool call and respond ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      const toolCallEvent: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-1',
+          name: 'testTool',
+          args: { arg1: 'value1' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-2',
+        },
+      };
+      const toolResponse: Part[] = [{ text: 'Tool response' }];
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: toolResponse,
+        executionStatus: 'success',
+      });
+
+      const firstCallEvents: ServerLlmStreamEvent[] = [toolCallEvent];
+      const secondCallEvents: ServerLlmStreamEvent[] = [
+        { type: LlmEventType.Content, value: 'Final answer' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
+        },
+      ];
+
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
+        .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Use a tool',
+        'prompt-id-2',
+        { humanInput: { text: 'ultracode use a tool' } },
+      );
+
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ name: 'testTool' }),
+        expect.any(AbortSignal),
+        expect.objectContaining({
+          outputUpdateHandler: expect.any(Function),
+        }),
+      );
+      // Verify first call has type: UserQuery
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        1,
+        [{ text: 'Use a tool' }],
+        expect.any(AbortSignal),
+        'prompt-id-2',
+        {
+          type: SendMessageType.UserQuery,
+          workflowModeEligible: true,
+          modelOverride: undefined,
+          submittedPrompt: 'Use a tool',
+          humanInput: { text: 'ultracode use a tool' },
+          ...(shared ? { onPromptAdmitted: expect.any(Function) } : {}),
+        },
+      );
+
+      // Verify second call (after tool execution) has type: ToolResult
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        [{ text: 'Tool response' }],
+        expect.any(AbortSignal),
+        'prompt-id-2',
+        { type: SendMessageType.ToolResult, workflowModeEligible: false },
+      );
+      expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
+      // Verify recordCompletedToolCall is called with the tool name and args.
+      expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+        'testTool',
+        { arg1: 'value1' },
+      );
+      // Verify getPendingMemoryTaskPromises is called at the end of the session.
+      expect(mockLlmClient.getPendingMemoryTaskPromises).toHaveBeenCalled();
+    },
+  );
+
+  describe('managed memory settlement on terminal paths', () => {
+    let finishMemory: (count: number) => void;
+    let rejectMemory: (error: Error) => void;
+    let memoryTask: Promise<number>;
+
+    beforeEach(() => {
+      setupMetricsMock();
+      memoryTask = new Promise<number>((resolve, reject) => {
+        finishMemory = resolve;
+        rejectMemory = reject;
+      });
+      mockLlmClient.getPendingMemoryTaskPromises.mockReturnValueOnce([
+        memoryTask,
+      ]);
     });
 
-    const firstCallEvents: ServerLlmStreamEvent[] = [toolCallEvent];
-    const secondCallEvents: ServerLlmStreamEvent[] = [
-      { type: LlmEventType.Content, value: 'Final answer' },
-      {
-        type: LlmEventType.Finished,
-        value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
-      },
-    ];
-
-    mockLlmClient.sendMessageStream
-      .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
-      .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
-
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Use a tool',
-      'prompt-id-2',
-    );
-
-    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
-    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
-      mockConfig,
-      expect.objectContaining({ name: 'testTool' }),
-      expect.any(AbortSignal),
-      expect.objectContaining({
-        outputUpdateHandler: expect.any(Function),
-      }),
-    );
-    // Verify first call has type: UserQuery
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      1,
-      [{ text: 'Use a tool' }],
-      expect.any(AbortSignal),
-      'prompt-id-2',
-      {
-        type: SendMessageType.UserQuery,
-        modelOverride: undefined,
-        submittedPrompt: 'Use a tool',
-      },
-    );
-    // Verify second call (after tool execution) has type: ToolResult
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      2,
-      [{ text: 'Tool response' }],
-      expect.any(AbortSignal),
-      'prompt-id-2',
-      { type: SendMessageType.ToolResult },
-    );
-    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
-    // Verify recordCompletedToolCall is called with the tool name and args.
-    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
-      'testTool',
-      { arg1: 'value1' },
-    );
-    // Verify consumePendingMemoryTaskPromises is called at the end of the session.
-    expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
-  });
-
-  it('uses a tool-selected full-turn model for the next request', async () => {
-    setupMetricsMock();
-    const model = 'qwen3-vl-plus\0';
-    mockCoreExecuteToolCall.mockImplementation(
-      async (_config, request, _signal, options) => {
-        if (request.callId === 'tool-image') {
-          expect(options.onToolResultFullTurnModel?.(model)).toBe(true);
-          return {
-            responseParts: [{ text: 'Tool response with image' }],
-            modelOverride: model,
-          };
+    it.each(['SIGINT', 'budget'] as const)(
+      'does not duplicate a delivered result when %s stderr fails during memory drain',
+      async (reason) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.STREAM_JSON,
+        );
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+        if (reason === 'budget') {
+          vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(1);
         }
-        return {
-          responseParts: [{ text: 'Skill response' }],
-          modelOverride: undefined,
-        };
-      },
-    );
-    mockLlmClient.sendMessageStream
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          {
-            type: LlmEventType.ToolCallRequest,
-            value: {
-              callId: 'tool-image',
-              name: 'screenshot_tool',
-              args: {},
-              isClientInitiated: false,
-              prompt_id: 'prompt-tool-image',
+        mockLlmClient.sendMessageStream.mockReturnValue(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Completed answer' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
             },
-          },
-          {
-            type: LlmEventType.ToolCallRequest,
-            value: {
-              callId: 'skill-after-image',
-              name: 'skill_tool',
-              args: {},
-              isClientInitiated: false,
-              prompt_id: 'prompt-tool-image',
-            },
-          },
-        ]),
-      )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'Image understood' },
-          {
-            type: LlmEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 1 },
-            },
-          },
-        ]),
-      );
-
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Use the screenshot tool',
-      'prompt-tool-image',
-    );
-
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      2,
-      [{ text: 'Tool response with image' }, { text: 'Skill response' }],
-      expect.any(AbortSignal),
-      'prompt-tool-image',
-      { type: SendMessageType.ToolResult, modelOverride: model },
-    );
-  });
-
-  it('rejects a conflicting tool-selected full-turn model within a batch', async () => {
-    setupMetricsMock();
-    const first = 'qwen3-vl-plus\0';
-    const second = 'qwen3-vl-max\0';
-    const accepted: Record<string, boolean> = {};
-    mockCoreExecuteToolCall.mockImplementation(
-      async (_config, request, _signal, options) => {
-        if (request.callId === 'tool-image-a') {
-          accepted['a'] = options.onToolResultFullTurnModel?.(first) ?? false;
-          return {
-            responseParts: [{ text: 'first image' }],
-            modelOverride: first,
-          };
-        }
-        if (request.callId === 'tool-image-b') {
-          accepted['b'] = options.onToolResultFullTurnModel?.(second) ?? false;
-          return {
-            responseParts: [{ text: 'second image' }],
-            modelOverride: second,
-          };
-        }
-        return { responseParts: [{ text: 'other' }], modelOverride: undefined };
-      },
-    );
-    mockLlmClient.sendMessageStream
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          {
-            type: LlmEventType.ToolCallRequest,
-            value: {
-              callId: 'tool-image-a',
-              name: 'screenshot_tool',
-              args: {},
-              isClientInitiated: false,
-              prompt_id: 'prompt-tool-image',
-            },
-          },
-          {
-            type: LlmEventType.ToolCallRequest,
-            value: {
-              callId: 'tool-image-b',
-              name: 'screenshot_tool',
-              args: {},
-              isClientInitiated: false,
-              prompt_id: 'prompt-tool-image',
-            },
-          },
-        ]),
-      )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'Image understood' },
-          {
-            type: LlmEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 1 },
-            },
-          },
-        ]),
-      );
-
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Use the screenshot tool',
-      'prompt-tool-image',
-    );
-
-    expect(accepted['a']).toBe(true);
-    expect(accepted['b']).toBe(false);
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      2,
-      [{ text: 'first image' }, { text: 'second image' }],
-      expect.any(AbortSignal),
-      'prompt-tool-image',
-      { type: SendMessageType.ToolResult, modelOverride: first },
-    );
-  });
-
-  it('rejects a conflicting tool-selected full-turn model in a drain item', async () => {
-    setupMetricsMock();
-    const first = 'qwen3-vl-plus\0';
-    const second = 'qwen3-vl-max\0';
-    const accepted: Record<string, boolean> = {};
-
-    let notificationCallback:
-      | ((
-          displayText: string,
-          modelText: string,
-          meta: { agentId: string; toolUseId?: string; status: string },
-        ) => void)
-      | null = null;
-    mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
-      (cb) => {
-        notificationCallback = cb;
-      },
-    );
-
-    mockCoreExecuteToolCall.mockImplementation(
-      async (_config, request, _signal, options) => {
-        if (request.callId === 'tool-main') {
-          notificationCallback?.('Agent done', 'Agent completed', {
-            agentId: 'bg-1',
-            status: 'completed',
+          ]),
+        );
+        const controller = new AbortController();
+        const beforeSigint = process.listeners('SIGINT');
+        const beforeAbort = getEventListeners(controller.signal, 'abort');
+        const stderrError = new Error('stderr write failed after result');
+        let failedWrites = 0;
+        processStderrSpy.mockImplementation(() => {
+          if (controller.signal.aborted && failedWrites === 0) {
+            failedWrites++;
+            throw stderrError;
+          }
+          return true;
+        });
+        const onResultEmitted = vi.fn();
+        let settled = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Complete then cancel',
+          'abort-after-result',
+          { abortController: controller, onResultEmitted },
+        )
+          .catch((error: unknown) => error)
+          .finally(() => {
+            settled = true;
           });
-          return { responseParts: [{ text: 'main tool done' }] };
+        try {
+          await vi.waitFor(() =>
+            expect(
+              mockLlmClient.getPendingMemoryTaskPromises,
+            ).toHaveBeenCalledOnce(),
+          );
+          expect(onResultEmitted).toHaveBeenCalledOnce();
+          expect(settled).toBe(false);
+          if (reason === 'budget') await vi.advanceTimersByTimeAsync(1_000);
+          else process.emit('SIGINT');
+          await vi.waitFor(() => expect(settled).toBe(true), { timeout: 500 });
+          // This handler is already inside the outer catch. A stderr failure
+          // propagates; it must not recursively retry or duplicate the result.
+          await expect(run).resolves.toBe(stderrError);
+          expect(process.exit).not.toHaveBeenCalled();
+          expect(failedWrites).toBe(1);
+          const frames = processStdoutSpy.mock.calls.flatMap(
+            ([chunk]) => JSON.parse(String(chunk)) as CLIMessage | CLIMessage[],
+          );
+          expect(frames.filter((frame) => frame.type === 'result')).toEqual([
+            expect.objectContaining({ is_error: false }),
+          ]);
+          expect(onResultEmitted).toHaveBeenCalledOnce();
+          // The unresolved task remains available for a later invocation.
+          expect(
+            mockLlmClient.consumePendingMemoryTaskPromises,
+          ).not.toHaveBeenCalled();
+          expect(
+            mockLlmClient.removePendingMemoryTaskPromises,
+          ).toHaveBeenCalledExactlyOnceWith([]);
+          expect(process.listeners('SIGINT')).toEqual(beforeSigint);
+          expect(getEventListeners(controller.signal, 'abort')).toEqual(
+            beforeAbort,
+          );
+        } finally {
+          vi.useRealTimers();
+          finishMemory(0);
         }
-        if (request.callId === 'drain-tool-a') {
-          accepted['a'] = options.onToolResultFullTurnModel?.(first) ?? false;
-          return {
-            responseParts: [{ text: 'drain image a' }],
-            modelOverride: first,
-          };
-        }
-        if (request.callId === 'drain-tool-b') {
-          accepted['b'] = options.onToolResultFullTurnModel?.(second) ?? false;
-          return {
-            responseParts: [{ text: 'drain image b' }],
-            modelOverride: second,
-          };
-        }
-        return { responseParts: [{ text: 'other' }], modelOverride: undefined };
       },
     );
 
-    mockLlmClient.sendMessageStream
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          {
-            type: LlmEventType.ToolCallRequest,
-            value: {
-              callId: 'tool-main',
-              name: 'some_tool',
-              args: {},
-              isClientInitiated: false,
-              prompt_id: 'prompt-drain',
-            },
-          },
-        ]),
+    it('bounds the one-shot memory drain on a non-abort error terminal', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      // The one-shot shape (llm.tsx calls runNonInteractive with no
+      // options, so no memoryWaitStopSignal): a failed run whose memory
+      // extraction is in flight must not stay alive forever after its
+      // error envelope is already on the wire (R6-2).
+      const failure = new Error('gateway failed before any content');
+      mockLlmClient.sendMessageStream.mockImplementationOnce(
+        async function* () {
+          yield Promise.reject(failure);
+        },
+      );
+      let drainEntered!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        drainEntered = resolve;
+      });
+      let drainCalls = 0;
+      mockLlmClient.getPendingMemoryTaskPromises
+        .mockReset()
+        .mockImplementation(() => {
+          drainCalls += 1;
+          if (drainCalls === 1) {
+            drainEntered();
+            return [memoryTask];
+          }
+          return [];
+        });
+      let settled = false;
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'fail with an extraction in flight',
+        'one-shot-error-drain',
       )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'Main done' },
-          {
+        .catch((error: unknown) => error)
+        .finally(() => {
+          settled = true;
+        });
+      try {
+        // The drain holds the memory task and its bounded window just
+        // armed; vi.waitFor is avoided here because it advances the fake
+        // clock and would eat the window's budget.
+        await entered.promise;
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        await vi.waitFor(() => expect(settled).toBe(true), { timeout: 500 });
+        // The run settles with its original error outcome, and stopping
+        // the wait neither cancels the task nor drops its identity.
+        await expect(run).resolves.toBe(failure);
+        expect(
+          mockLlmClient.removePendingMemoryTaskPromises,
+        ).toHaveBeenCalledWith([]);
+      } finally {
+        vi.useRealTimers();
+        finishMemory(0);
+      }
+    });
+
+    it('waits past the failure window for memory on a success terminal', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      // The success terminal keeps the invocation alive for the memory
+      // writes its own turn started, bounded only by the run's abort —
+      // the base behavior (R6-2): advancing past the failure window must
+      // not end the wait while a task is still in flight.
+      mockLlmClient.sendMessageStream.mockImplementationOnce(
+        async function* () {
+          yield { type: LlmEventType.Content, value: 'Done' };
+          yield {
             type: LlmEventType.Finished,
             value: {
               reason: undefined,
               usageMetadata: { totalTokenCount: 1 },
             },
-          },
-        ]),
+          };
+        },
+      );
+      let drainEntered!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        drainEntered = resolve;
+      });
+      let drainCalls = 0;
+      mockLlmClient.getPendingMemoryTaskPromises
+        .mockReset()
+        .mockImplementation(() => {
+          drainCalls += 1;
+          if (drainCalls === 1) {
+            drainEntered();
+            return [memoryTask];
+          }
+          return [];
+        });
+      let settled = false;
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'succeed with an extraction in flight',
+        'one-shot-success-drain',
       )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
+        .catch((error: unknown) => error)
+        .finally(() => {
+          settled = true;
+        });
+      try {
+        await entered.promise;
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(6_000);
+        expect(settled).toBe(false);
+        finishMemory(0);
+        await vi.waitFor(() => expect(settled).toBe(true), { timeout: 500 });
+        await expect(run).resolves.toBe(0);
+      } finally {
+        vi.useRealTimers();
+        finishMemory(0);
+      }
+    });
+
+    it.each([
+      { interruption: 'during memory drain', mixed: false },
+      { interruption: 'before catch drain', mixed: false },
+      { interruption: 'during memory drain with mixed tasks', mixed: true },
+    ])(
+      'keeps interrupted memory tracked for the next invocation after interruption $interruption',
+      async ({ interruption, mixed }) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.STREAM_JSON,
+        );
+        const rejectedTask = Promise.reject(new Error('Memory write failed'));
+        void rejectedTask.catch(() => undefined);
+        const queueOwner = {
+          pendingMemoryTaskPromises: mixed
+            ? [Promise.resolve(2), rejectedTask, memoryTask]
+            : [memoryTask],
+        };
+        const clientOwner = queueOwner as unknown as LlmClient;
+        mockLlmClient.getPendingMemoryTaskPromises
+          .mockReset()
+          .mockImplementation(() =>
+            LlmClient.prototype.getPendingMemoryTaskPromises.call(clientOwner),
+          );
+        mockLlmClient.removePendingMemoryTaskPromises.mockImplementation(
+          (tasks: ReadonlyArray<Promise<number>>) =>
+            LlmClient.prototype.removePendingMemoryTaskPromises.call(
+              clientOwner,
+              tasks,
+            ),
+        );
+        mockLlmClient.consumePendingMemoryTaskPromises.mockImplementation(() =>
+          LlmClient.prototype.consumePendingMemoryTaskPromises.call(
+            clientOwner,
+          ),
+        );
+        let finishNewTask!: (count: number) => void;
+        const newTask = new Promise<number>((resolve) => {
+          finishNewTask = resolve;
+        });
+        const abortController = new AbortController();
+        const signalListeners = process.listeners('SIGINT');
+        const firstResult = vi.fn();
+        mockLlmClient.sendMessageStream.mockImplementation(() => {
+          if (interruption === 'before catch drain') {
+            abortController.abort(new TurnInterruptedError());
+            throw abortController.signal.reason;
+          }
+          return createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'First answer' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]);
+        });
+        let firstSettled = false;
+        const firstRun = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'First input',
+          'prompt-interrupted-memory-first',
           {
+            abortController,
+            recoverableCancellation: true,
+            onResultEmitted: firstResult,
+          },
+        ).finally(() => {
+          firstSettled = true;
+        });
+        let secondRun: Promise<number> | undefined;
+        let secondSettled = false;
+        const secondResult = vi.fn();
+
+        try {
+          await vi.waitFor(() => expect(firstResult).toHaveBeenCalledOnce());
+          await vi.waitFor(() =>
+            expect(
+              mockLlmClient.getPendingMemoryTaskPromises,
+            ).toHaveBeenCalled(),
+          );
+          if (interruption !== 'before catch drain') {
+            expect(firstSettled).toBe(false);
+            if (mixed) queueOwner.pendingMemoryTaskPromises.push(newTask);
+            abortController.abort(new TurnInterruptedError());
+          }
+          await expect(firstRun).resolves.toBe(130);
+          expect(process.exit).not.toHaveBeenCalled();
+          expect(process.listeners('SIGINT')).toEqual(signalListeners);
+          expect(getEventListeners(abortController.signal, 'abort')).toEqual(
+            [],
+          );
+          expect(queueOwner.pendingMemoryTaskPromises).toHaveLength(
+            mixed ? 2 : 1,
+          );
+          expect(queueOwner.pendingMemoryTaskPromises[0]).toBe(memoryTask);
+          if (mixed) {
+            expect(queueOwner.pendingMemoryTaskPromises[1]).toBe(newTask);
+          }
+
+          mockLlmClient.sendMessageStream.mockImplementation(() =>
+            createStreamFromEvents([
+              { type: LlmEventType.Content, value: 'Second answer' },
+              {
+                type: LlmEventType.Finished,
+                value: {
+                  reason: undefined,
+                  usageMetadata: { totalTokenCount: 1 },
+                },
+              },
+            ]),
+          );
+          secondRun = runNonInteractive(
+            mockConfig,
+            mockSettings,
+            'Second input',
+            'prompt-interrupted-memory-second',
+            { recoverableCancellation: true, onResultEmitted: secondResult },
+          ).finally(() => {
+            secondSettled = true;
+          });
+          await vi.waitFor(() => expect(secondResult).toHaveBeenCalledOnce());
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(secondSettled).toBe(false);
+          expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+        } finally {
+          finishMemory(1);
+          finishNewTask(3);
+          await firstRun;
+          if (secondRun) await secondRun;
+        }
+        await expect(secondRun).resolves.toBe(0);
+        expect(process.exit).not.toHaveBeenCalled();
+        expect(queueOwner.pendingMemoryTaskPromises).toEqual([]);
+        expect(
+          mockLlmClient.consumePendingMemoryTaskPromises,
+        ).not.toHaveBeenCalled();
+        expect(process.listeners('SIGINT')).toEqual(signalListeners);
+      },
+    );
+
+    it.each([false, true])(
+      'stops the memory wait without cancelling a successful turn (already stopped=%s)',
+      async (alreadyStopped) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.STREAM_JSON,
+        );
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Answer' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        );
+        const abortController = new AbortController();
+        const memoryWaitStopController = new AbortController();
+        const signalListeners = process.listeners('SIGINT');
+        const abortListeners = getEventListeners(
+          abortController.signal,
+          'abort',
+        );
+        const stopListeners = getEventListeners(
+          memoryWaitStopController.signal,
+          'abort',
+        );
+        if (alreadyStopped) memoryWaitStopController.abort();
+        const flushOutput = vi.fn().mockResolvedValue(undefined);
+        const modSession = {
+          initialize: vi.fn().mockResolvedValue(undefined),
+          flushLogs: vi.fn(),
+          flushOutput,
+          discardSubmittedPrompts: () => {},
+          notePersonPrompt: () => {},
+          submitPrompt: () => ({ text: '', context: undefined }),
+          hasSubmittedPrompts: () => false,
+          takeSubmittedPrompt: () => undefined,
+          hasToolHooks: () => false,
+          syncSession: () => Promise.resolve(undefined),
+          startTurn: () => undefined,
+        } as unknown as ModSession;
+        const onResultEmitted = vi.fn();
+        let settled = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Test input',
+          'prompt-memory-wait-stop',
+          {
+            abortController,
+            memoryWaitStopSignal: memoryWaitStopController.signal,
+            modSession,
+            onResultEmitted,
+          },
+        )
+          .catch((error: unknown) => error)
+          .finally(() => {
+            settled = true;
+          });
+
+        try {
+          await vi.waitFor(() =>
+            expect(
+              mockLlmClient.getPendingMemoryTaskPromises,
+            ).toHaveBeenCalledOnce(),
+          );
+          expect(onResultEmitted).toHaveBeenCalledOnce();
+          expect(flushOutput).toHaveBeenCalled();
+          if (!alreadyStopped) {
+            expect(settled).toBe(false);
+            memoryWaitStopController.abort();
+          }
+          await vi.waitFor(() => expect(settled).toBe(true));
+          await expect(run).resolves.toBe(0);
+          expect(abortController.signal.aborted).toBe(false);
+          expect(process.exit).not.toHaveBeenCalled();
+          expect(onResultEmitted).toHaveBeenCalledOnce();
+          const results = processStdoutSpy.mock.calls
+            .map(([chunk]) => JSON.parse(String(chunk)) as CLIMessage)
+            .filter((message) => message.type === 'result');
+          expect(results).toEqual([
+            expect.objectContaining({ is_error: false, result: 'Answer' }),
+          ]);
+          expect(
+            mockLlmClient.removePendingMemoryTaskPromises,
+          ).toHaveBeenCalledExactlyOnceWith([]);
+          expect(process.listeners('SIGINT')).toEqual(signalListeners);
+          expect(getEventListeners(abortController.signal, 'abort')).toEqual(
+            abortListeners,
+          );
+          expect(
+            getEventListeners(memoryWaitStopController.signal, 'abort'),
+          ).toEqual(stopListeners);
+        } finally {
+          finishMemory(0);
+          await run;
+        }
+      },
+    );
+
+    it.each([
+      { cancellation: 'SIGINT before catch', beforeCatch: true },
+      { cancellation: 'SIGINT during catch drain', beforeCatch: false },
+      { cancellation: 'wall-time budget during catch drain', budget: true },
+      {
+        cancellation: 'recoverable interrupt before catch',
+        beforeCatch: true,
+        recoverable: true,
+      },
+      {
+        cancellation: 'recoverable interrupt during catch drain',
+        recoverable: true,
+      },
+      {
+        cancellation: 'SIGINT with memory wait stopped',
+        memoryWaitStopped: true,
+      },
+      {
+        cancellation: 'budget with memory wait stopped',
+        budget: true,
+        memoryWaitStopped: true,
+      },
+    ])(
+      'stops waiting for pending memory on $cancellation',
+      async ({ beforeCatch, budget, recoverable, memoryWaitStopped }) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.STREAM_JSON,
+        );
+        if (budget) {
+          vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+          // Below the one-shot drain's default window (5 s) so the budget
+          // cancellation is still what releases the wait.
+          vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(2);
+        }
+        const abortController = new AbortController();
+        const memoryWaitStopController = new AbortController();
+        const signalListeners = process.listeners('SIGINT');
+        const abortListeners = getEventListeners(
+          abortController.signal,
+          'abort',
+        );
+        if (memoryWaitStopped) {
+          abortController.signal.addEventListener(
+            'abort',
+            () => memoryWaitStopController.abort(),
+            { once: true },
+          );
+        }
+        const cancel = () => {
+          if (recoverable) {
+            abortController.abort(new TurnInterruptedError());
+          } else {
+            process.emit('SIGINT');
+          }
+        };
+        const executionError = new Error('Model stream failed');
+        mockLlmClient.sendMessageStream.mockImplementation(() => {
+          if (beforeCatch) cancel();
+          throw executionError;
+        });
+        const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+        const emitResult = vi.spyOn(adapter, 'emitResult');
+        const onResultEmitted = vi.fn();
+        let settled = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Test input',
+          'prompt-memory-cancellation',
+          {
+            adapter,
+            abortController,
+            memoryWaitStopSignal: memoryWaitStopped
+              ? memoryWaitStopController.signal
+              : undefined,
+            recoverableCancellation: recoverable,
+            onResultEmitted,
+          },
+        )
+          .catch((error: unknown) => error)
+          .finally(() => {
+            settled = true;
+          });
+
+        try {
+          await vi.waitFor(() =>
+            expect(onResultEmitted).toHaveBeenCalledOnce(),
+          );
+          if (!beforeCatch) {
+            await vi.waitFor(() =>
+              expect(
+                mockLlmClient.getPendingMemoryTaskPromises,
+              ).toHaveBeenCalledOnce(),
+            );
+            expect(settled).toBe(false);
+            expect(abortController.signal.aborted).toBe(false);
+            if (budget) {
+              await vi.advanceTimersByTimeAsync(10_000);
+              vi.useRealTimers();
+            } else {
+              cancel();
+            }
+          }
+          expect(abortController.signal.aborted).toBe(true);
+          if (memoryWaitStopped) {
+            expect(memoryWaitStopController.signal.aborted).toBe(true);
+          }
+
+          // Memory has no completion timer: cancellation must finish the run
+          // while it remains pending, before the fixture releases it below.
+          await vi.waitFor(() => expect(settled).toBe(true));
+          if (recoverable) {
+            await expect(run).resolves.toBe(130);
+            expect(process.exit).not.toHaveBeenCalled();
+          } else {
+            await expect(run).resolves.toEqual(
+              new Error(`process.exit(${budget ? 55 : 130}) called`),
+            );
+            expect(process.exit).toHaveBeenCalledExactlyOnceWith(
+              budget ? 55 : 130,
+            );
+          }
+          rejectMemory(new Error('Memory task failed after cancellation'));
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(emitResult).toHaveBeenCalledOnce();
+          expect(onResultEmitted).toHaveBeenCalledOnce();
+          expect(process.listeners('SIGINT')).toEqual(signalListeners);
+          expect(getEventListeners(abortController.signal, 'abort')).toEqual(
+            abortListeners,
+          );
+        } finally {
+          vi.useRealTimers();
+          finishMemory(0);
+          await run;
+        }
+      },
+    );
+
+    it.each([
+      'success',
+      'structured success',
+      'GLOBAL_TOOL_CALL_DUPLICATE',
+      'drain-turn loop detection',
+      'drain-turn structured success',
+      'TEXT loop detection',
+      'TEXT already reported error',
+    ] as const)(
+      'honors SIGINT while memory remains pending after %s',
+      async (terminal) => {
+        const textMode = terminal.startsWith('TEXT');
+        const structured = terminal.endsWith('structured success');
+        const drainTurn = terminal.startsWith('drain-turn');
+        const duplicate = terminal === 'GLOBAL_TOOL_CALL_DUPLICATE';
+        const loop = duplicate || terminal.endsWith('loop detection');
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          textMode ? OutputFormat.TEXT : OutputFormat.STREAM_JSON,
+        );
+        if (structured) {
+          vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+            type: 'object',
+            properties: { summary: { type: 'string' } },
+            required: ['summary'],
+          });
+          mockCoreExecuteToolCall.mockResolvedValue({
+            responseParts: [{ text: 'ok' }],
+          });
+        }
+        const terminalEvent: ServerLlmStreamEvent = structured
+          ? {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'memory-cancel-structured',
+                name: 'structured_output',
+                args: { summary: 'done' },
+                isClientInitiated: false,
+                prompt_id: 'prompt-memory-terminal-cancel',
+              },
+            }
+          : loop
+            ? {
+                type: LlmEventType.LoopDetected,
+                value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
+              }
+            : terminal === 'TEXT already reported error'
+              ? {
+                  type: LlmEventType.Error,
+                  value: {
+                    error: { message: '429 Too Many Requests', status: 429 },
+                  },
+                }
+              : {
+                  type: LlmEventType.Finished,
+                  value: {
+                    reason: undefined,
+                    usageMetadata: { totalTokenCount: 1 },
+                  },
+                };
+        if (drainTurn) {
+          mockMonitorRegistry.setNotificationCallback.mockImplementation(
+            (callback) => {
+              callback?.(
+                'Monitor ready',
+                '<task-notification>ready</task-notification>',
+                {
+                  monitorId: 'memory-cancel-monitor',
+                  toolUseId: 'memory-cancel-tool',
+                  status: 'running',
+                  eventCount: 1,
+                },
+              );
+            },
+          );
+          mockLlmClient.sendMessageStream.mockReturnValueOnce(
+            createStreamFromEvents([
+              {
+                type: LlmEventType.Finished,
+                value: {
+                  reason: undefined,
+                  usageMetadata: { totalTokenCount: 1 },
+                },
+              },
+            ]),
+          );
+        }
+        if (duplicate) {
+          vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
+          const toolCall: ServerLlmStreamEvent = {
             type: LlmEventType.ToolCallRequest,
             value: {
-              callId: 'drain-tool-a',
-              name: 'screenshot_tool',
-              args: {},
+              callId: 'memory-cancel-duplicate',
+              providerCallId: 'memory-cancel-duplicate',
+              name: 'testTool',
+              args: { arg1: 'value1' },
               isClientInitiated: false,
-              prompt_id: 'prompt-drain',
+              prompt_id: 'prompt-memory-terminal-cancel',
             },
-          },
+          };
+          mockCoreExecuteToolCall.mockResolvedValue({
+            responseParts: [{ text: 'Tool response' }],
+          });
+          mockLlmClient.sendMessageStream
+            .mockReturnValueOnce(createStreamFromEvents([toolCall]))
+            .mockReturnValueOnce(createStreamFromEvents([toolCall]))
+            .mockReturnValueOnce(createStreamFromEvents([toolCall]));
+        } else {
+          mockLlmClient.sendMessageStream.mockReturnValueOnce(
+            createStreamFromEvents([terminalEvent]),
+          );
+        }
+        const abortController = new AbortController();
+        const signalListeners = process.listeners('SIGINT');
+        const abortListeners = getEventListeners(
+          abortController.signal,
+          'abort',
+        );
+        const onResultEmitted = vi.fn();
+        let settled = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Test input',
+          'prompt-memory-terminal-cancel',
+          { abortController, onResultEmitted },
+        )
+          .catch((error: unknown) => error)
+          .finally(() => {
+            settled = true;
+          });
+
+        try {
+          await vi.waitFor(() =>
+            expect(
+              mockLlmClient.getPendingMemoryTaskPromises,
+            ).toHaveBeenCalledOnce(),
+          );
+          expect(settled).toBe(false);
+          expect(onResultEmitted).toHaveBeenCalledTimes(textMode ? 0 : 1);
+          // Returning a terminal helper without awaiting it must not remove
+          // the invocation's signal handlers while that helper still waits.
+          expect(process.listeners('SIGINT')).toHaveLength(
+            signalListeners.length + 1,
+          );
+          process.emit('SIGINT');
+          expect(abortController.signal.aborted).toBe(true);
+          await vi.waitFor(() => expect(settled).toBe(true));
+          await expect(run).resolves.toEqual(
+            new Error('process.exit(130) called'),
+          );
+          expect(process.exit).toHaveBeenCalledExactlyOnceWith(130);
+          if (textMode) {
+            expect(processStdoutSpy).not.toHaveBeenCalled();
+            expect(processStderrSpy).toHaveBeenCalledTimes(2);
+            expect(
+              processStderrSpy.mock.calls.map(([chunk]) => String(chunk)),
+            ).toEqual([
+              expect.stringContaining(
+                terminal === 'TEXT loop detection'
+                  ? 'Loop detection halted the run (turn_tool_call_cap:'
+                  : '429 Too Many Requests',
+              ),
+              'Operation cancelled.\n',
+            ]);
+          } else {
+            const results = processStdoutSpy.mock.calls
+              .flatMap(
+                ([chunk]) =>
+                  JSON.parse(String(chunk)) as CLIMessage | CLIMessage[],
+              )
+              .filter((message) => message.type === 'result');
+            expect(results).toEqual([
+              expect.objectContaining(
+                loop
+                  ? {
+                      is_error: true,
+                      error: {
+                        message: expect.stringContaining(
+                          duplicate
+                            ? LoopType.GLOBAL_TOOL_CALL_DUPLICATE
+                            : LoopType.TURN_TOOL_CALL_CAP,
+                        ),
+                      },
+                    }
+                  : {
+                      is_error: false,
+                      ...(structured
+                        ? { structured_result: { summary: 'done' } }
+                        : {}),
+                    },
+              ),
+            ]);
+            expect(onResultEmitted).toHaveBeenCalledOnce();
+          }
+          expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(
+            duplicate ? 3 : drainTurn ? 2 : 1,
+          );
+          expect(process.listeners('SIGINT')).toEqual(signalListeners);
+          expect(getEventListeners(abortController.signal, 'abort')).toEqual(
+            abortListeners,
+          );
+        } finally {
+          finishMemory(0);
+          await run;
+        }
+      },
+    );
+
+    it('serializes real continued turns behind pending memory after one result', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      mockLlmClient.getChat.mockReturnValue({
+        getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
+        getHistory: vi.fn().mockReturnValue([
           {
-            type: LlmEventType.ToolCallRequest,
-            value: {
-              callId: 'drain-tool-b',
-              name: 'screenshot_tool',
-              args: {},
-              isClientInitiated: false,
-              prompt_id: 'prompt-drain',
-            },
+            role: 'user',
+            parts: [{ text: 'Continue the interrupted work' }],
           },
         ]),
-      )
-      .mockReturnValueOnce(
+      });
+      mockLlmClient.sendMessageStream.mockImplementation(() =>
         createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'Drain done' },
+          { type: LlmEventType.Content, value: 'Answer' },
           {
             type: LlmEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 1 },
-            },
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
           },
         ]),
       );
+      const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+      const emitResult = vi.spyOn(adapter, 'emitResult');
+      const onResultEmitted = vi.fn();
+      const options = { adapter, onResultEmitted, continueInterrupted: true };
+      const runFirst = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '',
+        'prompt-memory-continued-first',
+        options,
+      );
+      // Match the caller's serialization boundary using real invocations:
+      // receiving a result alone must not release the next invocation.
+      const runSecond = runFirst.then(() =>
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          '',
+          'prompt-memory-continued-second',
+          options,
+        ),
+      );
+      const runs = Promise.all([runFirst, runSecond]);
+      void runs.catch(() => undefined);
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Do something',
-      'prompt-drain',
+      try {
+        await vi.waitFor(() =>
+          expect(
+            mockLlmClient.getPendingMemoryTaskPromises,
+          ).toHaveBeenCalledOnce(),
+        );
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(emitResult).toHaveBeenCalledOnce();
+        expect(onResultEmitted).toHaveBeenCalledOnce();
+        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledExactlyOnceWith(
+          [{ text: 'Continue the interrupted work' }],
+          expect.any(AbortSignal),
+          'prompt-memory-continued-first',
+          expect.objectContaining({ type: SendMessageType.Retry }),
+        );
+
+        finishMemory(1);
+        await expect(runs).resolves.toEqual([0, 0]);
+        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockLlmClient.sendMessageStream).toHaveBeenLastCalledWith(
+          [{ text: 'Continue the interrupted work' }],
+          expect.any(AbortSignal),
+          'prompt-memory-continued-second',
+          expect.objectContaining({ type: SendMessageType.Retry }),
+        );
+        expect(emitResult).toHaveBeenCalledTimes(2);
+        expect(onResultEmitted).toHaveBeenCalledTimes(2);
+        expect(process.exit).not.toHaveBeenCalled();
+      } finally {
+        finishMemory(0);
+        await runs;
+      }
+    });
+
+    it.each([
+      { terminal: 'schema error', drainTurn: false, format: OutputFormat.JSON },
+      {
+        terminal: 'structured success',
+        drainTurn: false,
+        format: OutputFormat.STREAM_JSON,
+      },
+      {
+        terminal: 'structured success',
+        drainTurn: true,
+        format: OutputFormat.STREAM_JSON,
+      },
+    ])(
+      'emits $terminal before memory settles and waits before returning (drain=$drainTurn)',
+      async ({ terminal, drainTurn, format }) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+        vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+          type: 'object',
+          properties: { summary: { type: 'string' } },
+          required: ['summary'],
+        });
+        const structuredResult = { summary: 'done' };
+        const plainTextTurn: ServerLlmStreamEvent[] = [
+          { type: LlmEventType.Content, value: 'Plain text answer' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
+        ];
+        if (drainTurn) {
+          mockMonitorRegistry.setNotificationCallback.mockImplementation(
+            (callback) => {
+              callback?.(
+                'Monitor ready',
+                '<task-notification>ready</task-notification>',
+                {
+                  monitorId: 'memory-test-monitor',
+                  toolUseId: 'memory-test-tool',
+                  status: 'running',
+                  eventCount: 1,
+                },
+              );
+            },
+          );
+          mockLlmClient.sendMessageStream.mockReturnValueOnce(
+            createStreamFromEvents(plainTextTurn),
+          );
+        }
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents(
+            terminal === 'schema error'
+              ? plainTextTurn
+              : [
+                  {
+                    type: LlmEventType.ToolCallRequest,
+                    value: {
+                      callId: 'memory-test-structured',
+                      name: 'structured_output',
+                      args: structuredResult,
+                      isClientInitiated: false,
+                      prompt_id: 'prompt-memory-schema',
+                    },
+                  },
+                ],
+          ),
+        );
+        mockCoreExecuteToolCall.mockResolvedValue({
+          responseParts: [{ text: 'ok' }],
+        });
+        const onResultEmitted = vi.fn();
+        let settled = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Return structured output',
+          'prompt-memory-schema',
+          { onResultEmitted },
+        ).finally(() => {
+          settled = true;
+        });
+        const results = () =>
+          processStdoutSpy.mock.calls
+            .flatMap(
+              ([chunk]) =>
+                JSON.parse(String(chunk)) as CLIMessage | CLIMessage[],
+            )
+            .filter((message) => message.type === 'result');
+
+        try {
+          await vi.waitFor(() =>
+            expect(onResultEmitted).toHaveBeenCalledOnce(),
+          );
+          expect(results()).toEqual([
+            expect.objectContaining(
+              terminal === 'schema error'
+                ? {
+                    is_error: true,
+                    error: {
+                      message: expect.stringContaining('structured_output'),
+                    },
+                  }
+                : { is_error: false, structured_result: structuredResult },
+            ),
+          ]);
+          expect(
+            mockLlmClient.getPendingMemoryTaskPromises,
+          ).toHaveBeenCalledOnce();
+          expect(settled).toBe(false);
+          finishMemory(1);
+          await expect(run).resolves.toBe(terminal === 'schema error' ? 1 : 0);
+          expect(results()).toHaveLength(1);
+          expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(
+            drainTurn ? 2 : 1,
+          );
+        } finally {
+          finishMemory(0);
+          await run;
+        }
+      },
     );
 
-    expect(accepted['a']).toBe(true);
-    expect(accepted['b']).toBe(false);
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      4,
-      [{ text: 'drain image a' }, { text: 'drain image b' }],
-      expect.any(AbortSignal),
-      'prompt-drain/automatic/3',
-      { type: SendMessageType.ToolResult, modelOverride: first },
+    it('emits one stream-JSON schema error before mixed memory tasks settle', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+        required: ['summary'],
+      });
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Plain text answer' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
+        ]),
+      );
+      let finishSecondMemory!: (count: number) => void;
+      let rejectSecondMemory!: (error: Error) => void;
+      const secondMemoryTask = new Promise<number>((resolve, reject) => {
+        finishSecondMemory = resolve;
+        rejectSecondMemory = reject;
+      });
+      mockLlmClient.getPendingMemoryTaskPromises
+        .mockReset()
+        .mockReturnValue([])
+        .mockReturnValueOnce([memoryTask, secondMemoryTask]);
+      const onResultEmitted = vi.fn();
+      let settled = false;
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Return structured output',
+        'prompt-memory-schema-mixed',
+        { onResultEmitted },
+      ).finally(() => {
+        settled = true;
+      });
+
+      try {
+        await vi.waitFor(() => expect(onResultEmitted).toHaveBeenCalledOnce());
+        const outputAtResult = processStdoutSpy.mock.calls.map(([chunk]) =>
+          String(chunk),
+        );
+        const results = outputAtResult
+          .map((chunk) => JSON.parse(chunk) as CLIMessage)
+          .filter((message) => message.type === 'result');
+        expect(results).toEqual([
+          expect.objectContaining({
+            is_error: true,
+            error: { message: expect.stringContaining('structured_output') },
+          }),
+        ]);
+        expect(settled).toBe(false);
+        finishMemory(1);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(false);
+        rejectSecondMemory(new Error('Memory task failed'));
+        await expect(run).resolves.toBe(1);
+        expect(onResultEmitted).toHaveBeenCalledOnce();
+        expect(
+          processStdoutSpy.mock.calls.map(([chunk]) => String(chunk)),
+        ).toEqual(outputAtResult);
+        expect(
+          mockLlmClient.removePendingMemoryTaskPromises,
+        ).toHaveBeenCalledWith([memoryTask, secondMemoryTask]);
+      } finally {
+        finishMemory(0);
+        finishSecondMemory(0);
+        await run;
+      }
+    });
+
+    it.each(['loop detection', 'already reported error'] as const)(
+      'drains memory before leaving TEXT mode after %s without duplicating output',
+      async (terminal) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.TEXT,
+        );
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([
+            terminal === 'loop detection'
+              ? {
+                  type: LlmEventType.LoopDetected,
+                  value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
+                }
+              : {
+                  type: LlmEventType.Error,
+                  value: {
+                    error: { message: '429 Too Many Requests', status: 429 },
+                  },
+                },
+          ]),
+        );
+        const onResultEmitted = vi.fn();
+        let settled = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Test input',
+          'prompt-memory-text-error',
+          { onResultEmitted },
+        )
+          .catch((error: unknown) => error)
+          .finally(() => {
+            settled = true;
+          });
+
+        try {
+          await vi.waitFor(() =>
+            expect(
+              mockLlmClient.getPendingMemoryTaskPromises,
+            ).toHaveBeenCalledOnce(),
+          );
+          expect(settled).toBe(false);
+          expect(processStderrSpy).toHaveBeenCalledTimes(1);
+          expect(processStderrSpy).toHaveBeenCalledWith(
+            expect.stringContaining(
+              terminal === 'loop detection'
+                ? 'Loop detection halted the run'
+                : '429 Too Many Requests',
+            ),
+          );
+          rejectMemory(new Error('Memory task failed'));
+          if (terminal === 'loop detection') {
+            await expect(run).resolves.toBe(1);
+          } else {
+            await expect(run).resolves.toBeInstanceOf(AlreadyReportedError);
+          }
+          expect(processStderrSpy).toHaveBeenCalledTimes(1);
+          expect(processStdoutSpy).not.toHaveBeenCalled();
+          expect(onResultEmitted).not.toHaveBeenCalled();
+        } finally {
+          finishMemory(0);
+          await run;
+        }
+      },
+    );
+
+    it.each(['emit', 'flush'] as const)(
+      'preserves output error after successful generation when terminal %s fails',
+      async (failure) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.STREAM_JSON,
+        );
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        );
+        const outputError = new Error('Output failed');
+        const retryError = new Error('Error output also failed');
+        const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+        const emitResult = vi.spyOn(adapter, 'emitResult');
+        const flushOutput = vi.fn().mockResolvedValue(undefined);
+        if (failure === 'emit') {
+          emitResult
+            .mockImplementationOnce(() => {
+              throw outputError;
+            })
+            .mockImplementation(() => {
+              throw retryError;
+            });
+        } else {
+          flushOutput.mockRejectedValueOnce(outputError);
+        }
+        const modSession = {
+          initialize: vi.fn().mockResolvedValue(undefined),
+          flushLogs: vi.fn(),
+          flushOutput,
+          discardSubmittedPrompts: () => {},
+          notePersonPrompt: () => {},
+          submitPrompt: () => ({ text: '', context: undefined }),
+          hasSubmittedPrompts: () => false,
+          takeSubmittedPrompt: () => undefined,
+          hasToolHooks: () => false,
+          syncSession: () => Promise.resolve(undefined),
+          startTurn: () => undefined,
+        } as unknown as ModSession;
+        const onResultEmitted = vi.fn();
+        let settled = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Test input',
+          'prompt-memory-success-output-failure',
+          { adapter, modSession, onResultEmitted },
+        )
+          .catch((error: unknown) => error)
+          .finally(() => {
+            settled = true;
+          });
+
+        try {
+          await vi.waitFor(() =>
+            expect(
+              mockLlmClient.getPendingMemoryTaskPromises,
+            ).toHaveBeenCalledOnce(),
+          );
+          expect(emitResult).toHaveBeenCalledOnce();
+          expect(emitResult).toHaveBeenNthCalledWith(
+            1,
+            expect.objectContaining({ isError: false }),
+          );
+          expect(onResultEmitted).toHaveBeenCalledTimes(
+            failure === 'emit' ? 0 : 1,
+          );
+          expect(flushOutput).toHaveBeenCalledTimes(failure === 'emit' ? 0 : 1);
+          expect(settled).toBe(false);
+          rejectMemory(new Error('Memory task failed'));
+          await expect(run).resolves.toBe(outputError);
+          expect(emitResult).toHaveBeenCalledTimes(failure === 'emit' ? 2 : 1);
+          if (failure === 'emit') {
+            expect(emitResult).toHaveBeenNthCalledWith(
+              2,
+              expect.objectContaining({
+                isError: true,
+                errorMessage: outputError.message,
+              }),
+            );
+          }
+          expect(onResultEmitted).toHaveBeenCalledTimes(
+            failure === 'emit' ? 0 : 1,
+          );
+          const results = processStdoutSpy.mock.calls
+            .map(([chunk]) => JSON.parse(String(chunk)) as CLIMessage)
+            .filter((message) => message.type === 'result');
+          expect(results).toEqual(
+            failure === 'emit'
+              ? []
+              : [expect.objectContaining({ is_error: false })],
+          );
+        } finally {
+          finishMemory(0);
+          await run;
+        }
+      },
+    );
+
+    it.each(['emit', 'flush'] as const)(
+      'drains memory when terminal output %s fails and preserves the execution error',
+      async (failure) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.STREAM_JSON,
+        );
+        const executionError = new Error('Execution failed');
+        mockLlmClient.sendMessageStream.mockImplementation(() => {
+          throw executionError;
+        });
+        const outputError = new Error('Output failed');
+        const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+        const emitResult = vi.spyOn(adapter, 'emitResult');
+        const flushOutput = vi.fn().mockResolvedValue(undefined);
+        if (failure === 'emit') {
+          emitResult.mockImplementation(() => {
+            throw outputError;
+          });
+        } else {
+          flushOutput.mockRejectedValueOnce(outputError);
+        }
+        const modSession = {
+          initialize: vi.fn().mockResolvedValue(undefined),
+          flushLogs: vi.fn(),
+          flushOutput,
+          discardSubmittedPrompts: () => {},
+          notePersonPrompt: () => {},
+          submitPrompt: () => ({ text: '', context: undefined }),
+          hasSubmittedPrompts: () => false,
+          takeSubmittedPrompt: () => undefined,
+          hasToolHooks: () => false,
+          syncSession: () => Promise.resolve(undefined),
+          startTurn: () => undefined,
+        } as unknown as ModSession;
+        const onResultEmitted = vi.fn();
+        let settled = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Test input',
+          'prompt-memory-output-failure',
+          { adapter, modSession, onResultEmitted },
+        )
+          .catch((error: unknown) => error)
+          .finally(() => {
+            settled = true;
+          });
+
+        try {
+          await vi.waitFor(() =>
+            expect(
+              mockLlmClient.getPendingMemoryTaskPromises,
+            ).toHaveBeenCalledOnce(),
+          );
+          expect(emitResult).toHaveBeenCalledOnce();
+          expect(onResultEmitted).toHaveBeenCalledTimes(
+            failure === 'emit' ? 0 : 1,
+          );
+          expect(flushOutput).toHaveBeenCalledTimes(failure === 'emit' ? 0 : 1);
+          expect(settled).toBe(false);
+          rejectMemory(new Error('Memory task failed'));
+          await expect(run).resolves.toBe(executionError);
+          expect(emitResult).toHaveBeenCalledOnce();
+          expect(onResultEmitted).toHaveBeenCalledTimes(
+            failure === 'emit' ? 0 : 1,
+          );
+        } finally {
+          finishMemory(0);
+          await run;
+        }
+      },
     );
   });
+
+  it.each(bothLoops)(
+    'uses a tool-selected full-turn model for the next request ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      const model = 'qwen3-vl-plus\0';
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config, request, _signal, options) => {
+          if (request.callId === 'tool-image') {
+            expect(options.onToolResultFullTurnModel?.(model)).toBe(true);
+            return {
+              responseParts: [{ text: 'Tool response with image' }],
+              modelOverride: model,
+            };
+          }
+          return {
+            responseParts: [{ text: 'Skill response' }],
+            modelOverride: undefined,
+          };
+        },
+      );
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-image',
+                name: 'screenshot_tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-tool-image',
+              },
+            },
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'skill-after-image',
+                name: 'skill_tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-tool-image',
+              },
+            },
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Image understood' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Use the screenshot tool',
+        'prompt-tool-image',
+      );
+
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        [{ text: 'Tool response with image' }, { text: 'Skill response' }],
+        expect.any(AbortSignal),
+        'prompt-tool-image',
+        {
+          type: SendMessageType.ToolResult,
+          workflowModeEligible: false,
+          modelOverride: model,
+        },
+      );
+    },
+  );
+
+  it.each(bothLoops)(
+    'rejects a conflicting tool-selected full-turn model within a batch ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      const first = 'qwen3-vl-plus\0';
+      const second = 'qwen3-vl-max\0';
+      const accepted: Record<string, boolean> = {};
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config, request, _signal, options) => {
+          if (request.callId === 'tool-image-a') {
+            accepted['a'] = options.onToolResultFullTurnModel?.(first) ?? false;
+            return {
+              responseParts: [{ text: 'first image' }],
+              modelOverride: first,
+            };
+          }
+          if (request.callId === 'tool-image-b') {
+            accepted['b'] =
+              options.onToolResultFullTurnModel?.(second) ?? false;
+            return {
+              responseParts: [{ text: 'second image' }],
+              modelOverride: second,
+            };
+          }
+          return {
+            responseParts: [{ text: 'other' }],
+            modelOverride: undefined,
+          };
+        },
+      );
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-image-a',
+                name: 'screenshot_tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-tool-image',
+              },
+            },
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-image-b',
+                name: 'screenshot_tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-tool-image',
+              },
+            },
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Image understood' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Use the screenshot tool',
+        'prompt-tool-image',
+      );
+
+      expect(accepted['a']).toBe(true);
+      expect(accepted['b']).toBe(false);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        [{ text: 'first image' }, { text: 'second image' }],
+        expect.any(AbortSignal),
+        'prompt-tool-image',
+        {
+          type: SendMessageType.ToolResult,
+          workflowModeEligible: false,
+          modelOverride: first,
+        },
+      );
+    },
+  );
+
+  it.each(bothLoops)(
+    'rejects a conflicting tool-selected full-turn model in a drain item ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      const first = 'qwen3-vl-plus\0';
+      const second = 'qwen3-vl-max\0';
+      const accepted: Record<string, boolean> = {};
+
+      let notificationCallback:
+        | ((
+            displayText: string,
+            modelText: string,
+            meta: { agentId: string; toolUseId?: string; status: string },
+          ) => void)
+        | null = null;
+      mockBackgroundTaskRegistry.setNotificationCallback.mockImplementation(
+        (cb) => {
+          notificationCallback = cb;
+        },
+      );
+
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config, request, _signal, options) => {
+          if (request.callId === 'tool-main') {
+            notificationCallback?.('Agent done', 'Agent completed', {
+              agentId: 'bg-1',
+              status: 'completed',
+            });
+            return { responseParts: [{ text: 'main tool done' }] };
+          }
+          if (request.callId === 'drain-tool-a') {
+            accepted['a'] = options.onToolResultFullTurnModel?.(first) ?? false;
+            return {
+              responseParts: [{ text: 'drain image a' }],
+              modelOverride: first,
+            };
+          }
+          if (request.callId === 'drain-tool-b') {
+            accepted['b'] =
+              options.onToolResultFullTurnModel?.(second) ?? false;
+            return {
+              responseParts: [{ text: 'drain image b' }],
+              modelOverride: second,
+            };
+          }
+          return {
+            responseParts: [{ text: 'other' }],
+            modelOverride: undefined,
+          };
+        },
+      );
+
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-main',
+                name: 'some_tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-drain',
+              },
+            },
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Main done' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'drain-tool-a',
+                name: 'screenshot_tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-drain',
+              },
+            },
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'drain-tool-b',
+                name: 'screenshot_tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-drain',
+              },
+            },
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Drain done' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Do something',
+        'prompt-drain',
+      );
+
+      expect(accepted['a']).toBe(true);
+      expect(accepted['b']).toBe(false);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        4,
+        [{ text: 'drain image a' }, { text: 'drain image b' }],
+        expect.any(AbortSignal),
+        'prompt-drain/automatic/3',
+        { type: SendMessageType.ToolResult, modelOverride: first },
+      );
+    },
+  );
 
   describe('parallel tool execution', () => {
     const finishTurn: ServerLlmStreamEvent[] = [
@@ -3890,113 +5855,117 @@ describe('runNonInteractive', () => {
       }));
     }
 
-    it('isolates enter_plan_mode from headless siblings without charging skipped calls to the budget', async () => {
-      setupMetricsMock();
-      const recordToolResult = vi.fn();
-      (
-        mockConfig as Config & {
-          getChatRecordingService: () => {
-            recordToolResult: typeof recordToolResult;
-            finalize: ReturnType<typeof vi.fn>;
-            flush: ReturnType<typeof vi.fn>;
-          };
-        }
-      ).getChatRecordingService = () => ({
-        recordToolResult,
-        finalize: vi.fn(),
-        flush: vi.fn().mockResolvedValue(undefined),
-      });
-      vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
-      vi.mocked(mockToolRegistry.getTool).mockImplementation(
-        (name: string) =>
-          ({
-            kind:
-              name === ToolNames.READ_FILE
-                ? Kind.Read
-                : name === ToolNames.WRITE_FILE
-                  ? Kind.Edit
-                  : Kind.Other,
-          }) as unknown as ReturnType<typeof mockToolRegistry.getTool>,
-      );
-      mockCoreExecuteToolCall.mockImplementation(
-        async (
-          _config: unknown,
-          request: { callId: string; name: string },
-        ) => ({
-          responseParts: [
-            {
-              functionResponse: {
-                id: request.callId,
-                name: request.name,
-                response: { output: 'entered plan mode' },
+    it.each(bothLoops)(
+      'isolates enter_plan_mode from headless siblings without charging skipped calls to the budget ($loop)',
+      async ({ shared }) => {
+        setupMetricsMock();
+        if (shared) useSharedLoopWithModToolHooks();
+        const recordToolResult = vi.fn();
+        (
+          mockConfig as Config & {
+            getChatRecordingService: () => {
+              recordToolResult: typeof recordToolResult;
+              finalize: ReturnType<typeof vi.fn>;
+              flush: ReturnType<typeof vi.fn>;
+            };
+          }
+        ).getChatRecordingService = () => ({
+          recordToolResult,
+          finalize: vi.fn(),
+          flush: vi.fn().mockResolvedValue(undefined),
+        });
+        vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
+        vi.mocked(mockToolRegistry.getTool).mockImplementation(
+          (name: string) =>
+            ({
+              kind:
+                name === ToolNames.READ_FILE
+                  ? Kind.Read
+                  : name === ToolNames.WRITE_FILE
+                    ? Kind.Edit
+                    : Kind.Other,
+            }) as unknown as ReturnType<typeof mockToolRegistry.getTool>,
+        );
+        mockCoreExecuteToolCall.mockImplementation(
+          async (
+            _config: unknown,
+            request: { callId: string; name: string },
+          ) => ({
+            responseParts: [
+              {
+                functionResponse: {
+                  id: request.callId,
+                  name: request.name,
+                  response: { output: 'entered plan mode' },
+                },
               },
-            },
-          ],
-          resultDisplay: 'entered plan mode',
-        }),
-      );
+            ],
+            resultDisplay: 'entered plan mode',
+          }),
+        );
 
-      mockLlmClient.sendMessageStream
-        .mockReturnValueOnce(
-          createStreamFromEvents([
-            ...toolCallEvents(
-              ['write-before-entry'],
-              ToolNames.WRITE_FILE,
-              'p-plan-boundary',
-            ),
-            ...toolCallEvents(
-              ['enter-plan'],
-              ToolNames.ENTER_PLAN_MODE,
-              'p-plan-boundary',
-            ),
-            ...toolCallEvents(
-              ['read-after-entry-1', 'read-after-entry-2'],
-              ToolNames.READ_FILE,
-              'p-plan-boundary',
-            ),
-          ]),
-        )
-        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+        mockLlmClient.sendMessageStream
+          .mockReturnValueOnce(
+            createStreamFromEvents([
+              ...toolCallEvents(
+                ['write-before-entry'],
+                ToolNames.WRITE_FILE,
+                'p-plan-boundary',
+              ),
+              ...toolCallEvents(
+                ['enter-plan'],
+                ToolNames.ENTER_PLAN_MODE,
+                'p-plan-boundary',
+              ),
+              ...toolCallEvents(
+                ['read-after-entry-1', 'read-after-entry-2'],
+                ToolNames.READ_FILE,
+                'p-plan-boundary',
+              ),
+            ]),
+          )
+          .mockReturnValueOnce(createStreamFromEvents(finishTurn));
 
-      await runNonInteractive(
-        mockConfig,
-        mockSettings,
-        'enter plan mode',
-        'p-plan-boundary',
-      );
+        await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'enter plan mode',
+          'p-plan-boundary',
+        );
 
-      expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
-      expect(mockCoreExecuteToolCall.mock.calls[0][1]).toMatchObject({
-        callId: 'enter-plan',
-        name: ToolNames.ENTER_PLAN_MODE,
-      });
-      const nextTurnParts = mockLlmClient.sendMessageStream.mock
-        .calls[1][0] as Part[];
-      expect(nextTurnParts.map((part) => part.functionResponse?.id)).toEqual([
-        'write-before-entry',
-        'enter-plan',
-        'read-after-entry-1',
-        'read-after-entry-2',
-      ]);
-      expect(nextTurnParts[0].functionResponse?.response).toEqual({
-        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
-      });
-      expect(nextTurnParts[1].functionResponse?.response).toEqual({
-        output: 'entered plan mode',
-      });
-      expect(nextTurnParts[2].functionResponse?.response).toEqual({
-        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
-      });
-      expect(nextTurnParts[3].functionResponse?.response).toEqual({
-        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
-      });
-      expect(
-        recordToolResult.mock.calls
-          .map((call) => call[1])
-          .filter((metadata) => metadata.callId !== 'enter-plan')
-          .map((metadata) => metadata.executionStatus),
-      ).toEqual(['not_started', 'not_started', 'not_started']);
-    });
+        expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+        expect(mockCoreExecuteToolCall.mock.calls[0][1]).toMatchObject({
+          callId: 'enter-plan',
+          name: ToolNames.ENTER_PLAN_MODE,
+        });
+        const nextTurnParts = mockLlmClient.sendMessageStream.mock
+          .calls[1][0] as Part[];
+        expect(nextTurnParts.map((part) => part.functionResponse?.id)).toEqual([
+          'write-before-entry',
+          'enter-plan',
+          'read-after-entry-1',
+          'read-after-entry-2',
+        ]);
+        expect(nextTurnParts[0].functionResponse?.response).toEqual({
+          error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+        });
+        expect(nextTurnParts[1].functionResponse?.response).toEqual({
+          output: 'entered plan mode',
+        });
+        expect(nextTurnParts[2].functionResponse?.response).toEqual({
+          error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+        });
+        expect(nextTurnParts[3].functionResponse?.response).toEqual({
+          error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+        });
+        expect(
+          recordToolResult.mock.calls
+            .map((call) => call[1])
+            .filter((metadata) => metadata.callId !== 'enter-plan')
+            .map((metadata) => metadata.executionStatus),
+        ).toEqual(['not_started', 'not_started', 'not_started']);
+      },
+    );
 
     it('stamps a Goal turn’s tool results with the permit that asked for them', async () => {
       // The evidence catalog derives provenance from this stamp; without it a
@@ -4083,7 +6052,12 @@ describe('runNonInteractive', () => {
         )
         .mockReturnValueOnce(createStreamFromEvents(finishTurn));
 
-      await runNonInteractive(mockConfig, 'work the goal', 'p-goal');
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'work the goal',
+        'p-goal',
+      );
 
       const optionsByCallId = new Map(
         recordToolResult.mock.calls.map((call) => [call[1]?.callId, call[2]]),
@@ -4156,13 +6130,78 @@ describe('runNonInteractive', () => {
         )
         .mockReturnValueOnce(createStreamFromEvents(finishTurn));
 
-      await runNonInteractive(mockConfig, 'plain work', 'p-plain');
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'plain work',
+        'p-plain',
+      );
 
       expect(recordToolResult).toHaveBeenCalled();
       for (const call of recordToolResult.mock.calls) {
         expect(call[2]).toBeUndefined();
       }
     });
+
+    it.each([
+      ['no hooks', false, ['git status', 'git status'], 2],
+      ['a PreToolUse hook', true, ['git status', 'git status'], 1],
+      [
+        'a skill earlier in the batch',
+        false,
+        ['skill', 'git status', 'git status'],
+        1,
+      ],
+    ])(
+      'limits read-only shell call concurrency with %s',
+      async (_label, preToolUseHook, commands, maxInFlight) => {
+        setupMetricsMock();
+        Object.assign(mockConfig, {
+          getDisableAllHooks: () => false,
+          hasHooksForEvent: (event: string) =>
+            preToolUseHook && event === 'PreToolUse',
+        });
+        vi.mocked(mockToolRegistry.getTool).mockImplementation(
+          (name: string) =>
+            ({
+              kind: name === ToolNames.SKILL ? Kind.Other : Kind.Execute,
+            }) as unknown as ReturnType<typeof mockToolRegistry.getTool>,
+        );
+        let inFlight = 0;
+        let peak = 0;
+        mockCoreExecuteToolCall.mockImplementation(
+          async (_config: unknown, req: { callId: string; name: string }) => {
+            if (req.name !== ToolNames.SKILL) {
+              inFlight += 1;
+              peak = Math.max(peak, inFlight);
+              await new Promise((resolve) => setTimeout(resolve, 10));
+              inFlight -= 1;
+            }
+            return { responseParts: [{ text: `resp-${req.callId}` }] };
+          },
+        );
+        mockLlmClient.sendMessageStream
+          .mockReturnValueOnce(
+            createStreamFromEvents(
+              commands.map((command, index) => ({
+                type: LlmEventType.ToolCallRequest,
+                value: {
+                  callId: `shell-${index}`,
+                  name: command === 'skill' ? ToolNames.SKILL : ToolNames.SHELL,
+                  args: command === 'skill' ? {} : { command },
+                  isClientInitiated: false,
+                  prompt_id: 'p-shell',
+                },
+              })),
+            ),
+          )
+          .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+        await runNonInteractive(mockConfig, mockSettings, 'go', 'p-shell');
+
+        expect(peak).toBe(maxInFlight);
+      },
+    );
 
     it('runs a batch of concurrency-safe tool calls concurrently', async () => {
       setupMetricsMock();
@@ -4214,7 +6253,7 @@ describe('runNonInteractive', () => {
       expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(total);
     });
 
-    it('uses deferred target identity for headless bridge concurrency and completion tracking', async () => {
+    it.each(['object', 'string'])('parallelizes %s bridges', async (format) => {
       setupMetricsMock();
       const targetName = 'mcp__docs__read';
       vi.mocked(mockToolRegistry.getTool).mockImplementation(
@@ -4235,8 +6274,22 @@ describe('runNonInteractive', () => {
       const gate = new Promise<void>((resolve) => {
         openGate = resolve;
       });
+      // R4-6: capture what production actually hands to executeToolCall —
+      // the envelope must survive partitioning (a refactor forwarding the
+      // computed unwrapped request would run the hidden target under its
+      // own name and desync the provider's function-call/response names).
+      const executedRequests: Array<{
+        callId: string;
+        name: string;
+        args: Record<string, unknown>;
+      }> = [];
       mockCoreExecuteToolCall.mockImplementation(
         async (_config, request, _signal, options) => {
+          executedRequests.push({
+            callId: request.callId,
+            name: request.name,
+            args: request.args as Record<string, unknown>,
+          });
           started += 1;
           if (started === total) openGate();
           await gate;
@@ -4257,7 +6310,7 @@ describe('runNonInteractive', () => {
               request: {
                 ...request,
                 name: targetName,
-                args: request.args['arguments'],
+                args: { path: request.callId },
               },
               response,
               durationMs: 1,
@@ -4274,7 +6327,10 @@ describe('runNonInteractive', () => {
           name: ToolNames.TOOL_CALL,
           args: {
             name: targetName,
-            arguments: { path: callId },
+            arguments:
+              format === 'string'
+                ? JSON.stringify({ path: callId })
+                : { path: callId },
           },
           isClientInitiated: false,
           prompt_id: 'p-bridge-parallel',
@@ -4292,6 +6348,15 @@ describe('runNonInteractive', () => {
       );
 
       expect(started).toBe(total);
+      expect(executedRequests).toHaveLength(2);
+      for (const req of executedRequests) {
+        const args = { path: req.callId };
+        expect(req.name).toBe(ToolNames.TOOL_CALL);
+        expect(req.args).toEqual({
+          name: targetName,
+          arguments: format === 'string' ? JSON.stringify(args) : args,
+        });
+      }
       expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
         targetName,
         { path: 'bridge-1' },
@@ -4300,6 +6365,71 @@ describe('runNonInteractive', () => {
         targetName,
         { path: 'bridge-2' },
       );
+    });
+
+    it('degrades a malformed string-arguments envelope without throwing', async () => {
+      // A truncated model output leaves `arguments` as unparseable text; the
+      // partition predicate must pass the envelope through untouched (the
+      // bridge's own refusal downstream) rather than throw synchronously and
+      // abort the headless turn.
+      setupMetricsMock();
+      const targetName = 'mcp__docs__read';
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name: string) =>
+          (name === targetName
+            ? { name: targetName, kind: Kind.Read }
+            : undefined) as unknown as ReturnType<
+            typeof mockToolRegistry.getTool
+          >,
+      );
+      vi.mocked(mockToolRegistry.isDeferredAndHidden).mockImplementation(
+        (name: string) => name === targetName,
+      );
+
+      const executedNames: string[] = [];
+      mockCoreExecuteToolCall.mockImplementation(async (_config, request) => {
+        executedNames.push(request.name);
+        return {
+          responseParts: [
+            {
+              functionResponse: {
+                id: request.callId,
+                name: request.name,
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        };
+      });
+
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'bridge-bad',
+                name: ToolNames.TOOL_CALL,
+                args: { name: targetName, arguments: '{"path":' },
+                isClientInitiated: false,
+                prompt_id: 'p-bridge-malformed',
+              },
+            },
+          ] as ServerLlmStreamEvent[]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'read',
+          'p-bridge-malformed',
+        ),
+      ).resolves.not.toThrow();
+      // The envelope survived to execution untouched (not unwrapped, not
+      // thrown on): the bridge itself produces the graceful refusal.
+      expect(executedNames).toEqual([ToolNames.TOOL_CALL]);
     });
 
     it('finalizes concurrent results in request order despite out-of-order completion', async () => {
@@ -4776,6 +6906,11 @@ describe('runNonInteractive', () => {
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(
+        'the provider replayed a tool call id that had already run',
+      ),
+    );
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
         'always-on guard and cannot be disabled via `model.skipLoopDetection`',
       ),
     );
@@ -5184,7 +7319,7 @@ describe('runNonInteractive', () => {
       ],
       expect.any(AbortSignal),
       'prompt-id-3',
-      { type: SendMessageType.ToolResult },
+      { type: SendMessageType.ToolResult, workflowModeEligible: false },
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Sorry, let me try again.\n');
   });
@@ -5393,6 +7528,7 @@ describe('runNonInteractive', () => {
       'prompt-id-7',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Summarize @file.txt',
       },
@@ -5465,6 +7601,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-route',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: selector,
         submittedPrompt: 'inspect @image.png',
       },
@@ -5474,7 +7611,11 @@ describe('runNonInteractive', () => {
       [{ text: 'tool response' }],
       expect.any(AbortSignal),
       'prompt-vision-route',
-      { type: SendMessageType.ToolResult, modelOverride: selector },
+      {
+        type: SendMessageType.ToolResult,
+        workflowModeEligible: false,
+        modelOverride: selector,
+      },
     );
     expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
       mockConfig,
@@ -5589,6 +7730,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-bridge',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'inspect @image.png',
       },
@@ -5670,6 +7812,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-bridge-failed',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'inspect @image.png',
       },
@@ -5708,6 +7851,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-bridge-skipped',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'inspect @image.png',
       },
@@ -5755,6 +7899,7 @@ describe('runNonInteractive', () => {
       'prompt-oversized-image',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'inspect @image.png',
       },
@@ -5812,6 +7957,7 @@ describe('runNonInteractive', () => {
       'prompt-id-1',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Test input',
       },
@@ -5971,6 +8117,7 @@ describe('runNonInteractive', () => {
       'prompt-id-empty',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Empty response test',
       },
@@ -6036,6 +8183,1108 @@ describe('runNonInteractive', () => {
       2,
     );
     expect(processStderrSpy).toHaveBeenCalledWith(`${jsonError}\n`);
+  });
+
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'emits init before startup logs when a Mod fails in %s',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      for (const write of [processStdoutSpy, processStderrSpy]) {
+        write.mockImplementation((...args: unknown[]) => {
+          const callback = args.at(-1);
+          if (typeof callback === 'function') queueMicrotask(() => callback());
+          return true;
+        });
+      }
+      const close = vi.fn().mockResolvedValue(undefined);
+      vi.spyOn(ModSession, 'create').mockImplementation(
+        (_config, _settings, adapter) =>
+          ({
+            initialize: vi
+              .fn()
+              .mockRejectedValue(new Error('MOD_START_FAILED')),
+            close,
+            flushOutput: vi.fn().mockResolvedValue(undefined),
+            flushLogs: vi.fn().mockImplementationOnce(() => {
+              adapter.emitSystemMessage('ui_log', {
+                plugin: 'broken',
+                text: 'MOD_START_LOG',
+              });
+            }),
+            takeSubmittedPrompt: () => undefined,
+            discardSubmittedPrompts: () => {},
+            notePersonPrompt: vi.fn(),
+          }) as unknown as ModSession,
+      );
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, '/hello', 'mod-failure'),
+      ).rejects.toThrow();
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages =
+        format === OutputFormat.JSON
+          ? JSON.parse(stdout)
+          : stdout
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line));
+      expect(messages[0]).toMatchObject({ type: 'system', subtype: 'init' });
+      expect(messages[1]).toMatchObject({
+        type: 'system',
+        subtype: 'ui_log',
+        data: { plugin: 'broken', text: 'MOD_START_LOG' },
+      });
+      expect(messages.at(-1)).toMatchObject({
+        type: 'result',
+        is_error: true,
+        error: { message: expect.stringContaining('MOD_START_FAILED') },
+      });
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalled();
+    },
+  );
+
+  describe.each([false, true])('Mod turns (shared loop: %s)', (shared) => {
+    beforeEach(() => {
+      Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => shared });
+    });
+    const installModTurn = () => {
+      const order: string[] = [];
+      let abort = (): boolean => false;
+      let ended: Promise<void> | undefined;
+      // Like the real turn, only the first report counts.
+      const turn = {
+        id: 'turn-1',
+        saw: vi.fn(),
+        complete: vi.fn((_ending?: string) => {
+          ended ??= Promise.resolve().then(() => void order.push('complete'));
+          return ended;
+        }),
+      };
+      const startTurn = vi.fn(
+        (
+          _text: string,
+          _signal: AbortSignal,
+          abortTurn: () => boolean,
+          _promptId?: string,
+        ) => {
+          order.push('start');
+          abort = abortTurn;
+          return turn;
+        },
+      );
+      // The prompts the Mods submitted, taken once the run is idle.
+      const submitted: ModQueuedPrompt[] = [];
+      const takeSubmittedPrompt = vi.fn(() => submitted.shift());
+      const notePersonPrompt = vi.fn();
+      const discardSubmittedPrompts = vi.fn(() => {
+        submitted.length = 0;
+      });
+      const submitPrompt = vi.fn(
+        async (
+          text: string,
+          _signal: AbortSignal,
+        ): Promise<
+          { text: string; context?: string[] } | { drop: string }
+        > => ({
+          text,
+        }),
+      );
+      vi.spyOn(ModSession, 'create').mockImplementation(
+        () =>
+          ({
+            initialize: vi.fn().mockResolvedValue(undefined),
+            close: vi.fn(async () => {
+              order.push('close');
+            }),
+            flushOutput: vi.fn().mockResolvedValue(undefined),
+            flushLogs: vi.fn(),
+            syncSession: vi.fn().mockResolvedValue(undefined),
+            // With Mod tool hooks the shared loop runs each call through
+            // `executeToolCall`, which these tests mock.
+            hasToolHooks: shared,
+            toolCall: () => undefined,
+            startTurn,
+            submitPrompt,
+            takeSubmittedPrompt,
+            notePersonPrompt,
+            discardSubmittedPrompts,
+            get hasSubmittedPrompts() {
+              return submitted.length > 0;
+            },
+          }) as unknown as ModSession,
+      );
+      return {
+        order,
+        turn,
+        startTurn,
+        submitPrompt,
+        submitted,
+        notePersonPrompt,
+        abort: () => abort(),
+      };
+    };
+    // Admits the prompt, as core does once UserPromptSubmit lets it through.
+    const admitting = (events: () => AsyncGenerator<ServerLlmStreamEvent>) =>
+      mockLlmClient.sendMessageStream.mockImplementation(
+        (...args: unknown[]) => {
+          (args[3] as { onPromptAdmitted?: () => void })?.onPromptAdmitted?.();
+          return events();
+        },
+      );
+
+    it('hears the prompt from its admission to its answer', async () => {
+      setupMetricsMock();
+      const { order, turn, startTurn } = installModTurn();
+      const events: ServerLlmStreamEvent[] = [
+        { type: LlmEventType.Content, value: 'Done.' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: undefined },
+        },
+      ];
+      admitting(() => createStreamFromEvents(events));
+
+      await runNonInteractive(mockConfig, mockSettings, 'Fix it', 'mod-turn');
+
+      expect(startTurn).toHaveBeenCalledExactlyOnceWith(
+        'Fix it',
+        expect.any(AbortSignal),
+        expect.any(Function),
+        mockLlmClient.sendMessageStream.mock.calls[0][2],
+      );
+      // The run's own signal, so an interrupt ends the turn.start hooks.
+      expect(startTurn.mock.calls[0][1]).toBe(
+        mockLlmClient.sendMessageStream.mock.calls[0][1],
+      );
+      expect(turn.saw.mock.calls.map(([event]) => event)).toEqual(events);
+      // The answer ends the turn before the run settles and closes.
+      expect(turn.complete.mock.calls[0]).toEqual([]);
+      expect(order.slice(0, 3)).toEqual(['start', 'complete', 'close']);
+    });
+
+    it('runs a prompt a Mod submitted as a turn of its own once the run is idle', async () => {
+      setupMetricsMock();
+      const { order, turn, startTurn, submitted, notePersonPrompt } =
+        installModTurn();
+      const finished: ServerLlmStreamEvent = {
+        type: LlmEventType.Finished,
+        value: { reason: undefined, usageMetadata: undefined },
+      };
+      // The Mod submits while the person's turn ends.
+      turn.complete.mockImplementationOnce(async () => {
+        order.push('complete');
+        submitted.push(
+          { plugin: 'lint', text: 'Run the linter', context: ['note'] },
+          { plugin: 'lint', text: 'Say done', asUser: true },
+        );
+      });
+      admitting(() => createStreamFromEvents([finished]));
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Fix it',
+        'mod-prompt',
+      );
+
+      expect(exitCode).toBe(0);
+      expect(notePersonPrompt).toHaveBeenCalledOnce();
+      const calls = mockLlmClient.sendMessageStream.mock.calls;
+      expect(calls).toHaveLength(3);
+      expect(calls[1][0]).toEqual([
+        {
+          text: frameModPrompt({
+            plugin: 'lint',
+            text: 'Run the linter',
+            context: ['note'],
+          }),
+        },
+      ]);
+      expect(calls[1][3]).toMatchObject({
+        type: SendMessageType.UserQuery,
+        submittedPrompt: 'Run the linter',
+        submittedByMod: 'lint',
+        promptContext: ['note'],
+        memoryRecallQuery: 'Run the linter',
+      });
+      expect(calls[1][3]).not.toHaveProperty('notificationDisplayText');
+      // Submitted as the person's own words, the model reads it bare.
+      expect(calls[2][0]).toEqual([{ text: 'Say done' }]);
+      expect(calls[2][3]).toMatchObject({ submittedAsUser: true });
+      expect(calls[2][3]).not.toHaveProperty('promptContext');
+      // The Mods hear each of those turns too.
+      expect(startTurn.mock.calls.map(([text, , , id]) => [text, id])).toEqual([
+        ['Fix it', calls[0][2]],
+        ['Run the linter', calls[1][2]],
+        ['Say done', calls[2][2]],
+      ]);
+      // The person's prompt resets the Mods' count before its turn starts, and
+      // the person's turn ends before the Mod's prompt starts its own.
+      expect(notePersonPrompt.mock.invocationCallOrder[0]).toBeLessThan(
+        startTurn.mock.invocationCallOrder[0],
+      );
+      expect(order.slice(0, 3)).toEqual(['start', 'complete', 'start']);
+      // Each turn hears what its own request streamed.
+      expect(turn.saw).toHaveBeenCalledTimes(3);
+      expect(order.at(-1)).toBe('close');
+    });
+
+    it('tells a stream-json client of a prompt a Mod submitted', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      setupMetricsMock();
+      const { turn, submitted } = installModTurn();
+      turn.complete.mockImplementationOnce(async () => {
+        submitted.push({ plugin: 'lint', text: 'Run the linter' });
+      });
+      admitting(() =>
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Done.' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, 'Fix it', 'mod-sdk');
+
+      const messages = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      const named = messages.findIndex(
+        (message) =>
+          message.type === 'system' && message.subtype === 'mod_prompt',
+      );
+      expect(named).toBeGreaterThan(0);
+      expect(messages[named].data).toEqual({ mod: 'lint' });
+      expect(messages[named - 1]).toMatchObject({ type: 'user' });
+      expect(JSON.stringify(messages[named - 1].message)).toContain(
+        'Run the linter',
+      );
+      // It comes before the turn the prompt starts.
+      expect(
+        messages.findIndex(
+          (message, index) => index > named && message.type === 'assistant',
+        ),
+      ).toBeGreaterThan(named);
+    });
+
+    it('ends a Mod turn a duplicate provider call stops as an error', async () => {
+      setupMetricsMock();
+      mockLlmClient.getHistoryToolCallFingerprints.mockReturnValue(
+        new Map([
+          [
+            'tool-drain',
+            getToolCallFingerprint('testTool', { arg1: 'value1' }),
+          ],
+        ]),
+      );
+      const { turn, submitted } = installModTurn();
+      turn.complete.mockImplementationOnce(async () => {
+        submitted.push({ plugin: 'lint', text: 'Run the linter' });
+      });
+      const toolCall = (callId: string, providerCallId: string, arg1: string) =>
+        ({
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId,
+            providerCallId,
+            name: 'testTool',
+            args: { arg1 },
+            isClientInitiated: false,
+            prompt_id: 'mod-dup',
+          },
+        }) as ServerLlmStreamEvent;
+      const duplicate = toolCall(
+        'tool-drain__qwen_dup_2',
+        'tool-drain',
+        'value1',
+      );
+      const rounds: ServerLlmStreamEvent[][] = [
+        [
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ],
+        [duplicate],
+        [duplicate, toolCall('tool-fresh', 'tool-fresh', 'value2')],
+      ];
+      admitting(() => createStreamFromEvents(rounds.shift() ?? []));
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Fix it',
+        'mod-dup',
+      );
+
+      expect(exitCode).toBe(1);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
+      // The person's turn ends with its answer; the Mod's as an error.
+      expect(turn.complete.mock.calls[0]).toEqual([]);
+      expect(turn.complete.mock.calls[1]).toEqual(['error']);
+    });
+
+    it('does not carry a prompt a Mod submitted into the next run once a run stops early', async () => {
+      setupMetricsMock();
+      const { turn, submitted } = installModTurn();
+      // A stream-json session runs every message on the same Mods.
+      const modSession = ModSession.create(
+        mockConfig,
+        mockSettings,
+        undefined as never,
+      );
+      turn.complete.mockImplementationOnce(async () => {
+        submitted.push({ plugin: 'lint', text: 'Run the linter' });
+      });
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Error,
+            value: { error: { message: 'boom', status: 500 } },
+          },
+        ]),
+      );
+      await runNonInteractive(mockConfig, mockSettings, 'Fix it', 'mod-stop', {
+        modSession,
+      }).catch(() => undefined);
+      expect(submitted).toEqual([]);
+
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+      await runNonInteractive(mockConfig, mockSettings, 'Next', 'mod-next', {
+        modSession,
+      });
+      expect(
+        mockLlmClient.sendMessageStream.mock.calls.map(([request]) =>
+          JSON.stringify(request),
+        ),
+      ).toEqual([
+        expect.stringContaining('Fix it'),
+        expect.stringContaining('Next'),
+      ]);
+    });
+
+    it('prints a Mod command reply in text output before the turn it hands on', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.TEXT);
+      setupMetricsMock();
+      const { submitted } = installModTurn();
+      mockGetCommands.mockReturnValue([
+        {
+          name: 'review',
+          description: 'review',
+          kind: CommandKind.FILE,
+          action: vi.fn(async () => {
+            submitted.push({ plugin: 'lint', text: 'Review the diff' });
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: 'Review queued.',
+            };
+          }),
+        },
+      ]);
+      admitting(() =>
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Reviewed.' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/review',
+        'mod-command-text',
+      );
+
+      expect(exitCode).toBe(0);
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      expect(stdout).toContain('Review queued.\n');
+      expect(stdout.indexOf('Review queued.')).toBeLessThan(
+        stdout.indexOf('Reviewed.'),
+      );
+    });
+
+    it('gives the worktree notice a Mod command reply held to the turn it hands on', async () => {
+      setupMetricsMock();
+      const { submitted } = installModTurn();
+      vi.mocked(mockConfig.consumePendingStartupWorktreeNotice).mockReturnValue(
+        'Working in worktree wt-1.',
+      );
+      mockGetCommands.mockReturnValue([
+        {
+          name: 'review',
+          description: 'review',
+          kind: CommandKind.FILE,
+          action: vi.fn(async () => {
+            submitted.push({ plugin: 'lint', text: 'Review the diff' });
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: 'Review queued.',
+            };
+          }),
+        },
+      ]);
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/review',
+        'mod-command-worktree',
+      );
+
+      const calls = mockLlmClient.sendMessageStream.mock.calls;
+      expect(calls).toHaveLength(1);
+      expect(calls[0][0]).toEqual([
+        {
+          text: '<system-reminder>\nWorking in worktree wt-1.\n</system-reminder>\n\n',
+        },
+        { text: frameModPrompt({ plugin: 'lint', text: 'Review the diff' }) },
+      ]);
+    });
+
+    it('runs a prompt a Mod command submitted after the command replies', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      setupMetricsMock();
+      const { startTurn, submitted } = installModTurn();
+      // A Mod command answers with a message once it has handed work on.
+      mockGetCommands.mockReturnValue([
+        {
+          name: 'review',
+          description: 'review',
+          kind: CommandKind.FILE,
+          action: vi.fn(async () => {
+            submitted.push({ plugin: 'lint', text: 'Review the diff' });
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: 'Review queued.',
+            };
+          }),
+        },
+      ]);
+      admitting(() =>
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Reviewed.' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/review',
+        'mod-command',
+      );
+
+      expect(exitCode).toBe(0);
+      // The command's reply is no turn: the only request is the Mod's prompt.
+      const calls = mockLlmClient.sendMessageStream.mock.calls;
+      expect(calls).toHaveLength(1);
+      expect(calls[0][0]).toEqual([
+        { text: frameModPrompt({ plugin: 'lint', text: 'Review the diff' }) },
+      ]);
+      expect(calls[0][3]).toMatchObject({
+        type: SendMessageType.UserQuery,
+        submittedByMod: 'lint',
+      });
+      expect(startTurn.mock.calls.map(([text]) => text)).toEqual([
+        'Review the diff',
+      ]);
+      expect(submitted).toEqual([]);
+      const messages = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      const reply = messages.findIndex(
+        (message) =>
+          message.type === 'assistant' &&
+          JSON.stringify(message.message).includes('Review queued.'),
+      );
+      const named = messages.findIndex(
+        (message) =>
+          message.type === 'system' && message.subtype === 'mod_prompt',
+      );
+      // The reply comes first, then the Mod's prompt, and one result ends it.
+      expect(reply).toBeGreaterThan(-1);
+      expect(named).toBeGreaterThan(reply);
+      expect(
+        messages.filter((message) => message.type === 'result'),
+      ).toHaveLength(1);
+      expect(messages.at(-1)).toMatchObject({
+        type: 'result',
+        is_error: false,
+        num_turns: 1,
+      });
+    });
+
+    it('sends the prompt and context the prompt.submit hooks passed on', async () => {
+      setupMetricsMock();
+      const { order, startTurn, submitPrompt } = installModTurn();
+      submitPrompt.mockImplementation(async (text) => {
+        order.push('submit');
+        return { text: text.toUpperCase(), context: ['note'] };
+      });
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, 'Fix it', 'rewrite');
+
+      expect(submitPrompt).toHaveBeenCalledExactlyOnceWith(
+        'Fix it',
+        mockLlmClient.sendMessageStream.mock.calls[0][1],
+      );
+      const [request, , , options] =
+        mockLlmClient.sendMessageStream.mock.calls[0];
+      expect(JSON.stringify(request)).toContain('FIX IT');
+      expect(JSON.stringify(request)).not.toContain('Fix it');
+      expect(options).toMatchObject({
+        submittedPrompt: 'FIX IT',
+        promptContext: ['note'],
+      });
+      expect(startTurn.mock.calls[0][0]).toBe('FIX IT');
+      expect(order.slice(0, 2)).toEqual(['submit', 'start']);
+    });
+
+    it('lets the hooks hear and rewrite only the text of a message with other blocks', async () => {
+      setupMetricsMock();
+      const { startTurn, submitPrompt } = installModTurn();
+      submitPrompt.mockImplementation(async (text) => ({
+        text: text.toUpperCase(),
+      }));
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+      const image = '{"type":"image"}';
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        `Fix it\n${image}`,
+        'blocks',
+        {
+          humanInput: { text: 'Fix it' },
+          promptParts: { text: 'Fix it', blocks: [image] },
+        },
+      );
+
+      expect(submitPrompt).toHaveBeenCalledExactlyOnceWith(
+        'Fix it',
+        expect.any(AbortSignal),
+      );
+      const [request, , , options] =
+        mockLlmClient.sendMessageStream.mock.calls[0];
+      expect(request).toEqual([{ text: `FIX IT\n${image}` }]);
+      expect(options).toMatchObject({
+        submittedPrompt: `FIX IT\n${image}`,
+        humanInput: { text: 'FIX IT' },
+      });
+      expect(startTurn.mock.calls[0][0]).toBe('FIX IT');
+    });
+
+    it.each([OutputFormat.JSON, OutputFormat.TEXT])(
+      'ends a run whose prompt a hook dropped with a result in %s',
+      async (format) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+        setupMetricsMock();
+        const { startTurn, submitPrompt } = installModTurn();
+        submitPrompt.mockResolvedValue({
+          drop: 'Prompt dropped by a hook: no secrets',
+        });
+
+        const exitCode = await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'a secret',
+          'dropped',
+        );
+
+        expect(exitCode).toBe(1);
+        expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+        expect(startTurn).not.toHaveBeenCalled();
+        if (format === OutputFormat.JSON) {
+          const messages = JSON.parse(
+            processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+          );
+          expect(messages.at(-1)).toMatchObject({
+            type: 'result',
+            is_error: true,
+            error: { message: 'Prompt dropped by a hook: no secrets' },
+          });
+        } else {
+          expect(processStderrSpy).toHaveBeenCalledWith(
+            'Prompt dropped by a hook: no secrets\n',
+          );
+        }
+      },
+    );
+
+    it('raises no prompt.submit for a message no person typed or without text', async () => {
+      setupMetricsMock();
+      const { submitPrompt, notePersonPrompt } = installModTurn();
+      mockLlmClient.sendMessageStream.mockImplementation(() =>
+        createStreamFromEvents([]),
+      );
+      const result = '{"type":"tool_result","tool_use_id":"t1"}';
+
+      await runNonInteractive(mockConfig, mockSettings, result, 'tool', {
+        promptParts: { text: '', blocks: [result] },
+        fromTool: true,
+      });
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        `Done\n${result}`,
+        'tool-text',
+        {
+          promptParts: { text: 'Done', blocks: [result] },
+          fromTool: true,
+        },
+      );
+      // A client's tool results are not the person's prompts, so they leave
+      // the Mods' turn count as it is.
+      expect(notePersonPrompt).not.toHaveBeenCalled();
+      const image = '{"type":"image"}';
+      await runNonInteractive(mockConfig, mockSettings, image, 'image', {
+        promptParts: { text: '', blocks: [image] },
+      });
+
+      expect(submitPrompt).not.toHaveBeenCalled();
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
+    });
+
+    it('raises no prompt.submit for a slash command or a notification', async () => {
+      setupMetricsMock();
+      const { submitPrompt, notePersonPrompt } = installModTurn();
+      mockGetCommands.mockReturnValue([
+        {
+          name: 'review',
+          description: 'review',
+          kind: CommandKind.FILE,
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'Review the diff' }],
+          }),
+        },
+      ]);
+      mockLlmClient.sendMessageStream.mockImplementation(() =>
+        createStreamFromEvents([]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, '/review', 'slash');
+      await runNonInteractive(mockConfig, mockSettings, 'done', 'note', {
+        sendMessageType: SendMessageType.Notification,
+      });
+
+      expect(submitPrompt).not.toHaveBeenCalled();
+      // The person's slash command still lets the Mods' prompts start turns
+      // again; a notification does not.
+      expect(notePersonPrompt).toHaveBeenCalledOnce();
+    });
+
+    it('starts no turn for a prompt core never admits', async () => {
+      setupMetricsMock();
+      const { startTurn } = installModTurn();
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          {
+            type: LlmEventType.UserPromptSubmitBlocked,
+            value: { reason: 'blocked', originalPrompt: 'Fix it' },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, 'Fix it', 'blocked');
+
+      expect(startTurn).not.toHaveBeenCalled();
+    });
+
+    it.each([OutputFormat.JSON, OutputFormat.TEXT])(
+      'lets a Mod end the turn with a result in %s',
+      async (format) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+        setupMetricsMock();
+        const mod = installModTurn();
+        const aborts: boolean[] = [];
+        admitting(async function* () {
+          yield { type: LlmEventType.Content, value: 'Partial' };
+          aborts.push(mod.abort(), mod.abort());
+          yield { type: LlmEventType.UserCancelled } as ServerLlmStreamEvent;
+        });
+
+        const exitCode = await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Fix it',
+          'mod-abort',
+        );
+
+        expect(exitCode).toBe(130);
+        // The run is already ending, so a second call ends nothing.
+        expect(aborts).toEqual([true, false]);
+        // The run answers with a result rather than exiting as an interrupt.
+        expect(process.exit).not.toHaveBeenCalled();
+        expect(mod.turn.complete.mock.calls[0]).toEqual(['aborted']);
+        if (format === OutputFormat.JSON) {
+          const messages = JSON.parse(
+            processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+          );
+          expect(messages.at(-1)).toMatchObject({
+            type: 'result',
+            is_error: true,
+            error: { message: 'A Mod ended the turn.' },
+          });
+        } else {
+          expect(processStderrSpy).toHaveBeenCalledWith(
+            'A Mod ended the turn.\n',
+          );
+        }
+      },
+    );
+
+    it('ends a structured-output run as an answer', async () => {
+      (mockConfig.getJsonSchema as Mock).mockReturnValue({
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+      });
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+      const { order, turn } = installModTurn();
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'ok' }],
+      });
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-structured',
+              name: 'structured_output',
+              args: { summary: 'done' },
+              isClientInitiated: false,
+              prompt_id: 'mod-structured',
+            },
+          },
+        ]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Emit structured output',
+        'mod-structured',
+      );
+
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+      expect(turn.complete.mock.calls[0]).toEqual([]);
+      expect(order.slice(0, 3)).toEqual(['start', 'complete', 'close']);
+    });
+
+    it('hears the continuation of an interrupted turn', async () => {
+      setupMetricsMock();
+      const { order, turn, startTurn } = installModTurn();
+      mockLlmClient.getChat = vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+        getHistoryShallow: vi.fn().mockReturnValue([]),
+        getHistory: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: 'do the thing' }] },
+          ]),
+      }));
+      admitting(() =>
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Done.' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, '', 'mod-continue', {
+        continueInterrupted: true,
+      });
+
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
+        [{ text: 'do the thing' }],
+        expect.any(AbortSignal),
+        'mod-continue',
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+      // A continuation has no typed prompt.
+      expect(startTurn).toHaveBeenCalledExactlyOnceWith(
+        '',
+        expect.any(AbortSignal),
+        expect.any(Function),
+        mockLlmClient.sendMessageStream.mock.calls[0][2],
+      );
+      expect(turn.complete.mock.calls[0]).toEqual([]);
+      expect(order.slice(0, 3)).toEqual(['start', 'complete', 'close']);
+    });
+
+    it('ends a turn the run budget stops as an error', async () => {
+      setupMetricsMock();
+      vi.mocked(mockConfig.getMaxWallTimeSeconds).mockReturnValue(0.01);
+      const mod = installModTurn();
+      mockLlmClient.sendMessageStream.mockImplementation(
+        (...args: unknown[]) => {
+          (args[3] as { onPromptAdmitted?: () => void })?.onPromptAdmitted?.();
+          const signal = args[1] as AbortSignal;
+          return (async function* () {
+            yield { type: LlmEventType.Content, value: 'Partial' };
+            await new Promise((_, reject) =>
+              signal.addEventListener(
+                'abort',
+                () => reject(new Error('stream aborted after budget expiry')),
+                { once: true },
+              ),
+            );
+          })();
+        },
+      );
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'Fix it', 'mod-budget'),
+      ).rejects.toThrow('process.exit(55) called');
+
+      // The budget aborts the run's controller, yet no one cancelled the turn.
+      expect(mod.turn.complete.mock.calls[0]).toEqual(['error']);
+    });
+
+    it('lets a Mod end the turn from its tool.call hook', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+      const mod = installModTurn();
+      // The hook calls $.turn.abort while the call waits on it.
+      mockCoreExecuteToolCall.mockImplementation(async () => {
+        mod.abort();
+        return {
+          callId: 'mod-ended-call',
+          responseParts: [{ text: 'Tool denied by Mod.' }],
+          resultDisplay: 'Tool denied by Mod.',
+          error: new Error('Tool denied by Mod.'),
+          errorType: undefined,
+        };
+      });
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.ToolCallRequest,
+            value: {
+              callId: 'mod-ended-call',
+              name: 'run_shell_command',
+              args: { command: 'echo should-not-run' },
+              isClientInitiated: false,
+              prompt_id: 'mod-tool-abort',
+            },
+          },
+        ]),
+      );
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Fix it',
+        'mod-tool-abort',
+      );
+
+      expect(exitCode).toBe(130);
+      expect(mod.turn.complete.mock.calls[0]).toEqual(['aborted']);
+      const messages = JSON.parse(
+        processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+      );
+      expect(messages.at(-1)).toMatchObject({
+        type: 'result',
+        is_error: true,
+        error: { message: 'A Mod ended the turn.' },
+      });
+    });
+
+    it('ends the person’s Goal turn before a Goal continuation runs', async () => {
+      setupMetricsMock();
+      await prepareGoalState('active');
+      let host: Parameters<typeof goalRuntime.bindHost>[0] | undefined;
+      vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((bound) => {
+        host = bound;
+        return goalRuntime.bindHost(bound);
+      });
+      vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
+      const { order, turn } = installModTurn();
+      // update_goal ends the turn while the runtime queues a continuation.
+      mockCoreExecuteToolCall.mockImplementation(async () => {
+        const goal = goalRuntime.getSnapshot().goal!;
+        await host!.startGoalTurn({
+          permit: {
+            goalId: goal.goalId,
+            revision: goal.revision,
+            turnId: 'goal-next',
+          },
+          continuationContext: 'existing goal',
+        });
+        return {
+          callId: 'update-goal-terminal',
+          responseParts: [{ text: 'proposal recorded' }],
+          resultDisplay: 'proposal recorded',
+          error: undefined,
+          errorType: undefined,
+          terminateTurn: true,
+        };
+      });
+      mockLlmClient.sendMessageStream.mockImplementation(
+        (
+          _parts: Part[],
+          _signal: AbortSignal,
+          _promptId: string,
+          sendOptions: {
+            goalPermit?: GoalTurnPermit;
+            onPromptAdmitted?: () => void;
+          },
+        ) => {
+          sendOptions.onPromptAdmitted?.();
+          order.push(
+            `send ${order.filter((step) => step.startsWith('send')).length + 1}`,
+          );
+          return createStreamFromEvents(
+            order.includes('send 2')
+              ? [
+                  { type: LlmEventType.Content, value: 'Continued.' },
+                  {
+                    type: LlmEventType.Finished,
+                    value: { reason: undefined, usageMetadata: undefined },
+                  },
+                ]
+              : [
+                  {
+                    type: LlmEventType.ToolCallRequest,
+                    value: {
+                      callId: 'update-goal-terminal',
+                      name: 'update_goal',
+                      args: {},
+                      isClientInitiated: false,
+                      prompt_id: 'goal-user-turn',
+                      goalContext: sendOptions.goalPermit,
+                    },
+                  },
+                ],
+          );
+        },
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'A real user update',
+        'goal-user-turn',
+      );
+
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      // The continuation is not the person's turn: it ends first.
+      expect(order.slice(0, 4)).toEqual([
+        'start',
+        'send 1',
+        'complete',
+        'send 2',
+      ]);
+      expect(turn.complete.mock.calls[0]).toEqual([]);
+    });
+
+    it('ends a loop-detected turn as an error before the Mods close', async () => {
+      setupMetricsMock();
+      const { order, turn } = installModTurn();
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.LoopDetected,
+            value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
+          },
+        ]),
+      );
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Fix it',
+        'mod-loop',
+      );
+
+      expect(exitCode).toBe(1);
+      expect(turn.complete.mock.calls[0]).toEqual(['error']);
+      // A close first would end the turn as aborted.
+      expect(order.slice(0, 3)).toEqual(['start', 'complete', 'close']);
+    });
+
+    it('ends the turn as an error when its request fails', async () => {
+      setupMetricsMock();
+      const { turn } = installModTurn();
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Error,
+            value: { error: { message: 'boom', status: 500 } },
+          },
+        ]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Fix it',
+        'mod-error',
+      ).catch(() => undefined);
+
+      expect(turn.complete.mock.calls[0]).toEqual(['error']);
+    });
   });
 
   it('should handle API errors in text mode and exit with error code', async () => {
@@ -6155,6 +9404,7 @@ describe('runNonInteractive', () => {
         error: {
           message: '402 Model gpt-oss-120b is not available for billing.',
           status: 402,
+          requestId: 'a30a1854-1925-4da8-8803-73fee2865116',
         },
       },
     };
@@ -6199,6 +9449,14 @@ describe('runNonInteractive', () => {
         expect(line.match(/\[API Error: /g)?.length ?? 0).toBe(1);
       }
     }
+
+    // End-to-end pin for issue #14115: the StructuredError's requestId must
+    // survive the whole forwarding chain onto the user-facing stderr line
+    // (inside the closing bracket, so the idempotency guard above still
+    // recognizes the line as formatted).
+    expect(stderrOutput).toContain(
+      '(request_id: a30a1854-1925-4da8-8803-73fee2865116)',
+    );
   });
 
   it('should handle FatalInputError with custom exit code in JSON format', async () => {
@@ -6241,50 +9499,262 @@ describe('runNonInteractive', () => {
     expect(processStderrSpy).toHaveBeenCalledWith(`${jsonError}\n`);
   });
 
-  it('should execute a slash command that returns a prompt', async () => {
-    setupMetricsMock();
-    const mockCommand = {
-      name: 'testcommand',
-      description: 'a test command',
-      kind: CommandKind.FILE,
-      action: vi.fn().mockResolvedValue({
-        type: 'submit_prompt',
-        content: [{ text: 'Prompt from command' }],
-      }),
-    };
-    mockGetCommands.mockReturnValue([mockCommand]);
+  it.each(bothLoops)(
+    'should execute a slash command that returns a prompt ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      const mockCommand = {
+        name: 'testcommand',
+        description: 'a test command',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'Prompt from command' }],
+        }),
+      };
+      mockGetCommands.mockReturnValue([mockCommand]);
 
-    const events: ServerLlmStreamEvent[] = [
-      { type: LlmEventType.Content, value: 'Response from command' },
-      {
-        type: LlmEventType.Finished,
-        value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+      const events: ServerLlmStreamEvent[] = [
+        { type: LlmEventType.Content, value: 'Response from command' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+        },
+      ];
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents(events),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/testcommand',
+        'prompt-id-slash',
+      );
+
+      // Ensure the prompt sent to the model is from the command, not the raw input
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
+        [{ text: 'Prompt from command' }],
+        expect.any(AbortSignal),
+        'prompt-id-slash',
+        {
+          type: SendMessageType.UserQuery,
+          workflowModeEligible: false,
+          modelOverride: undefined,
+          submittedPrompt: '/testcommand',
+          ...(shared ? { onPromptAdmitted: expect.any(Function) } : {}),
+        },
+      );
+
+      expect(processStdoutSpy).toHaveBeenCalledWith('Response from command\n');
+    },
+  );
+
+  describe('UserPromptSubmit admission before a command expands', () => {
+    const spies: Array<{ mockRestore: () => void }> = [];
+    const admission = Object.freeze({ blocked: false });
+    let deploy: SlashCommand & { action: Mock };
+    const finishedStream = () =>
+      createStreamFromEvents([
+        { type: LlmEventType.Content, value: 'done' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]);
+
+    beforeEach(() => {
+      setupMetricsMock();
+      deploy = {
+        name: 'deploy',
+        description: 'deploy',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'deploy expanded' }],
+        }),
+      };
+      for (const Loader of [
+        McpPromptLoader,
+        BuiltinCommandLoader,
+        BundledSkillLoader,
+        SkillCommandLoader,
+        SavedWorkflowLoader,
+      ]) {
+        spies.push(
+          vi
+            .spyOn(Loader.prototype as ICommandLoader, 'loadCommands')
+            .mockResolvedValue([]),
+        );
+      }
+      spies.push(
+        vi
+          .spyOn(FileCommandLoader.prototype as ICommandLoader, 'loadCommands')
+          .mockImplementation(async () => [deploy]),
+      );
+      mockCommandServiceCreate.mockImplementation(
+        async (loaders: ICommandLoader[], signal: AbortSignal) => {
+          const commands = (
+            await Promise.all(
+              loaders.map((loader) => loader.loadCommands(signal)),
+            )
+          )
+            .flat()
+            .map((command) => ({ ...command }));
+          return {
+            getCommands: () => commands,
+            getCommandsForMode: (mode: ExecutionMode) =>
+              filterCommandsForMode(commands, mode),
+          };
+        },
+      );
+      mockLlmClient.admitUserPrompt.mockResolvedValue(admission);
+      mockLlmClient.sendMessageStream.mockImplementation(finishedStream);
+    });
+
+    afterEach(() => {
+      for (const spy of spies.splice(0)) spy.mockRestore();
+    });
+
+    it('admits a custom command before it expands and passes the admission to the first send', async () => {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-admit',
+      );
+
+      expect(mockLlmClient.admitUserPrompt).toHaveBeenCalledExactlyOnceWith(
+        '/deploy prod',
+        'prompt-id-admit',
+      );
+      expect(
+        mockLlmClient.admitUserPrompt.mock.invocationCallOrder[0],
+      ).toBeLessThan(deploy.action.mock.invocationCallOrder[0]!);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledExactlyOnceWith(
+        [{ text: 'deploy expanded' }],
+        expect.any(AbortSignal),
+        'prompt-id-admit',
+        {
+          type: SendMessageType.UserQuery,
+          workflowModeEligible: false,
+          modelOverride: undefined,
+          submittedPrompt: '/deploy prod',
+          promptAdmission: admission,
+        },
+      );
+    });
+
+    it('sends a refused command unexpanded, with the admission that blocks it', async () => {
+      const refused = Object.freeze({ blocked: true });
+      mockLlmClient.admitUserPrompt.mockResolvedValue(refused);
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-refused',
+      );
+
+      expect(deploy.action).not.toHaveBeenCalled();
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledExactlyOnceWith(
+        [{ text: '/deploy prod' }],
+        expect.any(AbortSignal),
+        'prompt-id-refused',
+        expect.objectContaining({
+          type: SendMessageType.UserQuery,
+          promptAdmission: refused,
+        }),
+      );
+    });
+
+    it('passes the admission to the first send only', async () => {
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'Tool response' }],
+        executionStatus: 'success',
+      });
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'tool-1',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'prompt-id-tool',
+              },
+            },
+          ]),
+        )
+        .mockImplementationOnce(finishedStream);
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-tool',
+      );
+
+      const sendOptions = mockLlmClient.sendMessageStream.mock.calls.map(
+        (call) => call[3],
+      );
+      expect(sendOptions).toEqual([
+        expect.objectContaining({ promptAdmission: admission }),
+        expect.not.objectContaining({ promptAdmission: expect.anything() }),
+      ]);
+      expect(mockLlmClient.admitUserPrompt).toHaveBeenCalledOnce();
+    });
+
+    it('does not admit a notification batch', async () => {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/deploy prod',
+        'prompt-id-notification',
+        { sendMessageType: SendMessageType.Notification },
+      );
+
+      expect(mockLlmClient.admitUserPrompt).not.toHaveBeenCalled();
+      expect(deploy.action).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      ['before admission', true],
+      ['while admission runs', false],
+    ])(
+      'runs no command when the turn is cancelled %s',
+      async (_, abortFirst) => {
+        const turnAbortController = new AbortController();
+        const cancel = () =>
+          turnAbortController.abort(new TurnInterruptedError());
+        if (abortFirst) cancel();
+        mockLlmClient.admitUserPrompt.mockImplementation(async () => {
+          cancel();
+          return admission;
+        });
+
+        const exitCode = await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          '/deploy prod',
+          'prompt-id-cancelled',
+          {
+            abortController: turnAbortController,
+            recoverableCancellation: true,
+          },
+        );
+
+        expect(exitCode).toBe(130);
+        expect(mockLlmClient.admitUserPrompt).toHaveBeenCalledTimes(
+          abortFirst ? 0 : 1,
+        );
+        expect(deploy.action).not.toHaveBeenCalled();
+        expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
       },
-    ];
-    mockLlmClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents(events),
     );
-
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      '/testcommand',
-      'prompt-id-slash',
-    );
-
-    // Ensure the prompt sent to the model is from the command, not the raw input
-    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
-      [{ text: 'Prompt from command' }],
-      expect.any(AbortSignal),
-      'prompt-id-slash',
-      {
-        type: SendMessageType.UserQuery,
-        modelOverride: undefined,
-        submittedPrompt: '/testcommand',
-      },
-    );
-
-    expect(processStdoutSpy).toHaveBeenCalledWith('Response from command\n');
   });
 
   it('should handle command that requires confirmation by returning early', async () => {
@@ -6343,6 +9813,7 @@ describe('runNonInteractive', () => {
       'prompt-id-unknown',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: false,
         modelOverride: undefined,
         submittedPrompt: '/unknowncommand',
       },
@@ -6755,110 +10226,274 @@ describe('runNonInteractive', () => {
     });
   });
 
-  it('keeps notifications from different Todo work chains in separate batches', async () => {
-    setupMetricsMock();
+  it.each([false, true])(
+    'keeps notifications from different Todo work chains in separate batches (shared loop: %s)',
+    async (shared) => {
+      setupMetricsMock();
+      Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => shared });
 
-    const firstNotificationXml =
-      '<task-notification>\n' +
-      '<task-id>mon_1</task-id>\n' +
-      '<kind>monitor</kind>\n' +
-      '<status>running</status>\n' +
-      '<summary>Monitor emitted event #1.</summary>\n' +
-      '<result>ready</result>\n' +
-      '</task-notification>';
-    const secondNotificationXml =
-      '<task-notification>\n' +
-      '<task-id>mon_2</task-id>\n' +
-      '<kind>monitor</kind>\n' +
-      '<status>running</status>\n' +
-      '<summary>Monitor emitted event #2.</summary>\n' +
-      '<result>also ready</result>\n' +
-      '</task-notification>';
+      const firstNotificationXml =
+        '<task-notification>\n' +
+        '<task-id>mon_1</task-id>\n' +
+        '<kind>monitor</kind>\n' +
+        '<status>running</status>\n' +
+        '<summary>Monitor emitted event #1.</summary>\n' +
+        '<result>ready</result>\n' +
+        '</task-notification>';
+      const secondNotificationXml =
+        '<task-notification>\n' +
+        '<task-id>mon_2</task-id>\n' +
+        '<kind>monitor</kind>\n' +
+        '<status>running</status>\n' +
+        '<summary>Monitor emitted event #2.</summary>\n' +
+        '<result>also ready</result>\n' +
+        '</task-notification>';
 
-    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
-      if (!cb) {
-        return;
-      }
-      cb('Monitor "logs" event #1: ready', firstNotificationXml, {
-        monitorId: 'mon_1',
-        toolUseId: 'tool_mon_1',
-        status: 'running',
-        eventCount: 1,
-        todoWorkChainId: 'chain-1',
+      mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+        if (!cb) {
+          return;
+        }
+        cb('Monitor "logs" event #1: ready', firstNotificationXml, {
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          status: 'running',
+          eventCount: 1,
+          todoWorkChainId: 'chain-1',
+        });
+        cb('Monitor "build" event #1: ready', secondNotificationXml, {
+          monitorId: 'mon_2',
+          toolUseId: 'tool_mon_2',
+          status: 'running',
+          eventCount: 1,
+          todoWorkChainId: 'chain-2',
+        });
       });
-      cb('Monitor "build" event #1: ready', secondNotificationXml, {
-        monitorId: 'mon_2',
-        toolUseId: 'tool_mon_2',
-        status: 'running',
-        eventCount: 1,
-        todoWorkChainId: 'chain-2',
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Started.' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'First notification.' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Second notification.' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Watch the logs',
+        'prompt-monitor-work-chains',
+      );
+
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        [{ text: firstNotificationXml }],
+        expect.any(AbortSignal),
+        'prompt-monitor-work-chains/automatic/2',
+        expect.objectContaining({
+          todoWorkChainId: 'chain-1',
+        }),
+      );
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        3,
+        [{ text: secondNotificationXml }],
+        expect.any(AbortSignal),
+        'prompt-monitor-work-chains/automatic/3',
+        expect.objectContaining({
+          todoWorkChainId: 'chain-2',
+        }),
+      );
+    },
+  );
+
+  it.each(bothLoops)(
+    'answers an interrupt during a tool call with its result ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+      setupMetricsMock();
+      // A stream-json session interrupts the running turn this way.
+      const abortController = new AbortController();
+      mockCoreExecuteToolCall.mockImplementation(async () => {
+        abortController.abort(new TurnInterruptedError());
+        return {
+          callId: 'interrupted-call',
+          responseParts: [{ text: 'cancelled' }],
+          resultDisplay: 'cancelled',
+          error: new Error('cancelled'),
+          errorType: undefined,
+        };
       });
-    });
-    mockLlmClient.sendMessageStream
-      .mockReturnValueOnce(
+      mockLlmClient.sendMessageStream.mockReturnValue(
         createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'Started.' },
           {
-            type: LlmEventType.Finished,
+            type: LlmEventType.ToolCallRequest,
             value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 1 },
-            },
-          },
-        ]),
-      )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'First notification.' },
-          {
-            type: LlmEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 1 },
-            },
-          },
-        ]),
-      )
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: LlmEventType.Content, value: 'Second notification.' },
-          {
-            type: LlmEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 1 },
+              callId: 'interrupted-call',
+              name: 'run_shell_command',
+              args: { command: 'sleep 10' },
+              isClientInitiated: false,
+              prompt_id: 'interrupted-tool',
             },
           },
         ]),
       );
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Watch the logs',
-      'prompt-monitor-work-chains',
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Run it',
+        'interrupted-tool',
+        { abortController, recoverableCancellation: true },
+      );
+
+      expect(exitCode).toBe(130);
+      const messages = JSON.parse(
+        processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+      );
+      expect(messages.at(-1)).toMatchObject({
+        type: 'result',
+        is_error: true,
+        error: { message: 'Operation cancelled.' },
+      });
+    },
+  );
+
+  it('ends the run at the client session turn limit on the shared loop (#15325)', async () => {
+    setupMetricsMock();
+    Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => true });
+    mockLlmClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([{ type: LlmEventType.MaxSessionTurns }]),
     );
 
-    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      2,
-      [{ text: firstNotificationXml }],
-      expect.any(AbortSignal),
-      'prompt-monitor-work-chains/automatic/2',
-      expect.objectContaining({
-        todoWorkChainId: 'chain-1',
-      }),
-    );
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      3,
-      [{ text: secondNotificationXml }],
-      expect.any(AbortSignal),
-      'prompt-monitor-work-chains/automatic/3',
-      expect.objectContaining({
-        todoWorkChainId: 'chain-2',
-      }),
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Second question',
+        'prompt-client-turn-cap',
+      ),
+    ).rejects.toThrow('process.exit(53) called');
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Reached max session turns'),
     );
   });
+
+  // Intended difference: headless charges a drain item one turn, while the
+  // client counts each of its rounds, and only the shared loop honours the
+  // client's limit.
+  it.each(bothLoops)(
+    'handles the client session turn limit inside a drain item ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+
+      const notificationXml =
+        '<task-notification>\n' +
+        '<task-id>mon_1</task-id>\n' +
+        '<kind>monitor</kind>\n' +
+        '<status>running</status>\n' +
+        '<summary>Monitor emitted event #1.</summary>\n' +
+        '<result>ready</result>\n' +
+        '</task-notification>';
+      mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+        if (!cb) return;
+        cb('Monitor "logs" event #1: ready', notificationXml, {
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          status: 'running',
+          eventCount: 1,
+        });
+      });
+
+      const drainToolCallEvent: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-drain',
+          name: 'testTool',
+          args: { arg1: 'value1' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-drain-turn-cap',
+        },
+      };
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: [{ text: 'Tool response' }],
+      });
+
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Monitor launched.' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 2 },
+              },
+            },
+          ]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents([drainToolCallEvent]))
+        .mockReturnValueOnce(
+          createStreamFromEvents([{ type: LlmEventType.MaxSessionTurns }]),
+        );
+
+      // A drain item runs detached from the run's promise, so a throwing exit
+      // would surface as an unhandled rejection; hold the exit open instead,
+      // as the real process ends there.
+      if (shared) {
+        vi.mocked(process.exit).mockImplementation(
+          () => new Promise<never>(() => {}) as never,
+        );
+      }
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Watch the logs',
+        'prompt-id-drain-turn-cap',
+      );
+
+      if (shared) {
+        await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(53));
+        expect(processStderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Reached max session turns'),
+        );
+      } else {
+        await expect(run).resolves.toBe(0);
+      }
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it.skip('should emit a single user envelope when userEnvelope is provided', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
@@ -7461,6 +11096,7 @@ describe('runNonInteractive', () => {
       'prompt-envelope',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Message from stream-json input',
       },
@@ -8139,6 +11775,7 @@ describe('runNonInteractive', () => {
       'prompt-string-content',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Simple string content',
       },
@@ -8176,6 +11813,7 @@ describe('runNonInteractive', () => {
       'prompt-blocks-content',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'First part Second part',
       },
@@ -8223,6 +11861,261 @@ describe('runNonInteractive', () => {
     );
     expect(predicate({ prompt: 'regular cron job' } as CronJob)).toBe(false);
   });
+
+  it('exits once the final fire of a gated session job settles quietly', async () => {
+    // An expiring recurring job (like a one-shot) leaves the scheduler before
+    // its gate runs; a quiet gate then reaches no consumer, so the hold-open
+    // must be re-checked from the gate's settlement or the run pins forever.
+    setupMetricsMock();
+    let settleGate:
+      | ((result: { kind: 'quiet'; durationMs: number }) => void)
+      | undefined;
+    const scheduler = new CronScheduler(null, 60_000, {
+      runGate: () =>
+        new Promise((resolve) => {
+          settleGate = resolve;
+        }),
+    });
+    const job = scheduler.create('* * * * *', 'gated', true, 'true');
+    job.gateApproved = true;
+    // Park the job past the wall clock so the scheduler's own 1 s tick never
+    // fires it; the test ticks it explicitly, past its expiry.
+    job.lastFiredAt = Date.now() + 10 * 60_000;
+    const startSpy = vi.spyOn(scheduler, 'start');
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: LlmEventType.Content, value: 'ok' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+
+    let finished = false;
+    const run = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'test',
+      'p-cron-gate-final',
+    ).then(() => {
+      finished = true;
+    });
+    await vi.waitFor(() => expect(startSpy).toHaveBeenCalled());
+    expect(scheduler.sessionSize).toBe(1);
+
+    const slot = job.lastFiredAt + 120_000;
+    scheduler.tick(new Date(slot - (slot % 60_000) + 59_000));
+    await vi.waitFor(() => expect(settleGate).toBeDefined());
+    // Final fire: gone from the map, still counted while its gate runs.
+    expect(scheduler.list()).toHaveLength(0);
+    expect(scheduler.sessionSize).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(finished).toBe(false);
+
+    settleGate!({ kind: 'quiet', durationMs: 1 });
+    await run;
+    expect(scheduler.sessionSize).toBe(0);
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds open for a durable gated catch-up until its gate delivers', async () => {
+    // Durable jobs never pin the headless run, but start() flushes an
+    // overdue catch-up whose stamp lands before its gate decides: stopping
+    // the scheduler there would abort the gate and lose the slot for good.
+    setupMetricsMock();
+    const tmpDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'headless-gated-catch-up-'),
+    );
+    Storage.setRuntimeBaseDir(tmpDir);
+    const createdAt = Date.now() - 3 * 60 * 60_000;
+    await updateCronTasks(tmpDir, () => [
+      withTaskGate(
+        {
+          id: 'cu1',
+          cron: '0 * * * *',
+          prompt: 'overdue',
+          recurring: true,
+          createdAt,
+          lastFiredAt: createdAt,
+        },
+        './probe.sh',
+      ),
+    ]);
+    let settleGate:
+      | ((result: {
+          kind: 'output';
+          stdout: string;
+          truncated: boolean;
+          durationMs: number;
+        }) => void)
+      | undefined;
+    const scheduler = new CronScheduler(tmpDir, undefined, {
+      runGate: () =>
+        new Promise((resolve) => {
+          settleGate = resolve;
+        }),
+    });
+    try {
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockLlmClient.sendMessageStream.mockImplementation(() =>
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'ok' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
+        ]),
+      );
+
+      let finished = false;
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'test',
+        'p-cron-gate-catch-up',
+      ).then(() => {
+        finished = true;
+      });
+      await vi.waitFor(() => expect(settleGate).toBeDefined());
+      expect(scheduler.sessionSize).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(finished).toBe(false);
+
+      settleGate!({
+        kind: 'output',
+        stdout: 'event: comment\n',
+        truncated: false,
+        durationMs: 1,
+      });
+      await run;
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(
+        JSON.stringify(mockLlmClient.sendMessageStream.mock.calls[1]![0]),
+      ).toContain('<gate-output>\\nevent: comment\\n</gate-output>');
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+      const [task] = await readCronTasks(tmpDir);
+      expect(task?.runs).toEqual([
+        expect.objectContaining({ kind: 'catch-up', gate: 'delivered' }),
+      ]);
+    } finally {
+      scheduler.destroy();
+      await (scheduler as unknown as { pendingRelease: Promise<unknown> })
+        .pendingRelease;
+      Storage.setRuntimeBaseDir(null);
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each<[string, (scheduler: CronScheduler, root: string) => Promise<void>]>([
+    [
+      'deleted',
+      async (scheduler) => {
+        await scheduler.delete('cu1');
+      },
+    ],
+    [
+      'disabled on disk',
+      async (scheduler, root) => {
+        await updateCronTasks(root, (tasks) =>
+          tasks.map((t) => ({ ...t, enabled: false })),
+        );
+        // The reload the tasks-file watcher runs after its debounce.
+        await (
+          scheduler as unknown as {
+            loadFileTasks(handleMissed: boolean): Promise<void>;
+          }
+        ).loadFileTasks(false);
+      },
+    ],
+  ])(
+    'exits when the durable catch-up it holds open for is %s mid-gate',
+    async (_what, cancel) => {
+      // The hold-open waits on the running gate; cancelling it leaves nothing
+      // to wait for, and its settlement delivers nothing, so the run must
+      // re-check from there instead of pinning with an idle scheduler.
+      setupMetricsMock();
+      const tmpDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'headless-gated-cancel-'),
+      );
+      Storage.setRuntimeBaseDir(tmpDir);
+      const createdAt = Date.now() - 3 * 60 * 60_000;
+      await updateCronTasks(tmpDir, () => [
+        withTaskGate(
+          {
+            id: 'cu1',
+            cron: '0 * * * *',
+            prompt: 'overdue',
+            recurring: true,
+            createdAt,
+            lastFiredAt: createdAt,
+          },
+          './probe.sh',
+        ),
+      ]);
+      let gateSignal: AbortSignal | undefined;
+      // Like the real runner: a cancelled command settles as failed.
+      const scheduler = new CronScheduler(tmpDir, undefined, {
+        runGate: (_gate, { signal }) =>
+          new Promise((resolve) => {
+            gateSignal = signal;
+            signal.addEventListener('abort', () =>
+              resolve({
+                kind: 'failed',
+                detail: 'was cancelled',
+                stderr: '',
+                durationMs: 1,
+              }),
+            );
+          }),
+      });
+      try {
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockLlmClient.sendMessageStream.mockImplementation(() =>
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'ok' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]),
+        );
+
+        let finished = false;
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'test',
+          'p-cron-gate-cancel',
+        ).then(() => {
+          finished = true;
+        });
+        await vi.waitFor(() => expect(gateSignal).toBeDefined());
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(finished).toBe(false);
+
+        await cancel(scheduler, tmpDir);
+        expect(gateSignal!.aborted).toBe(true);
+        await vi.waitFor(() => expect(finished).toBe(true), { timeout: 1000 });
+        await run;
+        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(1);
+      } finally {
+        scheduler.destroy();
+        await (scheduler as unknown as { pendingRelease: Promise<unknown> })
+          .pendingRelease;
+        Storage.setRuntimeBaseDir(null);
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   describe('--json-schema structured output', () => {
     // Helper: walk an emitted event and extract the first tool_use_id when
@@ -8699,6 +12592,89 @@ describe('runNonInteractive', () => {
       // — the failed first attempt did not short-circuit the run.
       expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
     });
+
+    // Intended difference: the shared loop keys structured_output by its call
+    // id like any other call, so a resubmission under a reused id is a replay.
+    it.each(bothLoops)(
+      'handles a structured_output resubmitted under a reused call id ($loop)',
+      async ({ shared }) => {
+        if (shared) useSharedLoopWithModToolHooks();
+        (mockConfig.getJsonSchema as Mock).mockReturnValue({
+          type: 'object',
+          properties: { summary: { type: 'string' } },
+          required: ['summary'],
+        });
+        (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+        setupMetricsMock();
+
+        const reusedStructured: ServerLlmStreamEvent = {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'tool-structured-reused',
+            name: 'structured_output',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-reused',
+          },
+        };
+        const validStructured: ServerLlmStreamEvent = {
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'tool-structured-valid',
+            name: 'structured_output',
+            args: { summary: 'fourth try' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-reused',
+          },
+        };
+
+        mockLlmClient.sendMessageStream
+          .mockReturnValueOnce(createStreamFromEvents([reusedStructured]))
+          .mockReturnValueOnce(createStreamFromEvents([reusedStructured]))
+          .mockReturnValueOnce(createStreamFromEvents([reusedStructured]))
+          .mockReturnValueOnce(createStreamFromEvents([validStructured]));
+
+        const invalid = {
+          error: new Error('args failed schema validation'),
+          errorType: 'TOOL_INVALID_ARGUMENTS',
+          responseParts: [
+            { text: 'Tool error: args failed schema validation' },
+          ],
+        };
+        mockCoreExecuteToolCall
+          .mockResolvedValueOnce(invalid)
+          .mockResolvedValueOnce(invalid)
+          .mockResolvedValueOnce(invalid)
+          .mockResolvedValueOnce({ responseParts: [{ text: 'ok' }] });
+
+        const exitCode = await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Emit structured output',
+          'prompt-id-reused',
+        );
+
+        if (shared) {
+          // Round 2 is answered as a duplicate; round 3 repeats it and ends
+          // the run as a provider duplicate loop.
+          expect(exitCode).toBe(1);
+          expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+          expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
+          const duplicateParts = mockLlmClient.sendMessageStream.mock
+            .calls[2][0] as Part[];
+          expect(
+            duplicateParts[0].functionResponse?.response?.['error'],
+          ).toContain(
+            'Duplicate provider tool call id "tool-structured-reused"',
+          );
+        } else {
+          // Today every resubmission runs again until a valid one lands.
+          expect(exitCode).toBe(0);
+          expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(4);
+          expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(4);
+        }
+      },
+    );
 
     it('errors with non-zero exit when model emits plain text instead of structured_output', async () => {
       (mockConfig.getJsonSchema as Mock).mockReturnValue({
@@ -9437,6 +13413,11 @@ describe('runNonInteractive', () => {
         'worktree-real',
       );
       await fs.mkdir(worktreeDir, { recursive: true });
+      await fs.writeFile(
+        path.join(worktreeDir, '.qwen-session'),
+        'test-session-id',
+        'utf8',
+      );
       const sidecarPath = path.join(realTmpDir, 'sidecar.worktree.json');
       const sidecar = {
         slug: 'resume-test',

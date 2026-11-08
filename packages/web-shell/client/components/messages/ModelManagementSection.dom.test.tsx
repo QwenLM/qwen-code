@@ -543,3 +543,167 @@ describe('ModelManagementSection', () => {
     expect('baseUrl' in arg).toBe(false);
   });
 });
+
+describe('host model management controls', () => {
+  it.each([
+    [true, true],
+    [true, false],
+    [false, true],
+    [false, false],
+  ])(
+    'independently controls add=%s and delete=%s while retaining selection',
+    (allowAdd, allowDelete) => {
+      const { container, props } = renderSection({ allowAdd, allowDelete });
+      const buttons = Array.from(container.querySelectorAll('button'));
+      expect(
+        buttons.some((button) => button.textContent === '+ Add Model'),
+      ).toBe(allowAdd);
+      expect(
+        buttons.some((button) =>
+          button.getAttribute('aria-label')?.startsWith('Delete '),
+        ),
+      ).toBe(allowDelete);
+      expect(container.textContent).toContain('GPT-4o');
+      const select = buttons.find(
+        (button) =>
+          button.getAttribute('aria-label')?.includes('DeepSeek V4') &&
+          !button.getAttribute('aria-label')?.startsWith('Delete'),
+      );
+      act(() => select!.click());
+      expect(props.onSelectModel).toHaveBeenCalledWith('deepseek-v4(openai)');
+      expect(props.onDeleteModel).not.toHaveBeenCalled();
+    },
+  );
+
+  it('clears an open delete confirmation when deletion is disabled', () => {
+    const { container, props } = renderSection();
+    const button = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Delete GPT-4o"]',
+    )!;
+    act(() => button.click());
+    const { root } = mounted.at(-1)!;
+    const update = (allowDelete: boolean) =>
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <ModelManagementSection {...props} allowDelete={allowDelete} />
+          </I18nProvider>,
+        ),
+      );
+    expect(
+      container.querySelector('[aria-label="Confirm GPT-4o"]'),
+    ).not.toBeNull();
+    update(false);
+    expect(container.querySelector('[aria-label="Confirm GPT-4o"]')).toBeNull();
+    update(true);
+    expect(container.querySelector('[aria-label="Confirm GPT-4o"]')).toBeNull();
+    expect(props.onDeleteModel).not.toHaveBeenCalled();
+  });
+});
+
+describe('ModelManagementSection issue #13965 discontinued OAuth model', () => {
+  // The provider list the daemon serves enumerates every auth type, so the
+  // built-in `qwen-oauth` group reaches Settings even when the session runs on
+  // an OpenAI-compatible provider. The composer already hides it; Settings did
+  // not.
+  function oauthProvider(isCurrent = false): DaemonWorkspaceProviderStatus {
+    return {
+      kind: 'model_provider',
+      status: 'ok',
+      authType: 'qwen-oauth',
+      current: isCurrent,
+      models: [
+        {
+          modelId: 'coder-model(qwen-oauth)',
+          baseModelId: 'coder-model',
+          name: 'coder-model',
+          baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+          isCurrent,
+          isRuntime: false,
+        },
+      ],
+    };
+  }
+
+  it('hides the built-in OAuth group and its registry row', () => {
+    const { container } = renderSection({
+      providers: [...providers(), oauthProvider()],
+    });
+    expect(container.textContent).not.toContain('qwen-oauth');
+    expect(
+      container.querySelector('[aria-label="Delete coder-model"]'),
+    ).toBeNull();
+    // The unrelated OpenAI-compatible rows are untouched.
+    expect(container.textContent).toContain('GPT-4o');
+  });
+
+  it('keeps the row when the session is running that model', () => {
+    // The daemon's provider list skips runtime rows and hardcodes
+    // `isRuntime: false`, so `isCurrent` is the only signal that the running
+    // model must stay listed; otherwise Settings would empty the group while
+    // that very model is serving the session.
+    const { container } = renderSection({
+      providers: [...providers(), oauthProvider(true)],
+    });
+    expect(container.textContent).toContain('qwen-oauth');
+    expect(
+      container.querySelector('[aria-label="Delete coder-model"]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps the running OAuth model when it is the only provider group', () => {
+    // A qwen-oauth-only session: hiding the registry row must not empty the
+    // section and fall through to the empty state.
+    const { container } = renderSection({
+      providers: [oauthProvider(true)],
+      currentModelId: 'coder-model(qwen-oauth)',
+    });
+    expect(container.textContent).toContain('qwen-oauth');
+    expect(
+      container.querySelector('[aria-label="Delete coder-model"]'),
+    ).not.toBeNull();
+  });
+
+  it('does not resurrect the row through the saved-configuration merge', () => {
+    // The merge creates a provider group for an authType that is absent from
+    // the live list, so filtering the provider input alone is not enough.
+    const { container } = renderSection({
+      providers: providers(),
+      configurations: [
+        {
+          key: 'oauth-coder',
+          authType: 'qwen-oauth',
+          modelId: 'coder-model',
+          name: 'coder-model',
+          baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+          purpose: 'chat',
+        },
+      ],
+    });
+    expect(container.textContent).not.toContain('qwen-oauth');
+    expect(container.textContent).not.toContain('DYNAMIC_QWEN_OAUTH_BASE_URL');
+    expect(
+      container.querySelector('[aria-label="Delete coder-model"]'),
+    ).toBeNull();
+  });
+
+  it('keeps another provider’s model that is also called coder-model', () => {
+    const openaiCoder = providers();
+    openaiCoder[0].models.push({
+      modelId: 'coder-model(openai)',
+      baseModelId: 'coder-model',
+      name: 'coder-model',
+      baseUrl: 'https://api.openai.com/v1',
+      isCurrent: false,
+      isRuntime: false,
+    });
+    const { container } = renderSection({
+      providers: [...openaiCoder, oauthProvider()],
+      currentModelId: 'gpt-4o(openai)',
+    });
+    // Dropping the hidden entry must not be a name-based filter.
+    expect(container.textContent).toContain('coder-model');
+    expect(container.textContent).toContain('https://api.openai.com/v1');
+    expect(container.textContent).not.toContain('qwen-oauth');
+  });
+});

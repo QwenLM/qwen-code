@@ -82,8 +82,8 @@ In daemon-managed mode, every named channel's `cwd` must resolve to exactly one 
 Inbound:  Platform message
             → Envelope (with attachments)
             → GroupGate (group policy + mention gating)
-            → SenderGate (allowlist / pairing / open; group traffic follows
-              groupSenderPolicy when it is decoupled from senderPolicy)
+            → SenderGate (privatePolicy for personal messages; groups.senders
+              for group members, default open)
             → Slash commands (/clear, /help, /status)
             → SessionRouter (resolve or create agent session)
             → Resolve attachments (images → bridge, files → prompt text)
@@ -119,9 +119,9 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | `ChannelConfig`      | Channel configuration from `settings.json`                               |
 | `ChannelPlugin`      | Plugin factory interface (what you export)                               |
 | `Envelope`           | Normalized inbound message format                                        |
-| `SenderPolicy`       | `'allowlist' \| 'pairing' \| 'open'`                                     |
+| `PrivatePolicy`      | `'disabled' \| 'allowlist' \| 'pairing' \| 'open'`                       |
 | `GroupPolicy`        | `'disabled' \| 'allowlist' \| 'pairing' \| 'open'`                       |
-| `GroupSenderPolicy`  | `'inherit' \| 'open' \| 'allowlist'` — never `pairing`                   |
+| `GroupSenderPolicy`  | `'open' \| 'allowlist'` — never `pairing`                                |
 | `SessionScope`       | `'user' \| 'chat_thread' \| 'single'`; legacy `'thread'` is deprecated   |
 | `GroupConfig`        | Per-group settings (e.g. `requireMention`)                               |
 | `SessionTarget`      | Maps a session back to its channel/sender/chat                           |
@@ -145,14 +145,15 @@ constructor(name: string, config: ChannelConfig, bridge: ChannelAgentBridge, opt
 
 **Provided methods:**
 
-| Method                                                     | Description                                                                                                                                           |
-| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `handleInbound(envelope)`                                  | Route an inbound message through the full pipeline (gate checks, commands, session, prompt). Call this from your message handler.                     |
-| `setBridge(bridge)`                                        | Replace the agent bridge after crash recovery                                                                                                         |
-| `registerCommand(name, handler)`                           | Register a custom slash command (e.g. `/mycommand`)                                                                                                   |
-| `onToolCall(chatId, event)`                                | Hook called on agent tool invocations — override to show indicators                                                                                   |
-| `onResponseChunk(chatId, chunk, sessionId, segment)`       | Hook called per streaming text chunk — override for progressive display while preserving immutable `segment.sourceLabel` attribution (default: no-op) |
-| `onResponseComplete(chatId, fullText, sessionId, segment)` | Hook called when full response is ready — override to customize delivery (default: attributes delivery with `segment.sourceLabel` in named-task mode) |
+| Method                                                     | Description                                                                                                                                                                                           |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `handleInbound(envelope)`                                  | Route an inbound message through the full pipeline (gate checks, commands, session, prompt). Call this from your message handler.                                                                     |
+| `setBridge(bridge)`                                        | Replace the agent bridge after crash recovery                                                                                                                                                         |
+| `registerCommand(name, handler)`                           | Register a custom slash command (e.g. `/mycommand`)                                                                                                                                                   |
+| `onToolCall(chatId, event)`                                | Hook called on agent tool invocations — override to show indicators                                                                                                                                   |
+| `onResponseChunk(chatId, chunk, sessionId, segment)`       | Hook called per streaming text chunk — override for progressive display while preserving immutable `segment.sourceLabel` attribution (default: no-op)                                                 |
+| `isProactivePromptTurn(sessionId)`                         | `true` for loop and webhook turns whose result base delivers once via `pushProactive`; a sink that flushes streamed chunks must suppress those turns (base never calls `onResponseComplete` for them) |
+| `onResponseComplete(chatId, fullText, sessionId, segment)` | Hook called when full response is ready — override to customize delivery (default: attributes delivery with `segment.sourceLabel` in named-task mode)                                                 |
 
 **Built-in slash commands:** `/clear` (`/reset`, `/new`), `/help`, `/status`
 
@@ -270,7 +271,7 @@ constructor(bridge: ChannelAgentBridge, defaultCwd: string, scope?: SessionScope
 ### SenderGate
 
 ```typescript
-constructor(policy: SenderPolicy, allowedUsers?: string[], pairingStore?: PairingStore)
+constructor(policy: PrivatePolicy, allowedUsers?: string[], pairingStore?: PairingStore)
 ```
 
 | Method                         | Description                                                          |
@@ -281,16 +282,32 @@ constructor(policy: SenderPolicy, allowedUsers?: string[], pairingStore?: Pairin
 
 | Policy      | Behavior                                                                                                  |
 | ----------- | --------------------------------------------------------------------------------------------------------- |
+| `disabled`  | Nobody allowed; no pairing requests                                                                       |
 | `open`      | Everyone allowed                                                                                          |
 | `allowlist` | Only `allowedUsers` allowed                                                                               |
 | `pairing`   | Check allowlist, then approved pairings, then generate a pairing code (8-char, 1hr expiry, max 3 pending) |
 
-**Two axes:** `ChannelBase` may hold a second `SenderGate` for group traffic
-(when `groupSenderPolicy` is `open` or `allowlist`). Any sender check an
-adapter makes itself must go through `this.senderGateFor(envelope.isGroup)`
-rather than `this.gate`, or the group axis is silently ignored on that lane.
-The group gate never carries `pairing`: an approval there would also unlock
-direct messages.
+**Per-conversation gate:** `this.gate` is the direct-message gate. A group
+resolves its own `senders` (`groups[chatId]`, then `groups["*"]`, field by
+field; every admitted group defaults to `open`). Any
+sender check an adapter makes itself must go through
+`this.senderGateFor({ isGroup, chatId })` rather than `this.gate`, or the
+group's setting is silently ignored on that lane. A group gate never carries
+`pairing`: an approval there would also unlock direct messages.
+
+**Operators:** commands that act on a shared session (`/approve-always`, `/cancel`,
+`/clear`, `/loop`, the loop tool, steering, ...) check
+`isSharedSessionOperator`, not the sender gates. Only explicit `config.operators`
+grants shared-session operator permissions; omitted or empty means nobody.
+Private policy, user pairing, and group member admission never imply this role.
+An admitted sender may still `/approve` once or `/deny` their own pending request
+in the current attended run, in the same chat and thread. This does not grant
+session-management permissions or permission to answer another member's request.
+
+`resolvePrivatePolicy(config)` resolves the four-value private policy. Explicit
+`privatePolicy` takes precedence over deprecated `dmPolicy` and `senderPolicy`;
+otherwise disabled DM policy wins, then sender policy, then legacy `allowlist`.
+Group sender policy is independent and only accepts `open` or `allowlist`.
 
 ### GroupGate
 

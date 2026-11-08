@@ -55,12 +55,15 @@ Browser Use ships with Qwen Code as a bundled skill and its runtime resources.
 No separate Browser Use runtime package or second Qwen extension is required;
 the existing Qwen Chrome extension is reused. The skill's `runtime/` directory
 contains the Browser SDK, Native Host, and pinned Playwright dependency. The
-skill registers `runtime/node_modules` with the existing Node
-REPL and imports `runtime/index.js`; the CLI does not execute browser logic.
-The kernel evaluates that import in an isolated realm without Node globals, so
-the runtime bundle binds `process` itself at its top through `createRequire`;
-the build's load check runs in the main realm and cannot detect a missing
-binding, so a kernel-backed test pins it. Source development, transpiled builds, and the published CLI use this same
+skill imports `runtime/index.js` into the existing Node REPL without
+registering any module directory; the CLI does not execute browser logic.
+The kernel evaluates that import in an isolated realm without Node globals and
+resolves bare imports only from registered module roots and the working
+directory's `node_modules`, so the runtime bundle
+binds `process` and loads its pinned `playwright-core` itself through
+`createRequire`, which resolves from the bundle's own location. The build's
+load check runs in the main realm and cannot detect either gap, so a
+kernel-backed test pins both. Source development, transpiled builds, and the published CLI use this same
 layout. The generic Node REPL MCP server must be configured, and the Qwen
 Chrome extension must be installed in the browser. Bundling does not connect
 to Chrome at CLI startup; the SDK connects when first used.
@@ -73,8 +76,13 @@ tree; the normal installation `prepare` hook builds the package those copies
 come from. After changing Browser Use sources or dependencies, run
 `npm run build --workspace=@qwen-code/browser-use` and start `npm run dev`
 again to refresh the development copy. CLI and Core continue to run directly
-from TypeScript source. If the runtime is missing, the skill's existing setup
-check reports the incomplete runtime when invoked.
+from TypeScript source. If the runtime entry is missing, the import fails and
+the skill tells the model to stop and report an incomplete runtime. If its
+pinned `playwright-core` cannot be found, the SDK reports the incomplete
+runtime itself. Node's lookup continues into parent directories, so the SDK
+checks the version of the copy it finds: another version is refused as an
+incomplete runtime, while a copy of the pinned version is used, because it runs
+the same code.
 
 Browser Use is available to the model by default and is selected according to
 the user's task. Users can disable it through `/skills` or `skills.disabled`,
@@ -90,7 +98,10 @@ local Host setup. Initialization idempotently installs or reuses the launcher
 and manifests for existing browser roots, then the transport discovers a live
 Host and validates its extension, protocol and profile handshake. A configured
 `QWEN_BROWSER_USE_SOCKET_PATH` or `QWEN_BROWSER_USE_DISCOVERY_DIR` keeps using its
-externally managed setup.
+externally managed setup. Where the platform cannot register a Native Messaging
+Host, or where a `QWEN_BROWSER_USE_SOCKET_PATH` or
+`QWEN_BROWSER_USE_DISCOVERY_DIR` override is configured, initialization
+attempts no registration.
 
 Initialization does not read `Secure Preferences` or `Preferences` to detect
 an installed extension. Those private configuration files may be unreadable,
@@ -359,7 +370,11 @@ it does not run a one-second retry loop or rewrite empty session state on
 failed discovery. Initial backend discovery can wait up to 35 seconds, with
 the normal request execution timeout starting after connection. Browser
 listing and selection both allow this discovery window; explicit short
-transport request timeouts still cap discovery.
+transport request timeouts still cap discovery. Where the platform cannot
+register a Native Messaging Host and no `QWEN_BROWSER_USE_SOCKET_PATH` or
+`QWEN_BROWSER_USE_DISCOVERY_DIR` endpoint is configured, there is provably
+nothing to wait for, so listing and selection settle on a single discovery
+snapshot instead of waiting out the window.
 The active `runtime.connectNative()` port keeps the worker alive on Chrome 105
 and later, and an active `chrome.debugger` session provides an additional
 keepalive on Chrome 118 and later. This differs from the separate `/cdp`

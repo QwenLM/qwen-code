@@ -22,6 +22,7 @@ import {
 } from '@qwen-code/channel-base';
 import {
   DINGTALK_CHUNK_LIMIT,
+  DINGTALK_MAX_CHUNK_LENGTH,
   escapeDingTalkMarkdown,
   normalizeDingTalkMarkdown,
   extractTitle,
@@ -932,12 +933,14 @@ type DingtalkChannelConfig = ChannelConfig & {
 };
 
 interface ProactiveTextDelivery {
+  sourceText: string;
   title: string;
   chunks: string[];
   nextChunk: number;
 }
 
 interface ReplyTextDelivery {
+  sourceText: string;
   title: string;
   chunks: string[];
   nextChunk: number;
@@ -1683,17 +1686,24 @@ export class DingtalkChannel extends ChannelBase {
       sourceLabel && outgoingText.trim().length > 0
         ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
         : '';
-    const contentLimit =
-      DINGTALK_CHUNK_LIMIT - mentionPrefix.length - sourcePrefix.length;
+    const overhead = mentionPrefix.length + sourcePrefix.length;
+    const contentLimit = DINGTALK_CHUNK_LIMIT - overhead;
+    const maxLength = DINGTALK_MAX_CHUNK_LENGTH - overhead;
     if (contentLimit <= 0) {
       throw new Error('DingTalk source label exceeds the message limit.');
     }
-    const chunks = normalizeDingTalkMarkdown(outgoingText, contentLimit).map(
+    const chunks = normalizeDingTalkMarkdown(
+      outgoingText,
+      contentLimit,
+      maxLength,
+      overhead,
+    ).map(
       (chunk, index) =>
         `${index === 0 ? mentionPrefix : ''}${sourcePrefix}${chunk}`,
     );
     return {
       title: extractTitle(outgoingText),
+      sourceText: outgoingText,
       chunks,
       nextChunk: 0,
       ...(atUserId ? { atUserId } : {}),
@@ -1881,14 +1891,60 @@ export class DingtalkChannel extends ChannelBase {
     const sourcePrefix = sourceLabel
       ? `${escapeDingTalkMarkdown(sourceLabel)}\n\n`
       : '';
+    const title = extractTitle(outgoingText);
+    return {
+      title,
+      sourceText: outgoingText,
+      chunks: this.createProactiveTextChunks(outgoingText, title, sourcePrefix),
+      nextChunk: 0,
+    };
+  }
+
+  private createProactiveTextChunks(
+    text: string,
+    title: string,
+    sourcePrefix: string,
+    header = '',
+  ): string[] {
     const contentLimit = DINGTALK_CHUNK_LIMIT - sourcePrefix.length;
+    const targetLength = Math.max(1, contentLimit - header.length);
+    const maxLength =
+      DINGTALK_MAX_CHUNK_LENGTH - sourcePrefix.length - header.length;
     if (contentLimit <= 0) {
       throw new Error('DingTalk source label exceeds the message limit.');
     }
-    const chunks = normalizeDingTalkMarkdown(outgoingText, contentLimit).map(
-      (chunk) => `${sourcePrefix}${chunk}`,
+    const fits = (chunk: string) =>
+      Buffer.byteLength(
+        JSON.stringify({
+          title: `${title} (cont.)`,
+          text: sourcePrefix + header + chunk,
+        }),
+        'utf8',
+      ) <= 15_000;
+    if (!fits('')) {
+      throw new Error(
+        'DingTalk source label exceeds the proactive payload limit.',
+      );
+    }
+    let budget = maxLength;
+    let pieces = normalizeDingTalkMarkdown(
+      text,
+      targetLength,
+      budget,
+      sourcePrefix.length + header.length,
     );
-    return { title: extractTitle(outgoingText), chunks, nextChunk: 0 };
+    // Re-plan the whole batch from source before sending its first message.
+    // OpenAPI limits the serialized msgParam, not UTF-16 text length.
+    while (!pieces.every(fits)) {
+      budget = Math.floor(budget / 2);
+      pieces = normalizeDingTalkMarkdown(
+        text,
+        Math.min(targetLength, budget),
+        budget,
+        sourcePrefix.length + header.length,
+      );
+    }
+    return pieces.map((piece) => sourcePrefix + header + piece);
   }
 
   private async deliverProactiveText(
@@ -2885,8 +2941,39 @@ export class DingtalkChannel extends ChannelBase {
             (target.sourceLabel
               ? `${escapeDingTalkMarkdown(target.sourceLabel)}\n\n`
               : '');
-          plan.chunks[0] =
-            prefix + replaceHeader(plan.chunks[0]!.slice(prefix.length));
+          plan.sourceText = replaceHeader(plan.sourceText);
+          const terminalHeader =
+            !output.text && plan.sourceText.startsWith(header) ? header : '';
+          const source = plan.sourceText.slice(terminalHeader.length);
+          if (replyPlan) {
+            const mentionLength = replyPlan.atUserId
+              ? `@${replyPlan.atUserId}\n\n`.length
+              : 0;
+            const reservedLength = prefix.length + terminalHeader.length;
+            replyPlan.chunks = normalizeDingTalkMarkdown(
+              source,
+              Math.max(1, DINGTALK_CHUNK_LIMIT - reservedLength),
+              DINGTALK_MAX_CHUNK_LENGTH - reservedLength,
+              reservedLength,
+            ).map(
+              (chunk, index) =>
+                (index === 0
+                  ? prefix + terminalHeader
+                  : prefix.slice(mentionLength)) + chunk,
+            );
+          }
+          if (proactivePlan) {
+            proactivePlan.chunks = this.createProactiveTextChunks(
+              source,
+              plan.title,
+              prefix,
+              terminalHeader,
+            ).map((piece, index) =>
+              index > 0
+                ? prefix + piece.slice(prefix.length + terminalHeader.length)
+                : piece,
+            );
+          }
         }
         if (preparedReplyBody) {
           preparedReplyBody = replaceHeader(preparedReplyBody);

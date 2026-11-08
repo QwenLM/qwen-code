@@ -169,6 +169,8 @@ redaction contract.
 ## Follow-up work
 
 The JDBC implementation of this contract lives in
-`JdbcToolExecutionRepository`; see `managed-runtime-broker-jdbc.md`. Runtime
-dispatch integration must query the original `executionCallId` after an
-ambiguous response instead of replaying the Tool call.
+`JdbcToolExecutionRepository`; see `managed-runtime-broker-jdbc.md`. After an
+ambiguous response the Broker can query the original invocation on demand by
+its `reference`, and it calls `resolveUnknown` only on the Runtime's terminal
+evidence; it never replays the Tool call. See the UNKNOWN reconciliation section of
+`managed-runtime-broker-service-core.md`.

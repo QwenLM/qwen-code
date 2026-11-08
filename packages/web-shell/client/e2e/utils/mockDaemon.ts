@@ -45,6 +45,16 @@ import {
 } from '@qwen-code/sdk/daemon';
 import { installSseTransport, type SseTransport } from './sseTransport';
 
+/** One transcript page as the mock daemon serves it. */
+export interface MockTranscriptPage {
+  events: DaemonEvent[];
+  hasMore?: boolean;
+  nextCursor?: string;
+}
+
+/** Cursors whose one-off failure has already been served, per scenario. */
+const failedTranscriptReads = new WeakMap<object, Set<string>>();
+
 export interface DaemonRequestRecord {
   method: string;
   path: string;
@@ -102,10 +112,19 @@ export interface WebShellDaemonScenario {
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
   /**
-   * Page served by `GET /session/:id/transcript`. Unset answers an empty page,
-   * which is what a session with no persisted records reads as.
+   * Pages served by `GET /session/:id/transcript`. Unset answers an empty page,
+   * which is what a session with no persisted records reads as. `older` is
+   * keyed by the `cursor` the previous page handed back, so a spec can walk
+   * backwards. A `{ status }` entry answers that read with a failure instead
+   * of a page; with `then`, only the first read fails and later ones get the
+   * page, which is how a retry is exercised.
    */
-  transcriptPage?: { events: DaemonEvent[]; hasMore?: boolean };
+  transcriptPage?: MockTranscriptPage & {
+    older?: Record<
+      string,
+      MockTranscriptPage | { status: number; then?: MockTranscriptPage }
+    >;
+  };
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
   workspaceFiles: Record<string, string>;
   /**
@@ -289,6 +308,7 @@ export function createWebShellDaemonScenario(
       'session_permission_vote',
       'session_scope_override',
       'session_source_metadata',
+      'session_btw_stream',
       'workspace_settings',
       'workspace_voice',
     ],
@@ -682,7 +702,7 @@ export function replayCompleteEvent(
 
 export function permissionRequestEvent(
   requestId: string,
-  options: { id?: number; sessionId?: string } = {},
+  options: { id?: number; sessionId?: string; toolCall?: unknown } = {},
 ): DaemonEvent {
   return {
     ...(options.id !== undefined ? { id: options.id } : {}),
@@ -691,15 +711,15 @@ export function permissionRequestEvent(
     data: {
       requestId,
       sessionId: options.sessionId,
-      toolCall: {
+      toolCall: options.toolCall ?? {
         name: 'Bash',
         input: {
           command: 'printf web-shell-e2e',
         },
       },
       options: [
-        { optionId: 'allow_once', label: 'Allow once' },
-        { optionId: 'reject_once', label: 'Reject' },
+        { optionId: 'allow_once', label: 'Allow', kind: 'allow_once' },
+        { optionId: 'cancel', label: 'Reject', kind: 'reject_once' },
       ],
     },
   };
@@ -867,6 +887,7 @@ function isDaemonPath(path: string): boolean {
     /^\/session\/[^/]+\/saved-workflows\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-message\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-messages(?:\/[^/]+)?\/?$/.test(path) ||
+    /^\/session\/[^/]+\/btw\/stream(?:\/[^/]+)?\/?$/.test(path) ||
     /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
       path,
     )
@@ -1018,7 +1039,13 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   if (method === 'POST' && /^\/workspace\/github\/prs\/create\/?$/.test(path))
     return true;
-  if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) return true;
+  if (method === 'POST' && /^\/session\/[^/]+\/btw(?:\/stream)?\/?$/.test(path))
+    return true;
+  if (
+    method === 'DELETE' &&
+    /^\/session\/[^/]+\/btw\/stream\/[^/]+$/.test(path)
+  )
+    return true;
   if (method === 'GET' && /^\/file\/?$/.test(path)) return true;
   if (method === 'GET' && /^\/session\/[^/]+\/artifacts\/?$/.test(path)) {
     return true;
@@ -1225,7 +1252,7 @@ async function handleDaemonRoute(
   resolvePeer?: (origin: string) => DaemonPeer | undefined,
 ): Promise<void> {
   if (method === 'GET' && path === '/health') {
-    await json(route, { ok: true, healthy: true });
+    await json(route, { status: 'ok' });
     return;
   }
   if (method === 'GET' && path === '/capabilities') {
@@ -1948,6 +1975,28 @@ async function handleDaemonRoute(
     );
     return;
   }
+  if (method === 'POST' && /^\/session\/[^/]+\/btw\/stream\/?$/.test(path)) {
+    const requestId = (body as Record<string, unknown>)['requestId'];
+    const answer = scenario.btwAnswer ?? 'A side answer.';
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: ['answer', 'done']
+        .map(
+          (type) =>
+            `event: ${type}\ndata: ${JSON.stringify({ v: 1, type, requestId, answer })}\n\n`,
+        )
+        .join(''),
+    });
+    return;
+  }
+  if (
+    method === 'DELETE' &&
+    /^\/session\/[^/]+\/btw\/stream\/[^/]+$/.test(path)
+  ) {
+    await route.fulfill({ status: 204 });
+    return;
+  }
   if (method === 'POST' && /^\/session\/[^/]+\/btw\/?$/.test(path)) {
     await json(route, {
       sessionId: path.split('/')[2],
@@ -2240,12 +2289,58 @@ async function handleDaemonRoute(
       return;
     }
     if (action === 'transcript') {
-      const page = scenario.transcriptPage;
+      const cursor = searchParams.get('cursor');
+      // The daemon refuses a cursor sent with a direction or an anchor: the
+      // cursor already carries both. Answer the same way, so a client that
+      // sends the pair fails here rather than only against a real daemon.
+      if (
+        cursor &&
+        (searchParams.has('direction') ||
+          searchParams.has('beforeRecordId') ||
+          searchParams.has('atRecordId'))
+      ) {
+        await json(
+          route,
+          {
+            error: 'Invalid transcript cursor and anchor combination',
+            code: 'invalid_transcript_cursor',
+          },
+          400,
+        );
+        return;
+      }
+      const configured = scenario.transcriptPage;
+      let page: MockTranscriptPage | undefined = configured;
+      if (cursor) {
+        const entry = configured?.older?.[cursor];
+        if (entry && 'status' in entry) {
+          let failed = failedTranscriptReads.get(scenario);
+          if (!failed) {
+            failed = new Set();
+            failedTranscriptReads.set(scenario, failed);
+          }
+          if (!entry.then || !failed.has(cursor)) {
+            failed.add(cursor);
+            await json(
+              route,
+              { error: 'Transcript page is unavailable' },
+              entry.status,
+            );
+            return;
+          }
+          page = entry.then;
+        } else {
+          page = entry;
+        }
+      }
       await json(route, {
         v: 1,
         sessionId,
         events: page?.events ?? [],
         hasMore: page?.hasMore ?? false,
+        ...(page?.nextCursor !== undefined
+          ? { nextCursor: page.nextCursor }
+          : {}),
       });
       return;
     }
@@ -2333,6 +2428,46 @@ async function handleDaemonRoute(
       const configId = readStringField(body, 'configId');
       const value = readStringField(body, 'value');
       const persist = getRecordValue(body, 'persist');
+      if (configId === 'workflow_mode') {
+        const currentConfigOptions = Array.isArray(scenario.state.configOptions)
+          ? scenario.state.configOptions
+          : [];
+        const workflow = currentConfigOptions.find(
+          (option) => isRecord(option) && option['id'] === configId,
+        );
+        const metadata = getRecordValue(
+          getRecordValue(workflow, '_meta'),
+          'qwen.workflowMode',
+        );
+        if (
+          (value !== 'on' && value !== 'off') ||
+          (isRecord(body) && 'persist' in body) ||
+          !isRecord(metadata) ||
+          typeof metadata['available'] !== 'boolean' ||
+          (value === 'on' && !metadata['available'])
+        ) {
+          await badRequest(route, 'Unsupported workflow mode request.');
+          return;
+        }
+        const configOptions = currentConfigOptions.map((option) =>
+          isRecord(option) && option['id'] === configId
+            ? {
+                ...option,
+                currentValue: value,
+                _meta: {
+                  ...(isRecord(option['_meta']) ? option['_meta'] : {}),
+                  'qwen.workflowMode': {
+                    ...metadata,
+                    effective: value === 'on' && metadata['available'],
+                  },
+                },
+              }
+            : option,
+        );
+        scenario.state.configOptions = configOptions;
+        await json(route, { configOptions, persisted: true });
+        return;
+      }
       if (
         configId !== 'reasoning_effort' ||
         !value ||

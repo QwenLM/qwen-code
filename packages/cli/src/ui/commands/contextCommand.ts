@@ -26,15 +26,22 @@ import {
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
   buildAvailableSkillsReminder,
-  buildSkillLlmContent,
+  isSkillListingReminder,
   computeThresholds,
   getStartupContextLength,
-  isMediaPolicyToolHiddenFromModel,
   estimateContextTextTokens,
   resolveSlimmingConfig,
   formatContextFileDisplayPath,
+  getAllMemoryFilenames,
+  isSubpath,
+  Storage,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
+import {
+  AUTO_MEMORY_SNAPSHOT_METADATA,
+  getAutoMemorySnapshot,
+  withoutAutoMemorySnapshots,
+} from '@qwen-code/qwen-code-core/memory/request-context.js';
 import { t } from '../../i18n/index.js';
 import * as path from 'node:path';
 import { getSanitizedExtensionDisplayName } from '../../utils/extension-mention.js';
@@ -93,10 +100,28 @@ function parseMemoryFiles(
   memoryContent: string,
   workingDir: string,
   extensionOwners: ReadonlyMap<string, string> = new Map(),
+  admissionRoot: string = workingDir,
 ): ContextMemoryDetail[] {
   if (!memoryContent || memoryContent.trim().length === 0) return [];
 
   const results: ContextMemoryDetail[] = [];
+  // The preview resolves the owning workspace from the session's admission
+  // root (status.workspaceRoot), which stays put when session/cd relocates
+  // the live cwd. Gate on that same root — not the live working dir — so a
+  // row is a link exactly when the client can read it; a global memory file
+  // is read through the workspace-independent memory route. Normalize both
+  // sides of the global-dir comparison: getGlobalQwenDir() returns an
+  // absolute QWEN_HOME verbatim, trailing separator included, while
+  // path.dirname() never produces one.
+  const root = path.resolve(admissionRoot);
+  const globalDir = path.resolve(Storage.getGlobalQwenDir());
+  const memoryFilenames = new Set(getAllMemoryFilenames());
+  const openablePath = (absolutePath: string): string | undefined =>
+    isSubpath(root, absolutePath) ||
+    (path.resolve(path.dirname(absolutePath)) === globalDir &&
+      memoryFilenames.has(path.basename(absolutePath)))
+      ? absolutePath
+      : undefined;
   // Use backreference (\1) to ensure start/end path markers match
   const regex =
     /--- Context from: (.+?) ---\n([\s\S]*?)--- End of Context from: \1 ---/g;
@@ -111,12 +136,14 @@ function parseMemoryFiles(
     // global memory files don't render as `../../..` chains.
     const absolutePath = path.resolve(workingDir, filePath);
     const owner = extensionOwners.get(absolutePath);
+    const openPath = openablePath(absolutePath);
     results.push({
       // An extension's file is named by its extension rather than by a path
       // under the install directory, which is what makes the row actionable:
       // the reader can disable or migrate that extension.
       path: owner ?? formatContextFileDisplayPath(absolutePath, workingDir),
       tokens: estimateContextTextTokens(content),
+      ...(openPath !== undefined ? { absolutePath: openPath } : {}),
     });
   }
 
@@ -141,10 +168,6 @@ function unescapeXml(text: string): string {
     .replace(/&amp;/g, '&');
 }
 
-// `buildAvailableSkillsReminder` emits either the listing or, when nothing is
-// available, a fixed notice in the same prelude slot.
-const AVAILABLE_SKILLS_OPEN = '<available_skills>';
-const NO_SKILLS_NOTICE = 'No skills are currently available.';
 const SKILL_LISTING_ENTRY =
   /<skill>\n<name>\n([\s\S]*?)\n<\/name>[\s\S]*?<\/skill>/g;
 
@@ -159,12 +182,6 @@ interface SkillListingCost {
   tokens: number;
   /** Per-entry cost, keyed by lower-cased skill name. */
   byName: Map<string, SkillListingEntryCost>;
-}
-
-function isSkillListingText(text: string): boolean {
-  return (
-    text.includes(AVAILABLE_SKILLS_OPEN) || text.includes(NO_SKILLS_NOTICE)
-  );
 }
 
 // Measured from the rendered text rather than re-derived from skill configs,
@@ -194,15 +211,24 @@ function mergeSkillListing(
 /**
  * Skill-listing reminders that landed *after* the startup prelude. A skill
  * enabled mid-session is announced by a tail `<system-reminder>` carrying an
- * `<available_skills>` block (`buildChangedSkillsReminder`, and the scheduler's
- * equivalent), which `getStartupContextLength` never inspects. Those tokens are
- * listing cost, not conversation, so they are measured here and billed with the
- * startup listing under `skills` — otherwise the entry is billed to `messages`
- * while its detail row prints `0`.
+ * `<available_skills>` block (`buildChangedSkillsReminder`), which
+ * `getStartupContextLength` never inspects. Those tokens are listing cost, not
+ * conversation, so they are measured here and billed with the startup listing
+ * under `skills` — otherwise the entry is billed to `messages` while its
+ * detail row prints `0`.
  *
- * Text that merely mentions `<available_skills>` without a single `<skill>`
- * entry (a pasted example, the fixed "no skills" notice) is left alone: only
- * measured listings are excluded from `messages`.
+ * Only core's own listing reminders qualify (`isSkillListingReminder`); other
+ * text that mentions `<available_skills>` stays in `messages`. A qualifying
+ * reminder with no `<skill>` entry is left there too: only measured listings
+ * are excluded from `messages`.
+ *
+ * The scheduler's path-activation block is deliberately not covered:
+ * `coreToolScheduler` folds that envelope into `functionResponse.response.output`
+ * via `convertToFunctionResponse`, so it never reaches this scan as `part.text`
+ * and is billed with its tool result under `messages`. The activated skill
+ * still has its own detail row, since `listSkills()` returns it whether or
+ * not it is active; that row carries only what a text-part listing billed for
+ * it, which is 0 for a skill that was path-gated at startup (#12540).
  */
 function measureTailSkillListings(conversation: Content[]): {
   listing: SkillListingCost;
@@ -214,7 +240,7 @@ function measureTailSkillListings(conversation: Content[]): {
   for (const content of conversation) {
     for (const part of content.parts ?? []) {
       const text = part.text;
-      if (typeof text !== 'string' || !isSkillListingText(text)) continue;
+      if (typeof text !== 'string' || !isSkillListingReminder(text)) continue;
       const measured = measureSkillListing(text);
       if (measured.byName.size === 0) continue;
       mergeSkillListing(listing, measured);
@@ -236,7 +262,7 @@ function measureStartupPrelude(prelude: Content[]): StartupPreludeCost {
   for (const content of prelude) {
     for (const part of content.parts ?? []) {
       if (typeof part.text !== 'string') continue;
-      if (isSkillListingText(part.text)) {
+      if (isSkillListingReminder(part.text)) {
         mergeSkillListing(skillListing, measureSkillListing(part.text));
       } else {
         startupContextTokens += estimateContextTextTokens(part.text);
@@ -251,8 +277,7 @@ function measureStartupPrelude(prelude: Content[]): StartupPreludeCost {
  * qwen-code attaches media to `functionResponse.parts` (an extension to the
  * `@google/genai` schema; see `coreToolScheduler.createFunctionResponsePart`),
  * and `JSON.stringify`ing the whole part would bill that raw base64 as ASCII
- * text — a single ~100 KB screenshot alone is enough to push the estimate past
- * the provider total and deflate every category row through `scale`. Nested
+ * text, greatly inflating the conversation estimate. Nested
  * media is charged at the flat per-image budget core uses for the same carrier
  * (`estimatePartChars` in `compactionInputSlimming`).
  */
@@ -283,7 +308,7 @@ function estimateFunctionResponseTokens(
 }
 
 /**
- * Whether a `skill` response carries a body that `skills` already bills
+ * Consume one `skill` response carrying a body that `skills` already bills
  * (`loadedBodiesTokens`). Membership is by body, not by tool name: the Skill
  * tool also returns raw command output for a same-named non-skill command
  * without tracking it — "the result is raw command text, not a skill body"
@@ -294,18 +319,21 @@ function estimateFunctionResponseTokens(
  * same two shapes when it restores tracking (`restoreLoadedSkillsFromHistory`):
  * the body verbatim, or the body with a suffix appended after a newline.
  */
-function isBilledSkillBody(
+function consumeBilledSkillBody(
   part: Part,
-  billedSkillBodies: ReadonlySet<string>,
+  billedSkillBodies: Set<string>,
 ): boolean {
   if (billedSkillBodies.size === 0) return false;
   const output = (
     part.functionResponse?.response as { output?: unknown } | undefined
   )?.output;
   if (typeof output !== 'string') return false;
-  if (billedSkillBodies.has(output)) return true;
+  if (billedSkillBodies.delete(output)) return true;
   for (const body of billedSkillBodies) {
-    if (output.startsWith(`${body}\n`)) return true;
+    if (output.startsWith(`${body}\n`)) {
+      billedSkillBodies.delete(body);
+      return true;
+    }
   }
   return false;
 }
@@ -331,6 +359,8 @@ function estimateConversationTokens(
   billing: ConversationBilling,
 ): number {
   let tokens = 0;
+  // The historical body map bills each distinct body once under skills.
+  const remainingSkillBodies = new Set(billing.billedSkillBodies);
   for (const content of conversation) {
     for (const part of content.parts ?? []) {
       if (typeof part.text === 'string') {
@@ -343,7 +373,7 @@ function estimateConversationTokens(
       } else if (part.functionResponse) {
         if (
           part.functionResponse.name === ToolNames.SKILL &&
-          isBilledSkillBody(part, billing.billedSkillBodies)
+          consumeBilledSkillBody(part, remainingSkillBodies)
         ) {
           continue;
         }
@@ -396,9 +426,14 @@ export async function collectContextData(
   // `getStartupContextLength` and bill the whole prelude to `messages`.
   const history =
     activeChat?.getHistoryShallow?.() ?? activeChat?.getHistory?.() ?? [];
+  // Determine the boundary before filtering; catalog-only entries can disappear.
   const preludeLength = getStartupContextLength(history);
-  const prelude = measureStartupPrelude(history.slice(0, preludeLength));
-  const conversationHistory = history.slice(preludeLength);
+  const prelude = measureStartupPrelude(
+    withoutAutoMemorySnapshots(history.slice(0, preludeLength)),
+  );
+  const conversationHistory = withoutAutoMemorySnapshots(
+    history.slice(preludeLength),
+  );
   // Skill-listing reminders appended after the prelude are listing cost, not
   // conversation, and are billed with the startup listing under `skills`.
   const tailSkillListings = measureTailSkillListings(conversationHistory);
@@ -411,12 +446,8 @@ export async function collectContextData(
 
   const toolRegistry = config.getToolRegistry();
   const allTools = toolRegistry ? toolRegistry.getAllTools() : [];
-  // Match what's actually sent to the model: deferred tools — MCP tools and
-  // low-frequency built-ins like web_fetch / monitor / cron_* — are absent
-  // from the prompt unless session setup has revealed them. See
-  // client.ts which calls getFunctionDeclarations() with no args. The
-  // per-tool loop below applies the same filter so allToolsTokens stays
-  // aligned with the breakdown sum.
+  // Match client.ts's declaration source: registered tools can be hidden, and
+  // code mode can generate schemas that differ from the registered originals.
   const toolDeclarations = toolRegistry
     ? toolRegistry.getFunctionDeclarations()
     : [];
@@ -425,58 +456,87 @@ export async function collectContextData(
 
   const builtinTools: ContextToolDetail[] = [];
   const mcpTools: ContextToolDetail[] = [];
-  for (const tool of allTools) {
-    if (toolRegistry?.isDeferredAndHidden(tool.name)) {
-      continue;
-    }
-    // Same alignment rule for omni media-policy tools: fixed-only tools
-    // (declared descriptor, modelAccess not enabled) are stripped from
-    // getFunctionDeclarations() and cost the model zero prompt tokens, so
-    // listing them here would make the breakdown sum exceed allToolsTokens.
-    if (isMediaPolicyToolHiddenFromModel(config, tool)) {
-      continue;
-    }
-    const toolJsonStr = JSON.stringify(tool.schema);
+  for (const declaration of toolDeclarations) {
+    const tool = allTools.find((tool) => tool.name === declaration.name);
+    const toolJsonStr = JSON.stringify(declaration);
     const tokens = estimateContextTextTokens(toolJsonStr);
     if (tool instanceof DiscoveredMCPTool) {
       mcpTools.push({
         name: `${tool.serverName}__${tool.serverToolName || tool.name}`,
         tokens,
       });
-    } else if (tool.name !== ToolNames.SKILL) {
+    } else if (declaration.name !== ToolNames.SKILL) {
       builtinTools.push({
-        name: tool.name,
+        name: declaration.name!,
         tokens,
       });
     }
   }
 
   const memoryContent = config.getUserMemory();
-  const memoryFiles = parseMemoryFiles(
+  const instructionFiles = parseMemoryFiles(
     memoryContent,
     config.getWorkingDir(),
     extensionContextFileOwners(config, config.getWorkingDir()),
+    config.storage.getProjectRoot(),
   );
-  const autoMemoryPrompt = config.getAutoMemoryPrompt();
-  if (autoMemoryPrompt) {
+  const memoryFiles: ContextMemoryDetail[] = [];
+  const instructionFilesTokens = instructionFiles.reduce(
+    (sum, f) => sum + f.tokens,
+    0,
+  );
+  const catalog = config.getAutoMemoryContext?.() ?? '';
+  // Older snapshots remain in the request too; suppression hides all of them.
+  const snapshots = catalog
+    ? history.flatMap((content) =>
+        (content.parts ?? []).filter(
+          (part) => part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true,
+        ),
+      )
+    : [];
+  const pendingSnapshot = getAutoMemorySnapshot(history, catalog);
+  if (pendingSnapshot) snapshots.push(pendingSnapshot);
+  const autoMemoryTokens =
+    estimateContextTextTokens(config.getAutoMemoryPrompt()) +
+    snapshots.reduce(
+      (sum, part) => sum + estimateContextTextTokens(part.text ?? ''),
+      0,
+    );
+  if (autoMemoryTokens > 0) {
     memoryFiles.push({
       path: t('auto memory'),
-      tokens: estimateContextTextTokens(autoMemoryPrompt),
+      tokens: autoMemoryTokens,
     });
   }
   const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);
 
   const skillTool = allTools.find((tool) => tool.name === ToolNames.SKILL);
-  const skillToolDefinitionTokens = skillTool
-    ? estimateContextTextTokens(JSON.stringify(skillTool.schema))
+  const skillDeclaration = toolDeclarations.find(
+    (declaration) => declaration.name === ToolNames.SKILL,
+  );
+  const skillToolDefinitionTokens = skillDeclaration
+    ? estimateContextTextTokens(JSON.stringify(skillDeclaration))
     : 0;
 
-  const loadedSkillNames: ReadonlySet<string> =
-    skillTool && 'getLoadedSkillNames' in skillTool
+  const loadedContentNames: ReadonlyMap<string, string> =
+    skillTool && 'getLoadedSkillContentNames' in skillTool
       ? (
-          skillTool as { getLoadedSkillNames(): ReadonlySet<string> }
-        ).getLoadedSkillNames()
-      : new Set();
+          skillTool as {
+            getLoadedSkillContentNames(): ReadonlyMap<string, string>;
+          }
+        ).getLoadedSkillContentNames()
+      : new Map();
+  const bodyTokensByName = new Map<string, number>();
+  for (const [content, name] of loadedContentNames) {
+    bodyTokensByName.set(
+      name,
+      (bodyTokensByName.get(name) ?? 0) + estimateContextTextTokens(content),
+    );
+  }
+  const loadedBodiesTokens = [...bodyTokensByName.values()].reduce(
+    (sum, tokens) => sum + tokens,
+    0,
+  );
 
   const skillManager = config.getSkillManager();
   const skillConfigs = skillManager ? await skillManager.listSkills() : [];
@@ -496,26 +556,12 @@ export async function collectContextData(
   }
   mergeSkillListing(skillListing, tailSkillListings.listing);
 
-  let loadedBodiesTokens = 0;
-  // The exact bodies `loadedBodiesTokens` bills below. `estimateConversationTokens`
-  // skips a `skill` response only when this set owns its body, so the skip and
-  // the billing can never disagree.
-  const billedSkillBodies = new Set<string>();
+  const billedSkillBodies = new Set(loadedContentNames.keys());
   const skills: ContextSkillDetail[] = skillConfigs.map((skill) => {
     const listingTokens =
       skillListing.byName.get(skill.name.toLowerCase())?.tokens ?? 0;
-    const isLoaded = loadedSkillNames.has(skill.name);
-    let bodyTokens: number | undefined;
-    if (isLoaded && skill.body) {
-      // Matches every core producer, which renders the body with
-      // `path.dirname` of the platform's own separator; a `/`-only suffix strip
-      // leaves a Windows path intact and bills the body twice.
-      const baseDir = skill.filePath ? path.dirname(skill.filePath) : '';
-      const body = buildSkillLlmContent(baseDir, skill.body);
-      bodyTokens = estimateContextTextTokens(body);
-      loadedBodiesTokens += bodyTokens;
-      billedSkillBodies.add(body);
-    }
+    const bodyTokens = bodyTokensByName.get(skill.name);
+    const isLoaded = bodyTokens !== undefined;
     return {
       name: skill.name,
       tokens: listingTokens,
@@ -524,19 +570,33 @@ export async function collectContextData(
     };
   });
 
+  const discoveredNames = new Set(skillConfigs.map((skill) => skill.name));
+  for (const [name, bodyTokens] of bodyTokensByName) {
+    if (!discoveredNames.has(name)) {
+      skills.push({
+        name,
+        tokens: skillListing.byName.get(name.toLowerCase())?.tokens ?? 0,
+        loaded: true,
+        bodyTokens,
+      });
+    }
+  }
+
   // The listing also carries model-invocable commands — a user's own
   // `.qwen/commands/*.toml`, extension saved workflows with `whenToUse` — which
   // `listSkills()` never returns, while their tokens are inside the measured
   // listing that `skillsTokens` bills. Give each one a row so the rows and the
   // category cover the same set. Rows never feed `skillsTokens`: Built-in tools
   // subtracts the Skill tool definition *because* `skills` carries it.
-  const rowedNames = new Set(skillConfigs.map((s) => s.name.toLowerCase()));
+  const rowedNames = new Set(skills.map((s) => s.name.toLowerCase()));
   for (const [key, entry] of skillListing.byName) {
+    // Rendered into the listing, so model-invocable by definition. That holds
+    // for a skill disabled after the listing went out as well: its entry is
+    // still billed under `skills`, so its row must not be filtered away.
+    enabledSkillNames.add(key);
     if (rowedNames.has(key)) continue;
     rowedNames.add(key);
-    // Rendered into the listing, so model-invocable by definition.
-    enabledSkillNames.add(key);
-    skills.push({ name: entry.name, tokens: entry.tokens });
+    skills.push({ name: entry.name, tokens: entry.tokens, loaded: false });
   }
 
   conversationTokens = estimateConversationTokens(conversationHistory, {
@@ -567,6 +627,7 @@ export async function collectContextData(
   const rawOverhead =
     systemPromptTokens +
     allToolsTokens +
+    instructionFilesTokens +
     memoryFilesTokens +
     skillListing.tokens +
     loadedBodiesTokens +
@@ -584,144 +645,30 @@ export async function collectContextData(
     0,
   );
 
-  let totalTokens: number;
-  let displaySystemPrompt: number;
-  let displayBuiltinTools: number;
-  let displayMcpTools: number;
-  let displayMemoryFiles: number;
-  let displaySkills: number;
-  let displayStartupContext: number;
-  let messagesTokens: number;
-  let unattributedTokens = 0;
-  let freeSpace: number;
-  let detailBuiltinTools: ContextToolDetail[];
-  let detailMcpTools: ContextToolDetail[];
-  let detailMemoryFiles: ContextMemoryDetail[];
-  let detailSkills: ContextSkillDetail[];
+  const totalTokens = hasTokenCount ? apiTotalTokens : 0;
 
-  if (!hasTokenCount) {
-    totalTokens = 0;
-    displaySystemPrompt = systemPromptTokens;
-    displaySkills = skillsTokens;
-    displayStartupContext = startupContextTokens;
-    displayBuiltinTools = Math.max(
-      0,
-      allToolsTokens - skillToolDefinitionTokens - mcpToolsTotalTokens,
-    );
-    displayMcpTools = mcpToolsTotalTokens;
-    displayMemoryFiles = memoryFilesTokens;
-    messagesTokens = 0;
-    // Include the conversation: a `/model` switch, `/restore` or a resume
-    // zeroes the provider count while leaving `this.history` intact, and such a
-    // session must not report a 100K history as free window.
-    freeSpace = Math.max(0, contextWindowSize - rawContent - autocompactBuffer);
-    detailBuiltinTools = builtinTools;
-    detailMcpTools = mcpTools;
-    detailMemoryFiles = memoryFiles;
-    detailSkills = skills;
-  } else {
-    totalTokens = apiTotalTokens;
-
-    // Categories partition the request by content (#12033). When the overhead
-    // exceeds the provider total it is scaled down as a whole; when it falls
-    // short, the gap is reported as `unattributed` rather than folded into
-    // another category. The cached count is never subtracted: a cache hit spans
-    // several categories, so it is only an annotation.
-    //
-    // Only the overhead is scaled, and only against itself. Conversation content
-    // is deliberately kept out of the denominator: `conversationTokens` measures
-    // a strictly larger content set than the last request's `promptTokenCount`
-    // (which excludes the answer `history` already carries) with a CJK-aware
-    // estimator, so including it deflates every exactly-measured row. The total
-    // is not always provider-reported either — `compressFast()` and resume
-    // seeding stamp a char/4 estimate of the compressed history alone, which can
-    // sit below the overhead — so the clamp must stay armed there too, or the
-    // rows overshoot the total with no row able to report it. Conversation-side
-    // overshoot is absorbed by the `messages` cap below.
-    const scale = rawOverhead > totalTokens ? totalTokens / rawOverhead : 1;
-
-    // `displayBuiltinTools` floors at 0, so when the billed Skill definition and
-    // the MCP schemas together exceed the declared tool list, that excess would
-    // be charged to the overhead and taken straight back out of `messages`.
-    // Charge it to `mcpTools`, and charge whatever the MCP schemas cannot absorb
-    // to the Skill definition `skills` carries, so the three rows still account
-    // for exactly `allToolsTokens` plus the listing and the loaded bodies.
-    const clampDeficit = Math.max(
-      0,
-      skillToolDefinitionTokens + mcpToolsTotalTokens - allToolsTokens,
-    );
-    const clampedMcpTools = Math.max(0, mcpToolsTotalTokens - clampDeficit);
-    const clampedSkills =
-      skillsTokens - Math.max(0, clampDeficit - mcpToolsTotalTokens);
-    const clampedBuiltinTools = Math.max(
-      0,
-      allToolsTokens - skillToolDefinitionTokens - clampedMcpTools,
-    );
-    // The clamped categories partition `rawOverhead` before scaling. Flooring
-    // each share keeps their sum at or below `totalTokens`; independently
-    // rounding them can overshoot the total by a token with no negative row
-    // available to absorb the excess.
-    displaySystemPrompt = Math.floor(systemPromptTokens * scale);
-    displayBuiltinTools = Math.floor(clampedBuiltinTools * scale);
-    displayMcpTools = Math.floor(clampedMcpTools * scale);
-    displayMemoryFiles = Math.floor(memoryFilesTokens * scale);
-    displaySkills = Math.floor(clampedSkills * scale);
-    displayStartupContext = Math.floor(startupContextTokens * scale);
-
-    const attributedOverhead =
-      displaySystemPrompt +
-      displayBuiltinTools +
-      displayMcpTools +
-      displayMemoryFiles +
-      displaySkills +
-      displayStartupContext;
-
-    if (scale < 1) {
-      // Fully attributed; messages absorbs the per-row rounding so the rows
-      // sum to the total exactly.
-      messagesTokens = Math.max(0, totalTokens - attributedOverhead);
-    } else {
-      // Unscaled, the overhead already fits inside the total
-      // (`rawOverhead <= totalTokens`), so `messages` is capped only by the
-      // conversation estimate. A genuine shortfall still surfaces as
-      // `unattributed`.
-      messagesTokens = Math.min(
-        conversationTokens,
-        Math.max(0, totalTokens - attributedOverhead),
-      );
-      unattributedTokens = Math.max(
-        0,
-        totalTokens - attributedOverhead - messagesTokens,
-      );
-    }
-
-    freeSpace = Math.max(
-      0,
-      contextWindowSize - totalTokens - autocompactBuffer,
-    );
-
-    const scaleDetail = <T extends { tokens: number }>(items: T[]): T[] =>
-      scale < 1
-        ? items.map((item) => ({
-            ...item,
-            tokens: Math.round(item.tokens * scale),
-          }))
-        : items;
-
-    detailBuiltinTools = scaleDetail(builtinTools);
-    detailMcpTools = scaleDetail(mcpTools);
-    detailMemoryFiles = scaleDetail(memoryFiles);
-    detailSkills =
-      scale < 1
-        ? skills.map((item) => ({
-            ...item,
-            tokens: Math.round(item.tokens * scale),
-            bodyTokens: item.bodyTokens
-              ? Math.round(item.bodyTokens * scale)
-              : undefined,
-          }))
-        : skills;
-  }
+  // Keep the tool-category allocation bounded by the declared tool-list estimate.
+  const clampDeficit = Math.max(
+    0,
+    skillToolDefinitionTokens + mcpToolsTotalTokens - allToolsTokens,
+  );
+  const clampedMcpTools = Math.max(0, mcpToolsTotalTokens - clampDeficit);
+  const clampedSkills =
+    skillsTokens - Math.max(0, clampDeficit - mcpToolsTotalTokens);
+  const clampedBuiltinTools = Math.max(
+    0,
+    allToolsTokens - skillToolDefinitionTokens - clampedMcpTools,
+  );
+  // The MCP detail rows sit under the mcp row, so they carry its deficit too.
+  const mcpDetailShare =
+    mcpToolsTotalTokens > 0 ? clampedMcpTools / mcpToolsTotalTokens : 1;
+  const detailMcpTools =
+    mcpDetailShare < 1
+      ? mcpTools.map((item) => ({
+          ...item,
+          tokens: Math.round(item.tokens * mcpDetailShare),
+        }))
+      : mcpTools;
 
   // Tier classification: prefer the API-reported total when available.
   // When no API call has happened yet (first /context, --continue resume,
@@ -743,16 +690,20 @@ export async function collectContextData(
   // TODO: use estimatePromptTokens(history, undefined, 0, 0,
   // imageTokenEstimate) here for same-source-of-truth as the cheap gate.
   const tierTokens = hasTokenCount ? apiTotalTokens : rawContent;
+  const freeSpace = Math.max(
+    0,
+    contextWindowSize - tierTokens - autocompactBuffer,
+  );
 
   const breakdown: ContextCategoryBreakdown = {
-    systemPrompt: displaySystemPrompt,
-    builtinTools: displayBuiltinTools,
-    mcpTools: displayMcpTools,
-    memoryFiles: displayMemoryFiles,
-    skills: displaySkills,
-    startupContext: displayStartupContext,
-    messages: messagesTokens,
-    unattributed: unattributedTokens,
+    systemPrompt: systemPromptTokens,
+    builtinTools: clampedBuiltinTools,
+    mcpTools: clampedMcpTools,
+    instructionFiles: instructionFilesTokens,
+    memoryFiles: memoryFilesTokens,
+    skills: clampedSkills,
+    startupContext: startupContextTokens,
+    messages: conversationTokens,
     cachedTokens: hasTokenCount ? apiCachedTokens : 0,
     freeSpace,
     autocompactBuffer,
@@ -766,12 +717,14 @@ export async function collectContextData(
     totalTokens,
     contextWindowSize,
     breakdown,
-    builtinTools: showDetails ? detailBuiltinTools : [],
+    builtinTools: showDetails ? builtinTools : [],
     mcpTools: showDetails ? detailMcpTools : [],
-    memoryFiles: showDetails ? detailMemoryFiles : [],
+    instructionFiles: showDetails ? instructionFiles : [],
+    memoryFiles: showDetails ? memoryFiles : [],
     skills: showDetails
-      ? detailSkills.filter((skill) =>
-          enabledSkillNames.has(skill.name.toLowerCase()),
+      ? skills.filter(
+          (skill) =>
+            skill.loaded || enabledSkillNames.has(skill.name.toLowerCase()),
         )
       : [],
     isEstimated,
@@ -783,6 +736,10 @@ export async function collectContextData(
  * Format token count for display (e.g. 1234 -> "1.2k", 123456 -> "123.5k")
  */
 function fmtTokens(tokens: number): string {
+  // 999,950 rounds to 1000.0k, so it belongs in the next unit.
+  if (tokens >= 999_950) {
+    return `${(tokens / 1_000_000).toFixed(1)}m`;
+  }
   if (tokens >= 1000) {
     return `${(tokens / 1000).toFixed(1)}k`;
   }
@@ -826,21 +783,36 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     breakdown,
     builtinTools,
     mcpTools,
+    instructionFiles = [],
     memoryFiles,
     skills,
     isEstimated,
     showDetails,
   } = data;
   const hasTokenCount = totalTokens > 0;
+  const memoryLabel =
+    breakdown.instructionFiles === undefined ? 'Memory files' : 'Auto memory';
 
   const lines: string[] = [];
   lines.push('## Context Usage');
   lines.push('');
 
   if (!hasTokenCount) {
-    lines.push('*No API response yet. Send a message to see actual usage.*');
+    // After /model, /restore or a resume the history is intact while the
+    // provider total is 0; the rows then include the conversation, so the
+    // captions must not call them pre-conversation overhead (#12235).
+    const includesConversation = breakdown.messages > 0;
+    lines.push(
+      includesConversation
+        ? '*No provider usage yet. These are local estimates, including the conversation.*'
+        : '*No API response yet. Send a message to see actual usage.*',
+    );
     lines.push('');
-    lines.push('**Estimated pre-conversation overhead**');
+    lines.push(
+      includesConversation
+        ? '**Estimated usage, including the conversation**'
+        : '**Estimated pre-conversation overhead**',
+    );
     lines.push(
       `Model: ${modelName}  Context window: ${fmtTokens(contextWindowSize)} tokens`,
     );
@@ -892,8 +864,17 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       fmtCategoryRow('MCP tools', breakdown.mcpTools, contextWindowSize),
     );
   }
+  if (breakdown.instructionFiles !== undefined) {
+    lines.push(
+      fmtCategoryRow(
+        'Instruction files',
+        breakdown.instructionFiles,
+        contextWindowSize,
+      ),
+    );
+  }
   lines.push(
-    fmtCategoryRow('Memory files', breakdown.memoryFiles, contextWindowSize),
+    fmtCategoryRow(memoryLabel, breakdown.memoryFiles, contextWindowSize),
   );
   lines.push(fmtCategoryRow('Skills', breakdown.skills, contextWindowSize));
   if ((breakdown.startupContext ?? 0) > 0) {
@@ -905,19 +886,10 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       ),
     );
   }
-  if (hasTokenCount) {
+  if (hasTokenCount || breakdown.messages > 0) {
     lines.push(
       fmtCategoryRow('Messages', breakdown.messages, contextWindowSize),
     );
-    if ((breakdown.unattributed ?? 0) > 0) {
-      lines.push(
-        fmtCategoryRow(
-          'Unattributed',
-          breakdown.unattributed!,
-          contextWindowSize,
-        ),
-      );
-    }
   }
 
   if (showDetails) {
@@ -925,7 +897,7 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     const sortedMcp = [...mcpTools].sort((a, b) => b.tokens - a.tokens);
     const sortedMemory = [...memoryFiles].sort((a, b) => b.tokens - a.tokens);
     const sortedSkills = [...skills].sort((a, b) => {
-      if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+      if (!a.loaded !== !b.loaded) return a.loaded ? -1 : 1;
       return b.tokens + (b.bodyTokens ?? 0) - (a.tokens + (a.bodyTokens ?? 0));
     });
 
@@ -947,9 +919,19 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
         );
       }
     }
+    if (instructionFiles.length > 0) {
+      lines.push('', '**Instruction files**');
+      for (const file of [...instructionFiles].sort(
+        (a, b) => b.tokens - a.tokens,
+      )) {
+        lines.push(
+          fmtCategoryRow(file.path, file.tokens, contextWindowSize, '  └ '),
+        );
+      }
+    }
     if (sortedMemory.length > 0) {
       lines.push('');
-      lines.push('**Memory files**');
+      lines.push('**' + memoryLabel + '**');
       for (const file of sortedMemory) {
         lines.push(
           fmtCategoryRow(file.path, file.tokens, contextWindowSize, '  └ '),
@@ -960,9 +942,8 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       lines.push('');
       lines.push('**Skills**');
       for (const skill of sortedSkills) {
-        const label = skill.loaded ? `${skill.name} (active)` : skill.name;
         lines.push(
-          fmtCategoryRow(label, skill.tokens, contextWindowSize, '  └ '),
+          fmtCategoryRow(skill.name, skill.tokens, contextWindowSize, '  └ '),
         );
         if (skill.loaded && skill.bodyTokens && skill.bodyTokens > 0) {
           lines.push(

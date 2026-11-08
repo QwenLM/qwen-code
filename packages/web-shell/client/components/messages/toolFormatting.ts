@@ -1,6 +1,9 @@
-import type { ACPToolCall } from '../../adapters/types';
+import type { ACPToolCall } from '../../adapters/types.js';
+import { isAskUserQuestionToolName } from '../../constants/toolNames.js';
 
-export { isActiveToolStatus } from '../../adapters/toolClassification';
+export { isAskUserQuestionToolName } from '../../constants/toolNames.js';
+
+export { isActiveToolStatus } from '../../adapters/toolClassification.js';
 
 /**
  * Internal-tool-name → display-name lookup. This is a standalone copy of
@@ -26,7 +29,10 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   update_goal: 'UpdateGoal',
   propose_goal: 'ProposeGoal',
   save_memory: 'SaveMemory',
+  manage_memory: 'ManageMemory',
+  search_memory: 'SearchMemory',
   agent: 'Agent',
+  advisor: 'Advisor',
   skill: 'Skill',
   exit_plan_mode: 'ExitPlanMode',
   web_fetch: 'WebFetch',
@@ -38,6 +44,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   cron_create: 'CronCreate',
   cron_list: 'CronList',
   cron_delete: 'CronDelete',
+  autofix_pr: 'AutofixPr',
   loop_wakeup: 'LoopWakeup',
   create_sub_session: 'CreateSubSession',
   task_stop: 'TaskStop',
@@ -155,9 +162,8 @@ export function localizeToolDisplayName(
   return displayName;
 }
 
-export function isAskUserQuestionToolName(toolName: string): boolean {
-  const normalized = toolName.toLowerCase();
-  return normalized === 'ask_user_question' || normalized === 'askuserquestion';
+export function isAdvisorToolName(toolName: string): boolean {
+  return toolName.toLowerCase() === 'advisor';
 }
 
 export function isCompletedAskUserQuestion(tool: ACPToolCall): boolean {
@@ -200,12 +206,115 @@ export function truncateText(text: string, max: number): string {
   return text.slice(0, max) + '...';
 }
 
+/** Longest payload stretch a transcript card renders before "Show more". */
+export const MAX_TOOL_PAYLOAD_LENGTH = 4000;
+
+/** Ceiling after "Show more", matching the trajectory inspector. */
+export const EXPANDED_TOOL_PAYLOAD_LENGTH = 40_000;
+
+export function stringifyValue(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  const text = typeof value === 'string' ? value : safeJson(value);
+  return text.trim();
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Re-indents a canonical JSON object or array for display. The input must be
+ * exactly its compact JSON form or its two-space form; anything else — plain
+ * text, a primitive, a truncated document, JSON Lines, a mixed JSON/text log
+ * or non-canonical JSON — is returned as recorded so the caller can fall back
+ * to plain text. Formatting therefore never rewrites literals, duplicate
+ * keys, key order or string escapes.
+ *
+ * These rules are scoped to the transcript tool card. The sibling
+ * ToolCallDetail used by the turn-calls / trajectory panes still fences via a
+ * bare JSON.parse, so identical bytes can render differently per surface;
+ * lifting one shared Arguments/Result renderer is tracked as a follow-up
+ * rather than widened into this change.
+ */
+export function formatJsonPayload(
+  text: string,
+  maxFormattedLength = EXPANDED_TOOL_PAYLOAD_LENGTH,
+  maxInputLength = EXPANDED_TOOL_PAYLOAD_LENGTH,
+): {
+  text: string;
+  json: boolean;
+} {
+  // Pretty-printing can expand a compact payload well past the render cap, and
+  // parsing a multi-megabyte string is not worth it for output the card will
+  // never show in full.
+  if (text.length > maxInputLength) {
+    return { text, json: false };
+  }
+  const trimmed = text.trim();
+  if (!trimmed) return { text, json: false };
+
+  const document = formatJsonDocument(trimmed, maxFormattedLength);
+  if (document !== undefined) return { text: document, json: true };
+
+  return { text, json: false };
+}
+
+const MAX_JSON_FORMAT_DEPTH = 32;
+
+function formatJsonDocument(
+  text: string,
+  maxFormattedLength: number,
+): string | undefined {
+  if (!/^[[{]/.test(text)) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (value === null || typeof value !== 'object') return undefined;
+  if (exceedsJsonDepth(value, MAX_JSON_FORMAT_DEPTH)) return undefined;
+
+  // Compare against both canonical forms; only an exact match is safe to
+  // reformat, because anything else would rewrite recorded literals or keys.
+  const pretty = JSON.stringify(value, null, 2);
+  if (text === pretty) return text;
+
+  const compact = JSON.stringify(value);
+  if (text !== compact || pretty.length > maxFormattedLength) return undefined;
+  return pretty;
+}
+
+function exceedsJsonDepth(root: unknown, maxDepth: number): boolean {
+  const stack: Array<[unknown, number]> = [[root, 1]];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) break;
+    const [value, depth] = current;
+    if (depth > maxDepth) return true;
+    if (Array.isArray(value)) {
+      for (const entry of value) stack.push([entry, depth + 1]);
+    } else if (value !== null && typeof value === 'object') {
+      for (const entry of Object.values(value)) {
+        stack.push([entry, depth + 1]);
+      }
+    }
+  }
+  return false;
+}
+
 // The tool-header description is shown single-line (CSS-ellipsised) when the
 // row is collapsed and fully wrapped when it is expanded, so we keep the whole
 // string rather than hard-capping it at a line's worth of characters. A
 // generous ceiling still guards against a pathological multi-megabyte command
 // bloating the DOM.
 const MAX_DESCRIPTION_LENGTH = 2000;
+
+const GENERATED_UI_TOOL_NAME = 'mcp__generated-ui__generated_ui_show';
 
 export function getToolDescription(
   tool: ACPToolCall,
@@ -214,6 +323,12 @@ export function getToolDescription(
   if (isSkillToolName(tool.toolName)) {
     const skillName = getStringArg(tool.args, 'skill');
     if (skillName) return truncateText(skillName, MAX_DESCRIPTION_LENGTH);
+  }
+  if (tool.toolName === GENERATED_UI_TOOL_NAME) {
+    // The card title says what the view shows; the tool title only repeats
+    // the protocol name.
+    const title = getStringArg(tool.args, 'title');
+    if (title) return truncateText(title, MAX_DESCRIPTION_LENGTH);
   }
   const fromTitle = getDescriptionFromTitle(tool, workspaceCwd);
   if (fromTitle) return truncateText(fromTitle, MAX_DESCRIPTION_LENGTH);
@@ -255,6 +370,21 @@ export function extractText(tool: ACPToolCall): string | null {
   return extractRawOutputText(tool.rawOutput);
 }
 
+export function hasRecordedOutput(tool: ACPToolCall): boolean {
+  return (
+    tool.rawOutput != null ||
+    (tool.content?.some(
+      (block) =>
+        block.type === 'content' && typeof block.content?.text === 'string',
+    ) ??
+      false)
+  );
+}
+
+export function getAdvisorDisplayText(tool: ACPToolCall): string | null {
+  return extractRawOutputText(tool.rawOutput) ?? extractText(tool);
+}
+
 export function getToolResultSummary(tool: ACPToolCall): string {
   if (tool.status !== 'completed' && tool.status !== 'failed') return '';
 
@@ -264,6 +394,13 @@ export function getToolResultSummary(tool: ACPToolCall): string {
       (extractRawOutputText(tool.rawOutput) ?? '').trim(),
     );
     if (rawSummary) return rawSummary;
+  }
+
+  if (isAdvisorToolName(name)) {
+    const raw = getAdvisorReview(tool.rawOutput);
+    if (raw) return truncateText(raw.verdict.trim().replace(/\s+/g, ' '), 80);
+    const fallback = getAdvisorDisplayText(tool);
+    return fallback ? truncateText(fallback.split('\n')[0] ?? '', 80) : '';
   }
 
   const text = extractText(tool);
@@ -326,6 +463,72 @@ export function getToolResultSummary(tool: ACPToolCall): string {
   return truncateText(firstLine, 80);
 }
 
+export function getEmptyMcpToolTitleDescription(
+  toolName: string | undefined,
+  title: string | undefined,
+  input: Record<string, unknown> | undefined,
+): string | undefined {
+  if (
+    !toolName?.startsWith('mcp__') ||
+    !input ||
+    Object.keys(input).length > 0
+  ) {
+    return undefined;
+  }
+  // core's mcp-tool.ts getDescription serializes arguments as JSON; the CLI
+  // tool-call-emitter may prefix the MCP display name. Require confirmed-empty
+  // input so missing or nonempty arguments keep their original title.
+  const trimmed = title?.trim() ?? '';
+  if (trimmed === '{}') return '';
+  const match = /^(.+) \((.+) MCP Server\): \{\}$/.exec(trimmed);
+  // Preserve prose or aliased names when the prefix cannot be confirmed.
+  if (match === null) return undefined;
+  const rawName = `mcp__${match[2]}__${match[1]}`;
+  if (
+    toolName !== rawName &&
+    toolName !== normalizeToolNameForProvider(rawName)
+  )
+    return undefined;
+  return `${match[1]} (${match[2]} MCP Server)`;
+}
+
+export function isEmptyMcpToolTitle(
+  toolName: string | undefined,
+  title: string | undefined,
+  input: Record<string, unknown> | undefined,
+): boolean {
+  return getEmptyMcpToolTitleDescription(toolName, title, input) !== undefined;
+}
+
+// The web-shell bundle cannot import core, so keep this provider-name mirror
+// aligned with packages/core/src/utils/tool-name-utils.ts.
+const MAX_TOOL_NAME_LENGTH = 63;
+const PROVIDER_SAFE_TOOL_NAME = /^[A-Za-z][A-Za-z0-9_-]*$/;
+
+function normalizeToolNameForProvider(name: string): string {
+  if (
+    name.length <= MAX_TOOL_NAME_LENGTH &&
+    PROVIDER_SAFE_TOOL_NAME.test(name)
+  ) {
+    return name;
+  }
+
+  const sanitized = name.replace(/[^A-Za-z0-9_-]/g, '_');
+  const normalized = /^[A-Za-z]/.test(sanitized)
+    ? sanitized
+    : `tool_${sanitized}`;
+  const suffix = `_${stableToolNameHash(name)}`;
+  return `${normalized.slice(0, MAX_TOOL_NAME_LENGTH - suffix.length)}${suffix}`;
+}
+
+function stableToolNameHash(name: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < name.length; index += 1) {
+    hash = Math.imul(hash ^ name.charCodeAt(index), 16777619);
+  }
+  return (hash >>> 0).toString(36).padStart(7, '0');
+}
+
 function getDescriptionFromTitle(
   tool: ACPToolCall,
   workspaceCwd?: string,
@@ -334,6 +537,16 @@ function getDescriptionFromTitle(
 
   const displayName = formatToolDisplayName(tool.toolName);
   const title = tool.title.trim();
+  const emptyMcpDescription = getEmptyMcpToolTitleDescription(
+    tool.toolName,
+    title,
+    tool.args,
+  );
+  if (emptyMcpDescription !== undefined) {
+    return emptyMcpDescription
+      ? formatDescriptionPaths(emptyMcpDescription, workspaceCwd)
+      : null;
+  }
   if (title === tool.toolName || title === displayName) return null;
 
   const prefixes = [displayName, tool.toolName];
@@ -404,7 +617,8 @@ function getDescriptionFromArgs(
     return description;
   }
   if (args.file_path) {
-    if (args.description) return String(args.description);
+    const description = getStringArg(args, 'description');
+    if (description) return description;
     return pathForDisplay(String(args.file_path), workspaceCwd);
   }
   if (args.url) {
@@ -422,8 +636,7 @@ function getDescriptionFromArgs(
     const candidate = args.path || args.directory || '';
     return pathForDisplay(String(candidate), workspaceCwd);
   }
-  if (args.description) return String(args.description);
-  return '';
+  return getStringArg(args, 'description');
 }
 
 function getStringArg(
@@ -675,12 +888,44 @@ export function getAgentCurrentToolHint(
   return truncateText(hint, 50);
 }
 
-function extractRawOutputText(rawOutput: unknown): string | null {
+interface AdvisorReviewOutput {
+  verdict: string;
+  risks: string;
+  missingEvidence: string;
+  recommendation: string;
+}
+
+function getAdvisorReview(rawOutput: unknown): AdvisorReviewOutput | undefined {
+  if (!rawOutput || typeof rawOutput !== 'object') return undefined;
+  const raw = rawOutput as Record<string, unknown>;
+  if (raw.type !== 'advisor_review') return undefined;
+  if (
+    typeof raw.verdict !== 'string' ||
+    typeof raw.risks !== 'string' ||
+    typeof raw.missingEvidence !== 'string' ||
+    typeof raw.recommendation !== 'string'
+  ) {
+    return undefined;
+  }
+  return raw as unknown as AdvisorReviewOutput;
+}
+
+export function extractRawOutputText(rawOutput: unknown): string | null {
   if (!rawOutput) return null;
   if (typeof rawOutput === 'string') return rawOutput;
   if (typeof rawOutput !== 'object') return null;
 
   const raw = rawOutput as Record<string, unknown>;
+  const advisorReview = getAdvisorReview(raw);
+  if (advisorReview) {
+    const fields = [
+      ['Verdict', advisorReview.verdict],
+      ['Risks', advisorReview.risks],
+      ['Missing evidence', advisorReview.missingEvidence],
+      ['Recommendation', advisorReview.recommendation],
+    ] as const;
+    return fields.map(([label, value]) => `## ${label}\n${value}`).join('\n\n');
+  }
   if (typeof raw.output === 'string') return raw.output;
   if (typeof raw.stdout === 'string') return raw.stdout;
   if (typeof raw.content === 'string') return raw.content;

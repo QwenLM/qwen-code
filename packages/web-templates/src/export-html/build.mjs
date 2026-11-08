@@ -56,12 +56,33 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // the measurement. Before the split that lane measured the combined bundle at
 // 4,133,282 bytes on main at c3023b3e6d — the measurement #11372 raised these
 // two constants for, and which the CSS extraction superseded because the CSS
-// it counted is no longer in the JS. Keep the warning close to the
-// measurement and the hard ceiling close above it: a cap left far above the
-// measurement is a ratchet with enough slack for a whole dependency family to
-// come back unnoticed.
+// it counted is no longer in the JS.
+//
+// The bundle pulls web-shell's built transcript entry, which carries the
+// whole i18n table, so every string the Web Shell adds anywhere lands here.
+// Measured for #12154 by building this bundle twice against the same tree,
+// once with its dictionary and once with main's: 2,021,942 against
+// 2,013,739, so +8,203 bytes for forty-two keys across two locales,
+// which the cap above has room for. Both figures are local and both are
+// higher than the lane's; it is the difference between them that is
+// comparable, and the lane's absolute number is what these constants
+// track.
+//
+// Keep the warning close to the measurement and the hard ceiling close above
+// it: a cap left far above the measurement is a ratchet with enough slack for
+// a whole dependency family to come back unnoticed.
 const DOCUMENT_RUNTIME_WARNING_BYTES = 1_970_000;
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_030_000;
+// Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
+// (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
+// locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
+// 158ff26aeb without and with the change, leaving 3,278 below this ceiling.
+// Main 8345f5ceec then measured 2,049,419. Passing Web Shell theme tokens to
+// MCP Apps as standard style variables adds 820: 2,049,419 against 2,050,239
+// on that main without and with the change, leaving 2,761 below this ceiling.
+// Recovery UI and availability consumers (#14980) add 1,787, measured
+// against merged main 65051590d9, so the merged build stays below this
+// ceiling.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_053_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
@@ -254,6 +275,16 @@ const documentBuildResult = await build({
   entryPoints: [join(srcDir, 'document-main.tsx')],
   bundle: true,
   minify: true,
+  // esbuild escapes every non-ASCII character in a string literal by default
+  // (`charset: 'ascii'`), and this bundle carries the Web Shell's translation
+  // table for both locales, so `"\u4F60"` costs six bytes where the character
+  // is three in UTF-8. The escaped and literal forms are the same string value
+  // to the parser, and every path that serves this asset decodes it as UTF-8 —
+  // the document that loads it declares `<meta charset="UTF-8">`, and unpkg
+  // serves it as `application/javascript; charset=utf-8` — so this is bytes
+  // returned without changing what the renderer renders. Local main at
+  // bfa7a2f52e measured 2,049,210 bytes with the default; this emits 1,956,663.
+  charset: 'utf8',
   write: false,
   metafile: true,
   plugins: [stripDocumentDeadModules, extractTranscriptCss],

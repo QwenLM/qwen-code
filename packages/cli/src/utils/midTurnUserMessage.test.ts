@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Part } from '@google/genai';
 import {
+  MID_TURN_INTERRUPT_USER_MESSAGE_PREFIX,
   MID_TURN_USER_MESSAGE_PREFIX,
   prefixMidTurnUserMessageParts,
 } from './midTurnUserMessage.js';
@@ -36,5 +37,15 @@ describe('prefixMidTurnUserMessageParts', () => {
       { text: `${MID_TURN_USER_MESSAGE_PREFIX}inspect this` },
       imagePart,
     ]);
+  });
+
+  it('uses the given prefix instead of the default', () => {
+    expect(
+      prefixMidTurnUserMessageParts(
+        [{ text: 'stop' }],
+        'stop',
+        MID_TURN_INTERRUPT_USER_MESSAGE_PREFIX,
+      ),
+    ).toEqual([{ text: `${MID_TURN_INTERRUPT_USER_MESSAGE_PREFIX}stop` }]);
   });
 });

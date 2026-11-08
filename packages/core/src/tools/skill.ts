@@ -14,7 +14,11 @@ import type {
 } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { SkillManager } from '../skills/skill-manager.js';
-import type { SkillConfig } from '../skills/types.js';
+import {
+  AUTO_MEMORY_SKILL_NAME,
+  skillRestrictionNames,
+  type SkillConfig,
+} from '../skills/types.js';
 import {
   logSkillLaunch,
   recordSkillInvocation,
@@ -123,7 +127,11 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   }> = [];
   private hiddenSkillNames: Set<string> = new Set();
   private loadedSkillNames: Set<string> = new Set();
-  private loadedSkillContents: Set<string> = new Set();
+  private loadedSkillContents = new Map<string, string>();
+  private loadedSkillContentByName = new Map<
+    string,
+    { content: string; restrictionNames: string[] }
+  >();
   // Cleanup function returned by `addChangeListener`. Stored so per-agent
   // SkillTool instances (subagents share the parent's SkillManager) can
   // detach their listener at teardown — without this the SkillManager
@@ -206,6 +214,35 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         this.skillManager,
         this.config,
       );
+      const discoveredByName = new Map(
+        (this.skillManager.getCachedSkills() ?? []).map((skill) => [
+          skill.name,
+          skill,
+        ]),
+      );
+      const disabledNames = this.config.getDisabledSkillNames();
+      for (const name of this.loadedSkillNames) {
+        const skill = discoveredByName.get(name);
+        const loaded = this.loadedSkillContentByName.get(name);
+        if (
+          !skill &&
+          this.skillManager.hasDiscoveryErrors() &&
+          !(loaded?.restrictionNames ?? skillRestrictionNames({ name })).some(
+            (entry) => disabledNames.has(entry),
+          )
+        ) {
+          continue;
+        }
+        if (
+          !skill ||
+          !this.config.isSkillEnabled(skill) ||
+          loaded?.content !==
+            buildSkillLlmContent(path.dirname(skill.filePath), skill.body)
+        ) {
+          this.loadedSkillNames.delete(name);
+          this.loadedSkillContentByName.delete(name);
+        }
+      }
       this.availableSkills = collected.availableSkills;
       this.pendingConditionalSkillNames =
         collected.pendingConditionalSkillNames;
@@ -340,9 +377,15 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       this.config,
       this.skillManager,
       params,
-      (name: string, content?: string) => {
+      (name: string, content?: string, skill?: SkillConfig) => {
         this.loadedSkillNames.add(name);
-        if (content !== undefined) this.loadedSkillContents.add(content);
+        if (content !== undefined) {
+          this.loadedSkillContents.set(content, name);
+          this.loadedSkillContentByName.set(name, {
+            content,
+            restrictionNames: skillRestrictionNames(skill ?? { name }),
+          });
+        }
       },
       this.config.getModelInvocableCommandsExecutor(),
       (name: string) => this.loadedSkillNames.has(name),
@@ -361,15 +404,19 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   }
 
   /**
-   * Returns the set of skill names that have been successfully loaded
-   * (invoked) during the current session. Used by /context to attribute
-   * loaded skill body tokens separately from the tool-definition cost.
+   * Returns the skill names whose current content is already loaded.
+   * Historical bodies remain available through getLoadedSkillContents().
    */
   getLoadedSkillNames(): ReadonlySet<string> {
     return this.loadedSkillNames;
   }
 
   getLoadedSkillContents(): ReadonlySet<string> {
+    return new Set(this.loadedSkillContents.keys());
+  }
+
+  /** Maps exact emitted bodies to skill names, retained across refreshes. */
+  getLoadedSkillContentNames(): ReadonlyMap<string, string> {
     return this.loadedSkillContents;
   }
 
@@ -433,8 +480,12 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         if (rearm) unmatched.set(skill.name, skill.config);
         return;
       }
-      this.loadedSkillContents.add(skill.output);
+      this.loadedSkillContents.set(skill.output, skill.name);
       this.loadedSkillNames.add(skill.name);
+      this.loadedSkillContentByName.set(skill.name, {
+        content: skill.output,
+        restrictionNames: skillRestrictionNames(skill.config),
+      });
       if (rearm) restored.set(skill.name, skill.config);
     };
 
@@ -566,6 +617,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   clearLoadedSkills(): void {
     this.loadedSkillNames.clear();
     this.loadedSkillContents.clear();
+    this.loadedSkillContentByName.clear();
   }
 
   /**
@@ -592,7 +644,11 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     private readonly config: Config,
     private readonly skillManager: SkillManager,
     params: SkillParams,
-    private readonly onSkillLoaded: (name: string, content?: string) => void,
+    private readonly onSkillLoaded: (
+      name: string,
+      content?: string,
+      skill?: SkillConfig,
+    ) => void,
     private readonly commandExecutor:
       | ((
           name: string,
@@ -622,9 +678,43 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
    * skill loads, but the scheduler short-circuits at L4 when
    * `finalPermission === 'allow'`. The L3 default must be `'ask'` so
    * the classifier projection added in this PR can be reached.
+   *
+   * The exception is a bundled reference that is plain guidance shipped with
+   * the build: loading it adds text to the context and nothing else.
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    return 'ask';
+    return (await this.loadsBundledReference()) ? 'allow' : 'ask';
+  }
+
+  /**
+   * Whether this call loads the bundled `auto-memory` reference.
+   *
+   * The resident memory policy tells the model to load it before saving, and
+   * private memory writes are allowed without asking, so asking here would
+   * put an approval in front of every memory save. Only the bundled copy
+   * qualifies: a same-named project, user or extension skill takes precedence
+   * when the name is resolved, and it is ordinary user content that keeps
+   * the `'ask'` default. So does a copy that grants tools or registers hooks.
+   */
+  private async loadsBundledReference(): Promise<boolean> {
+    const name = this.params.skill;
+    if (name !== AUTO_MEMORY_SKILL_NAME) return false;
+    if (this.isSkillHidden(name)) return false;
+    if (this.config.getDisabledSkillNames().has(name.toLowerCase())) {
+      return false;
+    }
+    try {
+      const skill = await this.skillManager.loadSkill(name);
+      return (
+        skill?.level === 'bundled' &&
+        this.config.isSkillEnabled(skill) &&
+        !skill.allowedTools?.length &&
+        skill.hooks === undefined
+      );
+    } catch (error) {
+      debugLogger.warn(`Cannot resolve skill "${name}": ${error}`);
+      return false;
+    }
   }
 
   /**
@@ -892,7 +982,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
-      this.onSkillLoaded(this.params.skill, llmContent);
+      this.onSkillLoaded(this.params.skill, llmContent, skill);
 
       void this.recordAutoSkillUsageBestEffort(skill);
       recordSkillInvocation(this.config, {

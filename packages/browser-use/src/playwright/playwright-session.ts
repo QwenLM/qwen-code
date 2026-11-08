@@ -6,12 +6,11 @@
 
 import { randomUUID } from 'node:crypto';
 
-import {
-  chromium,
-  type Browser,
-  type BrowserContext,
-  type CDPSession,
-  type Page,
+import type {
+  Browser,
+  BrowserContext,
+  CDPSession,
+  Page,
 } from 'playwright-core';
 
 import type { ChromeBridge } from '../bridge/index.js';
@@ -22,6 +21,7 @@ import type {
   FinalizeTabStatus,
   TabInfo,
 } from '../core/primitives.js';
+import { chromium } from './playwright-core-loader.js';
 import {
   playwrightTransportAdapter,
   QwenPlaywrightTransport,

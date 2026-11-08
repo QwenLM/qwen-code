@@ -22,6 +22,13 @@
  *  - theme selection (useThemeCommand parity).
  */
 
+import { buildModelIdContext } from '@qwen-code/qwen-code-core/utils/modelId.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
+import {
+  checkAdvisorModelAvailability,
+  isAdvisorModelEligible,
+} from '../../config/advisor-model.js';
 import process from 'node:process';
 import { EventEmitter } from 'node:events';
 import {
@@ -60,6 +67,11 @@ import { loadMcpApprovals } from '../../config/mcpApprovals.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 import { extensionComponentsSummary } from '../../services/extension-components-summary.js';
+import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
+import {
+  filterModelEntriesForDisplay,
+  sortModelEntriesForDisplay,
+} from '../../utils/model-display-order.js';
 import { getErrorMessage } from '../../utils/errors.js';
 import { getToolInvalidReasons, isToolValid } from '../components/mcp/utils.js';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
@@ -70,6 +82,7 @@ import {
   formatUnsupportedVoiceModelMessage,
 } from '../voice/voice-model.js';
 import {
+  ADVISOR_OFF_OPTION,
   buildModelSelectionKey,
   encodeAuxModelSelector,
   encodeVisionModelSelector,
@@ -87,6 +100,17 @@ import type {
 } from './dialogs-mcp.js';
 import type { ExtensionRow } from './dialogs-extensions.js';
 
+function advisorSelector(
+  model: NonNullable<OpenTuiModelEntry['model']>,
+): string {
+  const selector = `${model.authType}:${model.id}`;
+  // Registry-exact, matching the ink dialog's list key: this selector is both
+  // the row key and the persisted value, and consumers compare it with `===`.
+  return model.isRuntimeModel
+    ? selector
+    : `${selector}\0${model.registryBaseUrl ?? ''}`;
+}
+
 /**
  * Model list parity of ModelDialog's `availableModelEntries`: runtime entries
  * are listed (tagged) outside image mode, QWEN_OAUTH models only under that
@@ -100,11 +124,32 @@ import type { ExtensionRow } from './dialogs-extensions.js';
 export function buildModelEntries(
   config: Config | null | undefined,
   mode: ModelDialogMode,
+  subscriptionSignedIn?: boolean,
 ): OpenTuiModelEntry[] {
   const allModels = config?.getAllConfiguredModels?.() ?? [];
   const authType = config?.getAuthType?.();
-  const entries: OpenTuiModelEntry[] = [];
+  const entries: OpenTuiModelEntry[] =
+    mode === 'advisor'
+      ? [
+          {
+            key: ADVISOR_OFF_OPTION,
+            value: ADVISOR_OFF_OPTION,
+            authType: '',
+            modelId: '',
+            label: t('Off'),
+            description: t('Disable Advisor'),
+          },
+        ]
+      : [];
   for (const model of allModels) {
+    if (
+      mode === 'advisor' &&
+      (!isAdvisorModelEligible(model, true) ||
+        !config ||
+        !checkAdvisorModelAvailability(config, advisorSelector(model))
+          .available)
+    )
+      continue;
     if (mode === 'image') {
       // ink gates on isImageGenerationCapable (not just imageOnly): dual-role
       // models with supportsImageGeneration and visionOnly image-capable
@@ -125,7 +170,7 @@ export function buildModelEntries(
       ) {
         continue;
       }
-      if (mode !== 'fast' && model.fastOnly) continue;
+      if (mode !== 'fast' && mode !== 'advisor' && model.fastOnly) continue;
       if (mode !== 'voice' && model.voiceOnly) continue;
       // ink keeps visionOnly models in vision AND image mode
       // (ModelDialog.tsx: isVisionModelMode || isImageModelMode || !m.visionOnly).
@@ -134,11 +179,13 @@ export function buildModelEntries(
     const key =
       model.isRuntimeModel && model.runtimeSnapshotId
         ? model.runtimeSnapshotId
-        : buildModelSelectionKey(
-            String(model.authType ?? ''),
-            model.id,
-            model.baseUrl,
-          );
+        : mode === 'advisor'
+          ? advisorSelector(model)
+          : buildModelSelectionKey(
+              String(model.authType ?? ''),
+              model.id,
+              model.baseUrl,
+            );
     const isRuntime = model.isRuntimeModel ?? false;
     const isQwenOAuth = model.authType === AuthType.QWEN_OAUTH;
     // ink folds the runtime / discontinued markers into the row description as
@@ -169,7 +216,13 @@ export function buildModelEntries(
       model,
     });
   }
-  return entries;
+  const visibleEntries = filterModelEntriesForDisplay(
+    entries,
+    subscriptionSignedIn,
+  );
+  return mode === 'primary'
+    ? sortModelEntriesForDisplay(visibleEntries)
+    : visibleEntries;
 }
 
 /** Parity of ModelDialog's `resolvePersistScope`. */
@@ -184,6 +237,32 @@ export function resolveModelPersistScope(
   if (persistScope === 'workspace') return SettingScope.Workspace;
   if (persistScope === 'user') return SettingScope.User;
   return getPersistScopeForModelSelection(settings);
+}
+
+/**
+ * Parity of `shareableAuxSelector` in ModelDialog.tsx: workspace settings are
+ * shareable (`<project>/.qwen/settings.json` gets committed), so only a
+ * provably public endpoint may be persisted there; otherwise drop just the
+ * `\0baseUrl` disambiguator, matching the policy in
+ * serve/routes/workspace-models.ts. `publicProviderBaseUrl` is the fail-closed
+ * of the two URL predicates — it also rejects query/hash secrets — and a kept
+ * URL stays byte-identical, which `Config.pinnedAuxEndpoint` requires.
+ */
+function shareableAuxSelector(selector: string, scope: SettingScope): string {
+  if (scope !== SettingScope.Workspace) return selector;
+  const sep = selector.indexOf('\0');
+  if (sep === -1) return selector;
+  const endpoint = selector.slice(sep + 1);
+  return publicProviderBaseUrl(endpoint) === endpoint
+    ? selector
+    : selector.slice(0, sep);
+}
+
+/** Parity of `endpointNotSavedNote` in ModelDialog.tsx. */
+function endpointNotSavedNote(selector: string, persisted: string): string {
+  return selector === persisted
+    ? ''
+    : t(' (endpoint not saved: project settings are shared)');
 }
 
 /**
@@ -203,6 +282,33 @@ export function computeModelDialogInitialKey(params: {
   const { config, settings, entries, mode } = params;
   if (entries.length === 0) return undefined;
   const byKey = new Map(entries.map((entry) => [entry.key, entry]));
+
+  if (mode === 'advisor') {
+    const setting = config?.getAdvisorModel();
+    if (!setting) return ADVISOR_OFF_OPTION;
+    try {
+      const endpointIndex = setting.indexOf('\0');
+      const selector = resolveModelId(
+        setting.split('\0')[0],
+        config ? buildModelIdContext(config) : {},
+      );
+      const match =
+        selector &&
+        entries.find(
+          ({ model }) =>
+            model &&
+            model.id === selector.modelId &&
+            (!selector.authType || model.authType === selector.authType) &&
+            (endpointIndex < 0 ||
+              (!model.isRuntimeModel &&
+                (model.registryBaseUrl ?? '') ===
+                  setting.slice(endpointIndex + 1))),
+        );
+      return match?.key ?? entries[1]?.key ?? ADVISOR_OFF_OPTION;
+    } catch {
+      return entries[1]?.key ?? ADVISOR_OFF_OPTION;
+    }
+  }
 
   if (mode === 'primary') {
     const snapshotId = config?.getActiveRuntimeModelSnapshot?.()?.id?.trim();
@@ -322,6 +428,30 @@ export async function applyModelSelection(
   const selectedEntry = entries.find((entry) => entry.key === selectionKey);
   const scopeSuffix = persistScopeSuffix(persistScope);
 
+  if (mode === 'advisor') {
+    if (!config) return { ok: false, error: t('Configuration not available.') };
+    const off = selectionKey === ADVISOR_OFF_OPTION;
+    if (!off && !selectedEntry?.model)
+      return { ok: false, error: t('Selected Advisor model is unavailable.') };
+    hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model?.envKey);
+    const selector = off ? undefined : advisorSelector(selectedEntry!.model!);
+    if (selector && !checkAdvisorModelAvailability(config, selector).available)
+      return { ok: false, error: t('Selected Advisor model is unavailable.') };
+    try {
+      if ((await config.setAdvisorModel(selector)) === false)
+        return { ok: false, error: t('Advisor configuration is unavailable.') };
+      settings.setValue(SettingScope.User, 'advisorModel', selector ?? '');
+      return {
+        ok: true,
+        message: selector
+          ? t('Advisor set to {{model}}', { model: selector.split('\0')[0] })
+          : t('Advisor disabled'),
+      };
+    } catch (error) {
+      return { ok: false, error: getErrorMessage(error) };
+    }
+  }
+
   if (mode === 'voice') {
     if (!selectedEntry?.model) {
       return { ok: false, error: t('Selected voice model is unavailable.') };
@@ -355,17 +485,21 @@ export async function applyModelSelection(
 
   hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model?.envKey);
 
-  // Fast model mode: save authType:modelId so duplicate model ids across
-  // providers remain unambiguous. baseUrl is intentionally discarded.
+  // Fast model mode: save authType:modelId (plus the baseUrl endpoint
+  // disambiguator when the row carries one) so duplicate model ids across
+  // providers bind the selected provider's credentials.
   if (mode === 'fast') {
     const fastModel = encodeAuxModelSelector(selectionKey);
     // Sync the runtime Config so forked agents pick up the change immediately.
     config?.setFastModel?.(fastModel);
     const scope = resolveModelPersistScope(settings, persistScope);
-    settings.setValue(scope, 'fastModel', fastModel);
+    // The shareable workspace file only ever receives a provably public
+    // endpoint; this session's in-memory pin keeps the picked row.
+    const persistedFastModel = shareableAuxSelector(fastModel, scope);
+    settings.setValue(scope, 'fastModel', persistedFastModel);
     return {
       ok: true,
-      message: `${t('Fast Model')}: ${fastModel}${scopeSuffix}`,
+      message: `${t('Fast Model')}: ${persistedFastModel.split('\0')[0]}${scopeSuffix}${endpointNotSavedNote(fastModel, persistedFastModel)}`,
     };
   }
 
@@ -414,10 +548,14 @@ export async function applyModelSelection(
     // Sync runtime Config so the compression service picks it up immediately.
     config.setCompactionModel(compactionModelId);
     const scope = resolveModelPersistScope(settings, persistScope);
-    settings.setValue(scope, 'compactionModel', compactionModelId);
+    const persistedCompactionModel = shareableAuxSelector(
+      compactionModelId,
+      scope,
+    );
+    settings.setValue(scope, 'compactionModel', persistedCompactionModel);
     return {
       ok: true,
-      message: `${t('Compaction Model')}: ${compactionModelId}${scopeSuffix}`,
+      message: `${t('Compaction Model')}: ${persistedCompactionModel.split('\0')[0]}${scopeSuffix}${endpointNotSavedNote(compactionModelId, persistedCompactionModel)}`,
     };
   }
 
@@ -502,6 +640,9 @@ export async function applyModelSelection(
     }
     after = config.getContentGeneratorConfig?.();
   } catch (e) {
+    if (e instanceof SubscriptionOAuthError) {
+      return { ok: false, error: t(subscriptionErrorMessage(e)) };
+    }
     const baseErrorMessage = e instanceof Error ? e.message : String(e);
     // Use parsed modelId for display to avoid showing raw selection key
     // (which contains invisible \0 separator between modelId and baseUrl).
@@ -537,13 +678,15 @@ export async function applyModelSelection(
   return {
     ok: true,
     message:
-      `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
-      `\n` +
-      `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
-      `\n` +
-      `Base URL: ${baseUrl}` +
-      `\n` +
-      `API key: ${maskedKey}`,
+      effectiveAuthType === AuthType.QWEN_SUBSCRIPTION
+        ? t('Model: {{model}}', { model: effectiveModelId }) + scopeSuffix
+        : `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
+          `\n` +
+          `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
+          `\n` +
+          `Base URL: ${baseUrl}` +
+          `\n` +
+          `API key: ${maskedKey}`,
   };
 }
 

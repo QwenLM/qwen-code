@@ -92,7 +92,7 @@ import {
 } from './channel-platform';
 
 interface ChannelsManagerPageProps {
-  onClose: () => void;
+  onClose?: () => void;
   initialFocusRef?: Ref<HTMLHeadingElement>;
 }
 
@@ -266,9 +266,6 @@ export function ChannelsManagerPage({
         .sort((left, right) => left.name.localeCompare(right.name)),
     [channels],
   );
-  const workspaceName = activeWorkspace
-    ? workspaceLabel(activeWorkspace)
-    : t('channels.workspace.current');
   const channelTypeLabel = useCallback(
     (channel: DaemonChannelInstanceSnapshot) => {
       const type = String(channel.config.type);
@@ -430,85 +427,81 @@ export function ChannelsManagerPage({
   return (
     <div className={styles.page}>
       <header className={styles.pageHeader}>
-        <Button
-          variant="ghost"
-          size="icon"
-          className={styles.backButton}
-          onClick={onClose}
-          aria-label={t('channels.action.back')}
-        >
-          <ArrowLeftIcon />
-        </Button>
+        {onClose && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className={styles.backButton}
+            onClick={onClose}
+            aria-label={t('channels.action.back')}
+          >
+            <ArrowLeftIcon />
+          </Button>
+        )}
         <h1 ref={initialFocusRef} tabIndex={-1} className={styles.title}>
-          {t('channels.title')}
+          {t('sidebar.channelSettings')}
         </h1>
       </header>
 
       <div className={styles.pageBody}>
-        <p className={styles.intro}>{t('channels.description')}</p>
-
         <div className={styles.toolbar}>
-          <p className={styles.count}>
-            {t('channels.summary', {
-              workspace: workspaceName,
-              count: instances.length,
-            })}
-          </p>
-          <div className={styles.toolbarActions}>
-            {registeredWorkspaces.length > 0 ? (
-              <div className={styles.workspacePicker}>
-                <span className={styles.workspacePickerLabel}>
-                  {t('channels.workspace.label')}
-                </span>
-                <Select
-                  value={selectedManagementWorkspace?.cwd ?? ''}
-                  disabled={
-                    !supportsManagement ||
-                    Boolean(editor) ||
-                    loading ||
-                    deleting
-                  }
-                  onValueChange={(cwd) => setManagementWorkspaceCwd(cwd)}
+          {registeredWorkspaces.length > 0 ? (
+            <div className={styles.workspacePicker}>
+              <Select
+                value={selectedManagementWorkspace?.cwd ?? ''}
+                disabled={
+                  !supportsManagement || Boolean(editor) || loading || deleting
+                }
+                onValueChange={(cwd) => setManagementWorkspaceCwd(cwd)}
+              >
+                <SelectTrigger
+                  className={styles.workspacePickerTrigger}
+                  aria-label={t('channels.workspace.label')}
                 >
-                  <SelectTrigger
-                    className={styles.workspacePickerTrigger}
-                    aria-label={t('channels.workspace.label')}
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {registeredWorkspaces.map((entry) => (
-                      <SelectItem
-                        key={entry.id}
-                        value={entry.cwd}
-                        disabled={!entry.trusted}
-                      >
-                        {workspaceLabel(entry)}
-                        {entry.primary
-                          ? ` · ${t('channels.workspace.primary')}`
-                          : ''}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            ) : null}
-            <Button
-              variant="outline"
-              className={styles.refreshButton}
-              disabled={
-                !supportsManagement ||
-                loading ||
-                Boolean(editor) ||
-                busy !== null ||
-                deleting
-              }
-              onClick={() => void reload()}
-            >
-              {loading ? <Spinner /> : <RefreshCwIcon />}
-              {t('channels.action.refresh')}
-            </Button>
-          </div>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {registeredWorkspaces.map((entry) => (
+                    <SelectItem
+                      key={entry.id}
+                      value={entry.cwd}
+                      disabled={!entry.trusted}
+                    >
+                      {workspaceLabel(entry)}
+                      {entry.primary
+                        ? ` · ${t('channels.workspace.primary')}`
+                        : ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {snapshot && (
+                <Badge
+                  variant="secondary"
+                  aria-label={t('channels.configuredCount', {
+                    count: instances.length,
+                  })}
+                >
+                  {t('channels.configuredCount', { count: instances.length })}
+                </Badge>
+              )}
+            </div>
+          ) : null}
+          <Button
+            variant="outline"
+            className={styles.refreshButton}
+            disabled={
+              !supportsManagement ||
+              loading ||
+              Boolean(editor) ||
+              busy !== null ||
+              deleting
+            }
+            onClick={() => void reload()}
+          >
+            {loading ? <Spinner /> : <RefreshCwIcon />}
+            {t('channels.action.refresh')}
+          </Button>
         </div>
 
         {!supportsManagement ? (

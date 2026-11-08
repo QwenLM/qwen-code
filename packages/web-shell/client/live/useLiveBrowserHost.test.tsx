@@ -10,6 +10,30 @@ import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+const availabilityMock = vi.hoisted(() => ({
+  enabled: false,
+  available: true,
+  listener: undefined as (() => void) | undefined,
+  controller: {
+    getSnapshot: () =>
+      availabilityMock.available ? 'available' : 'unavailable',
+    assertAvailable: () => {
+      if (!availabilityMock.available) throw new Error('Daemon unavailable');
+    },
+    check: vi.fn(async () => {}),
+    subscribe: (listener: () => void) => {
+      availabilityMock.listener = listener;
+      return () => {
+        availabilityMock.listener = undefined;
+      };
+    },
+  },
+}));
+vi.mock('../daemon/availability-context', () => ({
+  useDaemonAvailabilityController: () =>
+    availabilityMock.enabled ? availabilityMock.controller : undefined,
+}));
+
 import {
   useLiveBrowserHost,
   type UseLiveBrowserHostResult,
@@ -137,8 +161,11 @@ class MockAudioContext {
     start: ReturnType<typeof vi.fn>;
     stop: ReturnType<typeof vi.fn>;
   }> = [];
+  static initialState: 'running' | 'suspended' = 'running';
+  static resumeRejectsOnClose = false;
 
-  state = 'running';
+  state = MockAudioContext.initialState;
+  rejectResume: (() => void) | undefined;
   currentTime = 0;
   readonly sampleRate: number;
   readonly destination = {};
@@ -171,9 +198,19 @@ class MockAudioContext {
     MockAudioContext.sources.push(source);
     return source;
   });
-  resume = vi.fn(async () => {});
+  resume = vi.fn(async () => {
+    if (!MockAudioContext.resumeRejectsOnClose) return;
+    if (this.state === 'closed') {
+      throw new DOMException('closed', 'InvalidStateError');
+    }
+    await new Promise<void>((_resolve, reject) => {
+      this.rejectResume = () =>
+        reject(new DOMException('closed', 'InvalidStateError'));
+    });
+  });
   close = vi.fn(async () => {
     this.state = 'closed';
+    this.rejectResume?.();
   });
 
   constructor(options?: { sampleRate?: number }) {
@@ -239,6 +276,9 @@ function speak(samples: number[] = [0.5, -0.5]): void {
 }
 
 beforeEach(() => {
+  availabilityMock.enabled = false;
+  availabilityMock.available = true;
+  availabilityMock.listener = undefined;
   host = undefined;
   token = undefined;
   onStatus.mockReset();
@@ -268,6 +308,8 @@ beforeEach(() => {
   MockAudioContext.processor = undefined;
   MockAudioContext.sources = [];
   MockAudioContext.addModule = undefined;
+  MockAudioContext.initialState = 'running';
+  MockAudioContext.resumeRejectsOnClose = false;
   MockWorkletNode.instances = [];
   MockWorkletNode.failConstruction = false;
   Object.defineProperty(globalThis, 'AudioWorkletNode', {
@@ -298,6 +340,60 @@ afterEach(async () => {
 });
 
 describe('useLiveBrowserHost', () => {
+  it('blocks capture while unavailable and ends an active host without restarting on recovery', async () => {
+    availabilityMock.enabled = true;
+    availabilityMock.available = false;
+    await render();
+    await act(async () => host!.connect());
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(MockWebSocket.instances).toHaveLength(0);
+    availabilityMock.available = true;
+    await connected();
+    await act(async () => {
+      availabilityMock.available = false;
+      availabilityMock.listener?.();
+    });
+    expect(track.stop).toHaveBeenCalled();
+    expect(host!.phase).toBe('error');
+    await act(async () => {
+      availabilityMock.available = true;
+      availabilityMock.listener?.();
+    });
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(MockWebSocket.instances).toHaveLength(1);
+  });
+
+  it('stops a granted microphone when an outage ends connect mid-handshake', async () => {
+    availabilityMock.enabled = true;
+    MockAudioContext.initialState = 'suspended';
+    MockAudioContext.resumeRejectsOnClose = true;
+    let resolveMic!: (stream: MediaStream) => void;
+    getUserMedia.mockImplementation(
+      () =>
+        new Promise<MediaStream>((resolve) => {
+          resolveMic = resolve;
+        }),
+    );
+    await render();
+    act(() => {
+      host!.connect();
+    });
+    await act(async () => {
+      availabilityMock.available = false;
+      availabilityMock.listener?.();
+    });
+    expect(host!.phase).toBe('error');
+    const stream = {
+      getTracks: () => [track],
+      getAudioTracks: () => [track],
+    } as unknown as MediaStream;
+    await act(async () => {
+      resolveMic(stream);
+      await Promise.resolve();
+    });
+    expect(track.stop).toHaveBeenCalled();
+  });
+
   it('takes the lease on /live/web with the reduced browser hello', async () => {
     token = 'secret-token';
     await render();
@@ -460,6 +556,51 @@ describe('useLiveBrowserHost', () => {
       error: 'The screen was too detailed to send.',
     });
   });
+
+  it.each(['stop', 'replace', 'epoch'])(
+    'does not upload an old capture after %s',
+    async (change) => {
+      await render();
+      const ws = await connected();
+      await act(async () => {
+        await host!.startSharingScreen();
+      });
+      let resolve!: (frame: {
+        image: string;
+        width: number;
+        height: number;
+      }) => void;
+      shareHandle.grab.mockImplementationOnce(
+        () =>
+          new Promise((done) => {
+            resolve = done;
+          }),
+      );
+      await act(async () => {
+        ws.receive({
+          type: 'host.capture_visual',
+          requestId: 'stale',
+          source: 'screen',
+          epoch: 0,
+        });
+        if (change === 'stop') host!.stopSharingScreen();
+        else if (change === 'replace') await host!.startSharingScreen();
+        else
+          ws.receive({
+            type: 'host.state',
+            epoch: 1,
+            status: status('listening'),
+          });
+        resolve({ image: 'old-image', width: 1, height: 1 });
+      });
+      expect(
+        ws.text().find((message) => message['requestId'] === 'stale'),
+      ).toMatchObject({ success: false });
+      expect(
+        ws.text().some((message) => message['image'] === 'old-image'),
+      ).toBe(false);
+    },
+  );
 
   it('follows the browser\u2019s own stop-sharing control', async () => {
     await render();
@@ -986,4 +1127,207 @@ describe('useLiveBrowserHost', () => {
       expect(host!.captureMode).toBeUndefined();
     });
   });
+});
+
+describe('continuous screen feed', () => {
+  async function feeding() {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({
+        type: 'host.welcome',
+        screenFeedV1: true,
+        epoch: 1,
+        status: status('listening'),
+      });
+      await host!.startSharingScreen();
+    });
+    const feedId = host!.screenFeed.feedId!;
+    await act(async () =>
+      ws.receive({
+        type: 'host.screen_feed_state',
+        epoch: 1,
+        feedId,
+        phase: 'starting',
+      }),
+    );
+    return { ws, feedId };
+  }
+
+  it('keeps old daemons on demand without unsupported commands', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+      await host!.startSharingScreen();
+    });
+    expect(
+      ws
+        .text()
+        .some((message) =>
+          String(message['type']).startsWith('host.screen_feed'),
+        ),
+    ).toBe(false);
+  });
+
+  it('automatically starts when a call becomes ready after sharing', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({
+        type: 'host.welcome',
+        screenFeedV1: true,
+        epoch: 0,
+        status: status('idle'),
+      });
+      await host!.startSharingScreen();
+    });
+    expect(host!.screenFeed.phase).toBe('idle');
+    await act(async () =>
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') }),
+    );
+    expect(ws.text().at(-1)).toMatchObject({
+      type: 'host.screen_feed_start',
+      epoch: 1,
+    });
+  });
+
+  it('starts automatically during an active call and sends frames after the starting acknowledgement', async () => {
+    const { ws, feedId } = await feeding();
+    expect(ws.text()).toContainEqual({
+      type: 'host.screen_feed_frame',
+      epoch: 1,
+      feedId,
+      image: 'ZmFrZS1qcGVn',
+    });
+    expect(host!.screenShare.sharing).toBe(true);
+  });
+
+  it.each(['stop', 'revoke', 'disconnect', 'callEnd'])(
+    'cancels the feed on %s and ignores late replies',
+    async (operation) => {
+      const { ws, feedId } = await feeding();
+      await act(async () => {
+        if (operation === 'stop') host!.stopSharingScreen();
+        else if (operation === 'revoke') shareEnded!();
+        else if (operation === 'disconnect') host!.disconnect();
+        else
+          ws.receive({ type: 'host.state', epoch: 1, status: status('idle') });
+      });
+      expect(ws.text().at(-1)).toEqual({
+        type: 'host.screen_feed_stop',
+        epoch: 1,
+        feedId,
+      });
+      await act(async () =>
+        ws.receive({
+          type: 'host.screen_feed_state',
+          epoch: 1,
+          feedId,
+          phase: 'streaming',
+        }),
+      );
+      expect(host!.screenFeed.phase).not.toBe('streaming');
+    },
+  );
+
+  it('revokes an active share on a new epoch before any new feed can reuse its pending encode', async () => {
+    let resolve!: (frame: {
+      image: string;
+      width: number;
+      height: number;
+    }) => void;
+    shareHandle.grab.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const { ws, feedId } = await feeding();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 2, status: status('listening') });
+      const latestStart = ws
+        .text()
+        .filter((message) => message['type'] === 'host.screen_feed_start')
+        .at(-1)!;
+      ws.receive({
+        type: 'host.screen_feed_state',
+        epoch: 2,
+        feedId: latestStart['feedId'],
+        phase: 'starting',
+      });
+      resolve({ image: 'old-feed', width: 1, height: 1 });
+    });
+    expect(ws.text()).toContainEqual({
+      type: 'host.screen_feed_stop',
+      epoch: 1,
+      feedId,
+    });
+    expect(ws.text().some((message) => message['image'] === 'old-feed')).toBe(
+      false,
+    );
+    expect(host!.screenFeed.phase).toBe('stopped');
+    expect(host!.screenShare.sharing).toBe(false);
+    expect(shareHandle.stop).toHaveBeenCalled();
+    expect(shareHandle.grab).toHaveBeenCalledTimes(1);
+    expect(
+      ws
+        .text()
+        .filter((message) => message['type'] === 'host.screen_feed_start'),
+    ).toHaveLength(1);
+  });
+
+  it('does not retry an errored feed on periodic state updates but permits a new share', async () => {
+    const { ws, feedId } = await feeding();
+    await act(async () => {
+      ws.receive({
+        type: 'host.screen_feed_state',
+        epoch: 1,
+        feedId,
+        phase: 'error',
+        message: 'failed',
+      });
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+      ws.receive({ type: 'host.state', epoch: 1, status: status('thinking') });
+    });
+    expect(host!.screenFeed.phase).toBe('error');
+    expect(
+      ws
+        .text()
+        .filter((message) => message['type'] === 'host.screen_feed_start'),
+    ).toHaveLength(1);
+    await act(async () => host!.startSharingScreen());
+    expect(
+      ws
+        .text()
+        .filter((message) => message['type'] === 'host.screen_feed_start'),
+    ).toHaveLength(2);
+  });
+
+  it.each(['listening', 'starting'])(
+    'discards a pending screen picker when a %s call ends',
+    async (state) => {
+      await render();
+      const ws = await connected();
+      let resolve!: (value: typeof shareHandle) => void;
+      startShare.mockImplementationOnce(
+        () =>
+          new Promise((done) => {
+            resolve = done;
+          }),
+      );
+      let pending!: Promise<void>;
+      await act(async () => {
+        ws.receive({ type: 'host.state', epoch: 1, status: status(state) });
+        pending = host!.startSharingScreen();
+        ws.receive({ type: 'host.state', epoch: 1, status: status('idle') });
+      });
+      await act(async () => {
+        resolve(shareHandle);
+        await pending;
+      });
+      expect(host!.screenShare.sharing).toBe(false);
+      expect(shareHandle.stop).toHaveBeenCalled();
+    },
+  );
 });

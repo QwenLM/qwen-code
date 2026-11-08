@@ -6,9 +6,18 @@
 
 import type { Application } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
-import { getServeProtocolVersions } from '../capabilities.js';
+import {
+  getServeProtocolVersions,
+  hostedPersonaServeFeatures,
+} from '../capabilities.js';
 import type { getAdvertisedServeFeatures } from '../capabilities.js';
 import { MAX_UPLOAD_BYTES } from '../fs/index.js';
+import {
+  MAX_SKILL_ARCHIVE_BYTES,
+  MAX_SKILL_ARCHIVE_EXPANDED_BYTES,
+  MAX_SKILL_ARCHIVE_ENTRIES,
+  MAX_SKILL_ARCHIVE_MANIFEST_BYTES,
+} from '../workspace-skill-management.js';
 import {
   advertisedMaxPendingPromptsPerSession,
   advertisedMaxSessions,
@@ -16,6 +25,7 @@ import {
 import {
   CAPABILITIES_SCHEMA_VERSION,
   type CapabilitiesEnvelope,
+  type HostedHarnessCapabilities,
   type ServeOptions,
 } from '../types.js';
 import type {
@@ -38,6 +48,8 @@ interface RegisterCapabilitiesRoutesDeps {
   sessionRestoreTimeoutMs: number;
   languageCodes: string[];
   daemonEnv: Readonly<NodeJS.ProcessEnv>;
+  agentCollaborationEnabledFor?: (workspaceCwd: string) => boolean;
+  hostedHarness?: HostedHarnessCapabilities;
 }
 
 function workflowsEnabledForRuntime(
@@ -86,10 +98,13 @@ export function registerCapabilitiesRoutes(
       (entry) => entry.primary && entry.state === 'active',
     )?.current?.runtime;
     const multipleAdmissionPools = entries.length > 1;
-    const features = deps.currentServeFeatures();
+    const features = deps.hostedHarness
+      ? hostedPersonaServeFeatures()
+      : deps.currentServeFeatures();
     const runtimeRemoval = features.includes('workspace_runtime_removal');
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
+      ...(deps.hostedHarness ? { hostedHarness: deps.hostedHarness } : {}),
       protocolVersions: getServeProtocolVersions(),
       ...(deps.qwenCodeVersion
         ? { qwenCodeVersion: deps.qwenCodeVersion }
@@ -121,6 +136,15 @@ export function registerCapabilitiesRoutes(
         ...(features.includes('workspace_file_upload')
           ? { maxWorkspaceFileUploadBytes: MAX_UPLOAD_BYTES }
           : {}),
+        ...(features.includes('skill_archive_install') ||
+        features.includes('skill_zip_file_source')
+          ? {
+              maxSkillArchiveBytes: MAX_SKILL_ARCHIVE_BYTES,
+              maxSkillArchiveExpandedBytes: MAX_SKILL_ARCHIVE_EXPANDED_BYTES,
+              maxSkillArchiveEntries: MAX_SKILL_ARCHIVE_ENTRIES,
+              maxSkillArchiveManifestBytes: MAX_SKILL_ARCHIVE_MANIFEST_BYTES,
+            }
+          : {}),
         ...(multipleAdmissionPools || deps.maxTotalSessions !== undefined
           ? {
               maxSessionsPerWorkspace: advertisedMaxSessions(
@@ -147,6 +171,15 @@ export function registerCapabilitiesRoutes(
         primary: entry.primary,
         trusted:
           entry.state === 'active' && entry.current?.runtime.trusted === true,
+        ...(features.includes('agent_collaboration_v1')
+          ? {
+              agentCollaborationEnabled:
+                entry.state === 'active' &&
+                entry.current?.runtime.trusted === true &&
+                deps.agentCollaborationEnabledFor?.(entry.workspaceCwd) ===
+                  true,
+            }
+          : {}),
         workflowsEnabled: workflowsEnabledForRuntime(
           entry.state === 'active' ? entry.current?.runtime : undefined,
           deps.daemonEnv,

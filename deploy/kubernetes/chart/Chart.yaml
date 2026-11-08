@@ -1,0 +1,6 @@
+apiVersion: 'v2'
+name: 'qwen-managed-agent'
+description: 'Single-replica Managed Agent API with Hosted Harness and MySQL'
+type: 'application'
+version: '0.1.0'
+kubeVersion: '>=1.28.0-0'

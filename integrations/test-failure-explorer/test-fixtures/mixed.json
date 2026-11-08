@@ -1,0 +1,87 @@
+{
+  "numTotalTestSuites": 4,
+  "numPassedTestSuites": 1,
+  "numFailedTestSuites": 3,
+  "numPendingTestSuites": 0,
+  "numTotalTests": 4,
+  "numPassedTests": 3,
+  "numFailedTests": 1,
+  "numPendingTests": 0,
+  "numTodoTests": 0,
+  "snapshot": {
+    "added": 0,
+    "failure": false,
+    "filesAdded": 0,
+    "filesRemoved": 0,
+    "filesRemovedList": [],
+    "filesUnmatched": 0,
+    "filesUpdated": 0,
+    "matched": 0,
+    "total": 0,
+    "unchecked": 0,
+    "uncheckedKeysByFile": [],
+    "unmatched": 0,
+    "updated": 0,
+    "didUpdate": false
+  },
+  "startTime": 1791649286366,
+  "success": false,
+  "testResults": [
+    {
+      "assertionResults": [
+        {
+          "ancestorTitles": ["outer suite", "nested suite"],
+          "fullName": "outer suite nested suite adds correctly",
+          "status": "passed",
+          "title": "adds correctly",
+          "duration": 0.47150000000002024,
+          "failureMessages": [],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": ["outer suite", "nested suite"],
+          "fullName": "outer suite nested suite preserves the failing assertion",
+          "status": "failed",
+          "title": "preserves the failing assertion",
+          "duration": 3.5329590000000053,
+          "failureMessages": [
+            "AssertionError: expected 2 to be 3 // Object.is equality\n    at /fixture-workspace/mixed/nested.fixture.ts:15:21\n    at file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:155:11\n    at file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:752:26\n    at file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1897:20\n    at new Promise (<anonymous>)\n    at runWithTimeout (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1863:10)\n    at runTest (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1574:12)\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at runSuite (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)\n    at runSuite (file:///fixture-repository/node_modules/@vitest/runner/dist/chunk-hooks.js:1729:8)"
+          ],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": ["outer suite"],
+          "fullName": "outer suite passes outside the inner suite",
+          "status": "passed",
+          "title": "passes outside the inner suite",
+          "duration": 0.10729200000000105,
+          "failureMessages": [],
+          "meta": {}
+        }
+      ],
+      "startTime": 1791649286770,
+      "endTime": 1791649286774.1072,
+      "status": "failed",
+      "message": "",
+      "name": "/fixture-workspace/mixed/nested.fixture.ts"
+    },
+    {
+      "assertionResults": [
+        {
+          "ancestorTitles": [],
+          "fullName": "another file passes",
+          "status": "passed",
+          "title": "another file passes",
+          "duration": 0.4602079999999944,
+          "failureMessages": [],
+          "meta": {}
+        }
+      ],
+      "startTime": 1791649287098,
+      "endTime": 1791649287098.4602,
+      "status": "passed",
+      "message": "",
+      "name": "/fixture-workspace/mixed/second.fixture.ts"
+    }
+  ]
+}
