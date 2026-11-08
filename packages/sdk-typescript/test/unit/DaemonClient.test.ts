@@ -2004,6 +2004,46 @@ describe('DaemonClient', () => {
       expect(transportFetch).not.toHaveBeenCalled();
     });
 
+    it('queries ignored paths against the selected workspace and session cwd', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { v: 1, ignoredPaths: ['helper.log'] }),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'wrong transport' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+      const response = await client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitIgnoredPaths(
+          ['helper.log', 'source.ts'],
+          '/work/secondary/tree',
+          'session-1',
+        );
+      expect(response.ignoredPaths).toEqual(['helper.log']);
+      expect(response.v).toBe(1);
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Fwork%2Fsecondary/git/check-ignore?cwd=%2Fwork%2Fsecondary%2Ftree&sessionId=session-1',
+      );
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        paths: ['helper.log', 'source.ts'],
+      });
+    });
+
     it('builds Git status query strings from cwd/wait options', async () => {
       const status = {
         v: 1 as const,
@@ -12445,6 +12485,34 @@ describe('DaemonClient', () => {
   });
 
   describe('workspace registration persistence', () => {
+    it('reads and saves shared workspace order through REST and propagates failures', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { cwds: ['/b', '/a'] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.getWorkspaceOrder()).resolves.toEqual({
+        cwds: ['/b', '/a'],
+      });
+      await expect(client.setWorkspaceOrder(['/b', '/a'])).resolves.toEqual({
+        cwds: ['/b', '/a'],
+      });
+      expect(calls.map((call) => [call.method, call.url, call.body])).toEqual([
+        ['GET', 'http://daemon/workspace-order', null],
+        [
+          'POST',
+          'http://daemon/workspace-order',
+          JSON.stringify({ cwds: ['/b', '/a'] }),
+        ],
+      ]);
+      const failed = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: async () => jsonResponse(500, { error: 'disk full' }),
+      });
+      await expect(failed.setWorkspaceOrder(['/a'])).rejects.toBeInstanceOf(
+        DaemonHttpError,
+      );
+    });
+
     it('updates and clears workspace metadata through direct REST', async () => {
       const { fetch, calls } = recordingFetch((req) =>
         jsonResponse(200, {
