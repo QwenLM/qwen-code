@@ -98,6 +98,18 @@ interface HookPlan {
   readonly toolInputOrder?: HostedToolInputOrder;
 }
 
+/**
+ * The config-scoped owner an active extension bundle names
+ * (`extensions-components-<hash(sessionKey, configRevision)>`). The same id is
+ * recomputed on every load of that configRevision, so a terminal release
+ * tombstones the id a later load must re-acquire (R13-1). Shared with the
+ * close's held-Runtime drains, which must not release one on a detach even
+ * when the Broker's hold rows named it (R28-1).
+ */
+export function isHostedConfigScopedOwner(runtimeSessionId: string): boolean {
+  return runtimeSessionId.startsWith('extensions-components-');
+}
+
 function exceedsHookResourceLimit(value: unknown): boolean {
   return Buffer.byteLength(JSON.stringify(value)) > 60 * 1024;
 }
@@ -648,7 +660,7 @@ export class HostedHookSession {
    * the id a later load must re-acquire (R13-1).
    */
   private get deterministicOwner(): boolean {
-    return this.broker.runtimeSessionId.startsWith('extensions-components-');
+    return isHostedConfigScopedOwner(this.broker.runtimeSessionId);
   }
 
   delegateBrokerToMcp(): void {

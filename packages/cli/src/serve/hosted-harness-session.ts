@@ -241,6 +241,7 @@ import {
   HostedHookRecoveryRequiredError,
   parseHostedHookPin,
   hostedHookOccurrenceId,
+  isHostedConfigScopedOwner,
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { reconcileNeverStartedChildRuns } from './hosted-never-started-reconcile.js';
@@ -7885,13 +7886,14 @@ export function registerHostedHarnessSessionRoutes(
       // rather than failing the load (the Workspace-level cascade stays
       // the backstop). The Broker answers Runtime Session ids, and
       // hostedRuntimeSessionId is idempotent, so the close's drain maps a
-      // restored entry back to itself. The restore stays off a lifecycle-v2
-      // load (#13986 R1-3). Its original reason — v2 had no drain — is gone
-      // now that settle_resources drains the set too (R24-1), but the gate
-      // stays for a different one: a restored id can be a deterministic Hook
-      // owner, and the v2 drain releases it terminally, which would tombstone
-      // the id a reload recomputes (R13-1/R14-1). Re-enabling the restore for
-      // v2 belongs with the keep-READY drain, not ahead of it.
+      // restored entry back to itself. The `!== 2` conjunct is the #13986 R1-3
+      // gate, and it is NOT what keeps a restored config-scoped owner safe:
+      // lifecycleProtocolVersion is only spread onto the resident when the
+      // load carries a lifecycle authority, so a bare attach leaves it
+      // undefined and this restore runs even for a Session that later settles
+      // as v2 (R28-1). A load cannot know which protocol will close it, so the
+      // protection lives at the release instead — both drains skip a
+      // config-scoped owner unless the close is terminal (R13-1/R14-1).
       if (
         !create &&
         brokerOptions &&
@@ -8372,6 +8374,19 @@ export function registerHostedHarnessSessionRoutes(
           let heldDrainUnproven = false;
           if (brokerOptions)
             for (const heldTurn of [...session.heldRuntimeTurns]) {
+              // A detach must never terminally release a config-scoped owner:
+              // the id is recomputed on the next load and a RELEASED row makes
+              // every later Hook unacquirable (R13-1/R14-1). The restore can
+              // seed one here from the Broker's hold rows, and the load cannot
+              // know which protocol will close it, so the invariant lives at
+              // the release rather than at a restore gate (R28-1). Leaving the
+              // entry owed keeps the handback below refusing busy — the honest
+              // park #16579 tracks. A delete is terminal, so it may release.
+              if (
+                kind !== 'delete' &&
+                isHostedConfigScopedOwner(hostedRuntimeSessionId(heldTurn))
+              )
+                continue;
               try {
                 await new HostedWorkspaceBroker(
                   brokerOptions,
@@ -13084,6 +13099,15 @@ export function registerHostedHarnessSessionRoutes(
         let heldDrainUnproven = false;
         if (brokerOptions) {
           for (const heldTurn of [...session.heldRuntimeTurns]) {
+            // Same invariant as the v2 drain, and it predates it: the restore
+            // seeds config-scoped owners from the Broker's hold rows, and a
+            // detach must not tombstone an id the next load recomputes
+            // (R13-1/R14-1/R28-1). A DELETE is terminal and may release.
+            if (
+              req.method !== 'DELETE' &&
+              isHostedConfigScopedOwner(hostedRuntimeSessionId(heldTurn))
+            )
+              continue;
             try {
               await new HostedWorkspaceBroker(
                 brokerOptions,

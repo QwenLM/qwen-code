@@ -12730,6 +12730,61 @@ describe('Hosted Harness no-tool session', () => {
     ).toEqual([...restored].sort());
   });
 
+  it('never terminally releases a restored config-scoped owner on a v2 detach (R28-1)', async () => {
+    // A bare load carries no lifecycle authority, so lifecycleProtocolVersion
+    // is never spread onto the resident and the restore's `!== 2` gate does
+    // not exclude it — yet the same Session can settle as v2 afterwards. The
+    // restored id is the deterministic Hook owner, whose RELEASED row would
+    // make every Hook after the reload unacquirable, so the guard has to sit
+    // at the release rather than at that gate. A second, ordinary id rides
+    // along as the control: it must still drain, which proves the loop ran
+    // and the owner was skipped rather than never reached.
+    await prewriteShellProfileSession();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding-1',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+    release.mockResolvedValue();
+    const owner = `extensions-components-${'e'.repeat(64)}`;
+    const activeHolds = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'activeHoldRuntimeSessionIds')
+      .mockResolvedValue([owner, PROMPT_ID]);
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store() })
+      .expect(200);
+    expect(activeHolds).toHaveBeenCalledTimes(1);
+    const resident = capturedWakeSession();
+    expect(resident.heldRuntimeTurns.has(owner)).toBe(true);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/lifecycle`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        protocolVersion: 2,
+        phase: 'settle_resources',
+        kind: 'close',
+        toolProfile: 'hosted-workspace-shell/1',
+        sessionKey: resident.managed.authority.sessionHeader.sessionKey,
+        authority: {
+          operationId: 'close-restored-owner',
+          claimGeneration: 1,
+        },
+      });
+    const releasedIds = (release.mock.contexts as HostedWorkspaceBroker[]).map(
+      (broker) => broker.runtimeSessionId,
+    );
+    expect(releasedIds).toContain(PROMPT_ID);
+    expect(releasedIds).not.toContain(owner);
+  });
+
   it('closes a Session whose restored hold the restarted Broker cannot drain (#13986 R2-1)', async () => {
     // A worker restart takes the Harness and the Broker down together. The
     // replacement Broker no longer holds the Runtime Session in memory and
