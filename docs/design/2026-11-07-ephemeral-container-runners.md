@@ -183,9 +183,12 @@ keep their current routing. This avoids migrating browser system dependencies
 that the new image has not verified, and leaves the routing image relationship
 of the existing classifier job and the other workflows unchanged.
 
-Update 2026-11-08: the credential-free Web-shell Visuals capture job has
-moved onto this pool; the main CI `Test (ubuntu-latest, Node 22.x)`
-aggregate gate was tried here and moved back off (below).
+Update 2026-11-08: the credential-free Web-shell Visuals capture job
+moves onto this pool **for untrusted fork PRs only** — same-repo PRs stay
+on the hosted lane, where the job ran before (the original rule above,
+"trusted and same-repository PR routes stay unchanged", still governs).
+The main CI `Test (ubuntu-latest, Node 22.x)` aggregate gate was tried
+here and moved back off (below).
 The capture job matches the pool's security
 model exactly (untrusted PR code, read-only token, only the event-scoped
 `GITHUB_TOKEN`), which supersedes the browser-dependency exclusion above for

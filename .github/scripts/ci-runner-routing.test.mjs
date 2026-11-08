@@ -94,6 +94,10 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       String(sameRepo),
     ],
     [
+      /github\.event\.pull_request\.head\.repo\.full_name != github\.repository/,
+      String(!sameRepo),
+    ],
+    [
       /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
       String(TRUSTED.includes(assoc)),
     ],
@@ -877,16 +881,20 @@ describe('credential-free jobs on the disposable pool', () => {
   it('web-shell-visuals.yml capture: untrusted renders ride the disposable pool', () => {
     // The capture builds and renders untrusted PR code with a read-only
     // token and no secrets — the disposable pool's exact security model.
-    // The privileged publisher stays wherever it was; only capture moves.
+    // The pool exists for untrusted fork PRs only: same-repo PRs stay on
+    // the hosted lane, where this job ran before the migration.
     const doc = parse(
       readFileSync(join(workflowsDir, 'web-shell-visuals.yml'), 'utf8'),
     );
     const runsOn = String(doc.jobs.capture['runs-on']);
     assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
-    // The expression reads neither head.repo nor author_association (the
-    // repo clause is substituted to a constant), so one association sweep
-    // covers every fork and same-repo shape.
+    assert.match(
+      runsOn,
+      /github\.event\.pull_request\.head\.repo\.full_name != github\.repository/,
+      'capture must keep the fork clause: only fork PRs route to the disposable pool',
+    );
     for (const assoc of ASSOCIATIONS) {
+      // Fork PR: the disposable pool, whoever authored it.
       assert.deepEqual(
         evalRunsOn(runsOn, {
           ecsDisabled: false,
@@ -895,8 +903,23 @@ describe('credential-free jobs on the disposable pool', () => {
           assoc,
         }),
         EPHEMERAL,
-        `capture assoc='${assoc}'`,
+        `capture fork assoc='${assoc}'`,
       );
+      // Same-repo PR: stays hosted — the disposable pool must never serve
+      // trusted runs, and the kill-switch question never arises there.
+      for (const ecsDisabled of [false, true]) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            ecsDisabled,
+            eventName: 'pull_request',
+            sameRepo: true,
+            assoc,
+          }),
+          JSON.parse(HOSTED),
+          `capture same-repo assoc='${assoc}' ecsDisabled=${ecsDisabled}`,
+        );
+      }
+      // Kill-switch reverts fork runs to hosted too.
       assert.deepEqual(
         evalRunsOn(runsOn, {
           ecsDisabled: true,
@@ -905,7 +928,7 @@ describe('credential-free jobs on the disposable pool', () => {
           assoc,
         }),
         JSON.parse(HOSTED),
-        'kill-switch must revert capture to hosted',
+        `kill-switch must revert fork capture to hosted assoc='${assoc}'`,
       );
     }
     // Only the event-scoped read-only GITHUB_TOKEN may reach the disposable
@@ -994,13 +1017,14 @@ describe('credential-free jobs on the disposable pool', () => {
       Number(diskFloor?.env?.DISK_FLOOR_MAX_USED_PCT) < 89,
       'the ceiling must refuse the measured 89%-used failure slot',
     );
-    // The pool pays two cold installs (measured: 22m18s install, Chromium
-    // still downloading at 36m48s), so the hosted 45-minute cap cancels
-    // the job before any render. The ceiling is routed like runs-on —
-    // runner.environment is not available in timeout-minutes.
+    // The fork pool pays two cold installs (measured: 22m18s install,
+    // Chromium still downloading at 36m48s), so the hosted 45-minute cap
+    // cancels the job before any render. The ceiling is routed like
+    // runs-on — runner.environment is not available in timeout-minutes —
+    // keyed off the same fork term: pool (fork, not disabled) 90, else 45.
     assert.equal(
       String(doc.jobs.capture['timeout-minutes']),
-      "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true' && 45 || 90 }}",
+      "${{ (github.event.pull_request.head.repo.full_name != github.repository && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && 90 || 45 }}",
     );
     // Unpinned workers size Chromium from the HOST's cores inside a 4-CPU
     // container: the first pooled run lost its runner to CPU/memory
