@@ -422,7 +422,36 @@ the session's model keeps discretion and its approval mode governs actions.
 A template containing `--publish` is the operator's explicit publication
 consent for the rounds it triggers — configure it deliberately. With
 `boundSessionActions` absent, delivery keeps the legacy single-winner
-behavior and the generic prompt, byte for byte.
+behavior; the prompt then carries the built-in guidance below for a
+role-carrying binding, and stays byte for byte the generic prompt for an
+untyped one.
+
+### Built-In Role Guidance (No Templates Configured)
+
+You do not have to write templates to keep roles apart. Without
+`boundSessionActions`, a binding that carries a role still gets a `Role:` line
+naming that role, and the prompt's workflow sentence is replaced by built-in
+guidance for it (summarized below; the delivered text is a little longer):
+
+| Role     | Built-in guidance                                                                                                                        |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `review` | Act as the reviewer: inspect the change and report findings. Do not push or modify the branch.                                           |
+| `verify` | Act as the verifier: verify and report. Attribute CI failures rather than fixing them. Do not merge, rebase, resolve conflicts, or push. |
+| `fix`    | Act as the fixer: investigate and fix; your workflow decides whether to push. Re-read the current head first.                            |
+
+An untyped binding keeps the generic sentence ("Handle the event with your
+normal workflow…"). A configured template always wins over the built-in
+guidance, and the per-role subscription is unchanged: a role with no matching
+key still receives nothing.
+
+Event bodies state facts only. `ci_failure` reports the head and the failed
+checks, `merge_conflict` reports `mergeable_state: dirty`, and a merged PR is
+reported as merged — none of them tells the session to fix, rebase, or wrap up.
+What to do about an event comes from your template, the built-in role guidance,
+or the session's own workflow, never from the event data.
+
+Like a template, this guidance is an instruction rather than an authorization
+boundary; tool permissions remain the boundary.
 
 ## Known Limitations
 

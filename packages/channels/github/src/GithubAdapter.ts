@@ -30,6 +30,7 @@ import {
   BoundSessionQueueFullError,
   BoundSessionUnavailableError,
   buildBoundEventPrompt,
+  DEFAULT_BOUND_ROLE_GUIDANCE,
   getGlobalQwenDir,
   getWorkspaceScopeDirName,
   lowercaseGroupAllowedUsers,
@@ -5301,9 +5302,29 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const summary = this.boundSessionByPr.get(
       this.prBindingKey(chatId, issueNumber),
     );
-    return summary
-      ? { kind: 'bound-session', sessionId: summary.sessionId }
-      : undefined;
+    if (!summary) return undefined;
+    const role = this.boundRoleOf(chatId, issueNumber, summary.sessionId);
+    return {
+      kind: 'bound-session',
+      sessionId: summary.sessionId,
+      ...(role ? { role } : {}),
+    };
+  }
+
+  /**
+   * The role of the entry that names THIS PR for a session, or undefined for
+   * an untyped binding. Legacy routing picks its winner from boundSessionByPr,
+   * which holds only the summary, so the role is read back from the same
+   * follower list the role-aware path groups by.
+   */
+  private boundRoleOf(
+    chatId: string,
+    issueNumber: number,
+    sessionId: string,
+  ): PrBindingRole | undefined {
+    return this.boundFollowersOf(chatId, issueNumber).find(
+      (follower) => follower.summary.sessionId === sessionId,
+    )?.role;
   }
 
   /**
@@ -5343,10 +5364,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ? {
           kind: 'bound-session',
           sessionId: best.summary.sessionId,
-          // Legacy mode must stay byte-compatible even when bindings carry
-          // roles (a /review backfill stamps them with no map configured):
-          // a role here would grow a Role: line in the generic prompt.
-          ...(this.boundRoleAware && best.role ? { role: best.role } : {}),
+          ...(best.role ? { role: best.role } : {}),
         }
       : undefined;
   }
@@ -5647,12 +5665,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const summary = this.boundSessionByPr.get(
         this.prBindingKey(chatId, issueNumber),
       );
-      return summary
-        ? {
-            targets: [{ sessionId: summary.sessionId }],
-            followed: true,
-          }
-        : { targets: [], followed: false };
+      if (!summary) return { targets: [], followed: false };
+      const role = this.boundRoleOf(chatId, issueNumber, summary.sessionId);
+      return {
+        targets: [{ sessionId: summary.sessionId, ...(role ? { role } : {}) }],
+        followed: true,
+      };
     }
     const followers = this.boundFollowersOf(chatId, issueNumber);
     const byRole = new Map<
@@ -5840,8 +5858,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // removed on acceptance, so a silent cut would drop the tail from every
     // surface. With a matching operator template the generic workflow line
     // becomes a labeled trusted instruction block; the untrusted warning
-    // extends to the substituted values. Without one (and without a role)
-    // the prompt is byte-identical to the pre-template contract.
+    // extends to the substituted values. Without one, a role-carrying binding
+    // gets the built-in guidance for that role and an untyped binding keeps
+    // the prompt byte-identical to the pre-template contract.
     const eventClass = this.boundEventClass(envelope);
     const template = resolveBoundActionTemplate(
       this.boundSessionActions,
@@ -5867,6 +5886,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         : {}),
       dataLines: [identity, ...contextLines],
       ...(role ? { role } : {}),
+      // The builder uses this only when no operator instruction resolved.
+      // Role-aware targets are selected BY template match, so they always
+      // carry an instruction and the guidance is inert there; the per-role
+      // subscription is enforced at selection, not by a flag here.
+      ...(role ? { roleGuidance: DEFAULT_BOUND_ROLE_GUIDANCE[role] } : {}),
       body: text,
     });
   }
@@ -6043,10 +6067,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.transitionInboundTask(task.id, 'running', { delivery: next });
         task.delivery = next;
         try {
+          // Rebuild for THIS target: the legacy fallback scans every
+          // follower, so it can land on a different role (or an untyped
+          // binding). Reusing the first target's prompt would hand this
+          // session the gone session's Role line and role guidance.
+          // Role-aware fallbacks stay inside their role group, where the
+          // deterministic renderer rebuilds the identical string.
+          const targetPrompt = this.buildBoundSessionPrompt(
+            envelope,
+            next.role,
+            this.boundLaneClass(task.dedupe),
+          );
           // Same event key: a different session's ring has never seen it.
           await boundSessions.deliverPrompt(
             next.sessionId,
-            prompt,
+            targetPrompt,
             idempotencyKey,
           );
           this.recordBoundDelivered(envelope, next.sessionId);
@@ -6643,7 +6678,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           : '';
       events.push({
         type: 'ci_failure',
-        summary: `CI failed on head ${headSha}.${failedChecks} Inspect the failed checks and fix or attribute the failure.`,
+        summary: `CI failed on head ${headSha}.${failedChecks}`,
       });
     }
 
@@ -6661,7 +6696,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     ) {
       events.push({
         type: 'merge_conflict',
-        summary: `Merge conflicts detected (mergeable_state: dirty). Rebase or merge the base branch and resolve the conflicts.`,
+        summary: 'Merge conflicts detected (mergeable_state: dirty).',
       });
     }
 
@@ -6675,7 +6710,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       events.push({
         type: 'state_change',
         summary: pr.merged
-          ? 'The PR was merged. Wrap up any follow-up work.'
+          ? 'The PR was merged.'
           : 'The PR was closed without merging.',
       });
     }

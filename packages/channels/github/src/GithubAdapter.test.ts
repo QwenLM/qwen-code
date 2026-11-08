@@ -26,6 +26,7 @@ import {
   BoundSessionQueueFullError,
   BoundSessionUnavailableError,
   channelEventFilePath,
+  DEFAULT_BOUND_ROLE_GUIDANCE,
   getWorkspaceScopeDirName,
   PairingStore,
   type ChannelAgentBridge,
@@ -14045,6 +14046,135 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(fallback![1]).not.toContain('Role:');
       expect(fallback![1]).not.toContain('[Operator instruction');
     });
+
+    it('names the role and gives its built-in guidance with no actions configured', async () => {
+      // A /verify-pr backfill stamps a role with no map configured. The
+      // session must learn which hat it wears instead of receiving a
+      // role-blind instruction to act.
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'verify-session',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain('Role: verify');
+      expect(prompt).toContain(DEFAULT_BOUND_ROLE_GUIDANCE.verify);
+      expect(prompt).not.toContain(
+        'Handle the event with your normal workflow',
+      );
+      expect(prompt).not.toContain('[Operator instruction');
+    });
+
+    it('gives the fallback session its OWN role, not the gone session role', async () => {
+      // The legacy gone-fallback scans every follower, so it can cross roles.
+      // Reusing the first target's prompt hands the verifier the reviewer's
+      // instruction; rebuilding per target is what this pins.
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'gone-session',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'review',
+              },
+            ],
+          }),
+          makeBinding({
+            sessionId: 'verify-session',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 'gone-session') {
+            throw new BoundSessionGoneError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const calls = boundSessions.deliverPrompt.mock.calls as Array<
+        [string, string]
+      >;
+      const fallback = calls.find(([id]) => id === 'verify-session');
+      expect(fallback).toBeDefined();
+      expect(fallback![1]).toContain('Role: verify');
+      expect(fallback![1]).toContain(DEFAULT_BOUND_ROLE_GUIDANCE.verify);
+      expect(fallback![1]).not.toContain('Role: review');
+      expect(fallback![1]).not.toContain(DEFAULT_BOUND_ROLE_GUIDANCE.review);
+    });
+
+    it('never leaks built-in guidance into a configured operator template', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: { 'verify:default': 'Only report %pr%.' },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'verify-session',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain('Only report 42.');
+      expect(prompt).toContain('Role: verify');
+      expect(prompt).not.toContain(DEFAULT_BOUND_ROLE_GUIDANCE.verify);
+    });
   });
 
   describe('review-round regressions (durable fan-out, delivery ring, role loss, partial guard, lane class)', () => {
@@ -16205,6 +16335,97 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       mockNotificationsOnce([]);
       await pollOnce();
       expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('tells a verify-bound session its role on a merge_conflict watch event', async () => {
+      // The reported incident: a /verify-pr session bound with role `verify`,
+      // no boundSessionActions, received "Rebase or merge the base branch"
+      // with no Role line and built a merge commit. The watch path resolves
+      // its target through resolveBoundDelivery, not resolveBoundTargets.
+      await initChannel(watchConfig, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'verify-session',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockPull({});
+      mockNotificationsOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      mockPull({ mergeable: false, mergeable_state: 'dirty' });
+      mockNotificationsOnce([]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      const [sessionId, prompt] = boundSessions.deliverPrompt.mock.calls[0] as [
+        string,
+        string,
+      ];
+      expect(sessionId).toBe('verify-session');
+      expect(prompt).toContain('Role: verify');
+      expect(prompt).toContain(DEFAULT_BOUND_ROLE_GUIDANCE.verify);
+      expect(prompt).toContain(
+        'Merge conflicts detected (mergeable_state: dirty).',
+      );
+      expect(prompt).not.toContain('Rebase or merge');
+      expect(prompt).not.toContain(
+        'Handle the event with your normal workflow',
+      );
+    });
+
+    it('states watch facts without assigning an action to the session', async () => {
+      // The summary is event DATA. An imperative here reaches every role
+      // unchanged and told a verify-only session to rebase and push; the
+      // action belongs to the operator template or the built-in role
+      // guidance, never to the body.
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({});
+      mockNotificationsOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+      mockNotificationsOnce([]);
+      mockChecks([
+        { status: 'completed', conclusion: 'failure', name: 'build' },
+      ]);
+      await pollOnce();
+      const ciPrompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(ciPrompt).toContain('CI failed on head sha-1.');
+      expect(ciPrompt).toContain('Failed checks: build.');
+      expect(ciPrompt).not.toContain('fix or attribute');
+      expect(ciPrompt).not.toContain('Inspect the failed checks');
+
+      mockPull({ mergeable: false, mergeable_state: 'dirty' });
+      mockNotificationsOnce([]);
+      await pollOnce();
+      const conflictPrompt = boundSessions.deliverPrompt.mock
+        .calls[1]![1] as string;
+      expect(conflictPrompt).toContain(
+        'Merge conflicts detected (mergeable_state: dirty).',
+      );
+      expect(conflictPrompt).not.toContain('Rebase or merge');
+      expect(conflictPrompt).not.toContain('resolve the conflicts');
+
+      mockPull({ state: 'closed', merged: true });
+      mockNotificationsOnce([]);
+      await pollOnce();
+      const mergedPrompt = boundSessions.deliverPrompt.mock
+        .calls[2]![1] as string;
+      expect(mergedPrompt).toContain('The PR was merged.');
+      expect(mergedPrompt).not.toContain('Wrap up');
     });
 
     it('fires state_change on merge and leaves the watch set once recorded', async () => {
