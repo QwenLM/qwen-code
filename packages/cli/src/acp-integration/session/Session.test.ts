@@ -5422,10 +5422,7 @@ describe('Session', () => {
           );
         }
         if (receipt === 'receipt-fails') {
-          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
-            'Failed to settle unsent ACP tool results after the round stopped',
-            writeError,
-          );
+          expect(history).toContain('output was discarded');
         }
       },
     );
@@ -6031,28 +6028,33 @@ describe('Session', () => {
           const history = JSON.stringify(
             vi.mocked(mockChat.addHistory).mock.calls,
           );
-          if (decision === 'write-reject') {
-            expect(failure).toBeDefined();
+          expect(failure).toBeUndefined();
+          expect(result).toMatchObject({ stopReason: 'cancelled' });
+          expect(history).toContain('INDEPENDENT_TERMINAL_INPUT');
+          if (
+            decision === 'write-reject' ||
+            decision === 'pending-hook' ||
+            decision === 'prior-withheld'
+          ) {
             expect(history).not.toContain('PRIVATE_TERMINAL');
-          } else {
-            expect(result).toMatchObject({ stopReason: 'cancelled' });
-            expect(history).toContain('INDEPENDENT_TERMINAL_INPUT');
-            if (decision === 'pending-hook' || decision === 'prior-withheld') {
-              expect(history).not.toContain('PRIVATE_TERMINAL');
-              expect(history).toContain(
-                decision === 'prior-withheld'
-                  ? 'previous policy refusal'
-                  : 'The tool had already completed; its output was discarded.',
-              );
-            } else expect(history).toContain('PRIVATE_TERMINAL_RESULT');
-          }
+            expect(history).toContain(
+              decision === 'prior-withheld'
+                ? 'previous policy refusal'
+                : 'The tool had already completed; its output was discarded.',
+            );
+          } else expect(history).toContain('PRIVATE_TERMINAL_RESULT');
         },
       );
     });
 
-    it.each([false, true])(
-      'keeps full tool ownership but filters host input on a partial terminal preserve: hook=%s',
-      async (hooked) => {
+    it.each([
+      { hooked: false, writeReject: false },
+      { hooked: true, writeReject: false },
+      { hooked: true, writeReject: true },
+      { hooked: false, writeReject: true },
+    ])(
+      'keeps full tool ownership on a partial terminal preserve: hook=$hooked writeReject=$writeReject',
+      async ({ hooked, writeReject }) => {
         mockConfig.getDisableAllHooks = vi.fn(() => !hooked);
         mockConfig.getMessageBus = vi.fn().mockReturnValue({
           request: vi.fn().mockResolvedValue({ success: true, output: {} }),
@@ -6108,22 +6110,27 @@ describe('Session', () => {
             },
           ],
         );
-        const recordAdmission = vi.fn((parts: readonly Part[]) => [
-          {
-            parts,
-            decision: hooked
-              ? {
-                  withheld:
-                    'The tool had already completed; its output was discarded.',
-                }
-              : ('admitted' as const),
-          },
-        ]);
+        const recordAdmission = vi.fn(async (parts: readonly Part[]) => {
+          if (writeReject) throw new core.SessionWriterUnavailableError();
+          return [
+            {
+              parts,
+              decision: hooked
+                ? {
+                    withheld:
+                      'The tool had already completed; its output was discarded.',
+                  }
+                : ('admitted' as const),
+            },
+          ];
+        });
         Object.assign(mockChatRecordingService, {
           recordToolResultAdmission: recordAdmission,
         });
-        const result = await prompt();
-        expect(result.stopReason).toBe('max_tokens');
+        const stopped = await prompt().then(
+          (result) => ({ result }),
+          (error: unknown) => ({ error }),
+        );
         expect(send).toHaveBeenCalledTimes(2);
         expect(JSON.stringify(send.mock.calls[1][0])).toContain(
           'INDEPENDENT_PARTIAL_INPUT',
@@ -6137,6 +6144,15 @@ describe('Session', () => {
         const history = JSON.stringify(
           vi.mocked(mockChat.addHistory).mock.calls,
         );
+        expect(stopped).toMatchObject({
+          result: { stopReason: 'max_tokens' },
+        });
+        if (writeReject) {
+          expect(history).toContain('INDEPENDENT_PARTIAL_INPUT');
+          expect(history).not.toContain('PRIVATE_PARTIAL');
+          expect(history).toContain('partial-call');
+          return;
+        }
         expect(history).not.toContain('INDEPENDENT_PARTIAL_INPUT');
         if (hooked) {
           expect(history).not.toContain('PRIVATE_PARTIAL');
@@ -6824,7 +6840,7 @@ describe('Session', () => {
         ).not.toHaveBeenCalled();
       });
 
-      it('recovers a legacy cron tool result cancelled while building the next message', async () => {
+      it.each([false, true])('cron recovery, rejects=%s', async (rejects) => {
         const directory = await fs.mkdtemp(
           path.join(os.tmpdir(), 'qwen-cron-result-'),
         );
@@ -6835,8 +6851,12 @@ describe('Session', () => {
         const recorder = new ChatRecordingService(mockConfig, undefined, true);
         recorder.activate({
           sessionId: 'test-session-id',
-          appendJsonLine: (record: unknown) =>
-            fs.appendFile(recordingPath, JSON.stringify(record) + '\n'),
+          appendJsonLine: async (record: ChatRecord) => {
+            if (rejects && record.subtype === 'tool_result_admission') {
+              throw new core.SessionWriterUnavailableError();
+            }
+            await fs.appendFile(recordingPath, JSON.stringify(record) + '\n');
+          },
         } as SessionWriterLease);
         const recordResult = vi.spyOn(recorder, 'recordToolResult');
         const recordAdmission = vi.spyOn(recorder, 'recordToolResultAdmission');
@@ -6901,7 +6921,13 @@ describe('Session', () => {
           );
           expect(cancelled).toBeDefined();
           await cancelled;
-          await recorder.flush();
+          if (rejects) {
+            await expect(recorder.flush()).rejects.toBeInstanceOf(
+              core.SessionWriterUnavailableError,
+            );
+          } else {
+            await recorder.flush();
+          }
 
           expect(execute).toHaveBeenCalledOnce();
           expect(recordResult).toHaveBeenCalledOnce();
@@ -6933,6 +6959,26 @@ describe('Session', () => {
             .mocked(mockChat.addHistory)
             .mock.calls.flatMap(([content]) => content.parts ?? [])
             .filter((part) => part.functionResponse?.id === call.id);
+          if (rejects) {
+            expect(receipts).toHaveLength(0);
+            expect(JSON.stringify(restored.apiHistory)).not.toContain(
+              'PRIVATE_CRON_TOOL_RESULT',
+            );
+            expect(liveResponses).toEqual([
+              {
+                functionResponse: {
+                  id: call.id,
+                  name: call.name,
+                  response: {
+                    error:
+                      'The tool had already completed; its output was discarded.',
+                  },
+                },
+              },
+            ]);
+            expect(recordAdmission).toHaveBeenCalledOnce();
+            return;
+          }
           expect({
             recovered: restoredResponses.length,
             receipts: receipts.length,

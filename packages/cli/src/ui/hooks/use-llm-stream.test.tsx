@@ -7231,7 +7231,7 @@ describe('useLlmStream', () => {
     },
   );
 
-  it('records the Goal finalization error on the owning interaction', async () => {
+  it.each([false, true])('reports Goal failure (%s)', async (rejects) => {
     const permit: GoalTurnPermit = {
       goalId: 'goal-finish-error',
       revision: 1,
@@ -7267,6 +7267,11 @@ describe('useLlmStream', () => {
     mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
       flush: vi.fn().mockResolvedValue(undefined),
+      ...(rejects && {
+        recordToolResultAdmission: vi
+          .fn()
+          .mockRejectedValue(new Error('terminal admission write failed')),
+      }),
     });
     let capturedOnComplete:
       | ((completedTools: TrackedToolCall[]) => Promise<void>)
@@ -7364,6 +7369,12 @@ describe('useLlmStream', () => {
       errorType: 'continuation_goal_finish_failed',
     });
     expect(mockSendMessageStream).toHaveBeenCalledOnce();
+    if (rejects) {
+      expect(client.addHistory).not.toHaveBeenCalled();
+      expect(runtime.dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'pause' }),
+      );
+    }
   });
 
   it('does not let an old tool batch end a replacement interaction', async () => {
@@ -9990,12 +10001,14 @@ describe('useLlmStream', () => {
     ] as const;
 
     it.each(
-      paths.flatMap((path) =>
-        decisions.map((decision) => ({ path, decision })),
-      ),
+      paths
+        .flatMap((path) =>
+          decisions.map((decision) => ({ path, decision, swap: false })),
+        )
+        .concat({ path: 'quota', decision: 'write-reject', swap: true }),
     )(
-      'settles $path results durably before retaining history: $decision',
-      async ({ path, decision }) => {
+      'settles $path results durably before retaining history: $decision (session swap: $swap)',
+      async ({ path, decision, swap }) => {
         const hooked =
           decision === 'pending-hook' || decision === 'prior-allow';
         mockConfig.getDisableAllHooks = vi.fn(() => !hooked);
@@ -10005,6 +10018,8 @@ describe('useLlmStream', () => {
         mockConfig.hasHooksForEvent = vi.fn(
           (event) => hooked && event === 'UserPromptSubmit',
         );
+        let sessionId = mockConfig.getSessionId();
+        mockConfig.getSessionId = vi.fn(() => sessionId);
         const permit: GoalTurnPermit = {
           goalId: 'terminal-goal',
           revision: 1,
@@ -10046,9 +10061,9 @@ describe('useLlmStream', () => {
         });
         const recordToolResultAdmission = vi.fn(
           async (owned: readonly Part[]) => {
+            await barrier;
             if (decision === 'write-reject')
               throw new Error('terminal receipt write failed');
-            await barrier;
             return [
               {
                 parts: owned,
@@ -10109,6 +10124,7 @@ describe('useLlmStream', () => {
             expect(recordToolResultAdmission).toHaveBeenCalledOnce(),
           );
           expect(client.addHistory).not.toHaveBeenCalled();
+          if (swap) sessionId = 'successor-session';
         } finally {
           release();
           await pending;
@@ -10120,10 +10136,24 @@ describe('useLlmStream', () => {
             : undefined,
         );
         expect(mockSendMessageStream).not.toHaveBeenCalled();
-        if (decision === 'write-reject') {
+        if (swap) {
+          expect(failure).toBeUndefined();
+          expect(client.addHistory).not.toHaveBeenCalled();
+          expect(runtime.dispatch).not.toHaveBeenCalled();
+          expect(runtime.finishTurn).not.toHaveBeenCalled();
+          return;
+        }
+        if (decision === 'write-reject' && path === 'cancelled') {
           expect(failure).toBeDefined();
           expect(client.addHistory).not.toHaveBeenCalled();
-        } else if (
+          return;
+        }
+        expect(failure).toBeUndefined();
+        if (decision === 'write-reject' && path === 'quota') {
+          expect(runtime.finishTurn).toHaveBeenCalledWith(permit);
+        }
+        if (
+          decision === 'write-reject' ||
           decision === 'pending-hook' ||
           decision === 'prior-withheld'
         ) {

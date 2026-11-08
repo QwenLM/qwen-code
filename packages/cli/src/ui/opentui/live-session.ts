@@ -5,9 +5,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { settleToolResultHistory } from '@qwen-code/qwen-code-core/services/tool-result-history.js';
 import {
   hasToolResultPromptHook,
+  settleTerminalToolResultHistory,
   UNSENT_TOOL_RESULT,
 } from '../../services/tool-result-history.js';
 
@@ -765,7 +765,7 @@ export async function* livePromptEvents(
     if (!parts.length || !current() || config.getSessionId() !== sessionId) {
       return;
     }
-    const retained = await settleToolResultHistory(
+    const retained = await settleTerminalToolResultHistory(
       config.getChatRecordingService(),
       { role: 'user', parts },
       parts,

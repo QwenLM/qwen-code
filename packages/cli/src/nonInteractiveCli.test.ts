@@ -1817,7 +1817,7 @@ describe('runNonInteractive', () => {
     );
   });
 
-  it('ends a Goal turn without another model call after update_goal', async () => {
+  it.each([false, true])('ends Goal at update_goal (%s)', async (rejects) => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
     await prepareGoalState('paused');
@@ -1868,6 +1868,7 @@ describe('runNonInteractive', () => {
     });
     const recordToolResultAdmission = vi.fn(async (parts: readonly Part[]) => {
       await barrier;
+      if (rejects) throw new Error('terminal admission write failed');
       return [{ parts, decision: 'admitted' as const }];
     });
     mockConfig.getChatRecordingService.mockReturnValue({
@@ -1902,7 +1903,12 @@ describe('runNonInteractive', () => {
           functionResponse: {
             id: 'update-goal-terminal',
             name: 'update_goal',
-            response: { output: 'proposal recorded' },
+            response: rejects
+              ? {
+                  error:
+                    'The tool had already completed; its output was discarded.',
+                }
+              : { output: 'proposal recorded' },
           },
         },
       ],

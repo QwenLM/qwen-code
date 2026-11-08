@@ -2602,8 +2602,8 @@ describe('livePromptEvents', () => {
         const recordToolResult =
           vi.fn<ChatRecordingService['recordToolResult']>();
         const admission = vi.fn(async (parts: readonly Part[]) => {
-          if (decision === 'write-reject') throw new Error('r2 receipt failed');
           await barrier;
+          if (decision === 'write-reject') throw new Error('r2 receipt failed');
           return [
             {
               parts,
@@ -2684,26 +2684,26 @@ describe('livePromptEvents', () => {
           'r2-cancel',
         ]);
         const addHistory = vi.mocked(config.getGeminiClient().addHistory);
-        if (decision === 'write-reject') {
-          expect(failure).toBeDefined();
-          expect(addHistory).not.toHaveBeenCalled();
+        expect(failure).toBeUndefined();
+        expect(addHistory).toHaveBeenCalledOnce();
+        const kept = addHistory.mock.calls[0][0];
+        if (
+          decision === 'write-reject' ||
+          decision === 'pending-hook' ||
+          decision === 'prior-withheld'
+        ) {
+          expect(JSON.stringify(kept)).not.toContain('R2_PRIVATE');
+          expect(kept.parts?.map((part) => part.functionResponse?.id)).toEqual([
+            'r2-success',
+            'r2-cancel',
+          ]);
+          expect(JSON.stringify(kept)).toContain(
+            decision === 'prior-withheld'
+              ? 'previous policy refusal'
+              : 'output was discarded',
+          );
         } else {
-          expect(failure).toBeUndefined();
-          expect(addHistory).toHaveBeenCalledOnce();
-          const kept = addHistory.mock.calls[0][0];
-          if (decision === 'pending-hook' || decision === 'prior-withheld') {
-            expect(JSON.stringify(kept)).not.toContain('R2_PRIVATE');
-            expect(
-              kept.parts?.map((part) => part.functionResponse?.id),
-            ).toEqual(['r2-success', 'r2-cancel']);
-            expect(JSON.stringify(kept)).toContain(
-              decision === 'prior-withheld'
-                ? 'previous policy refusal'
-                : 'output was discarded',
-            );
-          } else {
-            expect(kept).toEqual({ role: 'user', parts: packet });
-          }
+          expect(kept).toEqual({ role: 'user', parts: packet });
         }
       },
     );
@@ -3019,9 +3019,9 @@ describe('livePromptEvents', () => {
         });
         const recordToolResultAdmission = vi.fn(
           async (parts: readonly Part[]) => {
+            await barrier;
             if (decision === 'write-reject')
               throw new Error('terminal receipt write failed');
-            await barrier;
             return [
               {
                 parts,
@@ -3049,6 +3049,7 @@ describe('livePromptEvents', () => {
             hooked && event === 'UserPromptSubmit',
         });
         const restoreSteering = vi.fn();
+        const onToolsCancelled = vi.fn();
         if (path === 'steering-abort') atMocks.hang = () => controller.abort();
         let failure: unknown;
         const pending = drain(
@@ -3058,7 +3059,7 @@ describe('livePromptEvents', () => {
             controller.signal,
             path === 'steering-abort'
               ? { drainSteering: () => steering('read @a.ts'), restoreSteering }
-              : undefined,
+              : { onToolsCancelled },
           ),
         ).catch((error: unknown) => {
           failure = error;
@@ -3092,10 +3093,12 @@ describe('livePromptEvents', () => {
         if (path === 'steering-abort')
           expect(restoreSteering).toHaveBeenCalledWith(steering('read @a.ts'));
         const addHistory = vi.mocked(config.getGeminiClient().addHistory);
-        if (decision === 'write-reject') {
-          expect(failure).toBeDefined();
-          expect(addHistory).not.toHaveBeenCalled();
-        } else if (
+        if (path === 'all-cancelled') {
+          expect(onToolsCancelled).toHaveBeenCalledOnce();
+        }
+        expect(failure).toBeUndefined();
+        if (
+          decision === 'write-reject' ||
           decision === 'pending-hook' ||
           decision === 'prior-withheld'
         ) {

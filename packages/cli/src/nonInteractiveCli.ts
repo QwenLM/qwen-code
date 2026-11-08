@@ -5,7 +5,7 @@
  */
 
 import { t } from './i18n/index.js';
-import { settleToolResultHistory } from '@qwen-code/qwen-code-core/services/tool-result-history.js';
+import { settleTerminalToolResultHistory } from './services/tool-result-history.js';
 
 import { isWrappedSystemReminderPart } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
@@ -3187,7 +3187,7 @@ export async function runNonInteractive(
               if (!activeGoalTurn) break;
               await modTurn?.complete();
               llmClient.addHistory(
-                await settleToolResultHistory(
+                await settleTerminalToolResultHistory(
                   config.getChatRecordingService?.(),
                   { role: 'user', parts: result.parts ?? [] },
                   result.parts ?? [],
@@ -3365,7 +3365,7 @@ export async function runNonInteractive(
             if (terminateTurn && activeGoalTurn) {
               await modTurn?.complete();
               llmClient.addHistory(
-                await settleToolResultHistory(
+                await settleTerminalToolResultHistory(
                   config.getChatRecordingService?.(),
                   { role: 'user', parts: toolResponseParts },
                   toolResponseParts,

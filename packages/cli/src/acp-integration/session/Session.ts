@@ -4,9 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { settleToolResultHistory } from '@qwen-code/qwen-code-core/services/tool-result-history.js';
-import { hasToolResultPromptHook } from '../../services/tool-result-history.js';
+import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
+import {
+  hasToolResultPromptHook,
+  settleTerminalToolResultHistory,
+} from '../../services/tool-result-history.js';
 
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
@@ -2749,6 +2752,7 @@ export class Session implements SessionContext {
   // batch so a transient stall can't silently lose them. See
   // `#drainMidTurnUserMessages`.
   private midTurnRecoveredMessages: DrainedMidTurnMessage[] = [];
+  private readonly midTurnUserParts = new WeakSet<Part>();
   // The turn the user asked to send queued input now for. Cleared whenever a
   // drain request goes out, since that request takes everything queued before
   // it; a request left over from an earlier turn never matches a later one.
@@ -8820,7 +8824,7 @@ export class Session implements SessionContext {
     toolOutputParts: readonly Part[],
     reason: string,
   ): Promise<Content> {
-    return settleToolResultHistory(
+    return settleTerminalToolResultHistory(
       this.config.getChatRecordingService(),
       message,
       toolOutputParts,
@@ -9288,17 +9292,12 @@ export class Session implements SessionContext {
           // The results of the tools that ran stay in history, as a
           // cancelled prompt keeps them.
           await this.#preserveUnsentMessageHistory(
-            !first && message.parts?.some((part) => part.functionResponse)
-              ? await settleToolResultHistory(
-                  this.config.getChatRecordingService(),
-                  message,
-                  toolOutputParts,
-                  hasToolResultPromptHook(this.config)
-                    ? TOOL_POST_EXECUTION_CANCELLED_MESSAGE
-                    : undefined,
-                )
-              : message,
+            message,
             true,
+            toolOutputParts,
+            !first && hasToolResultPromptHook(this.config)
+              ? TOOL_POST_EXECUTION_CANCELLED_MESSAGE
+              : undefined,
           );
           if (first) keepMessage(false);
           return { stopReason: 'cancelled' };
@@ -11495,11 +11494,20 @@ export class Session implements SessionContext {
     const preserved = { ...message, parts };
     this.#getCurrentChat().addHistory(
       owned.length
-        ? await settleToolResultHistory(
+        ? await settleTerminalToolResultHistory(
             this.config.getChatRecordingService(),
             preserved,
             owned,
             withheldReason,
+            preserveFullMessage
+              ? undefined
+              : () => ({
+                  ...message,
+                  parts: message.parts?.filter(
+                    (part) =>
+                      parts.includes(part) || this.midTurnUserParts.has(part),
+                  ),
+                }),
           )
         : preserved,
     );
@@ -11520,7 +11528,7 @@ export class Session implements SessionContext {
         )
       : await this.#drainMidTurnUserMessages(abortSignal);
     await this.#preserveUnsentMessageHistory(
-      await settleToolResultHistory(
+      await settleTerminalToolResultHistory(
         this.config.getChatRecordingService(),
         {
           role: 'user',
@@ -11576,8 +11584,11 @@ export class Session implements SessionContext {
       return false;
     }
     this.todoStopGuard.suspend();
+    const settle = goalTurn
+      ? settleToolResultHistory
+      : settleTerminalToolResultHistory;
     await this.#preserveUnsentMessageHistory(
-      await settleToolResultHistory(
+      await settle(
         this.config.getChatRecordingService(),
         { role: 'user', parts: toolRun.parts },
         toolRun.parts,
@@ -12582,6 +12593,7 @@ export class Session implements SessionContext {
       } else {
         recorder?.recordMidTurnUserMessage(built, displayText);
       }
+      for (const part of built) this.midTurnUserParts.add(part);
       parts.push(...built);
     }
     return parts;
