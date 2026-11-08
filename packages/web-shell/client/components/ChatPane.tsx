@@ -5,6 +5,7 @@
  */
 
 import { useModelRefresh } from '../hooks/useModelRefresh';
+import { useSubscriptionLogout } from '../hooks/useSubscriptionLogout';
 import { CapacityRecoveryDialog } from './workspaces/CapacityRecoveryDialog';
 import { useCapacityRecovery } from '../hooks/useCapacityRecovery';
 import {
@@ -44,6 +45,7 @@ import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../workflowDetailsContext';
 import { useI18n } from '../i18n';
+import { getWorkflowModeMessages } from './workflow-mode-messages';
 import { McpAppVisibilityContext } from '../mcpAppHostContext';
 import { getSubagentDetailsUnavailableReason } from './messages/toolFormatting';
 import { useWebShellCustomization } from '../customization';
@@ -154,6 +156,7 @@ const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
   'addMenu',
   'approvalMode',
   'plan',
+  'workflowMode',
   'contextUsage',
   'model',
   'voice',
@@ -317,7 +320,7 @@ export function ChatPane({
   showResponseTokensPerSecond = false,
   planControlVisible = false,
 }: ChatPaneProps) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const parentSurfaceVisible = useContext(McpAppVisibilityContext);
   const {
     renderComposerFooter: CustomComposerFooter,
@@ -622,6 +625,35 @@ export function ChatPane({
   modelManagementRef.current = modelManagementPolicy;
   const onSlashCommandRef = useRef(onSlashCommand);
   onSlashCommandRef.current = onSlashCommand;
+  const {
+    available: subscriptionAvailable,
+    handleCommand: handleSubscriptionLogout,
+  } = useSubscriptionLogout({
+    t,
+    onCommand: (text) =>
+      invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError),
+    workspaceCwd: paneSettingsCwd,
+    isBlocked: () =>
+      streamingStateRef.current !== 'idle' ||
+      sessionHasActivePromptRef.current ||
+      isGoalGateBlocked({
+        sessionId: connectionRef.current.sessionId,
+        goalState: connectionRef.current.goalState,
+      }),
+    onBlocked: () => {
+      onImageIngestionNotice?.('warning', t('queue.commandBlocked'));
+      return false;
+    },
+    onNotice: (_kind, message) =>
+      store.dispatch([
+        {
+          type: 'status',
+          promptId: `local-command:${crypto.randomUUID()}`,
+          text: message,
+        },
+      ]),
+    onError: reportError,
+  });
   const pendingApproval = useMemo(
     () => extractPendingPermission(blocks),
     [blocks],
@@ -742,6 +774,8 @@ export function ChatPane({
     clientId: connection.clientId,
     canMutateMidTurn,
     canQueryMidTurn,
+    canQueryPendingPrompts:
+      connection.capabilities?.features.includes('session_prompt') === true,
     canInjectMidTurnMedia,
     workspaceFileActions: attachmentWorkspaceTarget?.actions,
     streamingState,
@@ -757,6 +791,12 @@ export function ChatPane({
   // timestamp) rather than letting StreamingStatus fall back to "now" — so a
   // pane opened mid-turn shows the real elapsed time, not a reset-to-zero clock.
   const activeTurnStartedAt = useMemo(() => {
+    if (
+      connection.localPrompt &&
+      connection.localPrompt.sessionId === connection.sessionId
+    ) {
+      return connection.localPrompt.startedAt;
+    }
     if (connection.backgroundTurn) return connection.backgroundTurn.startedAt;
     if (!isResponding) return undefined;
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -764,7 +804,13 @@ export function ChatPane({
       if (message?.role === 'user') return message.timestamp;
     }
     return undefined;
-  }, [messages, isResponding, connection.backgroundTurn]);
+  }, [
+    messages,
+    isResponding,
+    connection.backgroundTurn,
+    connection.localPrompt,
+    connection.sessionId,
+  ]);
 
   const controlGoal = useCallback(
     async (
@@ -970,9 +1016,9 @@ export function ChatPane({
         return false;
       }
       transcriptViewportRef.current?.scrollToBottom();
-      // The host handler is documented as running before Web Shell handles a
-      // slash command, so it gets `/goal` first here exactly as it does in the
-      // main composer — otherwise an override works on one surface only.
+      // Account commands must pass login and model checks before host overrides.
+      const subscriptionHandled = handleSubscriptionLogout(text);
+      if (subscriptionHandled !== undefined) return subscriptionHandled;
       if (
         trimmed &&
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
@@ -1247,6 +1293,7 @@ export function ChatPane({
       connection.sessionId,
       connection.status,
       controlGoal,
+      handleSubscriptionLogout,
       enqueuePrompt,
       onFirstPromptAdmitted,
       onImageIngestionNotice,
@@ -1429,9 +1476,18 @@ export function ChatPane({
   // session's own actions; the SDK reflects the change back on `connection`.
   const commands = useMemo(() => {
     return localizeBuiltinDescriptions(
-      mergeCommands(connection.commands ?? [], getLocalCommands(t)),
+      mergeCommands(
+        connection.commands ?? [],
+        getLocalCommands(t, { subscriptionAvailable }),
+      ),
       t,
     )
+      .filter(
+        (command) =>
+          subscriptionAvailable ||
+          !['logout', 'upgrade'].includes(command.name) ||
+          Boolean(command.source && command.source !== 'builtin-command'),
+      )
       .filter(
         (command) =>
           modelManagementPolicy.allowAdd ||
@@ -1446,7 +1502,12 @@ export function ChatPane({
           description: t(skillKey),
         };
       });
-  }, [connection.commands, modelManagementPolicy.allowAdd, t]);
+  }, [
+    connection.commands,
+    modelManagementPolicy.allowAdd,
+    subscriptionAvailable,
+    t,
+  ]);
   const skills = useMemo(() => {
     const commandsByName = new Map(
       commands.map((command) => [command.name.toLowerCase(), command]),
@@ -1546,6 +1607,24 @@ export function ChatPane({
         );
     },
     [actions, reportError],
+  );
+  const handleWorkflowModeChange = useCallback(
+    (requested: boolean) => {
+      if (connection.loadingTranscript || connection.catchingUp) return;
+      const owner = sessionOwnerGuard.capture();
+      void actions.setWorkflowMode(requested).catch((error: unknown) => {
+        if (owner.isCurrent())
+          reportError(error, getWorkflowModeMessages(language).updateFailed);
+      });
+    },
+    [
+      actions,
+      connection.loadingTranscript,
+      connection.catchingUp,
+      sessionOwnerGuard,
+      reportError,
+      language,
+    ],
   );
   const handleSelectReasoningEffort = useCallback(
     (value: ReasoningSelection) =>
@@ -2024,6 +2103,16 @@ export function ChatPane({
             mountUnavailableModelTooltip={mountUnavailableModelTooltip}
             onSelectMode={handleSelectMode}
             onSelectModel={handleSelectModel}
+            workflowMode={connection.workflowMode}
+            workflowModeStatus={
+              connection.loadingTranscript ||
+              connection.catchingUp ||
+              connection.status !== 'connected'
+                ? 'syncing'
+                : (connection.workflowModeStatus ?? 'unknown')
+            }
+            workflowModePending={connection.workflowModePending}
+            onWorkflowModeChange={handleWorkflowModeChange}
             reasoning={connection.reasoning}
             onSelectReasoningEffort={handleSelectReasoningEffort}
             dialogOpen={approvalActive}

@@ -19,6 +19,10 @@ interface ScopedSessionsOptions {
   view?: 'organized';
   group?: string;
   pollIntervalMs?: number;
+  /** `null` queries every source type; omitted keeps the sidebar default. */
+  sourceType?: string | null;
+  /** List live bridge sessions only, so closed history cannot hide them. */
+  liveOnly?: boolean;
 }
 
 export function useScopedSessions(
@@ -35,7 +39,13 @@ export function useScopedSessions(
     view,
     group,
     pollIntervalMs,
+    liveOnly,
+    sourceType: sourceTypeOption,
   } = options;
+  const sourceType =
+    sourceTypeOption === null
+      ? undefined
+      : (sourceTypeOption ?? WEB_SHELL_SESSION_SOURCE_TYPE);
   const primary = useWebShellSessions({
     autoLoad,
     enabled: enabled && !workspaceCwd,
@@ -44,7 +54,8 @@ export function useScopedSessions(
     archiveState,
     view,
     group,
-    sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
+    ...(sourceType !== undefined ? { sourceType } : {}),
+    ...(liveOnly === true ? { liveOnly: true } : {}),
     ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
   });
   const primaryDeleteSession = primary.deleteSession;
@@ -63,11 +74,12 @@ export function useScopedSessions(
               ...(archiveState !== undefined ? { archiveState } : {}),
               ...(view !== undefined ? { view } : {}),
               ...(group !== undefined ? { group } : {}),
-              sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
+              ...(sourceType !== undefined ? { sourceType } : {}),
+              ...(liveOnly === true ? { liveOnly: true } : {}),
             },
           }
         : undefined,
-    [archiveState, group, pageSize, view, workspaceCwd],
+    [archiveState, group, liveOnly, pageSize, sourceType, view, workspaceCwd],
   );
   const scoped = useSessionCatalogQuery(workspace.client, query, {
     autoLoad,
@@ -130,6 +142,15 @@ export function useScopedSessions(
     loading: scoped.loading,
     error: scoped.error,
     reload: reloadScoped,
+    // Page-completeness markers, mirrored from the primary branch so a
+    // workspace-locked split call site can read them off the union without a
+    // TS2339: the prune guard needs them to tell "not in this page" from
+    // "gone".
+    nextCursor: scoped.nextCursor,
+    liveMergeFailed: scoped.liveMergeFailed,
+    truncated: scoped.truncated,
+    // Same reason: a stale-retained scoped page is not proof of absence.
+    stale: scoped.stale,
     deleteSession,
     deleteSessions,
     releaseSession: primaryReleaseSessionAction ? releaseSession : undefined,

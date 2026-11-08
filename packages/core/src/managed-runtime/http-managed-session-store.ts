@@ -183,6 +183,7 @@ export interface HttpManagedSessionStores {
     kind?: 'legacy-close' | `configuration:${string}`,
   ): Promise<void>;
   approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
+  modelConfig(expectedDigest: string, kind?: 'legacy-close'): Promise<unknown>;
   claimUserMessages(
     promptId: string,
     initialOnly?: boolean,
@@ -285,6 +286,8 @@ export function createHttpManagedSessionStores(
     authorizeLifecycle: (kind) => client.authorizeLifecycle(kind),
     authorizeOrdinary: (kind) => client.authorizeOrdinary(kind),
     approvalSelection: () => client.approvalSelection(),
+    modelConfig: (expectedDigest, kind) =>
+      client.modelConfig(expectedDigest, kind),
     claimUserMessages: (promptId, initialOnly) =>
       client.claimUserMessages(promptId, initialOnly),
   };
@@ -436,8 +439,16 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
       // inspectable by dropping the dangling page ref from the walk
       // without registering it — adding it would fire the enumeration
       // check below for exactly the snapshots this keeps readable
-      // (#13930 R1-43).
-      if (ref.kind === MANAGED_TOOL_RESULT_KINDS.page) continue;
+      // (#13930 R1-43). The same backward-compatibility applies to the
+      // extension closure's legacy kinds: a snapshot committed before that
+      // closure edge shipped recorded the bundle but never its contributions
+      // child (nor the manifest's parts), so an absent one degrades instead of
+      // condemning the whole snapshot (R3-1 / R7-1).
+      if (
+        ref.kind === MANAGED_TOOL_RESULT_KINDS.page ||
+        LEGACY_EXTENSION_CLOSURE_KINDS.has(ref.kind)
+      )
+        continue;
       throw corrupt('snapshot resource is missing.');
     }
     if (resourceRevisions.get(ref.resourceId)![0] > revision) {
@@ -605,6 +616,15 @@ const EXTENSION_RECORD_KINDS = new Set(
   ),
 );
 
+// Resources a pre-closure-edge snapshot may name without having staged them:
+// a bundle's contributions child and the contributions manifest's parts. The
+// inspection, native-page and commit walks degrade an absent one instead of
+// condemning the snapshot. One constant so the walks cannot drift (R7-1).
+const LEGACY_EXTENSION_CLOSURE_KINDS = new Set([
+  'managed-extension-contributions',
+  'managed-extension-contributions-part',
+]);
+
 class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   private readonly staged = new Map<
     string,
@@ -657,6 +677,21 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
     return this.client.readResource(validated);
   }
 
+  // Existence probe for the commit-side closure walk: a staged resource is
+  // present; a persisted one is present unless the store answers 404. Any other
+  // failure stays fatal (R6-1).
+  private async has(ref: ManagedSessionDurableRef): Promise<boolean> {
+    if (this.staged.has(ref.resourceId)) return true;
+    try {
+      await this.read(ref);
+      return true;
+    } catch (error) {
+      if (error instanceof ManagedSessionStoreHttpError && error.status === 404)
+        return false;
+      throw error;
+    }
+  }
+
   async commitResources(
     refs: readonly ManagedSessionDurableRef[],
   ): Promise<CommitResource[]> {
@@ -682,16 +717,39 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       if (staged !== undefined) {
         requireSameRef(staged.ref, ref);
         const nested = collectNestedResourceRefs(ref, staged.bytes);
-        pending.push(
-          ...(ref.kind === CHECKPOINT_HISTORY_KIND
+        const children =
+          ref.kind === CHECKPOINT_HISTORY_KIND
             ? nested.filter((child) => this.staged.has(child.resourceId))
-            : nested),
-        );
+            : nested;
+        for (const child of children) {
+          // A re-staged legacy bundle may name a contributions child (or part)
+          // that was never uploaded; degrade it like the persisted arm (R7-1).
+          if (
+            LEGACY_EXTENSION_CLOSURE_KINDS.has(child.kind) &&
+            !(await this.has(child))
+          )
+            continue;
+          pending.push(child);
+        }
       } else if (
         ref.kind !== CHECKPOINT_HISTORY_KIND &&
         isReferenceContainer(ref.kind)
       ) {
-        pending.push(...collectNestedResourceRefs(ref, await this.read(ref)));
+        for (const nested of collectNestedResourceRefs(
+          ref,
+          await this.read(ref),
+        )) {
+          // A legacy bundle may name a contributions child (or part) that was
+          // never staged — the commit-side counterpart of the read-side
+          // tolerance (R6-1 / R7-1). Drop only an absent one from the closure;
+          // a present or conflicting one stays fatal.
+          if (
+            LEGACY_EXTENSION_CLOSURE_KINDS.has(nested.kind) &&
+            !(await this.has(nested))
+          )
+            continue;
+          pending.push(nested);
+        }
       }
     }
     return [...closure.values()].map((ref) => {
@@ -892,6 +950,72 @@ class ManagedSessionStoreHttpClient {
         input: message['input'],
       };
     });
+  }
+
+  async modelConfig(
+    expectedDigest: string,
+    kind?: 'legacy-close',
+  ): Promise<unknown> {
+    if (!/^sha256:[0-9a-f]{64}$/u.test(expectedDigest)) {
+      throw corrupt('model configuration digest is invalid.');
+    }
+    await this.assertWritable();
+    return this.withRetry(
+      true,
+      'POST',
+      '/model-config:query',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/model-config:query',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            expectedDigest,
+            ...(kind ? { kind } : {}),
+          },
+          timeoutMs,
+        );
+        const reader = response.body?.getReader();
+        if (!reader) throw corrupt('Model configuration response has no body.');
+        const chunks: Uint8Array[] = [];
+        let length = 0;
+        try {
+          while (true) {
+            let item: ReadableStreamReadResult<Uint8Array>;
+            try {
+              item = await reader.read();
+            } catch (error) {
+              if (error instanceof TypeError || error instanceof DOMException) {
+                throw new ManagedSessionStoreTransportError(
+                  'Managed Session Store model configuration response failed.',
+                );
+              }
+              throw error;
+            }
+            if (item.done) break;
+            length += item.value.byteLength;
+            if (length > 16 * 1024) {
+              await reader.cancel();
+              throw corrupt(
+                'Model configuration response exceeds its byte limit.',
+              );
+            }
+            chunks.push(item.value);
+          }
+          try {
+            return JSON.parse(
+              Buffer.concat(chunks).toString('utf8'),
+            ) as unknown;
+          } catch {
+            throw corrupt('Model configuration response is invalid JSON.');
+          }
+        } finally {
+          reader.releaseLock();
+        }
+      },
+    );
   }
 
   async approvalSelection(): Promise<
@@ -1421,11 +1545,31 @@ class ManagedSessionStoreHttpClient {
         if (transaction['journalRevision'] !== after + 1)
           throw corrupt('native snapshot transaction revision conflicts.');
         const declared = append(transaction).refs;
+        const nested: typeof declared = [];
         for (const resource of added) {
           const body = await this.readResource(resource);
-          declared.push(...collectNestedResourceRefs(resource, body));
+          nested.push(...collectNestedResourceRefs(resource, body));
         }
+        // Direct references are the transaction's own census: a missing one is
+        // corrupt, exactly like the inspection walk's direct-reference guard.
         for (const resource of declared) {
+          if (!isDeepStrictEqual(resources.get(resource.resourceId), resource))
+            throw corrupt(
+              'native resource dependency is missing or conflicting.',
+            );
+        }
+        // Transitive refs collected from resource bodies: a bundle committed
+        // before the contributions closure edge shipped names a contributions
+        // child (and manifest parts) the snapshot never staged. Degrade only
+        // those absent legacy kinds, mirroring the inspection walk's tolerance
+        // (R3-1 / R4-6 / R7-1); a directly declared ref stays on the strict
+        // path above.
+        for (const resource of nested) {
+          if (
+            LEGACY_EXTENSION_CLOSURE_KINDS.has(resource.kind) &&
+            !resources.has(resource.resourceId)
+          )
+            continue;
           if (!isDeepStrictEqual(resources.get(resource.resourceId), resource))
             throw corrupt(
               'native resource dependency is missing or conflicting.',
@@ -2448,6 +2592,23 @@ class ManagedSessionStoreHttpClient {
     const expired = this.grant;
     this.stopRenewal();
     await this.renewPromise?.catch(() => undefined);
+    // A renewal in flight may have answered after the caller saw the lease
+    // lapse; it moved the lease forward and re-armed the timer, so keep that
+    // grant. Dropping it for an acquire, which a Store holding the Session's
+    // lifecycle can delay, leaves authorizeLifecycle, and any caller that
+    // reads the grant without first waiting in ensureWriter, refusing
+    // locally until the acquire answers. Only a lease that moved past the
+    // lapsed one counts: a refused renewal leaves the lapsed lease in place,
+    // and a commit, a head adoption or a journal read copies it into a new
+    // grant; in either case a wall-clock step back could make the lapsed
+    // lease look live.
+    if (
+      expired !== undefined &&
+      this.grant !== undefined &&
+      this.grant.leaseUntil > expired.leaseUntil &&
+      this.grant.leaseUntil > Date.now()
+    )
+      return;
     this.grant = undefined;
     const acquire = (async () => {
       await this.acquireWriter();
@@ -3321,6 +3482,8 @@ export function collectNestedResourceRefs(
   }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
+    ref.kind === 'managed-extension-config-bundle' ||
+    ref.kind === 'managed-extension-contributions' ||
     ref.kind === 'managed-definition' ||
     ref.kind === 'managed-action-options' ||
     ref.kind === 'managed-hook-plan' ||
@@ -3373,6 +3536,8 @@ function isReferenceContainer(kind: string): boolean {
     EXTENSION_RECORD_KINDS.has(kind) ||
     HOSTED_RECOVERY_RESOURCE_KINDS.has(kind) ||
     [
+      'managed-extension-config-bundle',
+      'managed-extension-contributions',
       'managed-definition',
       'managed-checkpoint',
       CHECKPOINT_HISTORY_KIND,

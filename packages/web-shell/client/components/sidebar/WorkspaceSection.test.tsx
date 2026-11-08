@@ -149,6 +149,7 @@ function renderSection(
     editingSessionId: string;
     searchQuery: string;
     gitBranchWanted: boolean;
+    untitledSessionLabel: string;
     renderSession: (
       session: DaemonSessionSummary,
       options?: {
@@ -175,6 +176,7 @@ function renderSection(
           trustToOpenLabel="Trust to open"
           noSessionsLabel="No sessions"
           loadErrorLabel="Load failed"
+          untitledSessionLabel={overrides.untitledSessionLabel}
           organizationEnabled={overrides.organizationEnabled ?? false}
           sessionCatalogRequestsEnabled={
             overrides.sessionCatalogRequestsEnabled
@@ -316,6 +318,41 @@ describe('WorkspaceSection label', () => {
 
     expect(container.textContent).toContain('Payments API');
     expect(container.textContent).not.toContain('project');
+  });
+
+  it('labels a nameless session instead of showing its id', async () => {
+    const listWorkspaceSessionsPage = vi.fn().mockResolvedValue({
+      sessions: [
+        {
+          sessionId: '550e8400-e29b-41d4-a716-446655440000',
+          displayName: '',
+          createdAt: '2026-01-01T00:00:00.000Z',
+        } as DaemonSessionSummary,
+      ],
+    });
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      workspace: untrustedWorkspace,
+      client,
+      expanded: true,
+      untitledSessionLabel: 'Untitled session',
+    });
+    await flush();
+
+    const row = container.querySelector<HTMLElement>('[role="note"]');
+    if (!row) throw new Error('read-only row was not rendered');
+    expect(row.textContent).toBe('Untitled session');
+    expect(row.textContent).not.toContain('550e8400');
+    // The visible text drops the id; the accessible name keeps it so two
+    // untitled read-only rows are not announced identically.
+    expect(row.getAttribute('aria-label')).toContain('550e8400');
   });
 
   it('shows read-only session details from row hover', async () => {

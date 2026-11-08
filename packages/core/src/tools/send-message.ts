@@ -28,6 +28,7 @@
  */
 
 import type { Config } from '../config/config.js';
+import { peerMessagingOffReason } from '../ipc/peer-messaging-guidance.js';
 import { toolSearchBridgeSentence } from '../skills/bundled-reference.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolErrorType } from './tool-error.js';
@@ -474,7 +475,7 @@ class SendMessageInvocation extends BaseToolInvocation<
 
     if (!teamManager) {
       const msg = this.peerMessagingOff
-        ? `No active team and no task_id, and cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so "${to}" cannot be another session. ` +
+        ? `No active team and no task_id, and cross-session peer lookup is unavailable in this session (${peerMessagingOffReason(this.config)}), so "${to}" could not be checked as another session. ` +
           'Create a team, or pass `task_id` to message a background task.'
         : `No active team, no task_id, and no reachable session named "${to}". ` +
           (rosterReachable(this.config)
@@ -502,12 +503,10 @@ class SendMessageInvocation extends BaseToolInvocation<
       // The team's "not found" is only half the answer once the peer
       // directory was searched too.
       if (!inProcessRecipient && /not found/i.test(errMsg)) {
-        // Branch, do not suppress: with messaging off the team's "not
-        // found" was the whole answer the model got, so it never learned
-        // that the name it wants could belong to a session this setting
-        // is hiding.
+        // With peer lookup unavailable, the team's result cannot rule out
+        // a recipient in another session.
         errMsg += this.peerMessagingOff
-          ? ` Cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so another session could not have taken that name either.`
+          ? ` Cross-session peer lookup is unavailable in this session (${peerMessagingOffReason(this.config)}), so another session with that name could not be checked.`
           : ` No reachable session has that name either${
               rosterReachable(this.config)
                 ? '; use list_agents to see who is reachable.'
