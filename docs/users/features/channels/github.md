@@ -160,6 +160,8 @@ Note that under `groupPolicy: "pairing"`, access is granted per repository: once
 
 The adapter detects mentions by scanning comment text and first-contact issue or PR bodies for `@bot-username` using a case-insensitive regex. It does not trust `reason: "mention"` alone because that value is sticky at the thread level. Other reasons select review, triage, followed-thread, or fallback prompts.
 
+Editing an older comment to add the mention does not reach the bot. GitHub notifies the bot of the new mention, but the adapter reads only comments created after its poll cursor (see [How It Works](#how-it-works)). The Channel events page records such a comment, when it mentions the bot and was edited after the cursor, as skipped with the reason `edited_comment`. A comment the channel already took (answered it, or read it in a batch of followed-thread comments) gets no row, but that record is bounded, so the row can also name an older comment the bot answered before. A mention added later to an issue or pull request body is answered only while the bot has not read the thread yet, since the body is read only on first contact; after that it is not answered and leaves no row. To ask the bot, post a new comment.
+
 ## How It Works
 
 The adapter uses GitHub's Notifications API as a wake-up signal:
@@ -350,6 +352,8 @@ Checks endpoint never suppresses the other three detections: their data
 comes from `pulls.get`, and the last known CI aggregate stands until a fetch
 succeeds again.
 Transitions are persisted before delivery, so restarts do not re-fire them.
+A head move fires whoever pushed it, including the bound session itself —
+see Known Limitations.
 
 ### Role-Aware Action Templates
 
@@ -422,7 +426,36 @@ the session's model keeps discretion and its approval mode governs actions.
 A template containing `--publish` is the operator's explicit publication
 consent for the rounds it triggers — configure it deliberately. With
 `boundSessionActions` absent, delivery keeps the legacy single-winner
-behavior and the generic prompt, byte for byte.
+behavior; the prompt then carries the built-in guidance below for a
+role-carrying binding, and stays byte for byte the generic prompt for an
+untyped one.
+
+### Built-In Role Guidance (No Templates Configured)
+
+You do not have to write templates to keep roles apart. Without
+`boundSessionActions`, a binding that carries a role still gets a `Role:` line
+naming that role, and the prompt's workflow sentence is replaced by built-in
+guidance for it (summarized below; the delivered text is a little longer):
+
+| Role     | Built-in guidance                                                                                                                        |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `review` | Act as the reviewer: inspect the change and report findings. Do not push or modify the branch.                                           |
+| `verify` | Act as the verifier: verify and report. Attribute CI failures rather than fixing them. Do not merge, rebase, resolve conflicts, or push. |
+| `fix`    | Act as the fixer: investigate and fix; your workflow decides whether to push. Re-read the current head first.                            |
+
+An untyped binding keeps the generic sentence ("Handle the event with your
+normal workflow…"). A configured template always wins over the built-in
+guidance, and the per-role subscription is unchanged: a role with no matching
+key still receives nothing.
+
+Event bodies state facts only. `ci_failure` reports the head and the failed
+checks, `merge_conflict` reports `mergeable_state: dirty`, and a merged PR is
+reported as merged — none of them tells the session to fix, rebase, or wrap up.
+What to do about an event comes from your template, the built-in role guidance,
+or the session's own workflow, never from the event data.
+
+Like a template, this guidance is an instruction rather than an authorization
+boundary; tool permissions remain the boundary.
 
 ## Known Limitations
 
@@ -431,6 +464,8 @@ behavior and the generic prompt, byte for byte.
 - The bot does not read comments before the current polling window; `author` and `comment` notifications may aggregate up to 20 comments from that window.
 - Inline PR review comments and review summary bodies are not enumerated; only issue/PR comments are processed.
 - The selected credential must support the Notifications API. Fine-grained PATs do not support it; use local `gh` authentication or a classic PAT with `notifications` scope.
+- **A bound session receives its own pushes.** `head_change` compares head SHAs and GitHub's PR object does not name the pusher, so the channel cannot tell a bound session's own push from someone else's. When the pushing session is the recipient, the event arrives as a queued turn attributed to `Author: GitHub`, with both SHAs in the summary.
+- **Breaking a push → event → push chain.** With `boundSessionActions`, a role whose template chain resolves nothing is skipped — keep `watch:head_change` and the catch-alls away from the role that pushes; the example above wakes review and verify, not fix. Without it, the single most recently active follower receives every subscribed transition, so drop `head_change` from `prWatchEvents` or have the session compare the summary's target SHA with the head it just pushed. `/verify-pr` re-runs for a head it has not verified, including one it pushed itself; `/autofix-pr` treats its own pushed heads as its own work. The other three transitions are never suppressed by authorship — a self-pushed head whose CI turns red still fires `ci_failure`.
 
 ## Starting the Channel
 

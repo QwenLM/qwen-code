@@ -1986,10 +1986,13 @@ function testZoomHotkeyScript() {
 
   const listeners = [];
   const invoked = [];
+  const mainFrame = {};
   vm.runInNewContext(
     script,
     {
       window: {
+        self: mainFrame,
+        top: mainFrame,
         __TAURI__: {
           core: {
             invoke: async (command, args) => {
@@ -2003,6 +2006,24 @@ function testZoomHotkeyScript() {
       },
     },
     { timeout: 5000 },
+  );
+
+  const subframeListeners = [];
+  vm.runInNewContext(
+    script,
+    {
+      window: {
+        self: {},
+        top: {},
+        addEventListener: (event) => subframeListeners.push(event),
+      },
+    },
+    { timeout: 5000 },
+  );
+  assert.equal(
+    subframeListeners.length,
+    0,
+    'Preview subframes must not install window zoom listeners.',
   );
 
   let stopped = false;

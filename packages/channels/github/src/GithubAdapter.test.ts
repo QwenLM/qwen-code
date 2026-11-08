@@ -26,6 +26,7 @@ import {
   BoundSessionQueueFullError,
   BoundSessionUnavailableError,
   channelEventFilePath,
+  DEFAULT_BOUND_ROLE_GUIDANCE,
   getWorkspaceScopeDirName,
   PairingStore,
   type ChannelAgentBridge,
@@ -2339,6 +2340,49 @@ describe('GithubChannel', () => {
           ['mention_required', 'C_1002'],
           ['duplicate', 'C_1001'],
         ]);
+      });
+
+      it('journals a mention added by an edit once while the window is held', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return [
+                issueNotification(1, `2026-07-02T01:0${poll}:00.000Z`),
+                issueNotification(2),
+              ];
+            }
+            if (params.issue_number === 2) throw transient();
+            const old = '2026-06-30T08:00:00.000Z';
+            return [
+              makeComment({
+                created_at: old,
+                updated_at: '2026-07-02T00:30:00.000Z',
+              }),
+              // Edited during the held window, after the first poll.
+              ...(poll > 1
+                ? [
+                    makeComment({
+                      id: 1002,
+                      created_at: old,
+                      updated_at: '2026-07-02T00:40:00.000Z',
+                    }),
+                  ]
+                : []),
+            ];
+          },
+        );
+
+        for (let i = 0; i < 3; i++) await pollOnce();
+
+        expect(channel.inboundEnvelopes).toHaveLength(0);
+        expect(
+          journal()
+            .filter((row) => row['reason'] === 'edited_comment')
+            .map((row) => row['messageId']),
+        ).toEqual(['C_1001', 'C_1002']);
       });
 
       it('does not spend the 5xx budget on polls a rate limit stopped', async () => {
@@ -8922,6 +8966,180 @@ describe('GithubChannel', () => {
       ]);
     });
 
+    describe('a mention added by editing an older comment', () => {
+      // The cursor is 2026-07-01T00:00:00.000Z and the notification's
+      // updated_at is 2026-07-02T10:00:00.000Z: the window between them.
+      const edited = (overrides: Record<string, unknown> = {}) =>
+        makeComment({
+          created_at: '2026-06-30T08:00:00.000Z',
+          updated_at: '2026-07-02T09:30:00.000Z',
+          ...overrides,
+        });
+
+      async function pollWith(
+        reason: string,
+        comments: Array<Record<string, unknown>>,
+      ) {
+        mockOctokit.paginate
+          .mockResolvedValueOnce([
+            makeNotification({
+              reason,
+              last_read_at: '2026-07-01T12:00:00.000Z',
+            }),
+          ])
+          .mockResolvedValueOnce(comments);
+        mockOctokit.rest.issues.get.mockResolvedValue({
+          data: { title: 'Test Issue', body: '', user: { login: 'alice' } },
+        });
+        await pollOnce();
+      }
+
+      it.each([
+        ['edited inside the window', {}],
+        [
+          'created at the window start',
+          { created_at: '2026-07-01T00:00:00.000Z' },
+        ],
+        [
+          'edited at the notification time',
+          { updated_at: '2026-07-02T10:00:00.000Z' },
+        ],
+        [
+          'edited after the notification',
+          { updated_at: '2026-07-02T11:00:00.000Z' },
+        ],
+        [
+          'written by a mixed-case login',
+          { user: { id: 10001, login: 'Alice' } },
+        ],
+        ['mentioning the bot in another case', { body: '@Test-Bot please' }],
+      ])(
+        'is recorded as skipped, not answered (%s)',
+        async (_name, overrides) => {
+          await initWithoutLoop();
+
+          await pollWith('mention', [edited(overrides)]);
+
+          expect(channel.inboundEnvelopes).toHaveLength(0);
+          expect(readJournal()).toEqual([
+            expect.objectContaining({
+              type: 'inbound',
+              outcome: 'skipped',
+              reason: 'edited_comment',
+              triggerKind: 'comment',
+              repository: 'owner/repo',
+              thread: 'issue:42',
+              number: 42,
+              messageId: 'C_1001',
+              actor: 'alice',
+            }),
+          ]);
+          // The row is the notification's only trace: the window commits.
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it('records each such comment of a thread, past the ones it skips', async () => {
+        await initWithoutLoop();
+        channel.cursor = {
+          lastProcessedAt: '2026-07-01T00:00:00.000Z',
+          // An older metadata floor must not narrow the comment window.
+          metaFloor: '2026-06-01T00:00:00.000Z',
+          dispatchedComments: ['C_1002'],
+        };
+
+        await pollWith('mention', [
+          edited({ id: 1001, body: 'no mention here' }),
+          edited({ id: 1002 }),
+          edited({ id: 1003 }),
+          edited({ id: 1004, user: { id: 10002, login: 'bob' } }),
+          edited({ id: 1005, user: null }),
+          edited({ id: 1006, node_id: undefined }),
+          // Last edited at the cursor: the window that ended there read it.
+          edited({ id: 1007, updated_at: '2026-07-01T00:00:00.000Z' }),
+          edited({ id: 1008, body: undefined }),
+        ]);
+
+        expect(
+          readJournal()
+            .filter((row) => row['reason'] === 'edited_comment')
+            .map((row) => [row['messageId'], row['actor']]),
+        ).toEqual([
+          ['C_1003', 'alice'],
+          ['C_1004', 'bob'],
+          ['C_1005', 'unknown'],
+          ['1006', 'alice'],
+        ]);
+      });
+
+      it('is recorded on the aggregate lane too', async () => {
+        await initWithoutLoop();
+
+        await pollWith('comment', [
+          edited(),
+          makeComment({ id: 1002, body: 'a new comment' }),
+        ]);
+
+        expect(channel.inboundEnvelopes).toHaveLength(1);
+        expect(channel.inboundEnvelopes[0]!.text).toContain(
+          '@alice: a new comment',
+        );
+        expect(channel.inboundEnvelopes[0]!.text).not.toContain(
+          'please fix this',
+        );
+        expect(
+          readJournal()
+            .filter((row) => row['reason'] === 'edited_comment')
+            .map((row) => row['messageId']),
+        ).toEqual(['C_1001']);
+      });
+
+      it.each([
+        ['it does not mention the bot', { body: 'no mention here' }],
+        [
+          'it was edited before the window',
+          { updated_at: '2026-06-30T09:00:00.000Z' },
+        ],
+        [
+          'it was edited at the window start',
+          { updated_at: '2026-07-01T00:00:00.000Z' },
+        ],
+        ['it has no update time', { updated_at: null }],
+        [
+          'it was created inside the window',
+          { created_at: '2026-07-02T09:00:00.000Z' },
+        ],
+        [
+          'it was created before the thread was last read',
+          { created_at: '2026-07-01T06:00:00.000Z' },
+        ],
+        ['the bot wrote it', { user: { id: 99999, login: 'test-bot' } }],
+        ['it has no creation time', { created_at: null }],
+      ])('is not recorded when %s', async (_name, overrides) => {
+        await initWithoutLoop();
+
+        await pollWith('mention', [edited(overrides)]);
+
+        expect(
+          readJournal().filter((row) => row['reason'] === 'edited_comment'),
+        ).toEqual([]);
+      });
+
+      it('is not recorded when the channel already took the comment', async () => {
+        await initWithoutLoop();
+        channel.cursor = {
+          lastProcessedAt: '2026-07-01T00:00:00.000Z',
+          dispatchedComments: ['C_1001'],
+        };
+
+        await pollWith('mention', [edited()]);
+
+        expect(readJournal()).toEqual([]);
+      });
+    });
+
     it('records the inbound acceptance, task transitions, and publication', async () => {
       mockOctokit.rest.issues.createComment.mockResolvedValue({
         data: { id: 500, html_url: 'https://github.com/owner/repo/500' },
@@ -14045,6 +14263,224 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(fallback![1]).not.toContain('Role:');
       expect(fallback![1]).not.toContain('[Operator instruction');
     });
+
+    it('names the role and gives its built-in guidance with no actions configured', async () => {
+      // A /verify-pr backfill stamps a role with no map configured. The
+      // session must learn which hat it wears instead of receiving a
+      // role-blind instruction to act.
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'verify-session',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain('Role: verify');
+      expect(prompt).toContain(DEFAULT_BOUND_ROLE_GUIDANCE.verify);
+      expect(prompt).not.toContain(
+        'Handle the event with your normal workflow',
+      );
+      expect(prompt).not.toContain('[Operator instruction');
+    });
+
+    it('keeps the role on a partial snapshot, where revalidation is skipped', async () => {
+      // On a COMPLETE snapshot delivery-time revalidation refills the role
+      // from resolveBoundDelivery, which masks the role that target selection
+      // attached. A partial or failed scan skips revalidation, so the frozen
+      // target is the only source of the role — this pins that half.
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'verify-session',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: true,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain('Role: verify');
+      expect(prompt).toContain(DEFAULT_BOUND_ROLE_GUIDANCE.verify);
+    });
+
+    it('gives the fallback session its OWN role, not the gone session role', async () => {
+      // The legacy gone-fallback scans every follower, so it can cross roles.
+      // Reusing the first target's prompt hands the verifier the reviewer's
+      // instruction; rebuilding per target is what this pins.
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'gone-session',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'review',
+              },
+            ],
+          }),
+          makeBinding({
+            sessionId: 'verify-session',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 'gone-session') {
+            throw new BoundSessionGoneError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const calls = boundSessions.deliverPrompt.mock.calls as Array<
+        [string, string]
+      >;
+      const fallback = calls.find(([id]) => id === 'verify-session');
+      expect(fallback).toBeDefined();
+      expect(fallback![1]).toContain('Role: verify');
+      expect(fallback![1]).toContain(DEFAULT_BOUND_ROLE_GUIDANCE.verify);
+      expect(fallback![1]).not.toContain('Role: review');
+      expect(fallback![1]).not.toContain(DEFAULT_BOUND_ROLE_GUIDANCE.review);
+    });
+
+    it('never leaks built-in guidance into a configured operator template', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: { 'verify:default': 'Only report %pr%.' },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'verify-session',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain('Only report 42.');
+      expect(prompt).toContain('Role: verify');
+      expect(prompt).not.toContain(DEFAULT_BOUND_ROLE_GUIDANCE.verify);
+    });
+
+    it('refreshes the role when a deferred delivery retries onto a re-roled binding', async () => {
+      // Same session, new role. Revalidation returns the same sessionId, so
+      // comparing session ids alone keeps the frozen `fix` role and hands a
+      // now-verifier session the fixer's guidance — the very defect this
+      // change exists to remove, reintroduced through the retry path.
+      const bound = (role: 'fix' | 'verify') => ({
+        bindings: [
+          makeBinding({
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role,
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue(bound('fix'));
+      boundSessions.deliverPrompt.mockRejectedValueOnce(
+        new BoundSessionQueueFullError('bound-session'),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const deferred = readInboundTasks();
+      expect(deferred).toHaveLength(1);
+      expect(deferred[0]!['delivery']).toEqual({
+        kind: 'bound-session',
+        sessionId: 'bound-session',
+        role: 'fix',
+      });
+
+      // The binding is re-roled while the task waits for the retry.
+      boundSessions.listPrBindings.mockResolvedValue(bound('verify'));
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      const [sessionId, prompt] = boundSessions.deliverPrompt.mock.calls[1] as [
+        string,
+        string,
+      ];
+      expect(sessionId).toBe('bound-session');
+      expect(prompt).toContain('Role: verify');
+      expect(prompt).toContain(DEFAULT_BOUND_ROLE_GUIDANCE.verify);
+      expect(prompt).not.toContain('Role: fix');
+      expect(prompt).not.toContain(DEFAULT_BOUND_ROLE_GUIDANCE.fix);
+    });
   });
 
   describe('review-round regressions (durable fan-out, delivery ring, role loss, partial guard, lane class)', () => {
@@ -16205,6 +16641,97 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       mockNotificationsOnce([]);
       await pollOnce();
       expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('tells a verify-bound session its role on a merge_conflict watch event', async () => {
+      // The reported incident: a /verify-pr session bound with role `verify`,
+      // no boundSessionActions, received "Rebase or merge the base branch"
+      // with no Role line and built a merge commit. The watch path resolves
+      // its target through resolveBoundDelivery, not resolveBoundTargets.
+      await initChannel(watchConfig, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'verify-session',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'verify',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockPull({});
+      mockNotificationsOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      mockPull({ mergeable: false, mergeable_state: 'dirty' });
+      mockNotificationsOnce([]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      const [sessionId, prompt] = boundSessions.deliverPrompt.mock.calls[0] as [
+        string,
+        string,
+      ];
+      expect(sessionId).toBe('verify-session');
+      expect(prompt).toContain('Role: verify');
+      expect(prompt).toContain(DEFAULT_BOUND_ROLE_GUIDANCE.verify);
+      expect(prompt).toContain(
+        'Merge conflicts detected (mergeable_state: dirty).',
+      );
+      expect(prompt).not.toContain('Rebase or merge');
+      expect(prompt).not.toContain(
+        'Handle the event with your normal workflow',
+      );
+    });
+
+    it('states watch facts without assigning an action to the session', async () => {
+      // The summary is event DATA. An imperative here reaches every role
+      // unchanged and told a verify-only session to rebase and push; the
+      // action belongs to the operator template or the built-in role
+      // guidance, never to the body.
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({});
+      mockNotificationsOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+      mockNotificationsOnce([]);
+      mockChecks([
+        { status: 'completed', conclusion: 'failure', name: 'build' },
+      ]);
+      await pollOnce();
+      const ciPrompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(ciPrompt).toContain('CI failed on head sha-1.');
+      expect(ciPrompt).toContain('Failed checks: build.');
+      expect(ciPrompt).not.toContain('fix or attribute');
+      expect(ciPrompt).not.toContain('Inspect the failed checks');
+
+      mockPull({ mergeable: false, mergeable_state: 'dirty' });
+      mockNotificationsOnce([]);
+      await pollOnce();
+      const conflictPrompt = boundSessions.deliverPrompt.mock
+        .calls[1]![1] as string;
+      expect(conflictPrompt).toContain(
+        'Merge conflicts detected (mergeable_state: dirty).',
+      );
+      expect(conflictPrompt).not.toContain('Rebase or merge');
+      expect(conflictPrompt).not.toContain('resolve the conflicts');
+
+      mockPull({ state: 'closed', merged: true });
+      mockNotificationsOnce([]);
+      await pollOnce();
+      const mergedPrompt = boundSessions.deliverPrompt.mock
+        .calls[2]![1] as string;
+      expect(mergedPrompt).toContain('The PR was merged.');
+      expect(mergedPrompt).not.toContain('Wrap up');
     });
 
     it('fires state_change on merge and leaves the watch set once recorded', async () => {
