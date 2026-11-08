@@ -278,6 +278,11 @@ export function resolveAgentModalitiesSource(
   if (!resolvedModel && base.getAuthType?.() === authOverrides.authType) {
     return base.getContentGeneratorConfigSources?.()['modalities'] ?? COMPUTED;
   }
+  // A provider switch with no registry route cleared every generation-config
+  // field, so nothing detected this value and the settings layer is never
+  // re-merged into an inherited agent config. Claiming the name-based default
+  // would aim a refusal at keys that decided nothing.
+  if (!resolvedModel) return { kind: 'default' };
   // Everything else was either name-detected by the registry or left as the
   // field's default; neither was read from a setting that names this model.
   // `via` records the provider route the value was derived through, so a

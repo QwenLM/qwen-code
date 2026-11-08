@@ -4668,6 +4668,37 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
+    it('forwards the provider route the computed source was derived through', async () => {
+      // Without `via` the converter's refusal falls into the arm that names
+      // `model.generationConfig.modalities`, a key a `modelProviders` route
+      // never reads (QwenLM/qwen-code#16178).
+      mockCliConfig = {
+        getModel: () => 'test-model',
+        getContentGeneratorConfig: () => ({ model: 'test-model' }),
+        getContentGeneratorConfigSources: () => ({
+          modalities: {
+            kind: 'computed',
+            via: { kind: 'modelProviders' },
+          },
+        }),
+      } as unknown as Config;
+      mockConfig = { ...mockConfig, cliConfig: mockCliConfig };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const convert = vi
+        .spyOn(mockConverter, 'convertLlmRequestToOpenAI')
+        .mockReturnValue([{ role: 'user', content: 'ok' }]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        choices: [{ index: 0, message: { role: 'assistant', content: '' } }],
+      });
+
+      await pipeline.execute(userRequest(), 'p');
+
+      expect(convert.mock.calls.at(-1)![1]).toMatchObject({
+        modalitiesSourceKind: 'computed',
+        modalitiesSourceViaKind: 'modelProviders',
+      });
+    });
+
     it('omits the modalities source for a generator on another model', async () => {
       mockCliConfig = {
         getModel: () => 'primary-model',

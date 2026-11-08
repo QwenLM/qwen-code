@@ -4653,11 +4653,20 @@ describe('modality filtering', () => {
     modalities: RequestContext['modalities'],
     modalitiesSourceKind: NonNullable<RequestContext['modalitiesSourceKind']>,
     part: Part,
+    modalitiesSourceViaKind?: NonNullable<
+      RequestContext['modalitiesSourceViaKind']
+    >,
   ): WirePart[] {
     const userMsg = findRole(
       OpenAIContentConverter.convertLlmRequestToOpenAI(
         { model: 'test-model', contents: [content('user', part)] },
-        { model, modalities, modalitiesSourceKind, startTime: 0 },
+        {
+          model,
+          modalities,
+          modalitiesSourceKind,
+          ...(modalitiesSourceViaKind ? { modalitiesSourceViaKind } : {}),
+          startTime: 0,
+        },
       ),
       'user',
     );
@@ -4721,6 +4730,25 @@ describe('modality filtering', () => {
 
     expect(parts[0].text).toContain("Model 'deepseek-chat'");
     expect(parts[0].text).toContain('inferred from the model name');
+  });
+
+  it('names only the provider entry when the source came through a provider route', () => {
+    // A `modelProviders` route never reads `model.generationConfig.modalities`,
+    // so offering that key sends the operator to a setting that did not
+    // produce this value (QwenLM/qwen-code#16178).
+    const parts = userContentPartsWithSource(
+      'deepseek-chat',
+      {},
+      'computed',
+      {
+        inlineData: { mimeType: 'image/png', data: 'abc123' },
+        displayName: 'screenshot.png',
+      } as unknown as Part,
+      'modelProviders',
+    );
+
+    expect(parts[0].text).toContain('modelProviders entry');
+    expect(parts[0].text).not.toContain('model.generationConfig.modalities');
   });
 
   it('keeps BMP image data when image modality is enabled', () => {

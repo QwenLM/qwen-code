@@ -796,7 +796,12 @@ describe('createRuntimeContentGeneratorView modalities source', () => {
       { authType: 'anthropic' },
     );
 
-    expect(view.configSources?.['modalities']?.['kind']).not.toBe('settings');
+    // The builder cleared every generation-config field for the new provider
+    // and nothing re-merges settings into an inherited agent config, so no
+    // value was detected: claiming a name-based default would name keys that
+    // decided nothing.
+    expect(view.configSources?.['modalities']).toEqual({ kind: 'default' });
+    expect(view.contentGeneratorConfig.modalities).toBeUndefined();
   });
 
   it('falls back the same-provider route to the session’s source, or computed', async () => {
