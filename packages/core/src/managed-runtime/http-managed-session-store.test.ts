@@ -1286,9 +1286,7 @@ describe('HTTP Managed Session store', () => {
   it('restores the expired grant and surfaces the failure when the acquire is refused', async () => {
     vi.useFakeTimers();
     const rig = await bootWithHeldRenewalAnswer({ holdAcquires: false });
-    const originalFetch =
-      rig.server.fetch.getMockImplementation() ??
-      rig.server.fetch.bind(rig.server);
+    const originalFetch = rig.server.fetch.getMockImplementation()!;
     let refuseAcquire = false;
     rig.server.fetch.mockImplementation(async (input, init) => {
       if (refuseAcquire && requestUrl(input).endsWith('/writers:acquire'))
