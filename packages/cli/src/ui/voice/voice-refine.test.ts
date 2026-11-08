@@ -7,6 +7,7 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { refineVoiceTranscript } from './voice-refine.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
 
 const mockRunSideQuery = vi.hoisted(() => vi.fn());
 const mockLogger = vi.hoisted(() => ({
@@ -33,6 +34,47 @@ describe('refineVoiceTranscript', () => {
   beforeEach(() => {
     mockRunSideQuery.mockReset();
   });
+
+  it.each(['failed', 'ready', 'aborted'])(
+    'respects Mod startup before refining voice input: %s',
+    async (state) => {
+      let resolve!: () => void;
+      let reject!: (error: Error) => void;
+      const ready = new Promise<void>((done, fail) => {
+        resolve = done;
+        reject = fail;
+      });
+      void ready.catch(() => {});
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({ ready } as interactiveMods.InteractiveModSession);
+      const controller = new AbortController();
+      mockRunSideQuery.mockResolvedValue({ text: 'fix the parser' });
+      const pending = refineVoiceTranscript(
+        config,
+        'um fix the parser',
+        controller.signal,
+      );
+      try {
+        await Promise.resolve();
+        expect(mockRunSideQuery).not.toHaveBeenCalled();
+        if (state === 'aborted') controller.abort();
+        else if (state === 'failed') reject(new Error('Mod startup failed'));
+        else resolve();
+        await expect(pending).resolves.toBe(
+          state === 'ready' ? 'fix the parser' : 'um fix the parser',
+        );
+        expect(mockRunSideQuery).toHaveBeenCalledTimes(
+          state === 'ready' ? 1 : 0,
+        );
+      } finally {
+        controller.abort();
+        resolve();
+        await pending;
+        owner.mockRestore();
+      }
+    },
+  );
 
   it('returns the trimmed refined text on success', async () => {
     mockRunSideQuery.mockResolvedValue({ text: '  fix the parser bug  ' });
@@ -156,6 +198,26 @@ describe('refineVoiceTranscript', () => {
   describe('with fake timers', () => {
     beforeEach(() => vi.useFakeTimers());
     afterEach(() => vi.useRealTimers());
+
+    it('falls back at the same timeout while Mod readiness remains pending', async () => {
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          ready: new Promise<void>(() => {}),
+        } as interactiveMods.InteractiveModSession);
+      try {
+        const pending = refineVoiceTranscript(
+          config,
+          'raw words',
+          new AbortController().signal,
+        );
+        await vi.advanceTimersByTimeAsync(2500);
+        await expect(pending).resolves.toBe('raw words');
+        expect(mockRunSideQuery).not.toHaveBeenCalled();
+      } finally {
+        owner.mockRestore();
+      }
+    });
 
     it('falls back to raw when refinement exceeds the timeout', async () => {
       mockRunSideQuery.mockImplementation(

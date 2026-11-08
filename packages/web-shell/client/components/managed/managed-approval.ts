@@ -1,3 +1,4 @@
+import { escapePreviewText } from '../../adapters/transcriptAdapter';
 import type {
   ACPToolCall,
   Message,
@@ -50,6 +51,31 @@ export function toManagedPermissionRequest(
   messages: readonly Message[],
 ): PermissionRequest {
   const tool = findManagedApprovalTool(messages, action);
+  const inputPreview =
+    action.kind === 'question' ? undefined : action.inputPreview;
+  let rawInput = tool?.args;
+  if (
+    !rawInput &&
+    action.toolName === 'exit_plan_mode' &&
+    inputPreview &&
+    !inputPreview.truncated
+  ) {
+    try {
+      const preview: unknown = JSON.parse(inputPreview.text);
+      if (preview && typeof preview === 'object' && !Array.isArray(preview)) {
+        const input = (preview as Record<string, unknown>)['input'];
+        if (
+          input &&
+          typeof input === 'object' &&
+          !Array.isArray(input) &&
+          typeof (input as Record<string, unknown>)['plan'] === 'string'
+        )
+          rawInput = input as Record<string, unknown>;
+      }
+    } catch {
+      /* An incomplete preview remains explicitly marked as such. */
+    }
+  }
   const toolCallId =
     tool?.callId ??
     (action.turnId ? `${action.turnId}:${action.functionCallId}` : undefined);
@@ -58,15 +84,36 @@ export function toManagedPermissionRequest(
     sessionId: action.sessionId,
     ...(toolCallId ? { toolCallId } : {}),
     toolName: action.toolName,
+    ...(action.toolName === 'exit_plan_mode'
+      ? { toolKind: 'switch_mode' as const }
+      : {}),
     title: tool?.title ?? action.toolName,
-    content: tool?.args
-      ? [{ type: 'text', text: JSON.stringify(tool.args, null, 2) }]
-      : [],
-    ...(tool?.args ? { rawInput: tool.args, contentIsInput: true } : {}),
-    options: action.options.map((option) => ({
-      id: option.id,
-      label: option.label,
-      ...(OPTION_KINDS[option.id] ? { kind: OPTION_KINDS[option.id] } : {}),
-    })),
+    content: rawInput
+      ? [
+          {
+            type: 'text',
+            text: escapePreviewText(
+              action.toolName === 'exit_plan_mode' &&
+                typeof rawInput['plan'] === 'string'
+                ? rawInput['plan']
+                : JSON.stringify(rawInput, null, 2),
+            ),
+          },
+        ]
+      : inputPreview
+        ? [{ type: 'text', text: escapePreviewText(inputPreview.text) }]
+        : [],
+    ...(rawInput
+      ? { rawInput, contentIsInput: true }
+      : inputPreview
+        ? { contentIsInput: true }
+        : {}),
+    options: (action.kind === 'question' ? [] : action.options).map(
+      (option) => ({
+        id: option.id,
+        label: option.label,
+        ...(OPTION_KINDS[option.id] ? { kind: OPTION_KINDS[option.id] } : {}),
+      }),
+    ),
   };
 }

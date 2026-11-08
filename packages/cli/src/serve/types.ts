@@ -59,6 +59,8 @@ export interface ChannelWebhookConfigSource {
 export interface ServeOptions {
   hostname: string;
   port: number;
+  /** Launcher-owned Conversations working root, fixed until daemon restart. */
+  conversationsDir?: string;
   /** Deployment boundary for provider selection and exposed surfaces. */
   profile?: ServeProfile;
   /**
@@ -142,10 +144,16 @@ export interface ServeOptions {
    * `BridgeOptions.eventRingSize` and used at every `new EventBus(...)`
    * construction site. Defaults to 8000. Must be a positive
    * finite integer — `0` / `NaN` / negative fail at boot. Larger
-   * rings let clients with longer reconnect gaps replay more history
-   * at the cost of a few hundred KB extra RAM per session.
+   * rings let clients with longer reconnect gaps replay more history only
+   * while the separate `eventRingMaxBytes` budget has room.
    */
   eventRingSize?: number;
+  /**
+   * Per-session retained SSE ring byte cap, including the latest full commands
+   * snapshot. Threaded into `BridgeOptions.eventRingMaxBytes`. Defaults to
+   * 8 MiB. Must be a positive safe integer up to 256 MiB, never unlimited.
+   */
+  eventRingMaxBytes?: number;
   /**
    * Per-session in-memory compacted replay snapshot byte cap. Threaded into
    * `BridgeOptions.compactedReplayMaxBytes`. Defaults to 4 MiB. Must be a
@@ -364,6 +372,8 @@ export interface ServeOptions {
   managedRuntimeBrokerToken?: string;
   /** Deployment-generated digest for the Hosted Harness private contract. */
   hostedHarnessCapabilityDigest?: string;
+  /** Trusted startup URL for the operator-only original CSI attachment. */
+  hostedCsiSessionStoreUrl?: string;
   /**
    * Per-SSE-connection idle deadline.
    */
@@ -387,8 +397,6 @@ export interface ServeOptions {
    * integer. Default: 10000 (10 s).
    */
   initializeTimeoutMs?: number;
-  /** A remote Host executes assignments; it does not own local scheduling. */
-  agentHostWorker?: boolean;
   /**
    * ACP session load/resume timeout in ms. Defaults to 60000 (60 s), raised
    * to an explicitly set initialize timeout when that value is larger. An
@@ -452,6 +460,11 @@ export interface ServeOptions {
  * `v` is the wire schema version; bumped only on breaking frame changes.
  */
 export interface HostedHarnessCapabilities {
+  readonly instanceId?: string;
+  readonly features?: readonly string[];
+  readonly lifecycleProtocolVersion?: 1;
+  readonly lifecycleV2Profiles?: readonly string[];
+  readonly titleProtocolVersion?: 1;
   readonly protocolVersions: {
     readonly current: 1;
     readonly supported: readonly [1];
@@ -556,6 +569,11 @@ export interface CapabilitiesEnvelope {
     sessionRestoreTimeoutMs?: number;
     /** Present when `workspace_file_upload` is advertised. */
     maxWorkspaceFileUploadBytes?: number;
+    /** Only raw Skill archives and zip-file sources; legacy limits are unchanged. */
+    maxSkillArchiveBytes?: number;
+    maxSkillArchiveExpandedBytes?: number;
+    maxSkillArchiveEntries?: number;
+    maxSkillArchiveManifestBytes?: number;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.
@@ -609,7 +627,7 @@ export interface ServeAuthProviderCatalog {
   workspaceCwd: string;
   providers: ServeAuthProviderDescriptor[];
   groups: Array<{
-    id: 'alibaba' | 'third-party' | 'custom';
+    id: 'qwencloud' | 'alibaba' | 'third-party' | 'custom';
     label: string;
     description: string;
     providerIds: string[];

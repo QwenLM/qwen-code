@@ -33,6 +33,7 @@ import {
   recursivelyHydrateStrings,
   substituteHookVariables,
   performVariableReplacement,
+  replacePluginRootInMarkdown,
 } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
@@ -66,6 +67,7 @@ import {
 import {
   InsecureArchiveUrlError,
   loadMarketplaceConfigFromSource,
+  resolveExistingLocalExtensionSource,
   parseInstallSource,
 } from './marketplace.js';
 import { convertCompatibleExtension } from './extension-converter.js';
@@ -514,6 +516,7 @@ export class ExtensionManager {
   private readonly networkPolicy?: ExtensionInstallMetadata['networkPolicy'];
   private readonly preparedMutations = new WeakSet<PreparedExtensionMutation>();
   private discoverCache: DiscoveredPlugin[] | null = null;
+  private discoverCacheCwd: string | undefined;
   /** See `sourceFingerprint`. `undefined` until the first refresh commits. */
   private lastSourceFingerprint: string | undefined;
   private inFlightSourceRevalidation: Promise<boolean> | undefined;
@@ -1277,20 +1280,39 @@ export class ExtensionManager {
     return this.sourceRegistryStore.read();
   }
 
+  parseInstallSource(
+    source: string,
+    cwd?: string,
+  ): Promise<ExtensionInstallMetadata> {
+    return parseInstallSource(source, {
+      networkPolicy: this.networkPolicy,
+      ...(cwd === undefined ? {} : { cwd }),
+    });
+  }
+
   /**
    * Adds a marketplace source. Loads the marketplace config to resolve a
    * human-readable name (falling back to the raw source). Throws if no
    * marketplace config can be resolved from the source.
    */
-  async addSource(source: string): Promise<ExtensionSource> {
+  async addSource(
+    source: string,
+    options?: { cwd?: string },
+  ): Promise<ExtensionSource> {
     const trimmed = source.trim();
     if (!trimmed) {
       throw new Error('Marketplace source cannot be empty.');
     }
-    const config = await loadMarketplaceConfigFromSource(
-      trimmed,
-      this.networkPolicy,
-    );
+    const cwd = options?.cwd;
+    const normalized = await resolveExistingLocalExtensionSource(trimmed, cwd);
+    const config =
+      cwd === undefined
+        ? await loadMarketplaceConfigFromSource(normalized, this.networkPolicy)
+        : await loadMarketplaceConfigFromSource(
+            normalized,
+            this.networkPolicy,
+            cwd,
+          );
     if (!config) {
       // A "marketplace" is a Claude-format collection (.claude-plugin/
       // marketplace.json). A single extension repo (Gemini/Claude/git/npm) is
@@ -1298,9 +1320,7 @@ export class ExtensionManager {
       let isInstallableExtension = false;
       let probeError: unknown;
       try {
-        await parseInstallSource(trimmed, {
-          networkPolicy: this.networkPolicy,
-        });
+        await this.parseInstallSource(trimmed, cwd);
         isInstallableExtension = true;
       } catch (error) {
         // Not a recognizable install source either; remember why so a
@@ -1335,8 +1355,8 @@ export class ExtensionManager {
       const now = new Date().toISOString();
       const entry: ExtensionSource = {
         name: config.name || trimmed,
-        source: trimmed,
-        type: parseExtensionSourceType(trimmed),
+        source: normalized,
+        type: parseExtensionSourceType(normalized),
         addedAt: now,
         lastUpdatedAt: now,
       };
@@ -1379,8 +1399,17 @@ export class ExtensionManager {
     return updated;
   }
 
-  loadSource(source: string): Promise<ClaudeMarketplaceConfig | null> {
-    return loadMarketplaceConfigFromSource(source, this.networkPolicy);
+  loadSource(
+    source: string,
+    options?: { cwd?: string },
+  ): Promise<ClaudeMarketplaceConfig | null> {
+    return options?.cwd === undefined
+      ? loadMarketplaceConfigFromSource(source, this.networkPolicy)
+      : loadMarketplaceConfigFromSource(
+          source,
+          this.networkPolicy,
+          options.cwd,
+        );
   }
 
   /**
@@ -1391,22 +1420,35 @@ export class ExtensionManager {
    */
   async discoverPlugins(options?: {
     refresh?: boolean;
+    cwd?: string;
   }): Promise<DiscoveredPlugin[]> {
     const installedNames = new Set(
       this.getLoadedExtensions().map((ext) => ext.name),
     );
-    if (this.discoverCache && !options?.refresh) {
+    const cwd =
+      options?.cwd === undefined ? undefined : path.resolve(options.cwd);
+    if (
+      this.discoverCache &&
+      this.discoverCacheCwd === cwd &&
+      !options?.refresh
+    ) {
       return this.discoverCache.map((plugin) => ({
         ...plugin,
         installed: installedNames.has(plugin.name),
       }));
     }
-    const result = await discoverPlugins(
-      this.getSources(),
-      installedNames,
-      this.networkPolicy,
-    );
+    const sources = this.getSources();
+    const result =
+      cwd === undefined
+        ? await discoverPlugins(sources, installedNames, this.networkPolicy)
+        : await discoverPlugins(
+            sources,
+            installedNames,
+            this.networkPolicy,
+            cwd,
+          );
     this.discoverCache = result;
+    this.discoverCacheCwd = cwd;
     return result;
   }
 
@@ -1535,6 +1577,29 @@ export class ExtensionManager {
         };
       });
     return { snapshot, extensions };
+  }
+
+  async refreshExtensionDetailsSnapshot(name: string): Promise<{
+    snapshot: ExtensionStoreSnapshot;
+    extension: Extension | null;
+  }> {
+    const { value: extensions, snapshot } =
+      await this.extensionStore.readConsistent(async () => {
+        const loaded = await this.loadExtensionsFromExtensionsDir(
+          this.configDir,
+          this.workspaceDir,
+          { detailName: name },
+        );
+        return {
+          value: loaded,
+          extensions: loaded.map(({ id, name }) => ({ id, name })),
+        };
+      });
+    const extension =
+      extensions.findLast(
+        (entry) => entry.name.toLowerCase() === name.toLowerCase(),
+      ) ?? null;
+    return { snapshot, extension };
   }
 
   private static stampPath(target: string, followSymlinks = true): string {
@@ -1730,7 +1795,7 @@ export class ExtensionManager {
   private async loadExtensionsFromExtensionsDir(
     extensionsDir: string,
     workspaceDir: string,
-    options: { manifestOnly?: boolean } = {},
+    options: { manifestOnly?: boolean; detailName?: string } = {},
   ): Promise<Extension[]> {
     let subdirs: string[];
     try {
@@ -1740,14 +1805,22 @@ export class ExtensionManager {
     }
 
     const extensions: Extension[] = [];
-    for (const subdir of subdirs) {
-      const extensionDir = path.join(extensionsDir, subdir);
-      const extension = await this.loadExtension(
-        { extensionDir, workspaceDir },
-        { manifestOnly: options.manifestOnly },
+    const batchSize = 4;
+    for (let offset = 0; offset < subdirs.length; offset += batchSize) {
+      // Drain in-flight loads before a failure can release the store read lock.
+      const results = await Promise.allSettled(
+        subdirs
+          .slice(offset, offset + batchSize)
+          .map((subdir) =>
+            this.loadExtension(
+              { extensionDir: path.join(extensionsDir, subdir), workspaceDir },
+              options,
+            ),
+          ),
       );
-      if (extension != null) {
-        extensions.push(extension);
+      for (const result of results) {
+        if (result.status === 'rejected') throw result.reason;
+        if (result.value != null) extensions.push(result.value);
       }
     }
     return extensions;
@@ -1875,7 +1948,11 @@ export class ExtensionManager {
 
   async loadExtension(
     context: LoadExtensionContext,
-    options: { throwOnError?: boolean; manifestOnly?: boolean } = {},
+    options: {
+      throwOnError?: boolean;
+      manifestOnly?: boolean;
+      detailName?: string;
+    } = {},
   ): Promise<Extension | null> {
     const { extensionDir } = context;
     if (!fs.statSync(extensionDir).isDirectory()) {
@@ -1887,11 +1964,16 @@ export class ExtensionManager {
       // Destructured separately so `extension` stays visible in the catch
       // below for the skip warning's path.
       const head = await this.loadExtensionManifestHead(context, {
-        createDataDir: !options.manifestOnly,
+        createDataDir:
+          !options.manifestOnly && options.detailName === undefined,
       });
       extension = head.extension;
 
-      if (options.manifestOnly) {
+      if (
+        options.manifestOnly ||
+        (options.detailName !== undefined &&
+          extension.name.toLowerCase() !== options.detailName.toLowerCase())
+      ) {
         // Catalog-style loads: everything after the head is subresource work
         // the catalog never reads, and skipping it here keeps the inclusion
         // set identical to the full load — the head throws for the same
@@ -2693,6 +2775,17 @@ export class ExtensionManager {
 
         const usesPluginVariables =
           originSource === 'Claude' || originSource === 'Qoder';
+        // ${CLAUDE_PLUGIN_ROOT} in markdown is how plugin authors reference their
+        // own scripts, so it resolves on every Claude/Qoder install regardless of
+        // whether the plugin ships hooks. The hook-conditional rewrites below stay
+        // gated on a hooks source.
+        if (usesPluginVariables) {
+          try {
+            replacePluginRootInMarkdown(stagingPath, destinationPath);
+          } catch (error) {
+            debugLogger.error('Plugin root markdown replacement failed', error);
+          }
+        }
         if (
           usesPluginVariables &&
           (fs.existsSync(hooksDir) ||

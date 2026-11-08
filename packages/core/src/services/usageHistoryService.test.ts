@@ -804,6 +804,84 @@ describe('persistUsageBeforeTranscriptDeletion (issue #7384)', () => {
     expect(fs.existsSync(usagePath())).toBe(false);
   });
 
+  it.each([
+    [false, 'request_lifecycle'],
+    [true, 'request_lifecycle'],
+    [false, 'tool_lifecycle'],
+    [true, 'tool_lifecycle'],
+  ] as const)(
+    'ignores lifecycle frames during usage rebuild and salvage (metrics: %s, event: %s)',
+    async (withMetrics, eventName) => {
+      const sessionId = `sess-lifecycle-${withMetrics}`;
+      const filePath = plantTranscript(sessionId, withMetrics);
+      const started = {
+        'event.name': eventName,
+        v: 1,
+        kind: eventName === 'tool_lifecycle' ? 'tool' : 'request',
+        ...(eventName === 'tool_lifecycle'
+          ? {
+              callId: 'call',
+              toolName: 'read_file',
+              executionStatus: 'running',
+            }
+          : {}),
+        executionId: 'execution',
+        sessionId,
+        promptId: `${sessionId}########1`,
+        model: 'qwen-max',
+        startedAt: 100,
+        phase: 'started',
+      };
+      fs.appendFileSync(
+        filePath,
+        [
+          started,
+          {
+            ...started,
+            phase: 'ended',
+            endedAt: 120,
+            durationMs: 20,
+            outcome: 'cancelled',
+            ...(eventName === 'tool_lifecycle'
+              ? { executionStatus: 'cancelled', executionDurationMs: 20 }
+              : {}),
+          },
+        ]
+          .map((uiEvent, i) =>
+            JSON.stringify({
+              uuid: `lifecycle-${i}`,
+              parentUuid: i === 0 ? 'u1' : 'lifecycle-0',
+              sessionId,
+              cwd: '/salvage/project',
+              timestamp: '2026-07-01T00:01:00.000Z',
+              type: 'system',
+              subtype: 'ui_telemetry',
+              systemPayload: { uiEvent },
+            }),
+          )
+          .join('\n') + '\n',
+      );
+
+      const rebuilt = await loadUsageHistory(undefined, {
+        persistRebuild: false,
+      });
+      expect(rebuilt).toHaveLength(withMetrics ? 1 : 0);
+      expect(aggregateUsage(rebuilt, 'all').sessionCount).toBe(
+        withMetrics ? 1 : 0,
+      );
+      const prepared = await prepareUsageBeforeTranscriptDeletion(filePath);
+      if (withMetrics) {
+        expect(prepared?.record.models['qwen-max']?.totalTokens).toBe(1000);
+      } else {
+        expect(prepared).toBeNull();
+        await expect(
+          persistUsageBeforeTranscriptDeletion(filePath),
+        ).resolves.toBe(false);
+        expect(fs.existsSync(usagePath())).toBe(false);
+      }
+    },
+  );
+
   it('never throws for a missing transcript', async () => {
     await expect(
       persistUsageBeforeTranscriptDeletion(

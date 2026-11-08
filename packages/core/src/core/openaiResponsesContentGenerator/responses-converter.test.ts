@@ -30,6 +30,7 @@ import type {
   ResponsesApiInputItem,
   ResponsesSSEEvent,
 } from './types.js';
+import { ToolCallTool } from '../../tools/tool-call.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { getThoughtSummary } from '../../utils/thoughtUtils.js';
 import {
@@ -1148,6 +1149,136 @@ describe('cleanOrphanedFunctionCalls', () => {
     const items = cleanOrphanedFunctionCalls([msgItem('user', 'hi')]);
     expect(items).toEqual([{ type: 'message', role: 'user', content: 'hi' }]);
   });
+
+  it('drops the reasoning item immediately preceding an orphaned call', () => {
+    const items = cleanOrphanedFunctionCalls([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      { type: 'function_call', call_id: 'a', name: 'f', arguments: '{}' },
+    ]);
+    expect(items).toEqual([]);
+  });
+
+  it('drops the reasoning heading an orphaned custom_tool_call group', () => {
+    // Same unit rule as the function_call twin: the group scan must not stop
+    // at the custom_tool_call boundary, or the head leaks onto the wire with
+    // no following item (#13233).
+    const items = cleanOrphanedFunctionCalls([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      {
+        type: 'custom_tool_call',
+        call_id: 'x1',
+        name: 'exec',
+        input: 'ls',
+      },
+    ]);
+    expect(items).toEqual([]);
+  });
+
+  it('keeps the reasoning when its custom_tool_call group survives', () => {
+    const items = cleanOrphanedFunctionCalls([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      {
+        type: 'custom_tool_call',
+        call_id: 'x1',
+        name: 'exec',
+        input: 'ls',
+      },
+      { type: 'custom_tool_call_output', call_id: 'x1', output: 'ok' },
+    ]);
+    expect(items).toEqual([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      {
+        type: 'custom_tool_call',
+        call_id: 'x1',
+        name: 'exec',
+        input: 'ls',
+      },
+      { type: 'custom_tool_call_output', call_id: 'x1', output: 'ok' },
+    ]);
+  });
+
+  it('keeps the reasoning when a sibling call in its group survives', () => {
+    // One reasoning item heads a parallel call group; dropping the orphaned
+    // member must not take the reasoning the surviving member needs.
+    const items = cleanOrphanedFunctionCalls([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      { type: 'function_call', call_id: 'a', name: 'f', arguments: '{}' },
+      { type: 'function_call', call_id: 'b', name: 'g', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'b', output: 'ok' },
+    ]);
+    expect(items).toEqual([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      { type: 'function_call', call_id: 'b', name: 'g', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'b', output: 'ok' },
+    ]);
+  });
+
+  it('drops the reasoning when every call in its group is orphaned', () => {
+    const items = cleanOrphanedFunctionCalls([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      { type: 'function_call', call_id: 'a', name: 'f', arguments: '{}' },
+      { type: 'function_call', call_id: 'b', name: 'g', arguments: '{}' },
+    ]);
+    expect(items).toEqual([]);
+  });
+
+  it('drops the whole reasoning run heading a fully orphaned group', () => {
+    // Two adjacent signed episodes head one call group; the scan at the
+    // first episode breaks on the second reasoning item, so only dropping
+    // the run as a whole keeps a bare reasoning item off the wire.
+    const items = cleanOrphanedFunctionCalls([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      { type: 'reasoning', id: 'rs_2', encrypted_content: 'enc', summary: [] },
+      { type: 'function_call', call_id: 'a', name: 'f', arguments: '{}' },
+      { type: 'function_call', call_id: 'b', name: 'g', arguments: '{}' },
+    ]);
+    expect(items).toEqual([]);
+  });
+
+  it('keeps reasoning paired with a call whose output survived', () => {
+    const items = cleanOrphanedFunctionCalls([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      { type: 'function_call', call_id: 'b', name: 'g', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'b', output: 'ok' },
+    ]);
+    expect(items).toEqual([
+      { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc', summary: [] },
+      { type: 'function_call', call_id: 'b', name: 'g', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'b', output: 'ok' },
+    ]);
+  });
+
+  it('drops only the reasoning tied to the orphaned call', () => {
+    const items = cleanOrphanedFunctionCalls([
+      { type: 'message', role: 'user', content: 'hi' },
+      {
+        type: 'reasoning',
+        id: 'rs_old',
+        encrypted_content: 'enc',
+        summary: [],
+      },
+      { type: 'function_call', call_id: 'a', name: 'f', arguments: '{}' },
+      {
+        type: 'reasoning',
+        id: 'rs_new',
+        encrypted_content: 'enc',
+        summary: [],
+      },
+      { type: 'function_call', call_id: 'b', name: 'g', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'b', output: 'ok' },
+    ]);
+    expect(items).toEqual([
+      { type: 'message', role: 'user', content: 'hi' },
+      {
+        type: 'reasoning',
+        id: 'rs_new',
+        encrypted_content: 'enc',
+        summary: [],
+      },
+      { type: 'function_call', call_id: 'b', name: 'g', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'b', output: 'ok' },
+    ]);
+  });
 });
 
 describe('convertGeminiToolsToResponsesTools', () => {
@@ -1297,10 +1428,13 @@ describe('normalizeResponsesParameters', () => {
     expect(normalizeResponsesParameters(schema)).toEqual({
       type: 'object',
       properties: {
-        nested: { type: 'object', properties: {} },
-        list: { type: 'array', items: { type: 'object', properties: {} } },
+        nested: { type: 'object', properties: {}, additionalProperties: true },
+        list: {
+          type: 'array',
+          items: { type: 'object', properties: {}, additionalProperties: true },
+        },
       },
-      anyOf: [{ type: 'object', properties: {} }],
+      anyOf: [{ type: 'object', properties: {}, additionalProperties: true }],
     });
   });
 
@@ -1314,8 +1448,8 @@ describe('normalizeResponsesParameters', () => {
     expect(normalizeResponsesParameters(schema)).toEqual({
       type: 'object',
       properties: {},
-      oneOf: [{ type: 'object', properties: {} }],
-      allOf: [{ type: 'object', properties: {} }],
+      oneOf: [{ type: 'object', properties: {}, additionalProperties: true }],
+      allOf: [{ type: 'object', properties: {}, additionalProperties: true }],
     });
   });
 
@@ -1341,12 +1475,51 @@ describe('normalizeResponsesParameters', () => {
     expect(result).not.toBe(schema);
     expect(result).toEqual({
       type: 'object',
-      properties: { nested: { type: 'object', properties: {} } },
+      properties: {
+        nested: { type: 'object', properties: {}, additionalProperties: true },
+      },
     });
   });
 
   it('passes through undefined', () => {
     expect(normalizeResponsesParameters(undefined)).toBeUndefined();
+  });
+
+  it('keeps a nested open object open, and an explicit closed one closed', () => {
+    expect(
+      normalizeResponsesParameters({
+        type: 'object',
+        properties: {
+          open: { type: 'object' },
+          closed: { type: 'object', additionalProperties: false },
+          typed: { type: 'object', additionalProperties: { type: 'string' } },
+        },
+      }),
+    ).toEqual({
+      type: 'object',
+      properties: {
+        open: { type: 'object', properties: {}, additionalProperties: true },
+        closed: { type: 'object', properties: {}, additionalProperties: false },
+        typed: {
+          type: 'object',
+          properties: {},
+          additionalProperties: { type: 'string' },
+        },
+      },
+    });
+  });
+
+  it("keeps tool_call's arguments open on the Responses wire (#12889)", () => {
+    const bridge = new ToolCallTool().schema;
+    const normalized = normalizeResponsesParameters(
+      bridge.parametersJsonSchema as Record<string, unknown>,
+    ) as { properties: Record<string, Record<string, unknown>> };
+
+    expect(normalized.properties['arguments']).toMatchObject({
+      type: 'object',
+      properties: {},
+      additionalProperties: true,
+    });
   });
 });
 

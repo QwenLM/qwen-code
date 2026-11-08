@@ -58,7 +58,7 @@ Each Runtime instance permits at most 16 connections and 32 in-flight requests, 
 
 - `packages/core/src/managed-runtime`: MCP record/protocol definitions, authority integration and resource closure.
 - `packages/cli/src/serve`: MCP Runtime service/routes, worker admission, Hosted orchestration and model catalog.
-- `packages/sdk-java/runtime-broker` and `managed-agent-server`: scoped forwarding, record materialization, catalog contract and tests.
+- `packages/managed-agent-server` and `managed-agent-server`: scoped forwarding, record materialization, catalog contract and tests.
 - `.qwen/e2e-tests/12827-h1.md`: baseline, deterministic protocol tests and fault evidence.
 
 ## Private profile usage

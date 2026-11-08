@@ -4,6 +4,7 @@ import type { Config } from '../../config/config.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { ToolNames } from '../tool-names.js';
+import { cloneApiHistory } from '../../utils/api-history-metadata.js';
 import {
   getStartupContextLength,
   isSystemReminderContent,
@@ -14,11 +15,12 @@ export const FORK_SUBAGENT_TYPE = 'fork';
 /**
  * Forking is an explicit choice — the caller selects it with
  * `subagent_type: "fork"`. Omitting `subagent_type` always resolves to the
- * general-purpose subagent, never a fork. Regular top-level subagents run in
- * the background by default; callers can set `run_in_background: false` for an
- * inline result. Forks are available in both interactive and headless
- * sessions; headless forks use the background registry so the caller waits for
- * completion and non-interactive permission policy is applied.
+ * general-purpose subagent, never a fork. Regular top-level subagents use
+ * `agents.defaultBackground` (default true) unless the definition's `background`
+ * or an explicit `run_in_background` overrides it; false returns results inline.
+ * Forks are available in both interactive and headless sessions; headless forks
+ * use the background registry so the caller waits for completion and
+ * non-interactive permission policy is applied.
  */
 export const FORK_BOILERPLATE_TAG = 'fork-boilerplate';
 export const FORK_DIRECTIVE_PREFIX = 'Directive: ';
@@ -284,7 +286,7 @@ export function selectForkHistory(
     }
   }
 
-  return structuredClone(selected);
+  return cloneApiHistory(selected);
 }
 
 /**

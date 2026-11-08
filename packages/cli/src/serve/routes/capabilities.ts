@@ -6,9 +6,18 @@
 
 import type { Application } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
-import { getServeProtocolVersions } from '../capabilities.js';
+import {
+  getServeProtocolVersions,
+  hostedPersonaServeFeatures,
+} from '../capabilities.js';
 import type { getAdvertisedServeFeatures } from '../capabilities.js';
 import { MAX_UPLOAD_BYTES } from '../fs/index.js';
+import {
+  MAX_SKILL_ARCHIVE_BYTES,
+  MAX_SKILL_ARCHIVE_EXPANDED_BYTES,
+  MAX_SKILL_ARCHIVE_ENTRIES,
+  MAX_SKILL_ARCHIVE_MANIFEST_BYTES,
+} from '../workspace-skill-management.js';
 import {
   advertisedMaxPendingPromptsPerSession,
   advertisedMaxSessions,
@@ -90,9 +99,7 @@ export function registerCapabilitiesRoutes(
     )?.current?.runtime;
     const multipleAdmissionPools = entries.length > 1;
     const features = deps.hostedHarness
-      ? (['hosted_harness_private_v1'] as ReturnType<
-          typeof getAdvertisedServeFeatures
-        >)
+      ? hostedPersonaServeFeatures()
       : deps.currentServeFeatures();
     const runtimeRemoval = features.includes('workspace_runtime_removal');
     const envelope: CapabilitiesEnvelope = {
@@ -128,6 +135,15 @@ export function registerCapabilitiesRoutes(
         sessionRestoreTimeoutMs: deps.sessionRestoreTimeoutMs,
         ...(features.includes('workspace_file_upload')
           ? { maxWorkspaceFileUploadBytes: MAX_UPLOAD_BYTES }
+          : {}),
+        ...(features.includes('skill_archive_install') ||
+        features.includes('skill_zip_file_source')
+          ? {
+              maxSkillArchiveBytes: MAX_SKILL_ARCHIVE_BYTES,
+              maxSkillArchiveExpandedBytes: MAX_SKILL_ARCHIVE_EXPANDED_BYTES,
+              maxSkillArchiveEntries: MAX_SKILL_ARCHIVE_ENTRIES,
+              maxSkillArchiveManifestBytes: MAX_SKILL_ARCHIVE_MANIFEST_BYTES,
+            }
           : {}),
         ...(multipleAdmissionPools || deps.maxTotalSessions !== undefined
           ? {

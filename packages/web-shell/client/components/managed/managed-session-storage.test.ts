@@ -37,4 +37,24 @@ describe('Managed session browser identity', () => {
       'w',
     );
   });
+
+  it('defaults a configured home to Managed but preserves an explicit Local selection and its history target', () => {
+    window.history.replaceState(null, '', '/?managedProvider=java&tenant=a');
+    expect(managedSelectionFromUrl(true).open).toBe(true);
+    expect(managedSelectionFromUrl().open).toBe(false);
+    saveManagedSelection(false, 'managed-history');
+    expect(managedSelectionFromUrl(true)).toEqual({
+      open: false,
+      sessionId: 'managed-history',
+    });
+    expect(new URLSearchParams(window.location.search).get('managed')).toBe(
+      '0',
+    );
+    expect(new URLSearchParams(window.location.search).get('tenant')).toBe('a');
+    saveManagedSelection(true, 'managed-history');
+    expect(managedSelectionFromUrl()).toEqual({
+      open: true,
+      sessionId: 'managed-history',
+    });
+  });
 });

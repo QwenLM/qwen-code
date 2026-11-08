@@ -233,8 +233,8 @@ W0e 将 Broker 执行标记为 `ABANDONED` 后，其 ledger 保持终态，不�
 | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `packages/core/src/managed-runtime/`           | 远端 segment/resource 适配器、共享接纳校验、HTTP Session commit/reader；保持本地 O1b/O1c 和通用资源调用方可用              |
 | `packages/cli/src/serve/`                      | worker publisher 注入、grant binding、v3 pending result、Hosted owner 接线；默认 no-tool 与 file-only profile 不变         |
-| `packages/sdk-java/managed-agent-server/`      | Store/controller/catalog/OSS 适配器、迁移和 Workspace transport；兼容现有 inline Session 事务/恢复                         |
-| `packages/sdk-java/runtime-broker/`            | transport 接口、延迟调度携带原始 v3 binding 与 ACK；普通 v2 调度不变                                                       |
+| `packages/managed-agent-server/`               | Store/controller/catalog/OSS 适配器、迁移和 Workspace transport；兼容现有 inline Session 事务/恢复                         |
+| `packages/managed-agent-server/`               | transport 接口、延迟调度携带原始 v3 binding 与 ACK；普通 v2 调度不变                                                       |
 | `packages/core/src/managed-runtime/contracts/` | 新私有 publication/binding fixture 及现有 O1a conformance fixture；TS/Java 的 call ID 映射、闭合字段、限制和错误优先级一致 |
 
 这些切片不涉及 WebShell 修改。这是跨 package 的 core 功能工作，遵循仓库 maintainer 知会/评审门禁。本设计不授权合并或绕过门禁。

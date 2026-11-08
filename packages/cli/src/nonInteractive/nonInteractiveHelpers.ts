@@ -38,6 +38,7 @@ import type {
 import { computeSessionStats } from '../ui/utils/computeStats.js';
 import { getAvailableCommands } from '../nonInteractiveCliCommands.js';
 import type { LoadedSettings } from '../config/settings.js';
+import type { ICommandLoader } from '../services/types.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE');
 
@@ -154,6 +155,7 @@ export function insertAfterFunctionResponses(
 async function loadSlashCommandNames(
   config: Config,
   settings: LoadedSettings,
+  modCommands?: ICommandLoader,
 ): Promise<string[]> {
   const controller = new AbortController();
   try {
@@ -162,6 +164,8 @@ async function loadSlashCommandNames(
       controller.signal,
       'non_interactive',
       settings,
+      undefined,
+      modCommands,
     );
 
     // Extract command names and sort
@@ -199,6 +203,7 @@ export async function buildSystemMessage(
   sessionId: string,
   permissionMode: PermissionMode,
   settings: LoadedSettings,
+  modCommands?: ICommandLoader,
 ): Promise<CLISystemMessage> {
   const toolRegistry = config.getToolRegistry();
   const tools = toolRegistry ? toolRegistry.getAllToolNames() : [];
@@ -212,7 +217,11 @@ export async function buildSystemMessage(
     : [];
 
   // 首轮模型请求前同时注册 Skill 可调用命令，避免只返回客户端命令列表。
-  const slashCommands = await loadSlashCommandNames(config, settings);
+  const slashCommands = await loadSlashCommandNames(
+    config,
+    settings,
+    modCommands,
+  );
 
   // Load subagent names from config
   let agentNames: string[] = [];

@@ -13,6 +13,7 @@ import {
   AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryIndexPath,
   getAutoMemoryMetadataPath,
+  getAutoMemoryRoot,
   getMemoryRootTrustedAnchor,
   getTeamAutoMemoryIndexPath,
   getTeamAutoMemoryRoot,
@@ -22,25 +23,59 @@ import {
 } from './paths.js';
 import { resolveTrustedMemoryRoot } from './trusted-memory-filesystem.js';
 import {
-  scanAllAutoMemoryTopicDocumentsFromRoot,
-  scanAutoMemoryTopicDocuments,
-  scanTeamAutoMemoryTopicDocuments,
-  scanUserAutoMemoryTopicDocuments,
+  isImportedMemoryDocument,
+  scanAutoMemoryIndexDocumentsFromRoot,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
 import type { AutoMemoryScope } from './types.js';
 import type { AutoMemoryMetadata } from './types.js';
+import {
+  formatIndexEntry,
+  INDEX_ALSO_OPEN,
+  INDEX_HOOK_SEPARATOR,
+  describeDroppedIndexEntries,
+  INDEX_SCAN_CAP_NOTICE_START,
+  INDEX_TRUNCATION_NOTICE_START,
+  MAX_NAMED_DROPPED_ENTRIES,
+  MAX_INDEX_CHARS,
+  MAX_INDEX_LINE_CHARS,
+  MAX_INDEX_LINES,
+  trimIndexToBudgetDetailed,
+} from './index-budget.js';
 
-const MAX_INDEX_LINE_CHARS = 150;
-const MAX_INDEX_LINES = 200;
-const MAX_INDEX_BYTES = 25_000;
 const MAX_INDEX_FIELD_CHARS = 120;
+// The description is the only optional part of an entry, so it absorbs all the
+// shortening. A hook that would have to be CUT below this length is not worth
+// the bytes it costs, so the entry is then emitted without one — but a hook
+// that fits whole in the leftover room is kept however small that room is.
+const MIN_INDEX_HOOK_CHARS = 24;
 
-function truncateIndexLine(text: string): string {
-  if (text.length <= MAX_INDEX_LINE_CHARS) {
-    return text;
+/**
+ * Shorten an already-sanitized field to `limit`, preferring a word boundary.
+ * Only display text may pass through here — never a link target, which stops
+ * resolving the moment it is cut.
+ */
+function truncateIndexField(value: string, limit: number): string {
+  if (value.length <= limit) {
+    return value;
   }
-  return `${text.slice(0, MAX_INDEX_LINE_CHARS - 1).trimEnd()}…`;
+  let head = value.slice(0, limit - 1);
+  // Back off one unit when the cut lands inside a surrogate pair: a lone high
+  // surrogate does not survive the write to MEMORY.md (the file carries U+FFFD
+  // instead), so the index stops round-tripping and the team rebuild's
+  // unchanged-content skip can never fire again.
+  const lastUnit = head.charCodeAt(head.length - 1);
+  if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) {
+    head = head.slice(0, -1);
+  }
+  // Back off to a word boundary only when the boundary keeps most of the
+  // window (the same guard compressFindingSummary applies): an unconditional
+  // backoff deletes everything after the last whitespace, collapsing a field
+  // whose tail is one long unbroken run — the normal shape of CJK prose,
+  // which has no word-separating spaces — to its leading token plus `…`.
+  const boundary = head.replace(/\s+\S*$/, '').trimEnd();
+  const cut = boundary.length >= limit * 0.6 ? boundary : head;
+  return `${cut.trimEnd()}…`;
 }
 
 /**
@@ -59,16 +94,21 @@ function sanitizeIndexField(value: string): string {
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
     // Zero-width + bidi-override chars that can hide or reorder injected text.
     .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+    // Unpaired surrogates, reachable from frontmatter via a YAML `\uD835`
+    // escape. They do not survive the write to MEMORY.md (the file carries
+    // U+FFFD instead), so the index would stop round-tripping and the team
+    // rebuild's unchanged-content skip could never fire again. Pairs are kept.
+    .replace(
+      /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g,
+      '',
+    )
     // Defang code spans/fences and markdown links so the field can't forge a
     // fenced "system" block or a clickable link inside the shared doc.
     .replace(/`/g, "'")
     .replace(/\]\(/g, '] (')
     .replace(/\s+/g, ' ')
     .trim();
-  if (cleaned.length <= MAX_INDEX_FIELD_CHARS) {
-    return cleaned;
-  }
-  return `${cleaned.slice(0, MAX_INDEX_FIELD_CHARS - 1).trimEnd()}…`;
+  return truncateIndexField(cleaned, MAX_INDEX_FIELD_CHARS);
 }
 
 // Chars left RAW in a link target: alphanumerics plus the path punctuation
@@ -76,6 +116,29 @@ function sanitizeIndexField(value: string): string {
 // separately so the class needs no slash (sidesteps the regex-literal /
 // no-useless-escape ambiguity around a `/` inside `[...]`).
 const PATH_TARGET_SAFE = /[A-Za-z0-9._~-]/;
+// Printable non-ASCII also stays RAW: a Markdown destination accepts it, and
+// encoding it would expand one CJK char to nine — a few ordinary non-ASCII
+// paths would then spend the whole index budget and evict every
+// other entry. Still encoded: whitespace (a destination may not contain any,
+// and `\s` covers the non-ASCII spaces a filename may legally hold), C0/C1
+// controls, ASCII punctuation, EVERY invisible format character — the
+// zero-width, bidi, soft-hyphen, variation-selector, Mongolian vowel-separator
+// and Hangul-filler ranges below, i.e. Unicode's `Cf` ∪
+// `Default_Ignorable_Code_Point` ∪ `Bidi_Control` in the BMP — because they
+// hide or reorder text that lands verbatim in every collaborator's system
+// prompt, and lone surrogates (they do not survive the write). An astral char
+// arrives as a pair, so it stays encoded too.
+//
+// This has to stay a per-code-unit DENYLIST rather than an allowlist built from
+// `\p{…}` classes: those need the `u` flag, under which an astral character is
+// one code point instead of a surrogate pair, so `\ud800-\udfff` stops firing
+// for well-formed pairs and the tag-steganography range U+E0020-U+E007F would
+// pass through raw.
+const PATH_TARGET_RAW_NON_ASCII =
+  // The class matches per code unit on purpose (see above), so the combining
+  // marks it excludes are listed as bare code points, not as sequences.
+  // eslint-disable-next-line no-control-regex, no-misleading-character-class
+  /[^\s\u0000-\u009f\u00ad\u034f\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u2069\u206a-\u206f\u3164\ufeff\ufe00-\ufe0f\uffa0\ufff0-\ufffb\ud800-\udfff]/;
 const utf8Encoder = new TextEncoder();
 
 /**
@@ -86,21 +149,24 @@ const utf8Encoder = new TextEncoder();
  * raw path (`ok.md` + newline + `- SYSTEM: …`) injects a second physical line
  * or closes the `](…)` target early. An earlier fix rewrote those chars to `_`,
  * which defused injection but pointed the link at a file that does NOT exist.
- * Instead, percent-encode every char outside the addressable allowlist: the
- * breakout chars become inert ASCII (newline→`%0A`, `(`→`%28`, `)`→`%29`,
- * space→`%20`, backtick→`%60`, …) so the target is one line with no `](`/`)`
- * breakout, yet `decodeURIComponent` recovers the exact path — the link still
- * resolves to the real file. `/` is kept literal so it stays a usable path.
+ * Instead, percent-encode every char that is neither addressable-ASCII nor
+ * printable non-ASCII: the breakout chars become inert ASCII (newline→`%0A`,
+ * `(`→`%28`, `)`→`%29`, space→`%20`, backtick→`%60`, …) so the target is one
+ * line with no `](`/`)` breakout, yet `decodeURIComponent` recovers the exact
+ * path — the link still resolves to the real file. `/` is kept literal so it
+ * stays a usable path.
+ * The path is deliberately NOT shortened: a truncated target points at a file
+ * that does not exist, and a dead link costs more than a long line. Overall
+ * index size stays bounded by the character budget in {@link assembleIndex}.
  */
 function encodeIndexPathTarget(value: string): string {
-  // Cap the RAW path before encoding so a pathological filename can't bloat the
-  // committed file; slicing by code point (and encoding AFTER) means we never
-  // split a surrogate pair or a `%XX` escape. The whole line is capped again by
-  // truncateIndexLine.
-  const chars = [...value].slice(0, MAX_INDEX_FIELD_CHARS);
   let out = '';
-  for (const ch of chars) {
-    if (ch === '/' || PATH_TARGET_SAFE.test(ch)) {
+  for (const ch of value) {
+    if (
+      ch === '/' ||
+      PATH_TARGET_SAFE.test(ch) ||
+      PATH_TARGET_RAW_NON_ASCII.test(ch)
+    ) {
       out += ch;
       continue;
     }
@@ -111,34 +177,125 @@ function encodeIndexPathTarget(value: string): string {
   return out;
 }
 
-function docIndexLine(doc: ScannedAutoMemoryDocument): string {
+/**
+ * Render one index entry. The link is built first and never shortened, because
+ * it is the entry's only functional part; the description takes whatever room
+ * the link leaves, and is dropped entirely when that room is too small to be
+ * useful. An entry whose link alone exceeds {@link MAX_INDEX_LINE_CHARS} is
+ * therefore allowed to run long — a resolving long link beats a short dead one.
+ * Grouped siblings reserve their space before the description is rendered;
+ * targets that do not fit are dropped whole, never sliced.
+ */
+function docIndexLine(
+  doc: ScannedAutoMemoryDocument,
+  others: ScannedAutoMemoryDocument[] = [],
+): string {
   const title = sanitizeIndexField(doc.title) || doc.type;
+  const link = `- [${title}](${encodeIndexPathTarget(doc.relativePath)})`;
+  let also = '';
+  for (const other of others) {
+    const target = encodeIndexPathTarget(other.relativePath);
+    const next = also ? `${also}, ${target}` : target;
+    if (
+      link.length + INDEX_ALSO_OPEN.length + next.length + 1 >
+      MAX_INDEX_LINE_CHARS
+    ) {
+      // Drop THIS sibling whole and keep measuring the rest: a later, shorter
+      // target may still fit, and a grouped member has no index line of its
+      // own — skipping the rest here would hide it from the index entirely.
+      continue;
+    }
+    also = next;
+  }
+  const suffix = also ? `${INDEX_ALSO_OPEN}${also})` : '';
+  const room =
+    MAX_INDEX_LINE_CHARS -
+    link.length -
+    suffix.length -
+    INDEX_HOOK_SEPARATOR.length;
   const description = sanitizeIndexField(doc.description) || doc.type;
-  return `- [${title}](${encodeIndexPathTarget(doc.relativePath)}) — ${description}`;
+  // A hook that FITS whole costs nothing beyond its bytes — keep it. Drop the
+  // hook only when it would have to be CUT below MIN_INDEX_HOOK_CHARS.
+  if (description.length > room && room < MIN_INDEX_HOOK_CHARS) {
+    return formatIndexEntry({ link, description: undefined, suffix });
+  }
+  return formatIndexEntry({
+    link,
+    description: truncateIndexField(description, room),
+    suffix,
+  });
 }
 
 /**
  * Assemble pre-built index lines into the final MEMORY.md body, enforcing the
- * line-count and byte-size caps and appending a truncation warning when either
- * trips. Each entry is exactly one line (descriptions are single-line).
+ * line-count and character caps, and appending a notice when either cap trips
+ * or the caller reports topic files omitted by the scan cap. Each entry is
+ * exactly one line (descriptions are single-line).
  */
-function assembleIndex(lines: string[]): string {
-  const raw = lines.join('\n');
-  const wasLineTruncated = lines.length > MAX_INDEX_LINES;
-  let truncated = wasLineTruncated
-    ? lines.slice(0, MAX_INDEX_LINES).join('\n')
-    : raw;
-
-  if (truncated.length > MAX_INDEX_BYTES) {
-    const cutAt = truncated.lastIndexOf('\n', MAX_INDEX_BYTES);
-    truncated = truncated.slice(0, cutAt > 0 ? cutAt : MAX_INDEX_BYTES);
+function assembleIndex(
+  lines: string[],
+  scanNotice = '',
+  scanOmitted = 0,
+  priorityPrefixLength = 0,
+): string {
+  const { content, dropped } = trimIndexToBudgetDetailed(
+    lines,
+    priorityPrefixLength,
+  );
+  if (dropped.length === 0 && !scanNotice) {
+    return content;
   }
-
-  if (!wasLineTruncated && truncated.length === raw.length) {
-    return truncated;
+  const reasons: string[] = [];
+  if (lines.length > MAX_INDEX_LINES) {
+    reasons.push(`${lines.length} entries (limit: ${MAX_INDEX_LINES})`);
   }
+  const candidates = lines.slice(0, MAX_INDEX_LINES);
+  const charCount = candidates.join('\n').length;
+  const ordinaryCharCount = candidates
+    .map((line) => line.slice(0, MAX_INDEX_LINE_CHARS))
+    .join('\n').length;
+  const overlongEntriesCauseOverflow =
+    charCount > MAX_INDEX_CHARS && ordinaryCharCount <= MAX_INDEX_CHARS;
+  if (charCount > MAX_INDEX_CHARS) {
+    reasons.push(
+      `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — ${
+        overlongEntriesCauseOverflow
+          ? 'index entries are too long'
+          : 'cumulative index entry length'
+      }`,
+    );
+  }
+  const reason = reasons.length > 0 ? ` ${reasons.join('; ')}.` : '';
+  const budgetLever =
+    reasons.length === 0
+      ? ''
+      : overlongEntriesCauseOverflow
+        ? ' Overlong entries already omit descriptions. Shorten their topic-file paths or frontmatter names, or merge topic files/remove obsolete ones. Editing only the generated index will not survive a rebuild.'
+        : charCount > MAX_INDEX_CHARS
+          ? ' Shorten topic-file paths or frontmatter names/descriptions, or merge/remove topic files. Editing only the generated index will not survive a rebuild.'
+          : ' Merge topic files or remove obsolete ones to reduce the index. Editing only the generated index will not survive a rebuild.';
+  const scanLever =
+    scanOmitted > 0
+      ? ' Merge topic files or remove obsolete ones to reduce the file count.'
+      : '';
+  const noticeStart =
+    reasons.length === 0 && scanOmitted > 0
+      ? INDEX_SCAN_CAP_NOTICE_START
+      : INDEX_TRUNCATION_NOTICE_START;
+  return `${content}${noticeStart}${reason}${describeDroppedIndexEntries(dropped, lines.length)}${scanNotice}${budgetLever}${scanLever}`;
+}
 
-  return `${truncated}\n\n> WARNING: MEMORY.md is too large; only part of it was written. Keep index entries concise and move detail into topic files.`;
+function describeScanOmissions(
+  docs: readonly ScannedAutoMemoryDocument[],
+  omitted: readonly ScannedAutoMemoryDocument[],
+): string {
+  if (omitted.length === 0) return '';
+  return `${describeDroppedIndexEntries(
+    omitted.slice(0, MAX_NAMED_DROPPED_ENTRIES).map((doc) => docIndexLine(doc)),
+    docs.length + omitted.length,
+    'topic files',
+    omitted.length,
+  )} Scan limit: ${docs.length} files.`;
 }
 
 export function buildManagedAutoMemoryIndex(
@@ -147,8 +304,19 @@ export function buildManagedAutoMemoryIndex(
     AutoMemoryMetadata,
     'updatedAt' | 'lastDreamAt' | 'lastDreamSessionId'
   >,
+  omitted: readonly ScannedAutoMemoryDocument[] = [],
 ): string {
-  return assembleIndex(docs.map((doc) => truncateIndexLine(docIndexLine(doc))));
+  const ordered = [...docs].sort(
+    (a, b) =>
+      Number(isImportedMemoryDocument(a)) - Number(isImportedMemoryDocument(b)),
+  );
+  const firstImported = ordered.findIndex(isImportedMemoryDocument);
+  return assembleIndex(
+    ordered.map((doc) => docIndexLine(doc)),
+    describeScanOmissions(ordered, omitted),
+    omitted.length,
+    firstImported < 0 ? 0 : firstImported,
+  );
 }
 
 /**
@@ -175,7 +343,7 @@ interface TeamIndexGroup {
  * the same shared fact, collapsing them into one index line — listing the other
  * files via "(also: …)" — keeps the index readable. The topic files themselves
  * are never removed (they remain the source of truth); only the index display
- * collapses, and an over-long "(also: …)" suffix may itself be truncated.
+ * collapses, and an "(also: …)" entry that does not fit is dropped whole.
  * Empty descriptions are never grouped. Input is assumed pre-sorted by
  * relativePath, so group order and each group's primary are deterministic.
  */
@@ -202,26 +370,20 @@ function groupTeamDocsByDescription(
   });
 }
 
-function teamGroupIndexLine(group: TeamIndexGroup): string {
-  const base = docIndexLine(group.primary);
-  if (group.others.length === 0) {
-    return truncateIndexLine(base);
-  }
-  const also = group.others
-    .map((doc) => encodeIndexPathTarget(doc.relativePath))
-    .join(', ');
-  return truncateIndexLine(`${base} (also: ${also})`);
-}
-
 /**
  * Build the team index with cross-author dedup: entries sharing a description
  * collapse into one line. See {@link groupTeamDocsByDescription}.
  */
 export function buildTeamAutoMemoryIndex(
   docs: ScannedAutoMemoryDocument[],
+  omitted: readonly ScannedAutoMemoryDocument[] = [],
 ): string {
   return assembleIndex(
-    groupTeamDocsByDescription(docs).map(teamGroupIndexLine),
+    groupTeamDocsByDescription(docs).map(({ primary, others }) =>
+      docIndexLine(primary, others),
+    ),
+    describeScanOmissions(docs, omitted),
+    omitted.length,
   );
 }
 
@@ -242,11 +404,14 @@ async function readAutoMemoryMetadata(
 export async function rebuildManagedAutoMemoryIndex(
   projectRoot: string,
 ): Promise<string> {
-  const [docs, metadata] = await Promise.all([
-    scanAutoMemoryTopicDocuments(projectRoot),
+  const [{ docs, omitted }, metadata] = await Promise.all([
+    scanAutoMemoryIndexDocumentsFromRoot(
+      getAutoMemoryRoot(projectRoot),
+      'project',
+    ),
     readAutoMemoryMetadata(projectRoot),
   ]);
-  const content = buildManagedAutoMemoryIndex(docs, metadata);
+  const content = buildManagedAutoMemoryIndex(docs, metadata, omitted);
   await atomicWriteFile(getAutoMemoryIndexPath(projectRoot), content, {
     encoding: 'utf-8',
     noFollow: true,
@@ -260,8 +425,13 @@ export async function rebuildAutoMemoryIndexAtRoot(
 ): Promise<string> {
   if (!existsSync(root)) return '';
   await resolveTrustedMemoryRoot(root, getMemoryRootTrustedAnchor(root));
-  const docs = await scanAllAutoMemoryTopicDocumentsFromRoot(root, scope);
-  const content = buildManagedAutoMemoryIndex(docs);
+  // Preserve this compatibility entry point's mtime order, even for team roots.
+  const { docs, omitted } = await scanAutoMemoryIndexDocumentsFromRoot(
+    root,
+    scope,
+    false,
+  );
+  const content = buildManagedAutoMemoryIndex(docs, undefined, omitted);
   await atomicWriteFile(path.join(root, AUTO_MEMORY_INDEX_FILENAME), content, {
     encoding: 'utf-8',
     noFollow: true,
@@ -276,8 +446,11 @@ export async function rebuildAutoMemoryIndexAtRoot(
  */
 export async function rebuildUserAutoMemoryIndex(): Promise<string> {
   if (!existsSync(getUserAutoMemoryRoot())) return '';
-  const docs = await scanUserAutoMemoryTopicDocuments();
-  const content = buildManagedAutoMemoryIndex(docs);
+  const { docs, omitted } = await scanAutoMemoryIndexDocumentsFromRoot(
+    getUserAutoMemoryRoot(),
+    'user',
+  );
+  const content = buildManagedAutoMemoryIndex(docs, undefined, omitted);
   await atomicWriteFile(getUserAutoMemoryIndexPath(), content, {
     encoding: 'utf-8',
     noFollow: true,
@@ -349,7 +522,10 @@ export async function rebuildTeamAutoMemoryIndex(
         `may be redirecting it.`,
     );
   }
-  const docs = await scanTeamAutoMemoryTopicDocuments(projectRoot);
+  const { docs, omitted } = await scanAutoMemoryIndexDocumentsFromRoot(
+    teamRoot,
+    'team',
+  );
   // Code-unit comparison, NOT localeCompare: the index is committed and pushed,
   // so its ordering must be byte-identical across machines/locales — otherwise
   // two collaborators churn MEMORY.md back and forth and the ff-only sync wedges.
@@ -360,7 +536,7 @@ export async function rebuildTeamAutoMemoryIndex(
         ? 1
         : 0,
   );
-  const content = buildTeamAutoMemoryIndex(ordered);
+  const content = buildTeamAutoMemoryIndex(ordered, omitted);
   const indexPath = getTeamAutoMemoryIndexPath(projectRoot);
   // Skip a byte-identical rewrite: regenerating MEMORY.md every run would churn
   // its mtime and produce no-op commits that ping-pong between collaborators.

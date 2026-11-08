@@ -20,7 +20,7 @@ import {
   ApiRequestPhase,
 } from './metrics.js';
 import { makeFakeConfig } from '../test-utils/config.js';
-import type { GoalStateEvent } from './types.js';
+import { ToolResultSizeEvent, type GoalStateEvent } from './types.js';
 
 const mockCounterAddFn: Mock<
   (value: number, attributes?: Attributes, context?: Context) => void
@@ -121,6 +121,38 @@ describe('Telemetry Metrics', () => {
     expect(mockHistogramRecordFn).toHaveBeenCalledWith(value, expected);
   };
 
+  it('records raw/injected size without call/session cardinality by default', () => {
+    init();
+    m.recordToolResultSizeMetrics(
+      mockConfig,
+      new ToolResultSizeEvent(
+        'shell',
+        'native',
+        'injection',
+        100,
+        20,
+        25,
+        5,
+        true,
+        20,
+        'batch',
+        'private-call',
+        'private-prompt',
+      ),
+    );
+    expect(mockHistogramRecordFn).toHaveBeenCalledTimes(4);
+    expect(mockHistogramRecordFn).toHaveBeenCalledWith(100, {
+      function_name: 'shell',
+      tool_type: 'native',
+      truncated: true,
+      phase: 'raw',
+    });
+    for (const [, attrs] of mockHistogramRecordFn.mock.calls) {
+      expect(attrs).not.toHaveProperty('call_id');
+      expect(attrs).not.toHaveProperty('session.id');
+    }
+  });
+
   describe('recordToolCallMetrics', () => {
     const config = makeFakeConfig({ sessionId: 'test-session-id' });
 
@@ -173,6 +205,56 @@ describe('Telemetry Metrics', () => {
       m.recordChatCompressionMetrics(config, tokens);
 
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, tokens);
+    });
+  });
+
+  describe('recordMemoryRecallMetrics', () => {
+    it('omits the selector_skipped dimension unless the caller sets it', () => {
+      init();
+
+      m.recordMemoryRecallMetrics(mockConfig, 42, {
+        strategy: 'heuristic',
+        docs_selected: 1,
+      });
+      m.recordMemoryRecallMetrics(mockConfig, 7, {
+        strategy: 'heuristic',
+        docs_selected: 0,
+        selector_skipped: true,
+      });
+
+      // An existing series must not gain the dimension — not even as a
+      // constant `false` — or every deployment with the experiment off
+      // splits the time series. Exact-attribute assertions, since a spy on
+      // this public API is what replaces it for logger-level tests.
+      expectCalls(mockCounterAddFn, [
+        [1, { strategy: 'heuristic' }],
+        [1, { strategy: 'heuristic', selector_skipped: true }],
+      ]);
+      expectCalls(mockHistogramRecordFn, [
+        [42, { strategy: 'heuristic' }],
+        [7, { strategy: 'heuristic', selector_skipped: true }],
+      ]);
+    });
+
+    it('keeps an explicit selector_skipped: false as the control series', () => {
+      // The ablation's control arm: with the experiment on, a recall whose
+      // selector ran must carry the dimension set to false — a truthiness
+      // check would drop it and mix the control series into the
+      // no-dimension (experiment-off) one.
+      init();
+
+      m.recordMemoryRecallMetrics(mockConfig, 9, {
+        strategy: 'heuristic',
+        docs_selected: 1,
+        selector_skipped: false,
+      });
+
+      expectCalls(mockCounterAddFn, [
+        [1, { strategy: 'heuristic', selector_skipped: false }],
+      ]);
+      expectCalls(mockHistogramRecordFn, [
+        [9, { strategy: 'heuristic', selector_skipped: false }],
+      ]);
     });
   });
 

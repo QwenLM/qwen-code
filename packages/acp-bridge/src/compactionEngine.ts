@@ -57,6 +57,8 @@ const TRANSIENT_TYPES = new Set([
   'client_evicted',
   'replay_complete',
   'stream_error',
+  // The surviving prefix is already seeded; never nest it in later snapshots.
+  'session_rewound',
 ]);
 const LATEST_WINS_UPDATES = new Set([
   'available_commands_update',
@@ -679,7 +681,11 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     switch (updateType) {
       case 'agent_message_chunk': {
-        if (hasDiscreteMessageMeta(data?.update?._meta)) {
+        const meta = data?.update?._meta as Record<string, unknown> | undefined;
+        if (
+          hasDiscreteMessageMeta(data?.update?._meta) ||
+          meta?.['executionLifecycle'] !== undefined
+        ) {
           this.slots.push({ kind: 'misc', event });
           break;
         }
@@ -696,6 +702,16 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       }
       case 'tool_call':
       case 'tool_call_update': {
+        const update = data?.update;
+        const meta = update?.['_meta'] as Record<string, unknown> | undefined;
+        if (
+          meta?.['toolLifecycle'] !== undefined &&
+          update?.['status'] === undefined &&
+          update?.['content'] === undefined
+        ) {
+          this.slots.push({ kind: 'misc', event });
+          break;
+        }
         const toolCallId = data?.update?.toolCallId;
         if (!toolCallId) {
           this.slots.push({ kind: 'misc', event });
@@ -1308,6 +1324,13 @@ function hasUnmodeledTextMeta(meta: unknown): boolean {
       // latest meta carry the label, so the live view must match instead
       // of splitting on it.
       if (typeof value !== 'string') return true;
+      continue;
+    }
+    if (key === 'agent') {
+      // Identity stamp SubAgentTracker pairs with the same two keys. Merging
+      // never reads it, so an unenrolled key would split every streamed
+      // subagent delta in the live view only.
+      if (typeof value !== 'object' || value === null) return true;
       continue;
     }
     if (key === 'qwenTranscript') {

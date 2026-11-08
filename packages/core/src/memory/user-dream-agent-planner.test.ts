@@ -46,6 +46,7 @@ describe('User Dream agent planner', () => {
       getModel: vi.fn().mockReturnValue('qwen-test'),
       getApprovalMode: vi.fn(),
       getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
+      getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue('session routing contract'),
     } as unknown as Config;
     vi.mocked(runForkedAgent).mockReset();
@@ -240,12 +241,44 @@ describe('User Dream agent planner', () => {
     );
   });
 
+  it('threads the configured memory agent turn limit into the forked agent', async () => {
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValueOnce(25);
+
+    await planUserAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(vi.mocked(runForkedAgent)).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 25 }),
+    );
+  });
+
+  it('preserves the zero turn limit sentinel', async () => {
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValueOnce(0);
+
+    await planUserAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(vi.mocked(runForkedAgent)).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 0 }),
+    );
+  });
+
+  it('falls back to the built-in turn budget when the limit is unset', async () => {
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValueOnce(undefined);
+
+    await planUserAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(vi.mocked(runForkedAgent)).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 8 }),
+    );
+  });
+
   it.each([
-    ['failed', 'Model timed out'],
-    ['cancelled', 'CANCELLED'],
+    ['failed', 'Model timed out', 'Model timed out'],
+    ['failed', 'MAX_TURNS', 'Agent stopped: maximum turns reached.'],
+    ['failed', 'TIMEOUT', 'Agent stopped: time limit reached.'],
+    ['cancelled', 'CANCELLED', 'User Dream agent failed'],
   ] as const)(
-    'rejects when the agent finishes as %s',
-    async (status, reason) => {
+    'rejects when the agent finishes as %s with reason %s',
+    async (status, reason, expected) => {
       vi.mocked(runForkedAgent).mockResolvedValue({
         status,
         terminateReason: reason,
@@ -254,7 +287,7 @@ describe('User Dream agent planner', () => {
 
       await expect(
         planUserAutoMemoryDreamByAgent(config, projectRoot),
-      ).rejects.toThrow(reason);
+      ).rejects.toThrow(expected);
     },
   );
 });

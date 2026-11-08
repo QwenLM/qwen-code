@@ -18,6 +18,7 @@ import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
 import {
   getEmptyMcpToolTitleDescription,
   localizeToolDisplayName,
+  sanitizeControlChars,
 } from './toolFormatting';
 import {
   ThinkingTranslateButton,
@@ -27,12 +28,14 @@ import styles from './ToolApproval.module.css';
 import { buildUnifiedDiff } from '../../utils/unifiedDiff';
 import { DiffView } from './tools/DiffView';
 import { useWebShellCustomization } from '../../customization';
+import { BrowserNotificationControl } from './BrowserNotificationControl';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
   onConfirm: (id: string, selectedOption: string) => void | Promise<void>;
   variant?: 'inline' | 'floating';
   disabled?: boolean;
+  showBrowserNotifications?: boolean;
   /**
    * Whether this approval should pull keyboard focus to its safe-default option
    * when it becomes the topmost (visible) one — on appearance, or when a panel/
@@ -44,6 +47,15 @@ interface ToolApprovalProps {
    * it — it just never grabs focus on its own.
    */
   keyboardActive?: boolean;
+  /**
+   * Escape dismisses without recording a decision (the TUI approval dialog's
+   * defer semantics). Default false keeps the tool-approval behavior where
+   * Escape rejects the pending request. A persistent trust decision must
+   * not be recordable by a habitual Escape.
+   */
+  escapeDismisses?: boolean;
+  /** Called when Escape dismisses; only meaningful with escapeDismisses. */
+  onDismiss?: () => void;
   /**
    * Id of an extra description the caller renders beside this panel, added to
    * `aria-describedby`. The Managed approvals card states there that the tool
@@ -196,6 +208,8 @@ function orderPermissionOptions(
 function getOptionI18nKey(
   option: PermissionRequest['options'][number],
 ): string | undefined {
+  if (option.id === 'hooks_approve') return 'hooksApproval.approve';
+  if (option.id === 'hooks_reject') return 'hooksApproval.reject';
   if (option.id === 'proceed_once_and_switch_to_default') {
     return 'approval.option.allowOnceAndSwitchToDefault';
   }
@@ -254,7 +268,10 @@ export function ToolApproval({
   onConfirm,
   variant = 'inline',
   disabled = false,
+  showBrowserNotifications = false,
   keyboardActive = true,
+  escapeDismisses = false,
+  onDismiss,
   extraDescriptionId,
   planTodos = [],
   planExecutionMode,
@@ -263,6 +280,7 @@ export function ToolApproval({
   const { t } = useI18n();
   const isAgent = isAgentTool(request.toolName);
   const isGoal = request.toolName === 'propose_goal';
+  const isProjectHooks = request.toolName === 'project_hooks';
   const isExitPlanApproval = isExitPlanApprovalRequest(request);
   const hasPlanExecutionMode =
     isExitPlanApproval && planExecutionMode !== undefined;
@@ -273,6 +291,7 @@ export function ToolApproval({
           ? request.options.filter(
               (option) =>
                 option.id === 'restore_previous' ||
+                option.id === 'allow' ||
                 option.kind === 'reject_once' ||
                 option.kind === 'reject_always',
             )
@@ -303,7 +322,10 @@ export function ToolApproval({
         if (option.kind === 'allow_once') return t('approval.goal.confirm');
         if (option.kind === 'reject_once') return t('approval.goal.reject');
       }
-      if (hasPlanExecutionMode && option.id === 'restore_previous') {
+      if (
+        hasPlanExecutionMode &&
+        (option.id === 'restore_previous' || option.id === 'allow')
+      ) {
         return t('approval.option.executePlan', {
           mode: t(`mode.label.${planExecutionMode}`),
         });
@@ -380,9 +402,11 @@ export function ToolApproval({
     request.toolName || parsedTitle.toolName || request.kind || 'Tool';
   const toolName = isGoal
     ? t('approval.goal.title')
-    : showsPlanWorkflow
-      ? t('workflow.planReview.title')
-      : localizeToolDisplayName(rawToolName, t);
+    : isProjectHooks
+      ? t('hooksApproval.title')
+      : showsPlanWorkflow
+        ? t('workflow.planReview.title')
+        : localizeToolDisplayName(rawToolName, t);
   const descriptionText =
     showsPlanWorkflow || isGoal ? undefined : getDescriptionText(request);
   const contentText = extractContentText(request);
@@ -495,6 +519,18 @@ export function ToolApproval({
       ) {
         return;
       }
+      if (
+        e.currentTarget.querySelector('[data-web-shell-notification-open]') &&
+        !isEditableTarget(e.target) &&
+        ((e.key >= '1' && e.key <= '9') ||
+          ((e.key === 'Enter' || e.key === ' ') &&
+            e.target instanceof Element &&
+            e.target.closest('[data-web-shell-permission-option]')))
+      ) {
+        e.preventDefault();
+        return;
+      }
+
       const count = displayOptions.length;
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
@@ -515,6 +551,10 @@ export function ToolApproval({
         focusOption(last);
       } else if (e.key === 'Escape') {
         e.preventDefault();
+        if (escapeDismisses) {
+          onDismiss?.();
+          return;
+        }
         const reject = requestRef.current.options.find(
           (o) => o.kind === 'reject_once' || o.kind === 'reject_always',
         );
@@ -527,7 +567,14 @@ export function ToolApproval({
         }
       }
     },
-    [displayOptions, moveSelection, confirm, focusOption],
+    [
+      displayOptions,
+      moveSelection,
+      confirm,
+      focusOption,
+      escapeDismisses,
+      onDismiss,
+    ],
   );
 
   const isExec = isExecKind(request);
@@ -564,6 +611,21 @@ export function ToolApproval({
     [request.content, hostOwnsEditDiffPreview],
   );
   const command = getCommandFromRawInput(request);
+  // `rawInput.command` is model-supplied and reaches this block verbatim, so
+  // neutralise the invisible controls `sanitizeControlChars` covers — C0/ANSI,
+  // C1, and the bidi embedding/isolate controls — before an approver reads it.
+  // That is the whole of its coverage: zero-width and line/paragraph separator
+  // code points are not in its character class and still pass through here.
+  // The raw `command` is kept for execution and for the explain button below.
+  const commandDisplay = sanitizeControlChars(command ?? '');
+  // The description is model-supplied too (`rawInput.description`, or a title
+  // built from the tool's own `getDescription()`), and renders one element
+  // above the command block, in its tooltip and in the `aria-describedby`
+  // target. Sanitise the text only: the element gate below must stay on the
+  // raw value or the IDREF dangles.
+  const descriptionDisplay = descriptionText
+    ? sanitizeControlChars(descriptionText)
+    : undefined;
   const showsCommandBlock =
     !isGoal && Boolean((isExec && command) || showsContent);
   // Exec warnings (e.g. command-substitution notices) arrive as real content
@@ -573,15 +635,27 @@ export function ToolApproval({
     isExec && command && showsContent && !request.contentIsInput
       ? contentText
       : null;
+  // The warnings text interpolates the model's raw `directory` argument
+  // (see `buildOutsideWorkspaceWarning`), so treat it like the command.
+  const execWarningsDisplay = execWarningsText
+    ? sanitizeControlChars(execWarningsText)
+    : undefined;
+  // The content text is model- or peer-supplied as well, and this block renders
+  // it in the body, in the `title` tooltip and as the `aria-describedby`
+  // target. Neutralise the text only: `showsContent` above stays on the raw
+  // value so the IDREF is still gated by whether the element renders.
+  const contentDisplay = sanitizeControlChars(contentText);
   const questionText = isGoal
     ? t('approval.goal.hint')
-    : showsPlanWorkflow
-      ? t('workflow.planReview.question')
-      : isAgent
-        ? t('approval.launchAgentQuestion')
-        : isExec
-          ? t('approval.execQuestion', { tool: toolName })
-          : t('approval.changeQuestion');
+    : isProjectHooks
+      ? t('hooksApproval.description')
+      : showsPlanWorkflow
+        ? t('workflow.planReview.question')
+        : isAgent
+          ? t('approval.launchAgentQuestion')
+          : isExec
+            ? t('approval.execQuestion', { tool: toolName })
+            : t('approval.changeQuestion');
 
   return (
     <div
@@ -622,11 +696,12 @@ export function ToolApproval({
         <span className={styles.name} id={headingId}>
           {toolName}
         </span>
+        {showBrowserNotifications && <BrowserNotificationControl />}
       </div>
 
       {descriptionText && (
-        <div className={styles.desc} id={descId} title={descriptionText}>
-          {descriptionText}
+        <div className={styles.desc} id={descId} title={descriptionDisplay}>
+          {descriptionDisplay}
         </div>
       )}
 
@@ -640,17 +715,21 @@ export function ToolApproval({
       ) : isExec && command ? (
         <>
           <div className={styles.code}>
-            <pre className={styles.codeBlock} id={commandId} title={command}>
-              {command}
+            <pre
+              className={styles.codeBlock}
+              id={commandId}
+              title={commandDisplay}
+            >
+              {commandDisplay}
             </pre>
           </div>
           {execWarningsText && (
             <pre
               className={styles.content}
               id={contentId}
-              title={execWarningsText}
+              title={execWarningsDisplay}
             >
-              {execWarningsText}
+              {execWarningsDisplay}
             </pre>
           )}
         </>
@@ -660,9 +739,9 @@ export function ToolApproval({
             isExitPlanApproval ? ` ${styles.planContent}` : ''
           }`}
           id={commandId}
-          title={contentText}
+          title={contentDisplay}
         >
-          {contentText}
+          {contentDisplay}
         </pre>
       ) : null}
 
@@ -674,8 +753,11 @@ export function ToolApproval({
         <div className={styles.content} data-plan-interactive>
           {diffs.map((block, index) => (
             <div key={index}>
-              <div>{block.path}</div>
-              <DiffView diff={block.diff} />
+              <div>{sanitizeControlChars(block.path ?? '')}</div>
+              <DiffView
+                diff={block.diff}
+                fillScrollRegion={variant === 'floating'}
+              />
             </div>
           ))}
         </div>

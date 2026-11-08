@@ -2,8 +2,12 @@
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import TurndownService from 'turndown';
 import { WebShellCustomizationProvider } from '../../customization';
-import { I18nProvider } from '../../i18n';
+import { getTranslator, I18nProvider } from '../../i18n';
+import { getSelectedReplyContent } from '../../utils/selectionClipboard';
+import { WebShellPortalRootContext } from '../../portalRoot';
+import styles from './AssistantMessage.module.css';
 import {
   TranscriptDocumentExpandedProvider,
   TranscriptRenderModeProvider,
@@ -514,6 +518,61 @@ describe('AssistantMessage streaming markdown', () => {
   });
 });
 
+describe('AssistantMessage footer tooltips', () => {
+  it.each([
+    [
+      'en',
+      [
+        'Copy content',
+        'Copy Markdown source',
+        'Satisfied',
+        'Not satisfied',
+        'New chat from here',
+      ],
+    ],
+    [
+      'zh-CN',
+      ['复制内容', '复制 Markdown 源文', '满意', '不满意', '从此处新建对话'],
+    ],
+  ] as const)(
+    'shows localized tooltips in the Web Shell portal on keyboard focus in %s',
+    async (language, labels) => {
+      const portal = document.createElement('div');
+      document.body.appendChild(portal);
+      try {
+        const container = render(
+          <WebShellPortalRootContext.Provider value={portal}>
+            <AssistantMessage
+              content="answer"
+              showFooterActions
+              showAssistantFeedback
+              showBranchAction
+              onBranchSession={vi.fn()}
+            />
+          </WebShellPortalRootContext.Provider>,
+          language,
+        );
+        expect(container.querySelector('.lucide-split')).not.toBeNull();
+        for (const label of labels) {
+          const button = container.querySelector<HTMLButtonElement>(
+            `button[aria-label="${label}"]`,
+          )!;
+          expect(button).not.toBeNull();
+          expect(button.hasAttribute('title')).toBe(false);
+          await act(async () => button.focus());
+          const tooltip = portal.querySelector('[role="tooltip"]')!;
+          expect(tooltip?.textContent).toBe(label);
+          expect(button.getAttribute('aria-describedby')).toBe(tooltip.id);
+          expect(container.querySelector('[role="tooltip"]')).toBeNull();
+          await act(async () => button.blur());
+        }
+      } finally {
+        portal.remove();
+      }
+    },
+  );
+});
+
 describe('AssistantMessage branch action', () => {
   it('disables the selected action while the branch request is pending', async () => {
     let resolveBranch!: () => void;
@@ -532,7 +591,7 @@ describe('AssistantMessage branch action', () => {
       />,
     );
     const button = container.querySelector<HTMLButtonElement>(
-      'button[title="Branch"]',
+      'button[aria-label="New chat from here"]',
     );
 
     act(() => button?.click());
@@ -559,7 +618,7 @@ describe('AssistantMessage branch action', () => {
         />,
       );
       const button = container.querySelector<HTMLButtonElement>(
-        'button[title="Branch"]',
+        'button[aria-label="New chat from here"]',
       );
 
       await act(async () => {
@@ -591,7 +650,11 @@ describe('AssistantMessage markdown tables', () => {
       </WebShellCustomizationProvider>,
     );
 
-    expect(container.textContent).toContain('Copy table');
+    expect(
+      container.querySelector(
+        '[data-selection-copy-table] button[aria-label="Copy"]',
+      ),
+    ).not.toBeNull();
     expect(
       container.querySelector('button[aria-label="View details for row 1"]'),
     ).not.toBeNull();
@@ -603,93 +666,292 @@ describe('AssistantMessage markdown tables', () => {
     );
 
     expect(container.querySelector('table')).not.toBeNull();
-    expect(container.textContent).not.toContain('Copy table');
+    expect(
+      container.querySelector(
+        '[data-selection-copy-table] button[aria-label="Copy"]',
+      ),
+    ).toBeNull();
+  });
+});
+
+describe('AssistantMessage Markdown copy', () => {
+  it.each([
+    ['en', 'Copy content', 'Copy Markdown source'],
+    ['zh-CN', '复制内容', '复制 Markdown 源文'],
+  ] as const)(
+    'copies rendered content and source Markdown with independent feedback in %s',
+    async (language, copyLabel, markdownLabel) => {
+      vi.useFakeTimers();
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      vi.stubGlobal('navigator', { clipboard: { writeText } });
+      try {
+        const content =
+          '## Heading\n\n**Bold** [link](https://example.com)\n\n- Item\n\n```ts\nconst x = 1;\n```';
+        const container = render(
+          <AssistantMessage content={content} showFooterActions />,
+          language,
+        );
+        const copy = container.querySelector<HTMLButtonElement>(
+          `button[aria-label="${copyLabel}"]`,
+        )!;
+        const markdown = container.querySelector<HTMLButtonElement>(
+          `button[aria-label="${markdownLabel}"]`,
+        )!;
+        expect(copy.nextElementSibling).toBe(markdown);
+        expect(markdown.hasAttribute('title')).toBe(false);
+        expect(markdown.getAttribute('aria-label')).not.toBe(
+          getTranslator(language)('assistant.copyMarkdown'),
+        );
+        await act(async () => markdown.click());
+        expect(writeText).toHaveBeenCalledWith(content);
+        expect(markdown.querySelector('rect')).toBeNull();
+        expect(copy.querySelector('rect')).not.toBeNull();
+        act(() => vi.advanceTimersByTime(2000));
+        expect(markdown.querySelector('rect')).not.toBeNull();
+        await act(async () => copy.click());
+        expect(writeText).toHaveBeenLastCalledWith(
+          'Heading\nBold link\nItem\nconst x = 1;',
+        );
+        expect(markdown.querySelector('rect')).not.toBeNull();
+        expect(copy.querySelector('rect')).toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it('copies the whole rendered reply without replacing a partial selection', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const selection = window.getSelection()!;
+    try {
+      const container = render(
+        <AssistantMessage content="Before **bold** after." showFooterActions />,
+      );
+      const range = document.createRange();
+      range.selectNodeContents(container.querySelector('strong')!);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy content"]',
+      )!;
+      await act(async () => button.click());
+      expect(writeText).toHaveBeenCalledWith('Before bold after.');
+      expect(selection.toString()).toBe('bold');
+      expect(selection.getRangeAt(0)).toBe(range);
+    } finally {
+      selection.removeAllRanges();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([
+    { content: '', showFooterActions: true },
+    { content: 'answer', showFooterActions: false },
+    { content: 'answer', showFooterActions: true, isStreaming: true },
+  ])('honors footer visibility: %j', (props) => {
+    const container = render(<AssistantMessage {...props} />);
+    expect(
+      container.querySelector('button[aria-label="Copy Markdown source"]'),
+    ).toBeNull();
+  });
+
+  it('omits the Markdown control from exported documents', () => {
+    const container = render(
+      <AssistantMessage content="answer" showFooterActions />,
+      'en',
+      'document',
+    );
+    expect(
+      container.querySelector('button[aria-label="Copy Markdown source"]'),
+    ).toBeNull();
+  });
+
+  it('falls back to the raw source when the reply renders no plain text', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    try {
+      const content = '![](https://example.com/a.png)';
+      const container = render(
+        <AssistantMessage content={content} showFooterActions />,
+      );
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy content"]',
+      )!;
+      await act(async () => button.click());
+      expect(writeText).toHaveBeenCalledWith(content);
+      expect(writeText).not.toHaveBeenCalledWith('');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('copies rendered text without running the Markdown converter', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const turndown = vi.spyOn(TurndownService.prototype, 'turndown');
+    try {
+      const container = render(
+        <AssistantMessage content="Before **bold** after." showFooterActions />,
+      );
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy content"]',
+      )!;
+      await act(async () => button.click());
+      expect(turndown).not.toHaveBeenCalled();
+      expect(writeText).toHaveBeenCalledWith('Before bold after.');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('marks the footer persistently visible only when asked', () => {
+    const shown = render(
+      <AssistantMessage
+        content="answer"
+        showFooterActions
+        footerAlwaysVisible
+      />,
+    );
+    expect(
+      shown
+        .querySelector(`.${styles.messageFooter}`)
+        ?.classList.contains(styles.messageFooterVisible),
+    ).toBe(true);
+    const resting = render(
+      <AssistantMessage content="answer" showFooterActions />,
+    );
+    expect(
+      resting
+        .querySelector(`.${styles.messageFooter}`)
+        ?.classList.contains(styles.messageFooterVisible),
+    ).toBe(false);
+  });
+
+  it('reports clipboard failure without a success flash', async () => {
+    vi.stubGlobal('navigator', {
+      clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
+    });
+    const originalExecCommand = document.execCommand;
+    document.execCommand = vi.fn().mockReturnValue(false);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const container = render(
+        <AssistantMessage content="answer" showFooterActions />,
+      );
+      const markdown = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy Markdown source"]',
+      )!;
+      await act(async () => markdown.click());
+      expect(warn).toHaveBeenCalledWith(
+        '[web-shell] clipboard write failed:',
+        expect.any(Error),
+      );
+      expect(markdown.querySelector('rect')).not.toBeNull();
+    } finally {
+      document.execCommand = originalExecCommand;
+      vi.unstubAllGlobals();
+    }
   });
 });
 
 describe('AssistantMessage copy reset timer', () => {
-  it('leaves no pending reset timer behind on unmount', async () => {
-    vi.useFakeTimers();
-    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText: vi.fn().mockResolvedValue(undefined) },
-    });
-    try {
-      const container = render(
-        <AssistantMessage content="copy me" showFooterActions />,
+  it.each(['Copy content', 'Copy Markdown source'])(
+    'cleans up the %s timer on unmount',
+    async (label) => {
+      vi.useFakeTimers();
+      const descriptor = Object.getOwnPropertyDescriptor(
+        navigator,
+        'clipboard',
       );
-      const button = container.querySelector<HTMLButtonElement>(
-        'button[title="Copy"]',
-      );
-      await act(async () => {
-        button?.click();
-        await Promise.resolve();
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: vi.fn().mockResolvedValue(undefined) },
       });
-      // The 2s reset is pending; unmounting must clear it, or it fires
-      // after the file's environment is torn down and the unit suites'
-      // unhandled-error gate turns an all-green run red.
-      expect(vi.getTimerCount()).toBeGreaterThan(0);
-      const { root, container: mountedContainer } = mounted.pop()!;
-      act(() => root.unmount());
-      mountedContainer.remove();
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      if (descriptor) {
-        Object.defineProperty(navigator, 'clipboard', descriptor);
+      try {
+        const container = render(
+          <AssistantMessage content="copy me" showFooterActions />,
+        );
+        const button = container.querySelector<HTMLButtonElement>(
+          `button[aria-label="${label}"]`,
+        );
+        await act(async () => {
+          button?.click();
+          await Promise.resolve();
+        });
+        // The 2s reset is pending; unmounting must clear it, or it fires
+        // after the file's environment is torn down and the unit suites'
+        // unhandled-error gate turns an all-green run red.
+        expect(vi.getTimerCount()).toBeGreaterThan(0);
+        const { root, container: mountedContainer } = mounted.pop()!;
+        act(() => root.unmount());
+        mountedContainer.remove();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        if (descriptor) {
+          Object.defineProperty(navigator, 'clipboard', descriptor);
+        }
       }
-    }
-  });
+    },
+  );
 });
 
 describe('AssistantMessage copy without the async Clipboard API (issue #9485)', () => {
-  it('falls back to execCommand and still shows the copied state', async () => {
-    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: undefined,
-    });
-    let copiedViaFallback: string | null = null;
-    const originalExecCommand = document.execCommand;
-    const execCommandMock = vi.fn().mockImplementation((command: string) => {
-      if (command === 'copy') {
-        copiedViaFallback = document.querySelector('textarea')?.value ?? null;
-      }
-      return true;
-    });
-    document.execCommand = execCommandMock;
-
-    try {
-      const container = render(
-        <AssistantMessage content="copy me" showFooterActions />,
+  it.each(['Copy content', 'Copy Markdown source'])(
+    'falls back to execCommand for %s',
+    async (label) => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        navigator,
+        'clipboard',
       );
-      const button = container.querySelector<HTMLButtonElement>(
-        'button[title="Copy"]',
-      );
-      expect(button).not.toBeNull();
-
-      await act(async () => {
-        button?.click();
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: undefined,
       });
+      let copiedViaFallback: string | null = null;
+      const originalExecCommand = document.execCommand;
+      const execCommandMock = vi.fn().mockImplementation((command: string) => {
+        if (command === 'copy') {
+          copiedViaFallback = document.querySelector('textarea')?.value ?? null;
+        }
+        return true;
+      });
+      document.execCommand = execCommandMock;
 
-      expect(execCommandMock).toHaveBeenCalledWith('copy');
-      expect(copiedViaFallback).toBe('copy me');
-      // The button should flip to the check icon even without the async API.
-      expect(
-        button?.querySelector('path[d="m3.5 8.3 3 3L12.8 5"]'),
-      ).not.toBeNull();
-    } finally {
-      document.execCommand = originalExecCommand;
-      if (descriptor) {
-        Object.defineProperty(navigator, 'clipboard', descriptor);
+      try {
+        const container = render(
+          <AssistantMessage content="**copy me**" showFooterActions />,
+        );
+        const button = container.querySelector<HTMLButtonElement>(
+          `button[aria-label="${label}"]`,
+        );
+        expect(button).not.toBeNull();
+
+        await act(async () => {
+          button?.click();
+        });
+
+        expect(execCommandMock).toHaveBeenCalledWith('copy');
+        expect(copiedViaFallback).toBe(
+          label === 'Copy content' ? 'copy me' : '**copy me**',
+        );
+        // The button should flip to the check icon even without the async API.
+        expect(
+          button?.querySelector('path[d="m3.5 8.3 3 3L12.8 5"]'),
+        ).not.toBeNull();
+      } finally {
+        document.execCommand = originalExecCommand;
+        if (descriptor) {
+          Object.defineProperty(navigator, 'clipboard', descriptor);
+        }
       }
-    }
-  });
+    },
+  );
 });
 
 describe('AssistantMessage satisfied / not-satisfied marks', () => {
   const find = (container: HTMLElement, title: string) =>
-    container.querySelector<HTMLButtonElement>(`button[title="${title}"]`);
+    container.querySelector<HTMLButtonElement>(`button[aria-label="${title}"]`);
 
   it('offers no marks unless the host opts in', () => {
     const container = render(
@@ -813,5 +1075,359 @@ describe('AssistantMessage satisfied / not-satisfied marks', () => {
     );
     expect(find(container, '满意')).not.toBeNull();
     expect(find(container, '不满意')).not.toBeNull();
+  });
+});
+
+describe('AssistantMessage agent replies', () => {
+  it('names the agent and reports a failed run with its error, steps and tokens', () => {
+    const container = render(
+      <AssistantMessage
+        content=""
+        author={{ name: 'reviewer', color: '#f80' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-1',
+          status: 'failed',
+          error: 'tool crashed',
+          steps: [{ id: 's1', title: 'Bash: npm test', status: 'failed' }],
+          totalTokens: 2048,
+        }}
+      />,
+    );
+
+    expect(container.textContent).toContain('reviewer');
+    expect(container.textContent).toContain('Failed');
+    expect(container.textContent).toContain('tool crashed');
+    expect(container.textContent).toContain('Bash: npm test');
+    expect(container.textContent).toContain(
+      `${(2048).toLocaleString()} tokens`,
+    );
+  });
+
+  it('shows no status word on a completed run, only its text and usage', () => {
+    const container = render(
+      <AssistantMessage
+        content="All good."
+        author={{ name: 'reviewer' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-2',
+          status: 'completed',
+          totalTokens: 12,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('All good.');
+    expect(container.textContent).toContain('12 tokens');
+    expect(container.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it("offers copy alone on an agent's reply", () => {
+    // MessageList passes an agent's reply footer actions without feedback or
+    // branch; the copy button and the status still render.
+    const container = render(
+      <AssistantMessage
+        content="Agent reply"
+        author={{ name: 'reviewer' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-3',
+          status: 'failed',
+        }}
+        showFooterActions
+        showAssistantFeedback={false}
+        showBranchAction={false}
+        onBranchSession={vi.fn()}
+      />,
+    );
+
+    expect(
+      container.querySelector('button[aria-label="Copy content"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('button[aria-label="New chat from here"]'),
+    ).toBeNull();
+    expect(container.querySelector('button[aria-pressed]')).toBeNull();
+    expect(container.textContent).toContain('Failed');
+  });
+});
+
+describe('AssistantMessage squad replies', () => {
+  it('tags a leader reply with the squad it leads', () => {
+    const container = render(
+      <AssistantMessage
+        content="@alice please take it"
+        author={{ name: 'lead' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-4',
+          status: 'completed',
+          author: { agentId: 'ag_lead', name: 'lead', squadName: 'crew' },
+        }}
+      />,
+    );
+    const tag = container.querySelector('[data-squad-tag]');
+    expect(tag?.getAttribute('data-squad-tag')).toBe('crew');
+    expect(tag?.textContent).toBe('crew');
+    // The tag sits on the author line, after the name; no middle dot.
+    expect(tag?.previousElementSibling?.textContent).toBe('lead');
+    expect(container.textContent).not.toContain('·');
+    expect(container.textContent).toContain('@alice please take it');
+  });
+
+  it('labels a member reply with the squad it answered for', () => {
+    const container = render(
+      <AssistantMessage
+        content="Fixed in auth.ts."
+        author={{ name: 'alice' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-9',
+          status: 'completed',
+          author: {
+            agentId: 'ag_alice',
+            name: 'alice',
+            memberSquadName: 'crew',
+          },
+        }}
+      />,
+    );
+    const tag = container.querySelector('[data-squad-tag="crew"]');
+    expect(tag?.previousElementSibling?.textContent).toBe('alice');
+    expect(container.textContent).toContain('Fixed in auth.ts.');
+  });
+
+  it('never renders an empty member reply as no_action', () => {
+    // Only a leader's empty reply means "nothing to do".
+    const container = render(
+      <AssistantMessage
+        content={'\u200B'}
+        author={{ name: 'alice' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-10',
+          status: 'completed',
+          author: {
+            agentId: 'ag_alice',
+            name: 'alice',
+            memberSquadName: 'crew',
+          },
+        }}
+      />,
+    );
+    expect(container.querySelector('[data-squad-outcome]')).toBeNull();
+    expect(container.querySelector('[data-squad-tag="crew"]')).not.toBeNull();
+  });
+
+  it('renders a no_action reply as one muted line', () => {
+    const container = render(
+      <AssistantMessage
+        content=""
+        author={{ name: 'lead' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-5',
+          status: 'completed',
+          squadOutcome: 'no_action',
+          author: { agentId: 'ag_lead', name: 'lead', squadName: 'crew' },
+        }}
+        showFooterActions
+      />,
+    );
+    const line = container.querySelector('[data-squad-outcome="no_action"]');
+    expect(line?.getAttribute('role')).toBe('note');
+    // Not a message: no avatar row, no footer.
+    expect(container.querySelector('button')).toBeNull();
+    expect(container.childElementCount).toBe(1);
+    // The squad's tag, then a plain sentence: no avatar, no middle dots.
+    expect(line?.childElementCount).toBe(2);
+    const [tag, sentence] = [...(line?.children ?? [])];
+    expect(tag?.getAttribute('data-squad-tag')).toBe('crew');
+    expect(tag?.querySelector('svg')).not.toBeNull();
+    expect(sentence?.textContent).toBe('lead had nothing to do');
+  });
+
+  it('renders a leader reply of only invisible characters as no_action', () => {
+    // Recorded before the daemon classified U+200B as no reply.
+    const container = render(
+      <AssistantMessage
+        content={'\u200B'}
+        author={{ name: 'lead' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-7',
+          status: 'completed',
+          totalTokens: 42,
+          author: { agentId: 'ag_lead', name: 'lead', squadName: 'crew' },
+        }}
+        showFooterActions
+      />,
+    );
+    const line = container.querySelector('[data-squad-outcome="no_action"]');
+    expect(line?.querySelector('[data-squad-tag="crew"]')).not.toBeNull();
+    expect(line?.textContent).toBe('crewlead had nothing to do');
+  });
+
+  it('shows no blank bubble for an agent reply of only invisible characters', () => {
+    const container = render(
+      <AssistantMessage
+        content={' \u200B\u2060 '}
+        author={{ name: 'bob' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-8',
+          status: 'completed',
+          author: { agentId: 'ag_bob', name: 'bob' },
+        }}
+        showFooterActions
+      />,
+    );
+    expect(container.textContent).toContain('bob');
+    expect(container.textContent).not.toContain('\u200B');
+    expect(container.querySelector('[data-squad-outcome]')).toBeNull();
+    // No copy footer for a reply with nothing to copy.
+    expect(container.querySelector('button')).toBeNull();
+  });
+
+  it('shows no blank bubble for an agent reply of only bidi marks', () => {
+    const container = render(
+      <AssistantMessage
+        content={'‎⁦⁩'}
+        author={{ name: 'bob' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-9',
+          status: 'completed',
+          author: { agentId: 'ag_bob', name: 'bob' },
+        }}
+        showFooterActions
+      />,
+    );
+    expect(container.textContent).toContain('bob');
+    expect(container.textContent).not.toContain('‎');
+    expect(container.querySelector('button')).toBeNull();
+  });
+
+  it('never shows the dictionary key where the collaboration strings are absent', () => {
+    // The transcript build stubs the collaboration dictionary; zh-CN here
+    // still has it, so check the localized label instead.
+    const container = render(
+      <AssistantMessage
+        content=""
+        author={{ name: 'lead' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-6',
+          status: 'completed',
+          squadOutcome: 'no_action',
+        }}
+      />,
+      'zh-CN',
+    );
+    // No squad name on the record: the sentence alone, without a tag.
+    expect(container.textContent).toBe('lead 这次无需动作');
+    expect(container.querySelector('[data-squad-tag]')).toBeNull();
+    expect(container.textContent).not.toContain('collab.');
+  });
+});
+
+describe('AssistantMessage selection copy gate', () => {
+  it.each([
+    ['interactive', false, true],
+    ['interactive', true, false],
+    ['readonly', false, false],
+    ['document', false, false],
+  ] as const)(
+    'mode=%s streaming=%s opens=%s',
+    async (mode, streaming, opens) => {
+      const container = render(
+        <AssistantMessage
+          content="Select **words** here."
+          isStreaming={streaming}
+        />,
+        'en',
+        mode,
+      );
+      const text = container.querySelector('strong')!.firstChild!;
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      for (const type of ['pointerdown', 'pointerup']) {
+        if (type === 'pointerup') {
+          window.getSelection()!.removeAllRanges();
+          window.getSelection()!.addRange(range);
+        }
+        const event = new MouseEvent(type, { bubbles: true, button: 0 });
+        Object.defineProperty(event, 'pointerType', { value: 'mouse' });
+        await act(async () => text.parentElement!.dispatchEvent(event));
+      }
+      expect(!!document.querySelector('[data-slot="popover-content"]')).toBe(
+        opens,
+      );
+      window.getSelection()!.removeAllRanges();
+    },
+  );
+});
+
+describe('rendered code selection semantics', () => {
+  it('preserves real loose task states without transferring them to notes', () => {
+    const container = render(
+      <AssistantMessage
+        content={
+          '- [x] Done\n\n  Completed note.\n\n- [ ] Pending\n\n  Pending note.'
+        }
+      />,
+    );
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    const value = getSelectedReplyContent(container, range)!;
+    expect(value.markdown).toMatch(/-\s+\[x\][^\S\n]+Done/);
+    expect(value.markdown).toMatch(/-\s+\[ \][^\S\n]+Pending/);
+    const items = container.querySelectorAll('li.task-list-item');
+    expect(items).toHaveLength(2);
+    for (const item of items) {
+      const note = item.querySelectorAll('p')[1];
+      expect(note).toBeDefined();
+      range.selectNodeContents(note);
+      expect(getSelectedReplyContent(container, range)!.markdown).not.toMatch(
+        /\[[x ]\]/,
+      );
+    }
+  });
+  it('preserves the actual code language and omits its rendered header', async () => {
+    const container = render(
+      <AssistantMessage content={'```typescript\nconst answer = 42;\n```'} />,
+    );
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(container.querySelector('pre')).not.toBeNull(),
+      );
+    });
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    const value = getSelectedReplyContent(container, range)!;
+    expect(value.text).toBe('const answer = 42;');
+    expect(value.markdown).toBe('```typescript\nconst answer = 42;\n```');
+    expect(
+      container.querySelector(
+        '[data-selection-code-language="typescript"] pre',
+      ),
+    ).not.toBeNull();
+  });
+  it('omits the actual Mermaid loading placeholder from copied prose', () => {
+    vi.useFakeTimers();
+    const container = render(
+      <AssistantMessage
+        content={'Before\n\n```mermaid\ngraph TD; A-->B\n```\n\nAfter'}
+      />,
+    );
+    expect(container.textContent).toContain('Rendering diagram');
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    expect(getSelectedReplyContent(container, range)).toEqual({
+      text: 'Before\nAfter',
+      markdown: 'Before\n\nAfter',
+    });
   });
 });

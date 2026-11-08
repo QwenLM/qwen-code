@@ -284,6 +284,24 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result!.mapping.method).toBe('session/set_model');
   });
 
+  it.each([
+    { configId: 'workflow_mode', value: 'off' },
+    { configId: 'reasoning_effort', value: 'high', persist: false },
+  ])(
+    'maps config options without dropping server validation fields: %j',
+    (body) => {
+      const result = matchRoute('/session/owner%2FB/config-option', 'POST');
+      expect(result?.mapping.method).toBe('session/set_config_option');
+      expect(
+        result?.mapping.extractParams(
+          result.segments,
+          { ...body, sessionId: 'forged-owner' },
+          'POST',
+        ),
+      ).toEqual({ ...body, sessionId: 'owner/B' });
+    },
+  );
+
   // ---- Vendor session extensions (_qwen/ prefix) ----------------------
 
   it('PATCH /session/:id/metadata maps to _qwen/session/update_metadata', () => {
@@ -654,6 +672,15 @@ describe('acpRouteTable – matchRoute', () => {
       desiredState: 'trusted',
       reason: 'operator prompt',
     });
+  });
+
+  it('POST /workspace/trust/grant maps to _qwen/workspace/trust/grant', () => {
+    const result = matchRoute('/workspace/trust/grant', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/trust/grant');
+    expect(result!.mapping.extractParams(result!.segments, {}, 'POST')).toEqual(
+      {},
+    );
   });
 
   it('GET /workspace/permissions maps to _qwen/workspace/permissions', () => {

@@ -50,7 +50,7 @@ A `READY` row is only durable control-plane evidence. It does not prove that its
 
 Control operations are limited to the existing private Runtime kinds: `bind-history`, `checkpoint`, `history`, `manifest`, `begin-turn`, `prepare`, `confirmation`, `confirm`, and `preflight`. They require a process-local Session whose repository record is still `READY`.
 
-Release first rejects a Session with any unsettled execution. It persists `RELEASING`, calls the Runtime transport, and persists `RELEASED` only after positive release acknowledgement. An ambiguous or negative release remains `RELEASING`, so a caller can retry the idempotent Runtime release rather than reopening the Session. Once `RELEASED` is durable, a repeated release returns success without requiring the removed process-local route or calling the Runtime again.
+Release first rejects a Session with any unsettled execution. The rejection and the `RELEASING` transition commit in one transaction under the Session row lock that admission also takes, so two Broker processes sharing the database cannot interleave an admission between them. It persists `RELEASING`, calls the Runtime transport, and persists `RELEASED` only after positive release acknowledgement. An ambiguous or negative release remains `RELEASING`, so a caller can retry the idempotent Runtime release rather than reopening the Session. Once `RELEASED` is durable, a repeated release returns success without requiring the removed process-local route or calling the Runtime again.
 
 ## Tool execution lifecycle
 
@@ -80,7 +80,7 @@ G2 now adds automatic, paginated evidence reconciliation when a Broker acquires 
 
 The service uses process-local futures only to coalesce duplicate provisioning, Session acquisition, and dispatch work within one Broker instance. Repository versions and leases remain the authority for state mutation. `brokerOwnerId` must identify one live Broker process; operation and dispatch claims are renewed at one third of their configured duration while external work is active.
 
-Closing the service rejects new work, cancels its internal waiters, and stops its owned renewal scheduler. It does not assert that in-flight external work stopped; expired repository claims preserve the fail-closed takeover semantics.
+Closing the service rejects new work, cancels its internal waiters, and stops its owned schedulers — renewals run on a dedicated pool, so a stalled renewal no longer occupies the coordination thread, and coordination runs on a single thread. A stalled renewal still holds its claim's renewal monitor, and the fence and settlement paths take that monitor, so a long storage stall can still block coordination behind it. Closing does not assert that in-flight external work stopped; expired repository claims preserve the fail-closed takeover semantics.
 
 ## Errors and security
 
@@ -111,7 +111,7 @@ Runtime tokens stay inside `RuntimeLease`. The service passes a lease to the bin
 - An ambiguous physical dispatch is never converted into a replayable error result.
 - An `UNKNOWN` execution settles only on the original Runtime's own terminal evidence.
 - Persisted readiness is never treated as liveness after process restart.
-- Runtime Session release cannot race an unsettled Tool execution.
+- Runtime Session release cannot race an unsettled Tool execution, in one Broker process or across processes sharing the database.
 - No Spring, HTTP server, Hosted Harness, or concrete Runtime provider dependency is introduced.
 
 ## Follow-up work

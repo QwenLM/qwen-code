@@ -589,6 +589,128 @@ describe('isSessionRuntimeActive', () => {
     }
   });
 
+  /**
+   * Run the runtime-status pid probe against a fake `/proc/<pid>/stat`.
+   *
+   * A zombie cannot be produced for real inside a Node test process: libuv
+   * reaps its own children on SIGCHLD, so a spawned child that exits without
+   * being waited on goes `R` and then disappears (ENOENT) within
+   * milliseconds instead of parking in `Z`. `Z` is only observable through
+   * the `/proc` line the probe reads, so that line is served from a fake —
+   * the same technique as `withFakeProc` in `process-liveness.test.ts`. The
+   * platform is forced to Linux so the parser is exercised on every CI
+   * runner rather than only the Linux one.
+   *
+   * `state` is field 3 of `/proc/<pid>/stat`; `killImpl`, when given,
+   * replaces `process.kill` so the errno branches are reachable.
+   */
+  async function probeWithFakeProc(
+    pid: number,
+    state: string,
+    killImpl?: () => never,
+  ) {
+    const repoRoot = path.join(tmpDir, `repo-${state}-${pid}`);
+    await fs.mkdir(repoRoot, { recursive: true });
+
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      const statPath = `/proc/${pid}/stat`;
+      // Fields 4..22, so the state token sits at field 3 right after the
+      // parenthesised `comm`. The parser anchors on the last ')'.
+      // prettier-ignore
+      const fields = [
+        '1', '2', '3', '4', '-1', '4194304', '100', '0', '200',
+        '0', '10', '20', '30', '40', '20', '0', '1', '0', '1000',
+      ];
+      const statLine = `4242 (node) ${state} ${fields.join(' ')} 1000 2000 3000\n`;
+      const readFileSync = ((p: unknown, ...rest: unknown[]) =>
+        String(p) === statPath
+          ? statLine
+          : (actual.readFileSync as (a: unknown, ...r: unknown[]) => unknown)(
+              p,
+              ...rest,
+            )) as typeof actual.readFileSync;
+      return { ...actual, readFileSync };
+    });
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+    if (killImpl) {
+      vi.spyOn(process, 'kill').mockImplementation(killImpl);
+    }
+    onTestFinished(() => {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+      vi.restoreAllMocks();
+    });
+
+    // The service must come from the same fresh module graph as the mocked
+    // `node:fs`, and so must `Storage`: its runtime base dir is per-class
+    // static state that the statically imported copy does not share.
+    const { Storage: ScopedStorage } = await import('../config/storage.js');
+    const service = await import('./worktreeSessionService.js');
+    ScopedStorage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
+    onTestFinished(() => ScopedStorage.setRuntimeBaseDir(null));
+
+    await writeRuntimeStatus(
+      new ScopedStorage(repoRoot).getRuntimeStatusPath('owner-session'),
+      {
+        sessionId: 'owner-session',
+        workDir: repoRoot,
+        pid,
+      },
+    );
+
+    return {
+      liveness: () =>
+        service.getSessionRuntimeLiveness('owner-session', repoRoot),
+      isActive: () => service.isSessionRuntimeActive('owner-session', repoRoot),
+    };
+  }
+
+  it('reports a defunct (zombie) pid as inactive instead of active', async () => {
+    // `process.kill(pid, 0)` succeeds for a zombie — the pid still occupies a
+    // process-table slot — so the recorded pid has to be a live one for the
+    // probe to reach the state check at all. This is the shape reported in
+    // #14288: a 48-day-old `[node] <defunct>` child under a still-live parent
+    // read back as a live session.
+    const probe = await probeWithFakeProc(process.pid, 'Z');
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+    await expect(probe.isActive()).resolves.toBe(false);
+  });
+
+  it('still reports a running pid as active', async () => {
+    // Guards the harness itself: the same fake `/proc`, one field different.
+    const probe = await probeWithFakeProc(process.pid, 'S');
+
+    await expect(probe.liveness()).resolves.toBe('active');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
+  it('reports a defunct pid owned by another user as inactive', async () => {
+    // The kernel permission-checks signal 0 regardless of the target's state,
+    // so a cross-user zombie reaches the EPERM branch too.
+    const probe = await probeWithFakeProc(2147483647, 'Z', () => {
+      throw Object.assign(new Error('operation not permitted'), {
+        code: 'EPERM',
+      });
+    });
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+  });
+
+  it('keeps an unexpected errno unknown rather than reporting the session dead', async () => {
+    // `unknown` must not collapse into `dead`. That is the direction which
+    // declares a live session inactive, so the tri-state answer has to
+    // survive the zombie check.
+    const probe = await probeWithFakeProc(2147483647, 'S', () => {
+      throw Object.assign(new Error('input/output error'), { code: 'EIO' });
+    });
+
+    await expect(probe.liveness()).resolves.toBe('unknown');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
   it('does not trust repo-contained dead runtime status as proof of inactivity', async () => {
     const repoRoot = path.join(tmpDir, 'repo');
     const fakeRuntimeBase = path.join(repoRoot, 'src');

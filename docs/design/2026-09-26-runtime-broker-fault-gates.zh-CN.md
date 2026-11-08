@@ -2,7 +2,7 @@
 
 [English](2026-09-26-runtime-broker-fault-gates.md) | [简体中文](2026-09-26-runtime-broker-fault-gates.zh-CN.md)
 
-状态：以测试形式实现于 `packages/sdk-java/runtime-broker`；没有修改生产代码
+状态：以测试形式实现于 `packages/managed-agent-server`；没有修改生产代码
 
 相关：#12748（FG1–FG4）、#12380 的 Stage F，以及门禁所检验的设计：
 [进程收养](2026-09-23-managed-runtime-process-adoption.zh-CN.md)、
@@ -22,7 +22,7 @@ W0c 上下文安装也有同样的缺口。Broker 的 managed-context/1 链路�
 
 范围内：#12748 中针对工具链路的 FG1–FG4 门禁，以及针对 W0c 上下文安装的 FG5 门禁，运行在真实服务、真实打包的 worker、真实 HTTP、真实数据库和真实进程死亡之上。
 
-范围外：Hosted Harness 的会话与 SSE 门禁、输出捕获与投递门禁（等 O1b–O3 之后）、managed agent server 在 W0c-3 中的存储所有权行与授权复核（由 `WorkspaceRuntimeTest` 单元测试覆盖）、Kubernetes 供给，以及 Stage G 故障转移。`scripts/run-managed-agent-server-e2e.ts` 的 `--session-failover` 模式仍不进 CI；in-flight 与 continuation 模式在 `hosted-harness-mysql` 任务中运行（见[ Hosted Turn failover E2E](2026-09-30-hosted-turn-failover-e2e.zh-CN.md)）。
+范围外：Hosted Harness 的会话与 SSE 门禁、输出捕获与投递门禁（等 O1b–O3 之后）、managed agent server 在 W0c-3 中的存储所有权行与授权复核（由 `WorkspaceRuntimeTest` 单元测试覆盖）、Kubernetes 供给，以及 Stage G 故障转移。`scripts/run-managed-agent-server-e2e.ts` 的三个故障转移模式（`--session-failover`、`--inflight-failover`、`--continuation-failover`）以及 `--big-output` 长回答与冷恢复模式都在 `hosted-failover-e2e` 任务中运行（#13258 时最初加入 `hosted-harness-mysql`）；只有真实模型检查仍不进 CI（见[ Hosted Turn failover E2E](2026-09-30-hosted-turn-failover-e2e.zh-CN.md)）。
 
 ## 3. 设计
 
@@ -112,14 +112,14 @@ FG4 存储门禁还钉住：数据库恢复后，没有任何东西重试失败�
 
 ### 3.5 对开放问题的取舍
 
-1. **CI 位置。** 门禁运行在 `sdk-java.yml` 的 `Hosted no-tool processes / MySQL 8.4 / Java 21` 任务中（#12733）。这条 Java 21 线已经为 Hosted 进程门禁安装、构建并打包 CLI。在那些门禁之后新增一步，在 `packages/sdk-java/runtime-broker` 中以 `-Dqwen.cli.entry=$GITHUB_WORKSPACE/dist/cli.js` 运行 `mvn -Pfault-gates test`，上限 10 分钟。
+1. **CI 位置。** 门禁运行在 `sdk-java.yml` 的 `Hosted no-tool processes / MySQL 8.4 / Java 21` 任务中（#12733）。这条 Java 21 线已经为 Hosted 进程门禁安装、构建并打包 CLI。在那些门禁之后新增一步，在 `packages/managed-agent-server` 中以 `-Dqwen.cli.entry=$GITHUB_WORKSPACE/dist/cli.js` 运行 `mvn -Pfault-gates test`，上限 10 分钟。
 2. **数据库。** 使用 TCP server 之后的文件型 H2，所有 Broker 进程共用。门禁暂不在 MySQL 或 MariaDB 上运行；它们所在的线已经带有 MySQL 8.4 服务，这项后续工作因此很小。
 3. **测试台语言。** 围绕 Broker 服务用 Java 实现，让每个故障都有确定的注入点。TypeScript 故障转移脚本保持独立。
 4. **#12670。** 按 §3.4 钉住。
 
 ## 4. 验证
 
-在仓库根目录构建好打包产物（`npm run build && npm run bundle`）后，在 `packages/sdk-java/runtime-broker` 中运行：
+在仓库根目录构建好打包产物（`npm run build && npm run bundle`）后，在 `packages/managed-agent-server` 中运行：
 
 ```bash
 mvn -Pfault-gates test   # 全部门禁（目前 44 个），约 4 分钟

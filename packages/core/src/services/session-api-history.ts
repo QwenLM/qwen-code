@@ -5,33 +5,57 @@
  */
 
 import type { Content, Part } from '@google/genai';
+import { isTurnResultRecordPayload } from './chatRecordingService.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
   GoalTurnEndRecordPayload,
   SlashCommandRecordPayload,
+  TurnResultRecordPayload,
+  UserPromptRecordPayload,
 } from './chatRecordingService.js';
+import { restoreUserPromptSubmitContextReceipt } from '../hooks/user-prompt-submit-context.js';
+import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
+import {
+  appendAutoMemorySnapshot,
+  AUTO_MEMORY_SNAPSHOT_METADATA,
+  findLatestAutoMemorySnapshot,
+} from '../memory/request-context.js';
+import { markCompressedHistory } from '../core/environmentContext.js';
+import {
+  clearApiHistoryDirectoryContext,
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+  markApiHistoryDirectoryContext,
+} from '../utils/api-history-metadata.js';
 
-const API_HISTORY_PROMPT_ID = Symbol('apiHistoryPromptId');
+export {
+  cloneApiHistory,
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+} from '../utils/api-history-metadata.js';
 
-type IdentifiedContent = Content & {
-  [API_HISTORY_PROMPT_ID]?: string;
-};
+const LEGACY_RECORD_REWIND_PREFIX = 'legacy-record:';
 
-export function markApiHistoryPrompt(
-  content: Content,
-  promptId: unknown,
-): void {
-  if (typeof promptId === 'string' && promptId.length > 0) {
-    (content as IdentifiedContent)[API_HISTORY_PROMPT_ID] = promptId;
+/** Record-derived rewind keys are not file-checkpoint prompt IDs. */
+export function getRecordRewindId(record: ChatRecord): string | undefined {
+  if (typeof record.promptId === 'string' && record.promptId.length > 0) {
+    return record.promptId;
   }
+  return typeof record.uuid === 'string' && record.uuid.length > 0
+    ? `${LEGACY_RECORD_REWIND_PREFIX}${record.uuid}`
+    : undefined;
 }
 
-export function getApiHistoryPromptId(content: Content): string | undefined {
-  return (content as IdentifiedContent)[API_HISTORY_PROMPT_ID];
+/**
+ * A turn starts at its prompt entry; a tool-loop continuation carries the
+ * turn's id but no prompt of its own.
+ */
+function isPromptEntry(content: Content): boolean {
+  return !content.parts?.some((part) => part.functionResponse);
 }
 
-/** Returns the unique matching entry at or after `startIndex`, or -1. */
+/** Returns the unique matching prompt entry at or after `startIndex`, or -1. */
 export function findApiHistoryPromptIndex(
   history: readonly Content[],
   promptId: string,
@@ -39,11 +63,131 @@ export function findApiHistoryPromptIndex(
 ): number {
   let match = -1;
   for (let index = startIndex; index < history.length; index++) {
-    if (getApiHistoryPromptId(history[index]!) !== promptId) continue;
+    const content = history[index]!;
+    if (getApiHistoryPromptId(content) !== promptId) continue;
+    // A turn cancelled between tool-loop laps pushes its continuation into
+    // history stamped with the turn's own id, so two entries carry the mark.
+    // Only the prompt entry starts the turn; counting the continuation would
+    // turn every such cancellation into a permanent refusal.
+    if (!isPromptEntry(content)) continue;
     if (match !== -1) return -1;
     match = index;
   }
   return match;
+}
+
+export function getLastApiHistoryPromptId(
+  history: readonly Content[],
+  trailingSystemNotifications?: number,
+): string | undefined {
+  const prompt = history
+    .slice(0, history.length - (trailingSystemNotifications ?? 0))
+    .findLast((content) => {
+      const id = getApiHistoryPromptId(content);
+      // Callers use this as a transport turn id (Session retry/continue), so
+      // it must stay a real prompt id: a record-derived key would also be
+      // stamped on the continuation entry, and a duplicate resolves to -1.
+      return id !== undefined && !id.startsWith(LEGACY_RECORD_REWIND_PREFIX);
+    });
+  return prompt && getApiHistoryPromptId(prompt);
+}
+
+export function getTurnResultCancellation(
+  result: Pick<
+    TurnResultRecordPayload,
+    'promptId' | 'state' | 'cancelledAt' | 'cancelReason'
+  >,
+  owned = true,
+): { reason: 'user' | 'unknown'; promptId: string } | undefined {
+  return result.state === 'cancelled' &&
+    typeof result.cancelledAt === 'number' &&
+    Number.isFinite(result.cancelledAt)
+    ? {
+        reason: owned && result.cancelReason === 'user' ? 'user' : 'unknown',
+        promptId: result.promptId,
+      }
+    : undefined;
+}
+
+export function getLastApiPromptCancellation(
+  history: readonly Content[],
+  records: readonly ChatRecord[],
+  trailingSystemNotifications?: number,
+):
+  | { reason: 'user' | 'unknown'; promptId: string; confirmationId?: string }
+  | undefined {
+  const promptId = getLastApiHistoryPromptId(
+    history,
+    trailingSystemNotifications,
+  );
+  const isOwner = (record: ChatRecord) =>
+    (record.type === 'user' && record.subtype === undefined) ||
+    (record.type === 'system' && record.subtype === 'turn_attempt');
+  const isResult = (record: ChatRecord) =>
+    record.type === 'system' && record.subtype === 'turn_result';
+  const cancellation = (record: ChatRecord | undefined, owned: boolean) => {
+    if (!record || !isResult(record)) return undefined;
+    const result = record.systemPayload as TurnResultRecordPayload;
+    return getTurnResultCancellation(
+      {
+        ...result,
+        promptId:
+          typeof result?.promptId === 'string' && result.promptId.length > 0
+            ? result.promptId
+            : record.uuid,
+      },
+      owned && isTurnResultRecordPayload(result),
+    );
+  };
+  const latest = records.findLast(
+    (record) => isOwner(record) || isResult(record),
+  );
+  const owner =
+    promptId &&
+    records.findLast(
+      (record) => isOwner(record) && record.promptId === promptId,
+    );
+  if (!owner) return cancellation(latest, false);
+  const results = records
+    .slice(records.indexOf(owner) + 1)
+    .filter(
+      (record) =>
+        isResult(record) &&
+        (record.promptId === promptId ||
+          (record.promptId === undefined &&
+            owner.daemonPromptId !== undefined &&
+            (record.systemPayload as TurnResultRecordPayload)?.promptId ===
+              owner.daemonPromptId)),
+    );
+  const result = results.findLast((record) => cancellation(record, false));
+  if (!result)
+    return results.length > 0 ? undefined : cancellation(latest, false);
+  const uniqueOwner =
+    records.filter(
+      (record) =>
+        isOwner(record) && record.daemonPromptId === owner.daemonPromptId,
+    ).length === 1;
+  const owned =
+    results.length === 1 && (result.promptId === promptId || uniqueOwner);
+  const cancelled = cancellation(result, owned);
+  const payload = result.systemPayload;
+  if (
+    cancelled?.reason === 'unknown' &&
+    owned &&
+    isTurnResultRecordPayload(payload) &&
+    payload.cancelReason === undefined &&
+    payload.promptId === owner.daemonPromptId &&
+    !records
+      .slice(records.indexOf(result) + 1)
+      .some((record) => cancellation(record, false)) &&
+    uniqueOwner &&
+    typeof result.uuid === 'string' &&
+    result.uuid.length > 0 &&
+    records.filter((record) => record.uuid === result.uuid).length === 1
+  ) {
+    return { ...cancelled, confirmationId: result.uuid };
+  }
+  return cancelled;
 }
 
 export interface BuildApiHistoryOptions {
@@ -100,8 +244,20 @@ function appendApiHistoryRecord(
 
   const message = copyContentForApiHistory(record.message);
   if (record.type === 'user' && !record.subtype) {
-    markApiHistoryPrompt(message, record.promptId);
+    markApiHistoryPrompt(message, getRecordRewindId(record));
+    const payload = record.systemPayload as UserPromptRecordPayload | undefined;
+    // Only the injector records per-turn hookContext provenance, so a
+    // trailing tagged part matching it is injector-owned: restore the
+    // receipt the JSON transcript could not carry.
+    if (typeof payload?.hookContext === 'string' && payload.hookContext) {
+      restoreUserPromptSubmitContextReceipt(message, payload.hookContext);
+    }
   }
+  // Session multi-agent records (`agent_mention` / `agent_message`) need no
+  // branch: their `message` is the enveloped model text, pushed below as its
+  // own user entry. This is the resume half of the contract; the live half is
+  // `Session.pendingExternalAgentContext`, which only exists in memory, so
+  // the two never double up.
   if (record.subtype === 'mid_turn_user_message') {
     const previous = history.at(-1);
     if (
@@ -113,6 +269,7 @@ function appendApiHistoryRecord(
       )
     ) {
       previous.parts = [...(previous.parts ?? []), ...(message.parts ?? [])];
+      clearApiHistoryDirectoryContext(previous);
       return;
     }
   }
@@ -188,7 +345,30 @@ export class SessionApiHistoryAccumulator {
   private lastMaterialRecord?: ChatRecord;
 
   add(record: ChatRecord): void {
+    // Internal calls have no model-emitted function-call partner.
+    if (isInternalCodeModeToolResult(record)) {
+      return;
+    }
     if (record.type === 'system') {
+      if (record.subtype === 'memory_catalog_snapshot') {
+        const snapshot = record.message?.parts?.[0];
+        if (
+          snapshot?.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true &&
+          typeof snapshot.text === 'string'
+        ) {
+          if (
+            findLatestAutoMemorySnapshot(this.history)?.text === snapshot.text
+          ) {
+            return;
+          }
+          const length = this.history.length;
+          appendAutoMemorySnapshot(this.history, { ...snapshot });
+          if (this.history.length > length) {
+            this.systemNotificationFlags.push(false);
+          }
+        }
+        return;
+      }
       if (record.subtype === 'slash_command') {
         const payload = record.systemPayload as
           | SlashCommandRecordPayload
@@ -248,13 +428,22 @@ export class SessionApiHistoryAccumulator {
       if (!isApiHistoryCompressionCandidate(record)) return;
       const payload = record.systemPayload as ChatCompressionRecordPayload;
       this.compressionCandidate = payload.compressedHistory;
+      const directoryContextIndices = new Set(
+        Array.isArray(payload.directoryContextIndices)
+          ? payload.directoryContextIndices
+          : [],
+      );
       this.history = Array.isArray(payload.compressedHistory)
         ? payload.compressedHistory.map((content, index) => {
             const copy = copyContentForApiHistory(content);
             markApiHistoryPrompt(copy, payload.promptIds?.[index]);
+            if (directoryContextIndices.has(index)) {
+              markApiHistoryDirectoryContext(copy);
+            }
             return copy;
           })
         : [];
+      markCompressedHistory(this.history, payload.contextPrefixLength);
       // Compressed history is raw `Content[]` with no source record behind it,
       // so no entry can claim the authoritative notification stamp.
       this.systemNotificationFlags = this.history.map(() => false);

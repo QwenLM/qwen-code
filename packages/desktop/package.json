@@ -9,6 +9,7 @@
     "build": "npm run build:runtime && tauri build",
     "build:runtime": "node scripts/prepare-runtime.js",
     "smoke:runtime": "node scripts/smoke-runtime.js",
+    "smoke:linux-installers": "node scripts/smoke-linux-installers.js",
     "smoke:packaged": "node scripts/smoke-packaged.js",
     "test:release": "node scripts/test-release.js",
     "version": "node scripts/version.js",

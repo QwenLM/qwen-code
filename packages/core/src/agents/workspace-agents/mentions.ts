@@ -136,6 +136,26 @@ export function parseMentions(
 }
 
 /**
+ * `text` with `breaker` inserted after the `@` of every token
+ * {@link parseMentions} resolves against `agents`, so none of them addresses
+ * anyone any more. Every other `@word` (`@media`, `@scope/pkg`, a near-miss)
+ * is left exactly as written.
+ */
+export function neutralizeMentions(
+  text: string,
+  agents: readonly WorkspaceAgent[],
+  breaker: string,
+): string {
+  return text.replace(
+    MENTION_PATTERN,
+    (token: string, name: string, offset: number) =>
+      text[offset + token.length] !== '/' && agentForToken(agents, name)
+        ? `@${breaker}${token.slice(1)}`
+        : token,
+  );
+}
+
+/**
  * The exact token an agent should paste to address another agent. Handed to
  * the model in the thread prompt so it never has to guess the spelling.
  */

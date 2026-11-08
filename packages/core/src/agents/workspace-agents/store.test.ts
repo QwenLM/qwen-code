@@ -9,180 +9,58 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const atomicWriteFault = vi.hoisted(() => ({
-  filePath: undefined as string | undefined,
-  mode: undefined as 'corruptAfter' | 'throwBefore' | undefined,
-}));
-
-vi.mock('../../utils/atomicFileWrite.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../../utils/atomicFileWrite.js')>();
-  return {
-    ...actual,
-    atomicWriteJSON: async (
-      ...args: Parameters<typeof actual.atomicWriteJSON>
-    ) => {
-      if (
-        atomicWriteFault.filePath === args[0] &&
-        atomicWriteFault.mode === 'throwBefore'
-      ) {
-        atomicWriteFault.filePath = undefined;
-        atomicWriteFault.mode = undefined;
-        throw new Error('injected crash before atomic write');
-      }
-      await actual.atomicWriteJSON(...args);
-      if (
-        atomicWriteFault.filePath === args[0] &&
-        atomicWriteFault.mode === 'corruptAfter'
-      ) {
-        atomicWriteFault.filePath = undefined;
-        atomicWriteFault.mode = undefined;
-        const fileSystem = await import('node:fs/promises');
-        await fileSystem.writeFile(args[0], '{}');
-      }
-    },
-  };
-});
-
 import { Storage } from '../../config/storage.js';
 import { mockCompromisedLock } from '../../test-utils/mock-compromised-lock.js';
 import {
-  allocateRunSequence,
-  claimAgentHostSession,
-  releaseAgentHostSession,
   getAgentsFilePath,
-  getThreadPath,
   getWorkspaceFilePath,
   AgentSchemaVersionError,
-  listThreads,
   readWorkspaceAgents,
   readAgentWorkspace,
-  readThread,
-  reconcileThreadOutbox,
+  removeAgentHost,
   retireWorkspaceAgent,
   setWorkspaceAgentEnabled,
   updateWorkspaceAgent,
   issueAgentHostEnrollment,
   enrollAgentHost,
   heartbeatAgentHost,
+  normalizeHostProgramProbes,
+  readAgentHosts,
   isAgentAddressable,
   updateWorkspaceAgents,
   withAgentStoreTransaction,
-  writeThread,
 } from './store.js';
-import { postMessage, postMessageInTransaction } from './thread-actions.js';
-import { issueA2AGrant } from './a2a-grants.js';
-import { resolveThreadStatus } from './thread-status.js';
 import {
-  HUMAN_AUTHOR_ID,
+  AGENT_HOST_REPLACEMENT_REQUIRED,
   AGENTS_SCHEMA_VERSION,
-  DEFAULT_THREAD_TOKEN_BUDGET,
-  MAX_THREAD_RUNS,
+  hostAvailablePrograms,
+  hostOffersProgram,
   type WorkspaceAgent,
-  type Thread,
-  type ThreadEvent,
-  type ThreadRun,
 } from './types.js';
+
+const renameFailure = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      if (args[1] === renameFailure.path) {
+        throw new Error('binding write failed');
+      }
+      return actual.rename(...args);
+    },
+  };
+});
 
 const PROJECT_ROOT = '/agent-store-test-project';
 const ALICE: WorkspaceAgent = { id: 'ag_alice', name: 'alice', createdAt: 1 };
 const BOB: WorkspaceAgent = { id: 'ag_bob', name: 'bob', createdAt: 1 };
 
-function run(
-  queueSequence: number,
-  tokens: number,
-  overrides: Partial<ThreadRun> = {},
-): ThreadRun {
-  return {
-    id: `rn_${queueSequence}`,
-    agentId: ALICE.id,
-    status: 'completed',
-    triggerMessageIds: [],
-    acceptedMessageIds: [],
-    consumedMessageIds: [],
-    usageByRound: tokens ? [{ attempt: 1, round: 1, tokens }] : [],
-    queueSequence,
-    attempts: 1,
-    queuedAt: queueSequence,
-    endedAt: queueSequence + 1,
-    ...overrides,
-  };
-}
-
-function thread(overrides: Partial<Thread> = {}): Thread {
-  return {
-    schemaVersion: AGENTS_SCHEMA_VERSION,
-    id: 'th_root',
-    title: 'Root',
-    body: '',
-    status: 'open',
-    createdAt: 1,
-    createdBy: HUMAN_AUTHOR_ID,
-    rootThreadId: 'th_root',
-    messages: [],
-    runs: [],
-    nextMessageSequence: 1,
-    deliveryByAgent: {},
-    outbox: [],
-    autoTurnsUsed: 0,
-    tokensUsed: 0,
-    ...overrides,
-  };
-}
-
 async function writeRaw(filePath: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, JSON.stringify(value));
-}
-
-function v0Thread(): Record<string, unknown> {
-  return {
-    id: 'th_root',
-    title: 'Legacy',
-    body: '',
-    status: 'open',
-    createdAt: 1,
-    createdBy: HUMAN_AUTHOR_ID,
-    rootThreadId: 'th_root',
-    messages: [
-      {
-        id: 'ms_1',
-        from: HUMAN_AUTHOR_ID,
-        text: 'one',
-        mentions: [],
-        at: 2,
-      },
-      {
-        id: 'ms_2',
-        from: ALICE.id,
-        text: 'two',
-        mentions: [],
-        at: 3,
-      },
-    ],
-    runs: [
-      {
-        id: 'rn_1',
-        agentId: ALICE.id,
-        status: 'completed',
-        triggerMessageIds: ['ms_1'],
-        attempts: 1,
-        queuedAt: 4,
-        endedAt: 5,
-      },
-      {
-        id: 'rn_2',
-        agentId: ALICE.id,
-        status: 'failed',
-        triggerMessageIds: ['ms_2'],
-        attempts: 1,
-        queuedAt: 6,
-        endedAt: 7,
-      },
-    ],
-    autoTurnsUsed: 0,
-    tokensUsed: 9,
-  };
 }
 
 describe('agent versioned store', () => {
@@ -191,8 +69,6 @@ describe('agent versioned store', () => {
   beforeEach(async () => {
     runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-store-test-'));
     Storage.setRuntimeBaseDir(runtimeDir);
-    atomicWriteFault.filePath = undefined;
-    atomicWriteFault.mode = undefined;
   });
 
   afterEach(async () => {
@@ -205,7 +81,6 @@ describe('agent versioned store', () => {
     await writeRaw(getWorkspaceFilePath(PROJECT_ROOT), {
       schemaVersion: AGENTS_SCHEMA_VERSION + 1,
       workspaceId: 'ws_newer',
-      nextRunSequence: 1,
     });
 
     await expect(readAgentWorkspace(PROJECT_ROOT)).rejects.toBeInstanceOf(
@@ -216,7 +91,7 @@ describe('agent versioned store', () => {
   it('fails closed on a malformed current workspace schema', async () => {
     await writeRaw(getWorkspaceFilePath(PROJECT_ROOT), {
       schemaVersion: AGENTS_SCHEMA_VERSION,
-      workspaceId: 'ws_malformed',
+      workspaceId: 'not a valid id',
     });
 
     await expect(readAgentWorkspace(PROJECT_ROOT)).rejects.toThrow(
@@ -236,94 +111,23 @@ describe('agent versioned store', () => {
     );
   });
 
-  it('fails closed on a newer thread schema', async () => {
-    await writeThread(PROJECT_ROOT, thread());
-    await writeRaw(getThreadPath(PROJECT_ROOT, 'th_root'), {
-      ...thread(),
-      schemaVersion: AGENTS_SCHEMA_VERSION + 1,
-    });
-
-    await expect(readThread(PROJECT_ROOT, 'th_root')).rejects.toBeInstanceOf(
-      AgentSchemaVersionError,
-    );
-    await expect(listThreads(PROJECT_ROOT)).rejects.toBeInstanceOf(
-      AgentSchemaVersionError,
-    );
-  });
-
-  it('migrates v0 agents and thread records in order', async () => {
-    await writeRaw(getAgentsFilePath(PROJECT_ROOT), [
-      { ...ALICE, hostSessionId: 'host_legacy' },
-    ]);
-    await writeRaw(getThreadPath(PROJECT_ROOT, 'th_root'), v0Thread());
-
-    const migrated = await readThread(PROJECT_ROOT, 'th_root');
+  it('creates the workspace record and an empty roster on first use', async () => {
     const workspace = await readAgentWorkspace(PROJECT_ROOT);
-    const agentsFile = JSON.parse(
-      await fs.readFile(getAgentsFilePath(PROJECT_ROOT), 'utf8'),
-    ) as Record<string, unknown>;
-
-    expect(migrated?.messages.map((message) => message.sequence)).toEqual([
-      1, 2,
-    ]);
-    expect(migrated?.runs.map((entry) => entry.queueSequence)).toEqual([1, 2]);
-    expect(migrated?.runs[1]?.usageByRound).toEqual([
-      { attempt: 1, round: 0, tokens: 9 },
-    ]);
-    expect(migrated?.nextMessageSequence).toBe(3);
-    expect(workspace).toMatchObject({
+    expect(workspace).toEqual({
       schemaVersion: AGENTS_SCHEMA_VERSION,
-      hostSessionId: 'host_legacy',
-      nextRunSequence: 3,
+      workspaceId: expect.stringMatching(/^ws_/),
     });
-    expect(agentsFile).toEqual({
-      schemaVersion: AGENTS_SCHEMA_VERSION,
-      agents: [ALICE],
-    });
-    await expect(
-      fs.access(getAgentsFilePath(PROJECT_ROOT).replace(/\.json$/, '.v0.json')),
-    ).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(
-      fs.access(
-        getThreadPath(PROJECT_ROOT, 'th_root').replace(/\.json$/, '.v0.json'),
-      ),
-    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readWorkspaceAgents(PROJECT_ROOT)).resolves.toEqual([]);
   });
 
-  it('does not silently drop a malformed v0 agent', async () => {
-    const legacy = [ALICE, { id: 'ag_invalid' }];
-    await writeRaw(getAgentsFilePath(PROJECT_ROOT), legacy);
-
-    await expect(readWorkspaceAgents(PROJECT_ROOT)).rejects.toThrow(
-      /malformed v0 agent/,
-    );
-    expect(
-      JSON.parse(await fs.readFile(getAgentsFilePath(PROJECT_ROOT), 'utf8')),
-    ).toEqual(legacy);
-  });
-
-  it('keeps the v0 backup until the migrated file validates', async () => {
-    const agentsPath = getAgentsFilePath(PROJECT_ROOT);
-    const backup = agentsPath.replace(/\.json$/, '.v0.json');
-    await writeRaw(agentsPath, [ALICE]);
-    atomicWriteFault.filePath = agentsPath;
-    atomicWriteFault.mode = 'corruptAfter';
-
-    await expect(readWorkspaceAgents(PROJECT_ROOT)).rejects.toThrow(
-      /failed validation/,
-    );
-    await expect(fs.access(backup)).resolves.toBeUndefined();
-    expect(JSON.parse(await fs.readFile(backup, 'utf8'))).toEqual([ALICE]);
-
-    await expect(readWorkspaceAgents(PROJECT_ROOT)).resolves.toEqual([ALICE]);
-    await expect(fs.access(backup)).rejects.toMatchObject({ code: 'ENOENT' });
-  });
-
-  it('reads a hand-written complete v1 fixture', async () => {
+  it('reads a workspace record written by the thread-era store', async () => {
+    // Those records also carried a run counter and a host-session claim; both
+    // are ignored now, and the grants beside them still load.
     await writeRaw(getWorkspaceFilePath(PROJECT_ROOT), {
       schemaVersion: AGENTS_SCHEMA_VERSION,
-      workspaceId: 'ws_fixture',
-      nextRunSequence: 2,
+      workspaceId: 'ws_legacy',
+      nextRunSequence: 7,
+      hostSessionId: 'session-1',
     });
     await writeRaw(getAgentsFilePath(PROJECT_ROOT), {
       schemaVersion: AGENTS_SCHEMA_VERSION,
@@ -331,47 +135,25 @@ describe('agent versioned store', () => {
         { ...ALICE, description: 'Reviews builds', maxConcurrentRuns: 2 },
       ],
     });
-    await writeRaw(
-      getThreadPath(PROJECT_ROOT, 'th_root'),
-      thread({ runs: [run(1, 3)] }),
-    );
 
+    await expect(readAgentWorkspace(PROJECT_ROOT)).resolves.toMatchObject({
+      workspaceId: 'ws_legacy',
+    });
     await expect(readWorkspaceAgents(PROJECT_ROOT)).resolves.toMatchObject([
       { id: ALICE.id, description: 'Reviews builds', maxConcurrentRuns: 2 },
     ]);
-    await expect(readThread(PROJECT_ROOT, 'th_root')).resolves.toMatchObject({
-      schemaVersion: AGENTS_SCHEMA_VERSION,
-      tokensUsed: 0,
-      runs: [{ usageByRound: [{ attempt: 1, round: 1, tokens: 3 }] }],
-    });
   });
 
-  it('reads the thread directory once per transaction and keeps it current', async () => {
-    await writeThread(PROJECT_ROOT, thread());
-    await withAgentStoreTransaction(PROJECT_ROOT, async (transaction) => {
-      const first = await transaction.listThreads();
-      expect(first.threads.map((entry) => entry.title)).toEqual(['Root']);
+  it('refuses a pre-release (v0) roster instead of guessing at it', async () => {
+    await writeRaw(getAgentsFilePath(PROJECT_ROOT), [ALICE]);
 
-      // A change on disk mid-transaction is not re-read: nothing else may
-      // write while the lock is held, so the listing is taken once.
-      await writeRaw(getThreadPath(PROJECT_ROOT, 'th_root'), {
-        ...thread(),
-        title: 'Changed outside',
-      });
-      // An in-place edit that is never written does not leak into the cache.
-      first.threads[0]!.title = 'Edited, not written';
-      const second = await transaction.listThreads();
-      expect(second.threads.map((entry) => entry.title)).toEqual(['Root']);
-
-      // The transaction's own write is what the next read sees.
-      const [root] = second.threads;
-      await transaction.writeThread({ ...root!, title: 'Written' });
-      const third = await transaction.listThreads();
-      expect(third.threads.map((entry) => entry.title)).toEqual(['Written']);
-      await expect(transaction.readThread('th_root')).resolves.toMatchObject({
-        title: 'Written',
-      });
-    });
+    await expect(readWorkspaceAgents(PROJECT_ROOT)).rejects.toBeInstanceOf(
+      AgentSchemaVersionError,
+    );
+    // Left as it was: it is the only copy of that roster.
+    expect(
+      JSON.parse(await fs.readFile(getAgentsFilePath(PROJECT_ROOT), 'utf8')),
+    ).toEqual([ALICE]);
   });
 
   it('rejects nested workspace transactions instead of deadlocking', async () => {
@@ -385,233 +167,16 @@ describe('agent versioned store', () => {
   it('keeps a transaction result when its workspace lock is compromised', async () => {
     const { lockSpy, getOnCompromised } = mockCompromisedLock();
     try {
-      await expect(allocateRunSequence(PROJECT_ROOT)).resolves.toBe(1);
+      await expect(
+        updateWorkspaceAgents(PROJECT_ROOT, () => [ALICE]),
+      ).resolves.toEqual([ALICE]);
       expect(getOnCompromised()).toBeTypeOf('function');
     } finally {
       lockSpy.mockRestore();
     }
-    await expect(allocateRunSequence(PROJECT_ROOT)).resolves.toBe(2);
+    await expect(readWorkspaceAgents(PROJECT_ROOT)).resolves.toEqual([ALICE]);
   });
 
-  it('rejects a thread whose progress snapshot is malformed', async () => {
-    await writeThread(
-      PROJECT_ROOT,
-      thread({
-        runs: [
-          run(1, 0, {
-            progress: {
-              attempt: 1,
-              sequence: 2,
-              receivedAt: 3,
-              activityAt: 3,
-              stage: 'tool',
-              detail: '',
-              outputText: 'done',
-              steps: [{ id: 'st_1', title: 'Read', status: 'done' }],
-            },
-          }),
-        ],
-      }),
-    );
-    await expect(readThread(PROJECT_ROOT, 'th_root')).resolves.toMatchObject({
-      runs: [{ progress: { outputText: 'done' } }],
-    });
-
-    await writeRaw(
-      getThreadPath(PROJECT_ROOT, 'th_root'),
-      thread({
-        runs: [{ ...run(1, 0), progress: 'x' } as unknown as ThreadRun],
-      }),
-    );
-    await expect(readThread(PROJECT_ROOT, 'th_root')).rejects.toThrow(
-      /Malformed/,
-    );
-  });
-
-  it('persists a run counter allocation before any thread write', async () => {
-    await expect(allocateRunSequence(PROJECT_ROOT)).resolves.toBe(1);
-    await expect(allocateRunSequence(PROJECT_ROOT)).resolves.toBe(2);
-    await expect(readAgentWorkspace(PROJECT_ROOT)).resolves.toMatchObject({
-      nextRunSequence: 3,
-    });
-  });
-
-  it('leaves a sequence gap when a thread write crashes after allocation', async () => {
-    await writeThread(PROJECT_ROOT, thread({ assigneeAgentId: ALICE.id }));
-    await writeThread(
-      PROJECT_ROOT,
-      thread({
-        id: 'th_other',
-        rootThreadId: 'th_other',
-        assigneeAgentId: ALICE.id,
-      }),
-    );
-    atomicWriteFault.filePath = getThreadPath(PROJECT_ROOT, 'th_root');
-    atomicWriteFault.mode = 'throwBefore';
-
-    await expect(
-      postMessage(
-        PROJECT_ROOT,
-        'th_root',
-        { from: HUMAN_AUTHOR_ID, text: 'first' },
-        { agents: [ALICE], now: 2 },
-      ),
-    ).rejects.toThrow(/injected crash/);
-
-    const second = await postMessage(
-      PROJECT_ROOT,
-      'th_other',
-      { from: HUMAN_AUTHOR_ID, text: 'second' },
-      { agents: [ALICE], now: 3 },
-    );
-    expect(second.dispatched[0]?.queueSequence).toBe(2);
-    await expect(readAgentWorkspace(PROJECT_ROOT)).resolves.toMatchObject({
-      nextRunSequence: 3,
-    });
-  });
-
-  it('replays an outbox apply exactly once at the target', async () => {
-    await writeThread(PROJECT_ROOT, thread({ assigneeAgentId: BOB.id }));
-    const event: ThreadEvent = {
-      id: 'ev_report',
-      kind: 'parent_report',
-      payload: { targetThreadId: 'th_root' },
-      status: 'pending',
-      attempts: 0,
-      createdAt: 3,
-    };
-    await writeThread(
-      PROJECT_ROOT,
-      thread({
-        id: 'th_child',
-        title: 'Child',
-        rootThreadId: 'th_root',
-        parentThreadId: 'th_root',
-        outbox: [event],
-      }),
-    );
-
-    await expect(
-      reconcileThreadOutbox(
-        PROJECT_ROOT,
-        'th_child',
-        async (transaction, pending) => {
-          await postMessageInTransaction(
-            transaction,
-            'th_root',
-            {
-              from: ALICE.id,
-              text: 'child complete',
-              originEventId: pending.id,
-            },
-            { agents: [ALICE, BOB], now: 4 },
-          );
-          throw new Error('crash after target apply');
-        },
-      ),
-    ).rejects.toThrow(/crash after target apply/);
-
-    await reconcileThreadOutbox(
-      PROJECT_ROOT,
-      'th_child',
-      async (transaction, pending) => {
-        await postMessageInTransaction(
-          transaction,
-          'th_root',
-          {
-            from: ALICE.id,
-            text: 'child complete',
-            originEventId: pending.id,
-          },
-          { agents: [ALICE, BOB], now: 5 },
-        );
-      },
-    );
-
-    const source = await readThread(PROJECT_ROOT, 'th_child');
-    const target = await readThread(PROJECT_ROOT, 'th_root');
-    expect(source?.outbox).toContainEqual({
-      ...event,
-      status: 'acknowledged',
-      attempts: 2,
-    });
-    expect(
-      target?.messages.filter((message) => message.originEventId === event.id),
-    ).toHaveLength(1);
-    expect(target?.runs).toHaveLength(1);
-  });
-
-  it('gates a depth-3 tree on run usage instead of a stale root cache', async () => {
-    // Each thread is under the tree budget alone; only their sum is over it.
-    await writeThread(PROJECT_ROOT, thread({ runs: [run(1, 400_000)] }));
-    await writeThread(
-      PROJECT_ROOT,
-      thread({
-        id: 'th_child',
-        rootThreadId: 'th_root',
-        parentThreadId: 'th_root',
-        runs: [run(2, 350_000, { id: 'rn_2' })],
-      }),
-    );
-    await writeThread(
-      PROJECT_ROOT,
-      thread({
-        id: 'th_grandchild',
-        rootThreadId: 'th_root',
-        parentThreadId: 'th_child',
-        assigneeAgentId: ALICE.id,
-        runs: [run(3, 300_000, { id: 'rn_3' })],
-      }),
-    );
-    const rootPath = getThreadPath(PROJECT_ROOT, 'th_root');
-    const root = JSON.parse(await fs.readFile(rootPath, 'utf8')) as Thread;
-    await writeRaw(rootPath, { ...root, tokensUsed: 0 });
-
-    // An agent's post is held by the cap; a person's post still gets through.
-    const fromAgent = await postMessage(
-      PROJECT_ROOT,
-      'th_grandchild',
-      { from: BOB.id, text: 'continue' },
-      { agents: [ALICE, BOB] },
-    );
-    expect(fromAgent.outcomes[0]?.decision).toEqual({
-      kind: 'skip',
-      reason: 'token_budget_exhausted',
-    });
-    expect(fromAgent.dispatched).toEqual([]);
-
-    const fromPerson = await postMessage(
-      PROJECT_ROOT,
-      'th_grandchild',
-      { from: HUMAN_AUTHOR_ID, text: 'continue' },
-      { agents: [ALICE, BOB] },
-    );
-    expect(fromPerson.outcomes[0]?.decision).toEqual({ kind: 'dispatch' });
-  });
-
-  it("charges only a thread's own tree against the token budget", async () => {
-    // Another tree far over the budget must not hold this one's agents.
-    await writeThread(
-      PROJECT_ROOT,
-      thread({
-        id: 'th_other',
-        rootThreadId: 'th_other',
-        runs: [run(1, DEFAULT_THREAD_TOKEN_BUDGET + 1)],
-      }),
-    );
-    await writeThread(
-      PROJECT_ROOT,
-      thread({ assigneeAgentId: ALICE.id, runs: [run(2, 10, { id: 'rn_2' })] }),
-    );
-
-    const fromAgent = await postMessage(
-      PROJECT_ROOT,
-      'th_root',
-      { from: BOB.id, text: 'continue' },
-      { agents: [ALICE, BOB] },
-    );
-    expect(fromAgent.outcomes[0]?.decision).toEqual({ kind: 'dispatch' });
-  });
   it('consumes a fresh enrollment token without replacing a valid host', async () => {
     const first = await issueAgentHostEnrollment(PROJECT_ROOT);
     const enrolled = await enrollAgentHost(PROJECT_ROOT, {
@@ -637,6 +202,60 @@ describe('agent versioned store', () => {
         providers: ['Qwen Code ACP'],
       }),
     ).rejects.toThrow('Invalid or expired Agent Host enrollment token.');
+  });
+
+  it('stores a v2 Host program probe and forgets it when the Host drops back to v1', async () => {
+    const first = await issueAgentHostEnrollment(PROJECT_ROOT);
+    const enrolled = await enrollAgentHost(PROJECT_ROOT, {
+      token: first.token,
+      name: 'mac',
+      workspaceCwd: '/worker',
+      providers: ['qwen'],
+    });
+    const programs = [
+      { program: 'qwen' as const, available: true },
+      { program: 'claude' as const, available: true, version: '2.1.0' },
+      { program: 'codex' as const, available: false, reason: 'missing' },
+    ];
+
+    const host = await heartbeatAgentHost(
+      PROJECT_ROOT,
+      enrolled.host.id,
+      enrolled.secret,
+      { workspaceCwd: '/worker', providers: [], programs, protocol: 2 },
+    );
+    expect(host).toMatchObject({ programs, protocol: 2, providers: [] });
+    expect(hostAvailablePrograms(host!)).toEqual(['qwen', 'claude']);
+    expect((await readAgentHosts(PROJECT_ROOT))[0]).toMatchObject({
+      programs,
+      protocol: 2,
+    });
+
+    const v1 = await heartbeatAgentHost(
+      PROJECT_ROOT,
+      enrolled.host.id,
+      enrolled.secret,
+      { workspaceCwd: '/worker', providers: ['Qwen Code ACP'] },
+    );
+    expect(v1?.programs).toBeUndefined();
+    expect(v1?.protocol).toBeUndefined();
+    expect(hostOffersProgram(v1!, 'qwen')).toBe(true);
+    expect(hostOffersProgram(v1!, 'claude')).toBe(false);
+  });
+
+  it('normalizes a Host program probe and rejects unknown programs', () => {
+    expect(
+      normalizeHostProgramProbes([
+        { program: 'claude', available: false },
+        { program: 'claude', available: true, version: 'v'.repeat(500) },
+      ]),
+    ).toEqual([
+      { program: 'claude', available: true, version: 'v'.repeat(200) },
+    ]);
+    expect(
+      normalizeHostProgramProbes([{ program: 'vim', available: true }]),
+    ).toBeUndefined();
+    expect(normalizeHostProgramProbes('qwen')).toBeUndefined();
   });
 
   it('keeps a fresh enrollment token when the saved credential is invalid', async () => {
@@ -667,6 +286,192 @@ describe('agent versioned store', () => {
   });
 });
 
+describe('removing and replacing an Agent Host', () => {
+  let runtimeDir: string;
+
+  beforeEach(async () => {
+    runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-host-test-'));
+    Storage.setRuntimeBaseDir(runtimeDir);
+  });
+
+  afterEach(async () => {
+    Storage.setRuntimeBaseDir(null);
+    await fs.rm(runtimeDir, { recursive: true, force: true });
+  });
+
+  const enroll = async (name: string, supersedesHostId?: string) => {
+    const { token } = await issueAgentHostEnrollment(
+      PROJECT_ROOT,
+      supersedesHostId,
+    );
+    return enrollAgentHost(PROJECT_ROOT, {
+      token,
+      name,
+      workspaceCwd: '/worker',
+      providers: ['Qwen Code ACP'],
+    });
+  };
+
+  it('unbinds agents and makes an agent whose only Host it was local', async () => {
+    const a = await enroll('a');
+    const b = await enroll('b');
+    await updateWorkspaceAgents(PROJECT_ROOT, () => [
+      { ...ALICE, execution: { mode: 'managed-host', hostIds: [a.host.id] } },
+      {
+        ...BOB,
+        execution: { mode: 'managed-host', hostIds: [a.host.id, b.host.id] },
+      },
+    ]);
+
+    await expect(removeAgentHost(PROJECT_ROOT, a.host.id)).resolves.toEqual({
+      removed: true,
+      agentsMadeLocal: [ALICE.id],
+    });
+    const roster = await readWorkspaceAgents(PROJECT_ROOT);
+    expect(roster.find((agent) => agent.id === ALICE.id)?.execution).toEqual({
+      mode: 'local',
+    });
+    expect(roster.find((agent) => agent.id === BOB.id)?.execution).toEqual({
+      mode: 'managed-host',
+      hostIds: [b.host.id],
+    });
+    expect((await readAgentHosts(PROJECT_ROOT)).map((host) => host.id)).toEqual(
+      [b.host.id],
+    );
+  });
+
+  it('reports an unknown Host rather than touching the roster', async () => {
+    await updateWorkspaceAgents(PROJECT_ROOT, () => [ALICE]);
+    await expect(removeAgentHost(PROJECT_ROOT, 'host_nobody')).resolves.toEqual(
+      { removed: false },
+    );
+    expect(await readWorkspaceAgents(PROJECT_ROOT)).toEqual([ALICE]);
+  });
+
+  it('moves bound agents onto the replacement Host', async () => {
+    const old = await enroll('old');
+    const sibling = await enroll('sibling');
+    await updateWorkspaceAgents(PROJECT_ROOT, () => [
+      {
+        ...ALICE,
+        execution: {
+          mode: 'managed-host',
+          hostIds: [old.host.id, sibling.host.id],
+        },
+      },
+    ]);
+
+    const replacement = await enroll('new', old.host.id);
+
+    // Only the replaced Host's binding moves; the agent keeps its others.
+    const [alice] = await readWorkspaceAgents(PROJECT_ROOT);
+    expect(alice.execution).toEqual({
+      mode: 'managed-host',
+      hostIds: [replacement.host.id, sibling.host.id],
+    });
+    expect((await readAgentHosts(PROJECT_ROOT)).map((host) => host.id)).toEqual(
+      [sibling.host.id, replacement.host.id],
+    );
+  });
+
+  it('keeps an interrupted replacement staged until it is retried', async () => {
+    const old = await enroll('old');
+    await updateWorkspaceAgents(PROJECT_ROOT, () => [
+      { ...ALICE, execution: { mode: 'managed-host', hostIds: [old.host.id] } },
+    ]);
+    const { token } = await issueAgentHostEnrollment(PROJECT_ROOT, old.host.id);
+    const input = {
+      token,
+      name: 'new',
+      workspaceCwd: '/worker',
+      providers: ['Qwen Code ACP'],
+    };
+    // The new identity is saved, then moving the bindings fails.
+    renameFailure.path = getAgentsFilePath(PROJECT_ROOT);
+    try {
+      await expect(enrollAgentHost(PROJECT_ROOT, input)).rejects.toThrow(
+        'binding write failed',
+      );
+    } finally {
+      renameFailure.path = undefined;
+    }
+    const staged = (await readAgentHosts(PROJECT_ROOT)).find(
+      (host) => host.id !== old.host.id,
+    )!;
+
+    // Neither a fresh enrollment nor removing either side may drop it.
+    await expect(issueAgentHostEnrollment(PROJECT_ROOT)).rejects.toThrow(
+      'Retry the pending Agent Host replacement',
+    );
+    await expect(removeAgentHost(PROJECT_ROOT, old.host.id)).rejects.toThrow(
+      'Retry the pending Agent Host replacement',
+    );
+    await expect(removeAgentHost(PROJECT_ROOT, staged.id)).rejects.toThrow(
+      'Retry the pending Agent Host replacement',
+    );
+
+    // The retry finishes it under the staged identity.
+    const refreshed = await issueAgentHostEnrollment(PROJECT_ROOT, old.host.id);
+    expect(refreshed.replacementHostId).toBe(staged.id);
+    const replacement = await enrollAgentHost(PROJECT_ROOT, {
+      ...input,
+      token: refreshed.token,
+    });
+    expect(replacement.host.id).toBe(staged.id);
+    expect((await readAgentHosts(PROJECT_ROOT)).map((host) => host.id)).toEqual(
+      [staged.id],
+    );
+    expect((await readWorkspaceAgents(PROJECT_ROOT))[0]?.execution).toEqual({
+      mode: 'managed-host',
+      hostIds: [staged.id],
+    });
+  });
+
+  it('refuses a heartbeat carrying a superseding token without consuming it', async () => {
+    const old = await enroll('old');
+    const { token } = await issueAgentHostEnrollment(PROJECT_ROOT, old.host.id);
+
+    await expect(
+      heartbeatAgentHost(PROJECT_ROOT, old.host.id, old.secret, {
+        workspaceCwd: '/worker',
+        providers: ['Qwen Code ACP'],
+        enrollmentToken: token,
+      }),
+    ).rejects.toThrow(AGENT_HOST_REPLACEMENT_REQUIRED);
+
+    // Unlike a fresh token (see 'consumes a fresh enrollment token without
+    // replacing a valid host'), a superseding token survives the refused
+    // heartbeat and still enrolls the replacement.
+    const replacement = await enrollAgentHost(PROJECT_ROOT, {
+      token,
+      name: 'new',
+      workspaceCwd: '/worker',
+      providers: ['Qwen Code ACP'],
+    });
+    expect(replacement.host.id).not.toBe(old.host.id);
+    expect((await readAgentHosts(PROJECT_ROOT)).map((host) => host.id)).toEqual(
+      [replacement.host.id],
+    );
+  });
+
+  it('rejects a superseding enrollment once the replaced Host is gone', async () => {
+    const old = await enroll('old');
+    const { token } = await issueAgentHostEnrollment(PROJECT_ROOT, old.host.id);
+
+    await expect(
+      removeAgentHost(PROJECT_ROOT, old.host.id),
+    ).resolves.toMatchObject({ removed: true });
+    await expect(
+      enrollAgentHost(PROJECT_ROOT, {
+        token,
+        name: 'new',
+        workspaceCwd: '/worker',
+        providers: ['Qwen Code ACP'],
+      }),
+    ).rejects.toThrow('Agent Host to replace not found.');
+  });
+});
+
 describe('retiring an agent', () => {
   let runtimeDir: string;
 
@@ -684,9 +489,9 @@ describe('retiring an agent', () => {
     updateWorkspaceAgents(PROJECT_ROOT, () => agents);
 
   it('keeps the entry so every post it made still names its author', async () => {
-    // The whole point: a thread is read long after an agent stops working,
-    // and removing the row would turn its side of the conversation into an
-    // author nobody can look up.
+    // The whole point: a chat session is read long after an agent stops
+    // working, and removing the row would turn its side of the conversation
+    // into an author nobody can look up.
     await seed([ALICE, BOB]);
 
     await expect(retireWorkspaceAgent(PROJECT_ROOT, ALICE.id)).resolves.toBe(
@@ -723,34 +528,6 @@ describe('retiring an agent', () => {
     expect((await readWorkspaceAgents(PROJECT_ROOT))[0].retiredAt).toBe(first);
   });
 
-  it('refuses while a run of its own is still live', async () => {
-    // An agent cannot be retired out from under a turn in flight.
-    await seed([ALICE]);
-    await writeThread(
-      PROJECT_ROOT,
-      thread({ runs: [run(1, 0, { status: 'running' })] }),
-    );
-
-    await expect(retireWorkspaceAgent(PROJECT_ROOT, ALICE.id)).resolves.toBe(
-      'has_live_work',
-    );
-    expect(
-      (await readWorkspaceAgents(PROJECT_ROOT))[0].retiredAt,
-    ).toBeUndefined();
-  });
-
-  it("ignores another agent's live run", async () => {
-    await seed([ALICE, BOB]);
-    await writeThread(
-      PROJECT_ROOT,
-      thread({ runs: [run(1, 0, { status: 'running' })] }),
-    );
-
-    await expect(retireWorkspaceAgent(PROJECT_ROOT, BOB.id)).resolves.toBe(
-      'updated',
-    );
-  });
-
   it('refuses to enable a retired identity instead of reporting success', async () => {
     // Enabling one would change nothing a caller can observe, since
     // `isAgentAddressable` still refuses it. Saying so beats a hollow 200.
@@ -774,36 +551,6 @@ describe('retiring an agent', () => {
     ).resolves.toBe('updated');
     const [alice] = await readWorkspaceAgents(PROJECT_ROOT);
     expect(isAgentAddressable(alice)).toBe(true);
-  });
-
-  it('leaves every roster field unchanged when a combined placement update is refused', async () => {
-    await seed([ALICE]);
-    await writeThread(
-      PROJECT_ROOT,
-      thread({ runs: [run(1, 0, { status: 'running' })] }),
-    );
-    await expect(
-      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
-        applyConfig: (agent) => ({ ...agent, description: 'changed' }),
-        execution: { mode: 'local' },
-        enabled: false,
-      }),
-    ).resolves.toBe('has_live_work');
-    expect(await readWorkspaceAgents(PROJECT_ROOT)).toEqual([ALICE]);
-  });
-
-  it('does not apply config when disabling is refused by unreadable threads', async () => {
-    await seed([ALICE]);
-    await writeRaw(getThreadPath(PROJECT_ROOT, 'th_broken'), {
-      schemaVersion: AGENTS_SCHEMA_VERSION,
-    });
-    await expect(
-      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
-        applyConfig: (agent) => ({ ...agent, description: 'changed' }),
-        enabled: false,
-      }),
-    ).rejects.toThrow('thread records are unreadable');
-    expect(await readWorkspaceAgents(PROJECT_ROOT)).toEqual([ALICE]);
   });
 
   it('checks concurrent persona and placement patches against the locked roster', async () => {
@@ -837,173 +584,6 @@ describe('retiring an agent', () => {
     ).toBe(false);
   });
 
-  it('combines a config change with disable and settles queued work', async () => {
-    await seed([ALICE]);
-    await writeThread(
-      PROJECT_ROOT,
-      thread({ runs: [run(1, 0, { status: 'queued', endedAt: undefined })] }),
-    );
-    await expect(
-      updateWorkspaceAgent(PROJECT_ROOT, ALICE.id, {
-        applyConfig: (agent) => ({ ...agent, description: 'paused' }),
-        enabled: false,
-      }),
-    ).resolves.toBe('updated');
-    expect(await readWorkspaceAgents(PROJECT_ROOT)).toEqual([
-      { ...ALICE, description: 'paused', enabled: false },
-    ]);
-    expect((await readThread(PROJECT_ROOT, 'th_root'))?.runs[0]?.status).toBe(
-      'cancelled',
-    );
-  });
-
-  it('cancels queued runs on disable so they cannot wedge their thread', async () => {
-    // A disabled agent can never start a queued run, but `queued` counts as
-    // live for thread status and retirement — a leftover queued run pinned
-    // the thread in `in_progress` and blocked retiring the agent.
-    await seed([ALICE]);
-    await writeThread(
-      PROJECT_ROOT,
-      thread({ runs: [run(1, 0, { status: 'queued', endedAt: undefined })] }),
-    );
-
-    await expect(
-      setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false),
-    ).resolves.toBe('updated');
-
-    const stored = await readThread(PROJECT_ROOT, 'th_root');
-    expect(stored?.runs[0]?.status).toBe('cancelled');
-    expect(stored?.runs[0]?.endedAt).toEqual(expect.any(Number));
-    expect(stored?.status).toBe('blocked');
-    // With the dead run settled the agent holds no live work, so retiring
-    // it — previously refused — now succeeds.
-    await expect(retireWorkspaceAgent(PROJECT_ROOT, ALICE.id)).resolves.toBe(
-      'updated',
-    );
-  });
-
-  it('finishes disabling after the roster committed but thread cleanup failed', async () => {
-    await seed([ALICE]);
-    await writeThread(
-      PROJECT_ROOT,
-      thread({ runs: [run(1, 0, { status: 'queued', endedAt: undefined })] }),
-    );
-    atomicWriteFault.filePath = getThreadPath(PROJECT_ROOT, 'th_root');
-    atomicWriteFault.mode = 'throwBefore';
-    await expect(
-      setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false),
-    ).rejects.toThrow('injected crash');
-    expect((await readWorkspaceAgents(PROJECT_ROOT))[0].enabled).toBe(false);
-    expect((await readThread(PROJECT_ROOT, 'th_root'))?.runs[0].status).toBe(
-      'queued',
-    );
-
-    await setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false);
-    const stored = await readThread(PROJECT_ROOT, 'th_root');
-    expect(stored?.runs[0].status).toBe('cancelled');
-    expect(stored?.status).toBe('blocked');
-    await setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false);
-    expect(await readThread(PROJECT_ROOT, 'th_root')).toEqual(stored);
-  });
-
-  it('refuses disabling before writing the roster when a thread is unreadable', async () => {
-    await seed([ALICE]);
-    // Versioned but unparseable is what "unreadable" means here. A record with
-    // no schema version at all is a schema failure, which listThreads rethrows
-    // rather than deferring — that path is covered by the version tests above.
-    await writeRaw(getThreadPath(PROJECT_ROOT, 'th_broken'), {
-      schemaVersion: AGENTS_SCHEMA_VERSION,
-    });
-    await expect(
-      setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false),
-    ).rejects.toThrow('thread records are unreadable');
-    expect((await readWorkspaceAgents(PROJECT_ROOT))[0].enabled).not.toBe(
-      false,
-    );
-  });
-
-  it('retains an unresolved close through trimming and releases it after acknowledgement', async () => {
-    await seed([ALICE]);
-    const blocker = run(1, 0, { closeKind: 'blocked' });
-    await writeThread(
-      PROJECT_ROOT,
-      thread({
-        status: 'blocked',
-        runs: [
-          blocker,
-          ...Array.from({ length: MAX_THREAD_RUNS }, (_, index) =>
-            run(index + 2, 0),
-          ),
-        ],
-      }),
-    );
-    const stored = (await readThread(PROJECT_ROOT, 'th_root'))!;
-    expect(stored.runs.some((entry) => entry.id === blocker.id)).toBe(true);
-    expect(
-      resolveThreadStatus({ thread: stored, hasLiveChildDependency: false })
-        .status,
-    ).toBe('blocked');
-
-    await writeThread(PROJECT_ROOT, {
-      ...stored,
-      runs: stored.runs.map((entry) =>
-        entry.id === blocker.id
-          ? { ...entry, closeAcknowledgedAtSequence: 0 }
-          : entry,
-      ),
-    });
-    expect(
-      (await readThread(PROJECT_ROOT, 'th_root'))?.runs.some(
-        (entry) => entry.id === blocker.id,
-      ),
-    ).toBe(false);
-  });
-
-  it('reports cancellation when disabling the last queued run of a child', async () => {
-    await seed([ALICE]);
-    await writeThread(
-      PROJECT_ROOT,
-      thread({
-        id: 'th_child',
-        rootThreadId: 'th_root',
-        parentThreadId: 'th_root',
-        status: 'in_progress',
-        runs: [run(1, 0, { status: 'queued', endedAt: undefined })],
-      }),
-    );
-
-    await setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false);
-
-    const stored = await readThread(PROJECT_ROOT, 'th_child');
-    expect(stored?.outbox).toEqual([
-      expect.objectContaining({
-        kind: 'parent_report',
-        causedByRunId: 'rn_1',
-        payload: expect.objectContaining({ event: 'child_cancelled' }),
-      }),
-    ]);
-  });
-
-  it('leaves running work alone on disable', async () => {
-    await seed([ALICE]);
-    await writeThread(
-      PROJECT_ROOT,
-      thread({ runs: [run(1, 0, { status: 'running', endedAt: undefined })] }),
-    );
-
-    await expect(
-      setWorkspaceAgentEnabled(PROJECT_ROOT, ALICE.id, false),
-    ).resolves.toBe('updated');
-
-    expect((await readThread(PROJECT_ROOT, 'th_root'))?.runs[0]?.status).toBe(
-      'running',
-    );
-    // A mid-turn run still blocks retirement, exactly as before.
-    await expect(retireWorkspaceAgent(PROJECT_ROOT, ALICE.id)).resolves.toBe(
-      'has_live_work',
-    );
-  });
-
   it('reports an unknown id rather than inventing an entry', async () => {
     await seed([ALICE]);
 
@@ -1011,39 +591,5 @@ describe('retiring an agent', () => {
       'not_found',
     );
     expect(await readWorkspaceAgents(PROJECT_ROOT)).toHaveLength(1);
-  });
-});
-
-describe('releasing the agent host session', () => {
-  let runtimeDir: string;
-
-  beforeEach(async () => {
-    runtimeDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'agent-release-test-'),
-    );
-    Storage.setRuntimeBaseDir(runtimeDir);
-  });
-
-  afterEach(async () => {
-    Storage.setRuntimeBaseDir(null);
-    await fs.rm(runtimeDir, { recursive: true, force: true });
-  });
-
-  it('drops only the claim and keeps the A2A grants', async () => {
-    await issueA2AGrant(PROJECT_ROOT, {
-      callerId: 'share_1',
-      agentId: ALICE.id,
-    });
-    await claimAgentHostSession(PROJECT_ROOT, 'session-1');
-
-    await expect(
-      releaseAgentHostSession(PROJECT_ROOT, 'session-1'),
-    ).resolves.toBe(true);
-
-    const workspace = await readAgentWorkspace(PROJECT_ROOT);
-    expect(workspace.hostSessionId).toBeUndefined();
-    expect(workspace.callerGrants?.map((grant) => grant.callerId)).toEqual([
-      'share_1',
-    ]);
   });
 });
