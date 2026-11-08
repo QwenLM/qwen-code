@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import express, { type Application, type Request } from 'express';
 import { bearerAuth } from '../auth.js';
 import type { CredentialStore } from '../local-control/credentials.js';
@@ -93,7 +93,11 @@ export function registerWebShellPairingRoutes(
         return;
       }
       const token = randomBytes(32).toString('base64url');
-      if (!credentials.addWebShellToken(token)) {
+      // The id is what makes the credential addressable later: the operator
+      // screen lists paired devices and revokes them individually, so the
+      // exchange response has to name the device it just created.
+      const deviceId = randomUUID();
+      if (!credentials.addWebShellToken(deviceId, token)) {
         res.status(409).json({
           error:
             'Paired device limit reached. Restart the daemon to reset pairing.',
@@ -101,9 +105,28 @@ export function registerWebShellPairingRoutes(
         return;
       }
       invitations.delete(key);
-      res.json({ token });
+      res.json({ token, deviceId });
     },
   );
+
+  // Device management lives on the same surface because it is the other half
+  // of pairing: a credential the operator can list and revoke, instead of one
+  // that only a restart clears. Each route states its own authorization here
+  // for the same reason as issuance above — this module mounts before the
+  // global bearer middleware.
+  app.get('/web-shell/devices', bearerAuth(credentials), (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ devices: credentials.listWebShellDevices() });
+  });
+
+  app.delete('/web-shell/devices/:id', bearerAuth(credentials), (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    if (!credentials.revokeWebShellToken(req.params['id'])) {
+      res.status(404).json({ error: 'Unknown device' });
+      return;
+    }
+    res.json({ revoked: true });
+  });
 
   app.post(
     '/web-shell/pairing',

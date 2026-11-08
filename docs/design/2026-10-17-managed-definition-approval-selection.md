@@ -2,6 +2,8 @@
 
 [English](2026-10-17-managed-definition-approval-selection.md) | [简体中文](2026-10-17-managed-definition-approval-selection.zh-CN.md)
 
+The [live approval extension](2026-10-20-managed-live-approval.md) supersedes this document's idle-only and next-Turn restrictions when `live-approval-selection/1` is available. Admission snapshots remain immutable; current permission checks read the durable Session selection. Older providers retain this baseline behavior.
+
 ## Status and goal
 
 Implementation based on research against `dac04ed35` on 2026-10-17. This document records the accepted design, compatibility constraints and verification requirements. Local verification results are recorded below; deployment-lane checks are distinguished from macOS evidence.
@@ -26,7 +28,7 @@ Opening the menu alone would leave execution and recovery inconsistent.
 
 | Area              | Decision                                                                                                                                                                                                                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Eligible Sessions | Existing, Workspace-bound built-in Sessions and valid stored-definition Sessions using exactly `hosted-workspace-files/1`, `hosted-workspace-shell/1` or `hosted-workspace-shell/2`. Existing actor, execution-registry and deployment checks still apply.               |
+| Eligible Sessions | Existing, Workspace-bound built-in Sessions and valid stored-definition Sessions using exactly `hosted-workspace-files/1` or `hosted-workspace-shell/1`. Existing actor, execution-registry and deployment checks still apply.                                           |
 | Modes             | `default`, `auto-edit` and `yolo`. The recorded owner with current OPERATOR or OWNER access makes an explicit choice while idle.                                                                                                                                         |
 | Definition policy | `permission_policy.approval_mode` remains the immutable creation policy. For eligible Sessions, the owner may override ordinary approval for later user Turns. This extends the previous fixed-policy behavior; it does not change the definition's content or revision. |
 | Creation          | Keep existing definition compilation, creation options and creation-request validation. A custom creation request cannot override its compiled initial policy. A newly created Session may use the existing-session operation once eligible and idle.                    |

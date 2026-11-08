@@ -2,6 +2,13 @@
 
 [English](2026-10-14-managed-agent-event-transport-mq3.md) | [简体中文](2026-10-14-managed-agent-event-transport-mq3.zh-CN.md)
 
+> **Wake 恢复更新（2026-10-19）：** 本文早期仅依赖来源账本的兜底描述已由
+> [Hosted SQL wake 扫描](2026-10-18-hosted-wake-recovery.zh-CN.md)取代。writer 丢失后，
+> 它发现已提交、未消费的 monitor/后台 Shell、channel、child/workflow、automation
+> 和 Session message 输入。公共前台 Turn 仍归 dispatcher；私有 CSI 和其他来源保留
+> 原有恢复路径。真实 MQ 开启、部署及跨平台扫描验收仍未验证。下方历史 MQ 门禁不证明
+> 这一新扫描；其故障验收见链接设计。
+
 > **状态：** 已作为门禁实现。这是跨节点 EventTransport 设计
 > （[2026-10-04-managed-agent-event-transport](2026-10-04-managed-agent-event-transport.zh-CN.md)
 > §7）的 **MQ3** 阶段，由 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 跟踪。
@@ -57,14 +64,14 @@ MQ2 列出的每一行都是对着单个应用跑的：H2 数据库，Harness �
 1. **节点在处理唤醒时崩溃，会让 bootstrap 通道停顿约两分钟。** LiteTopic 只有在 broker 让死掉的客户端过期（它的连接过期时限，默认两分钟）之后，才把崩溃成员未确认的消息交给另一个成员，而该 lite topic 后续的消息都按顺序排在它后面。本机用同组两个成员的探针实测：被占住的消息 124 秒后才到达另一个成员，崩溃 5 秒后发出的消息与它一起到达；门禁两条崩溃行的各次本机运行中，唤醒在 121–129 秒后转移。在共享的 bootstrap 通道上，这意味着全集群所有 Session 的唤醒。没有消息丢失——每个唤醒只是晚到——也没有任何输入账本依赖这条通道。被杀时手上没有未确认消息的节点不会占住通道：下一个唤醒在该行的等待时限内就到达了另一个节点。（§8：「broker 再投递；Session 被晚唤醒」——属实，但晚是以分钟计，而且是所有 Session。）
 2. **没有生产者重试缓冲。** 面对挂住的 proxy（用 SIGSTOP 冻结），客户端自带的尝试（每次三秒）能扛过几秒钟的停顿——本机的短时故障运行中（冻结持续一个 Turn）一条都没丢——但 proxy 离开更久时发出的信封会被丢弃，并打一条注明事件的 `WARN`，之后也不会补发（本机一次长时故障行的运行中丢了 13 条 journal 信封和 4 条公开信封）。提交路径不受影响：冻结期间，提交线程上的两种交接都只有个位数毫秒。（§8：「生产者以有界缓冲重试」——未实现；故障期间丢失的唤醒靠它的账本恢复。）
 3. **启动依赖 broker。** broker 不可用时重启的节点在能力探针上拒绝启动，而报错开头讲的是 LITE group 与 topic 的要求，端点配置项只在最后才提到；回退的办法是开关。长时故障行断言了这次拒绝，修好之后要反过来改。（§8：「传输消费者空转」只对已经在运行的节点成立。）
-4. **认领从不回滚。** 认领之后崩溃会烧掉这条通知；Session 靠其输入来源的账本恢复，各来源的缺口记录在 [#14116](https://github.com/QwenLM/qwen-code/issues/14116)。
+4. **认领从不回滚。** 认领之后崩溃会烧掉这条通知。对于符合条件的已提交唤醒，原来源账本兜底已由 [Hosted SQL 扫描](2026-10-18-hosted-wake-recovery.zh-CN.md)取代；历史 MQ3 门禁不证明新扫描在开启 MQ 时的验收。
 5. **没有 epoch 围栏。** 过期唤醒被活 writer 或水位拒绝；落在空闲 Session 上且序号更高时会加载它——无害，因为唤醒泵只执行 journal 里已有的内容。
 6. **Turn 调度租约用的是 JVM 时钟。** 时钟快出超过一个调度租约时长的节点会把活着的占有读成已过期并接管 Turn；本机一次节点快 10 分钟的运行中，它接管了一个活着的 Turn，每次尝试都撞上持有 Harness 的 writer 租约，重试耗尽后把这个 Turn 判为失败。这不在 transport 范围内——时钟偏差行让 Turn 不经过偏差节点——之所以记在这里，是因为 §8 声称所有租约都沿用本仓的租约惯例。
 7. **Harness 停在模型调用处的 Turn 不会被接管。** journal 生产者崩溃行的各次运行中，Turn 在另一个节点上被判为失败（`managed_runtime_recovery_blocked`，原因 `model_start`）：这是 Harness 根据 journal 做出的拒绝，transport 不参与。该行只断言 Turn 被推进到终态且只一次。
 
 ## 范围边界
 
-- 不改生产代码。发现 1–3 与 6 记录在此，留待后续；发现 4 的各来源缺口仍归 #14116。
+- 不改生产代码。发现 1–3 与 6 记录在此，留待后续；发现 4 后续的恢复实现与剩余验收见上方链接的 Hosted wake 设计。
 - 本阶段不对 bootstrap 通道分片，不缩短 broker 的连接过期时限，也不加生产者缓冲。
 - 不覆盖绑定 Workspace 的 Session、工具与 runtime broker：各行用普通公开 Session，让门禁保持可移植。公开事件通道的重复与乱序行仍归 MQ2d 的单节点门禁，并发认领竞争仍归 `EventTransportConsumerSqlTest`。
 

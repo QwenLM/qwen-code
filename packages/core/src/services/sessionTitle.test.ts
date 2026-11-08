@@ -7,6 +7,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { LlmChat } from '../core/llm-chat.js';
+import {
+  appendAutoMemorySnapshot,
+  getAutoMemorySnapshot,
+} from '../memory/request-context.js';
 import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 import {
   SYSTEM_REMINDER_CLOSE,
@@ -15,6 +20,7 @@ import {
 import {
   normalizeForEchoCompare,
   sanitizeTitle,
+  modPromptTitleKey,
   tryGenerateSessionTitle,
 } from './sessionTitle.js';
 import { content, modelText, userText } from '../test-utils/model-fixtures.js';
@@ -22,6 +28,7 @@ import { content, modelText, userText } from '../test-utils/model-fixtures.js';
 interface MockOptions {
   fastModel?: string | undefined;
   history?: Content[];
+  chat?: LlmChat;
   generateJsonResult?:
     | Record<string, unknown>
     | ((...args: unknown[]) => Promise<Record<string, unknown>>);
@@ -41,7 +48,8 @@ function makeConfig(opts: MockOptions): {
     getFastModel: vi.fn(() => opts.fastModel ?? undefined),
     getModel: vi.fn(() => 'qwen-plus'),
     getLlmClient: vi.fn(() => ({
-      getHistoryShallow: () => opts.history ?? [],
+      getHistoryShallow: (curated?: boolean) =>
+        opts.chat?.getHistoryShallow(curated) ?? opts.history ?? [],
       getChat: () => ({
         getHistory: () => opts.history ?? [],
       }),
@@ -61,6 +69,160 @@ const reminder = (body: string) =>
   `${SYSTEM_REMINDER_OPEN}\n${body}\n${SYSTEM_REMINDER_CLOSE}`;
 
 describe('tryGenerateSessionTitle', () => {
+  it.each(['CATALOG_SENTINEL', ''])(
+    'excludes durable catalog and ACP hook context from fallback title input, catalog=%j',
+    async (catalog) => {
+      const history: Content[] = [
+        content(
+          'user',
+          { text: 'Diagnose parser failure' },
+          { text: wrapUserPromptSubmitContext('HOOK_SENTINEL') },
+        ),
+      ];
+      appendAutoMemorySnapshot(
+        history,
+        getAutoMemorySnapshot([], 'CATALOG_SENTINEL')!,
+      );
+      history.push(modelText('The parser needs a fix.'));
+      const original = structuredClone(history);
+      const chat = new LlmChat(
+        { getAutoMemoryContext: () => catalog } as Config,
+        {},
+        history,
+      );
+      const { config, generateJson } = makeConfig({
+        chat,
+        fastModel: 'qwen-turbo',
+        generateJsonResult: { title: 'Repair parser regression' },
+      });
+      // Plain ACP recording has no display payload; its hook is appended later.
+      const outcome = await tryGenerateSessionTitle(
+        config,
+        new AbortController().signal,
+        [undefined],
+      );
+      expect(outcome.ok).toBe(true);
+      expect(generateJson).toHaveBeenCalledTimes(1);
+      const prompt = JSON.stringify(generateJson.mock.calls[0][0]);
+      expect(prompt).toContain('Diagnose parser failure');
+      expect(prompt).toContain('The parser needs a fix.');
+      expect(prompt).not.toContain('HOOK_SENTINEL');
+      expect(prompt).not.toContain('CATALOG_SENTINEL');
+      expect(prompt).not.toContain('Current memory catalog');
+      expect(chat.getHistoryShallow()).toEqual(original);
+    },
+  );
+
+  it('keeps ACP hook boundaries across a failed historical response under suppression', async () => {
+    const history: Content[] = [];
+    for (const [prompt, answer] of [
+      ['First parser request', ''],
+      ['Second parser request', 'Fixed parser'],
+    ]) {
+      history.push(
+        content(
+          'user',
+          { text: prompt },
+          { text: wrapUserPromptSubmitContext('HISTORICAL_HOOK') },
+        ),
+      );
+      const snapshot = getAutoMemorySnapshot(history, 'OLD_CATALOG');
+      if (snapshot) appendAutoMemorySnapshot(history, snapshot);
+      history.push(modelText(answer));
+    }
+    const chat = new LlmChat(
+      { getAutoMemoryContext: () => '' } as Config,
+      {},
+      history,
+    );
+    const { config, generateJson } = makeConfig({
+      chat,
+      fastModel: 'qwen-turbo',
+      generateJsonResult: { title: 'Repair parser regression' },
+    });
+    expect(
+      (
+        await tryGenerateSessionTitle(config, new AbortController().signal, [
+          undefined,
+          undefined,
+        ])
+      ).ok,
+    ).toBe(true);
+    const prompt = JSON.stringify(generateJson.mock.calls[0][0]);
+    expect(prompt).toContain('First parser request');
+    expect(prompt).toContain('Second parser request');
+    expect(prompt).not.toContain('HISTORICAL_HOOK');
+    expect(prompt).not.toContain('OLD_CATALOG');
+  });
+
+  it('keeps the recorded display projection authoritative with a durable snapshot', async () => {
+    const history = [
+      content(
+        'user',
+        { text: 'RAW_INPUT' },
+        { text: wrapUserPromptSubmitContext('RAW_HOOK') },
+        getAutoMemorySnapshot([], 'RAW_CATALOG')!,
+      ),
+      modelText('RAW_ANSWER'),
+    ];
+    const chat = new LlmChat(
+      { getAutoMemoryContext: () => 'RAW_CATALOG' } as Config,
+      {},
+      history,
+    );
+    const { config, generateJson } = makeConfig({
+      chat,
+      fastModel: 'qwen-turbo',
+      generateJsonResult: { title: 'Repair parser regression' },
+    });
+    expect(
+      (
+        await tryGenerateSessionTitle(config, new AbortController().signal, [
+          'Visible parser request',
+        ])
+      ).ok,
+    ).toBe(true);
+    const prompt = JSON.stringify(generateJson.mock.calls[0][0]);
+    expect(prompt).toContain('Visible parser request');
+    expect(prompt).not.toContain('RAW_');
+  });
+
+  it.each([false, true])(
+    'preserves user-authored tagged text before snapshot removal, multipart=%s',
+    async (multipart) => {
+      const parts = [
+        { text: wrapUserPromptSubmitContext('USER_AUTHORED_TAG') },
+      ];
+      if (multipart) parts.push({ text: 'Explain that literal tag' });
+      const history: Content[] = [
+        content(
+          'user',
+          ...parts,
+          getAutoMemorySnapshot([], 'CATALOG_SENTINEL')!,
+        ),
+        modelText('This is a literal tag.'),
+      ];
+      const chat = new LlmChat(
+        { getAutoMemoryContext: () => 'CATALOG_SENTINEL' } as Config,
+        {},
+        history,
+      );
+      const { config, generateJson } = makeConfig({
+        chat,
+        fastModel: 'qwen-turbo',
+        generateJsonResult: { title: 'Explain literal context tags' },
+      });
+      expect(
+        (await tryGenerateSessionTitle(config, new AbortController().signal))
+          .ok,
+      ).toBe(true);
+      const prompt = JSON.stringify(generateJson.mock.calls[0][0]);
+      expect(prompt).toContain('USER_AUTHORED_TAG');
+      if (multipart) expect(prompt).toContain('Explain that literal tag');
+      expect(prompt).not.toContain('CATALOG_SENTINEL');
+    },
+  );
+
   it('returns {ok:false, reason:"no_fast_model"} when fast model is absent', async () => {
     const { config } = makeConfig({
       fastModel: undefined,
@@ -347,6 +509,73 @@ describe('tryGenerateSessionTitle', () => {
     // the raw history, which carries the hidden model context.
     expect(outcome).toEqual({ ok: false, reason: 'empty_history' });
     expect(generateJson).not.toHaveBeenCalled();
+  });
+
+  it("draws on the conversation when only a Mod's turn is in the projection", async () => {
+    const framed =
+      '<qwen:mod-prompt mod="lint">\nRun the linter\n</qwen:mod-prompt>';
+    // As recorded, and as history holds it: a reminder part ahead, IDE context
+    // prepended to the text, the hooks' context after.
+    const modParts = [
+      { text: framed },
+      { text: wrapUserPromptSubmitContext('MOD_CONTEXT') },
+    ];
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'Fix the flaky login test' }] },
+        { role: 'model', parts: [{ text: 'Fixed it.' }] },
+        {
+          role: 'user',
+          parts: [
+            { text: 'REMINDER' },
+            { text: `IDE_CONTEXT\n\n${framed}` },
+            modParts[1]!,
+          ],
+        },
+        { role: 'model', parts: [{ text: 'Lint is clean.' }] },
+      ],
+      generateJsonResult: { title: 'Fix flaky login test' },
+    });
+
+    // The person's prompt recorded no display text; the Mod's turn offers
+    // nothing and must not switch the title to an empty projection, nor reach
+    // it through the conversation.
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      [undefined, null],
+      new Set([modPromptTitleKey(modParts)!]),
+    );
+
+    expect(outcome).toMatchObject({ ok: true });
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('Fix the flaky login test');
+    expect(prompt).not.toContain('Run the linter');
+    expect(prompt).not.toContain('REMINDER');
+    expect(prompt).toContain('Lint is clean.');
+  });
+
+  it("leaves a Mod's turn out of a display projection", async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden instructions' }] },
+        { role: 'model', parts: [{ text: 'Hello!' }] },
+      ],
+      generateJsonResult: { title: 'Answer greeting' },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal, [
+      '你好',
+      null,
+    ]);
+
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('你好');
+    expect(prompt).not.toContain('hidden instructions');
   });
 
   it('does not align a display projection onto an intervening system turn', async () => {
