@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent.contracts.session;
 
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionOptions;
-import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.CommandRecord;
