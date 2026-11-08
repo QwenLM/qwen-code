@@ -1,0 +1,44 @@
+{
+  "sessionKey": {
+    "tenantId": "tenant-测试",
+    "workspaceId": "w1",
+    "sessionId": "s1"
+  },
+  "messageId": "message-测试",
+  "ordinal": 0,
+  "invocationId": "14fea771907c821e2a96b44b3692a582e1917cededbc1f93a9f76e175d46c020",
+  "otherMessageInvocationId": "a50b25fdcede63b1a664ef5622de77574549f29e40de9fffd1d27d20f93f91d9",
+  "evidence": {
+    "schemaVersion": 1,
+    "reducerVersion": 1,
+    "epochId": "epoch-1",
+    "startEventId": "message:message-测试",
+    "sourceEventId": "message:result-1",
+    "observations": [
+      {
+        "invocationId": "14fea771907c821e2a96b44b3692a582e1917cededbc1f93a9f76e175d46c020",
+        "assistantMessageId": "message-测试",
+        "ordinal": 0,
+        "toolName": "read_file",
+        "functionCallId": "provider-reused",
+        "providerCallId": null,
+        "executionCallId": "execution-1",
+        "taskId": null,
+        "toolKind": "builtin",
+        "serverId": null,
+        "admission": "allowed",
+        "execution": "success",
+        "delivery": "partial",
+        "capture": "complete",
+        "file": {
+          "operation": "read",
+          "path": "文档/说明.md",
+          "cwdRelative": "."
+        },
+        "skill": null
+      }
+    ],
+    "coverageReasons": [],
+    "omittedObservationCount": 0
+  }
+}

@@ -408,8 +408,8 @@ public class ManagedNativeJournalSnapshots {
             case "input.accepted" -> List.of("contentRef", "admissionRef");
             case "activation.changed" -> List.of("installRef", "boundaryRef");
             case "model.attempt" -> List.of("routeRef", "inputCheckpointRef", "usageRef", "recoveryRef");
-            case "message.committed" -> List.of("contentRef");
-            case "tool.intent" -> List.of("toolDefinitionRef", "argsRef");
+            case "message.committed" -> List.of("contentRef", "diagnosticsRef");
+            case "tool.intent" -> List.of("toolDefinitionRef", "argsRef", "diagnosticsRef");
             case "hosted.batch.planned" -> List.of("planRef");
             case "hosted.cleanup" -> List.of("descriptorRef");
             case "action.changed" -> List.of("optionsRef", "decisionRef");

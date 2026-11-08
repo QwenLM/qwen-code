@@ -157,6 +157,12 @@ final class JournalCommit {
         JournalStoreRows.HeadRow head = csiHead == null
                 ? fencing.requireHeadAfterCsiCheck(tenantId, sessionId) : csiHead;
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        if (head.storageVersion() >= 4) {
+            JsonNode activity = extensionRecords.findActivityStatistics(tenantId, sessionId);
+            if (activity == null || !"ready".equals(activity.path("readiness").asText())) {
+                throw JournalStoreRows.conflict("managed_activity_rebuilding", "Session diagnostics are being restored before writer admission.");
+            }
+        }
         if (authority == null) {
             fencing.requireNoLifecycleClaim(tenantId, sessionId);
         }
@@ -234,13 +240,24 @@ final class JournalCommit {
             if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(resource.kind())) {
                 ManagedModelDiagnosticProjection.validateResource(closureReader.apply(resource.resourceId()));
             }
+            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.KIND.equals(resource.kind())) {
+                StoredResource evidence = closureReader.apply(resource.resourceId());
+                ManagedExtensionRecordStore.require(evidence.schemaVersion() == 1 && evidence.byteLength() <= 65_536,
+                        "Invalid execution diagnostic resource.");
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.requireEvidence(
+                        ManagedExtensionRecordStore.readBody(evidence));
+            }
         }
+        List<JsonNode> diagnosticEvents = new ArrayList<>();
         boolean wakeInput = false;
         for (String line :
                 new String(validated.recordBytes(), StandardCharsets.UTF_8).split("\n")) {
             JsonNode record = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(line);
             if (record != null && record.has("managedSession")) {
                 JsonNode event = record.get("managedSession");
+                if (event.isObject() && event.has("kind")) {
+                    diagnosticEvents.add(event);
+                }
                 wakeInput |= WakeRecoveryStore.isWakeInput(event);
                 ManagedHostedRecoveryRecords.validateEvent(
                         event.path("kind").asText(),
@@ -258,6 +275,10 @@ final class JournalCommit {
         }
         lifecycleAuthorization.authorizeNewLifecycleDispatch(tenantId, sessionId, authority,
                 validated.recordBytes(), reader);
+        if (diagnosticEvents.stream().anyMatch(event -> event.path("payload").has("diagnosticsRef"))) {
+            ManagedExtensionRecordStore.require(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics
+                    .carrierDigest(diagnosticEvents).equals(request.contentDigest()), "Execution diagnostic commit digest conflicts.");
+        }
         if (authority == null && fencing.lifecycleProtocolFenced(tenantId, sessionId)) {
             extensionRecords.requireLifecycleSettlement(tenantId, sessionId, validated.recordBytes(),
                     reader);
@@ -340,7 +361,7 @@ final class JournalCommit {
                 request.latestCheckpointResourceId(),
                 validated.recordBytes(), validated.recordBytes().length,
                 validated.recordDigest(), now.getTime());
-        ActivationChange activation = activationChange(
+        var activation = JournalStoreRows.activationChange(
                 applied.lastActivation());
         if (placement != null && "QUIESCING".equals(placement.state()) && activation != null
                 && "active".equals(activation.phase())
@@ -850,27 +871,6 @@ final class JournalCommit {
                 existing.operation(), existing.firstSequence(),
                 existing.lastSequence(), existing.lastSequence(),
                 existing.commitDigest(), true);
-    }
-
-    /**
-     * Converts the last activation.changed payload of a committed transaction, so the head row can
-     * answer authorization reads without rescanning the journal. The payload was already parsed by
-     * the extension record pass of this commit.
-     */
-    static ActivationChange activationChange(JsonNode payload) {
-        if (payload == null) {
-            return null;
-        }
-        return new ActivationChange(
-                ToolPublicationContract.text(payload, "activationId"),
-                ToolPublicationContract.text(payload, "phase"),
-                payload.path("epoch").asLong(),
-                ManagedExtensionRecords.millisLenient(
-                        payload.path("expiresAt")));
-    }
-
-    record ActivationChange(String id, String phase, long epoch,
-            Long expiresAt) {
     }
 
     record ValidatedCommit(byte[] recordBytes, String recordDigest,

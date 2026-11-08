@@ -184,13 +184,20 @@ export async function generateNativeTextTurns(
       create: { definitionRef, rootSnapshotRef, createdBy: 'hosted-harness' },
     });
     if (input.diagnostics) await enableManagedSessionDiagnostics(managed);
+    if (input.activityDiagnostics) {
+      const { enableManagedExecutionDiagnostics } = await import(
+        core('managed-execution-diagnostics')
+      );
+      await enableManagedExecutionDiagnostics(managed);
+    }
     if (input.legacyTerminalShape) {
       const write = managed.sink.write.bind(managed.sink);
-      managed.sink.write = (entry) =>
+      managed.sink.write = (entry, diagnostics) =>
         write(
           entry.subtype === 'turn_result'
             ? { ...entry, daemonPromptId: entry.systemPayload.promptId }
             : entry,
+          diagnostics,
         );
     }
     const turnCount = input.extractedProducer ? 2 : 5;

@@ -50,7 +50,7 @@ const now = () => {
 };
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const grant = () => ({
-  supportedStorageVersion: 3,
+  supportedStorageVersion: input.activityDiagnostics ? 4 : 3,
   writerGeneration,
   leaseUntil,
   journalRevision: transactions.length,
@@ -106,7 +106,11 @@ const server = http.createServer(async (req, res) => {
     } else if (suffix === '/restore') {
       answer = {
         state,
-        storageVersion: 1,
+        storageVersion: [...resources.values()].some(
+          (value) => value.resource.kind === 'managed-execution-diagnostics',
+        )
+          ? 4
+          : 1,
         writerGeneration,
         journalRevision: transactions.length,
         committedSequence: sequence,

@@ -1215,6 +1215,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/session-activity-stats/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Persisted execution diagnostics since the recorded collection start. Self scope; no Runtime acquisition or discovery. Requires an authenticated actor and current Session/Workspace read access. */
+        post: operations["querySessionActivityStatistics"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/session-activity/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Persisted execution diagnostics since the recorded collection start. Self scope; no Runtime acquisition or discovery. Requires an authenticated actor and current Session/Workspace read access. */
+        post: operations["querySessionActivity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2988,6 +3022,7 @@ export interface components {
             servers: components["schemas"]["ManagedDiagnosticMcpServer"][];
         };
         ManagedDiagnosticAgentInvocation: {
+            predecessorTaskId?: string | null;
             taskId: string;
             parentSessionId: string;
             childSessionId: string | null;
@@ -3018,6 +3053,246 @@ export interface components {
             cursor?: string | null;
             limit?: number | null;
         };
+        ManagedActivityMetrics: {
+            requested: number;
+            admission: {
+                allowed: number;
+                denied: number;
+                invalid: number;
+                unknown: number;
+            };
+            execution: {
+                not_started: number;
+                running: number;
+                success: number;
+                error: number;
+                cancelled: number;
+                unknown: number;
+            };
+            delivery: {
+                pending: number;
+                complete: number;
+                partial: number;
+                unavailable: number;
+                unknown: number;
+            };
+        };
+        ManagedActivityFile: {
+            /** @enum {string} */
+            operation: "read" | "write" | "edit";
+            path: string | null;
+            cwdRelative: string | null;
+        };
+        ManagedActivitySkill: {
+            /** @enum {string} */
+            resourceKind: "skill" | "extension_command";
+            name: string;
+            pin: string;
+            /** @enum {string} */
+            origin: "user" | "model" | "unknown";
+            /** @enum {string} */
+            delivery: "complete" | "partial" | "unknown";
+        };
+        ManagedActivityInvocation: {
+            invocationId: string;
+            assistantMessageId: string;
+            ordinal: number;
+            toolName: string;
+            functionCallId: string | null;
+            providerCallId: string | null;
+            executionCallId: string | null;
+            taskId: string | null;
+            /** @enum {string} */
+            toolKind: "builtin" | "mcp" | "hosted" | "unknown";
+            serverId: string | null;
+            /** @enum {string} */
+            admission: "allowed" | "denied" | "invalid" | "unknown";
+            /** @enum {string} */
+            execution: "not_started" | "running" | "success" | "error" | "cancelled" | "unknown";
+            /** @enum {string} */
+            delivery: "pending" | "complete" | "partial" | "unavailable" | "unknown";
+            /** @enum {string} */
+            capture: "complete" | "partial" | "unavailable" | "unknown";
+            file: components["schemas"]["ManagedActivityFile"] | null;
+            skill: components["schemas"]["ManagedActivitySkill"] | null;
+            requestSequence: string;
+            requestedAt: number;
+            conflictingEvidence?: boolean;
+            taskState?: string;
+            taskRuntimeState?: string | null;
+        };
+        ManagedActivityStatistics: {
+            tools: components["schemas"]["ManagedActivityMetrics"];
+            files: components["schemas"]["ManagedActivityMetrics"];
+            skills: components["schemas"]["ManagedActivityMetrics"];
+            otherTools: components["schemas"]["ManagedActivityMetrics"];
+            otherSkills: components["schemas"]["ManagedActivityMetrics"];
+            toolBuckets: {
+                key: string;
+                name: string;
+                metrics: components["schemas"]["ManagedActivityMetrics"];
+                resource?: {
+                    /** @enum {string} */
+                    resourceKind: "skill" | "extension_command";
+                    name: string;
+                    pin: string;
+                };
+            }[];
+            skillBuckets: {
+                key: string;
+                name: string;
+                metrics: components["schemas"]["ManagedActivityMetrics"];
+                resource?: {
+                    /** @enum {string} */
+                    resourceKind: "skill" | "extension_command";
+                    name: string;
+                    pin: string;
+                };
+            }[];
+            skillLoads: components["schemas"]["ManagedActivityMetrics"];
+            extensionCommands: components["schemas"]["ManagedActivityMetrics"];
+            fileOperations: {
+                read: components["schemas"]["ManagedActivityMetrics"];
+                write: components["schemas"]["ManagedActivityMetrics"];
+                edit: components["schemas"]["ManagedActivityMetrics"];
+            };
+        };
+        ManagedDiagnosticActivityStats: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            /** @constant */
+            scope: "self";
+            readRevision: string | null;
+            coverageStartSequence: string | null;
+            coveredThroughSequence: string | null;
+            startedAt: number | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            statistics: components["schemas"]["ManagedActivityStatistics"] | null;
+        };
+        ManagedActivityToolsPage: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            /** @constant */
+            scope: "self";
+            readRevision: string | null;
+            coverageStartSequence: string | null;
+            coveredThroughSequence: string | null;
+            startedAt: number | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            /** @constant */
+            kind: "tools";
+            items: components["schemas"]["ManagedActivityInvocation"][];
+            hasMore: boolean;
+            nextCursor: string | null;
+        };
+        ManagedActivityFilesPage: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            /** @constant */
+            scope: "self";
+            readRevision: string | null;
+            coverageStartSequence: string | null;
+            coveredThroughSequence: string | null;
+            startedAt: number | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            /** @constant */
+            kind: "files";
+            items: {
+                invocationId: string;
+                assistantMessageId: string;
+                ordinal: number;
+                toolName: string;
+                functionCallId: string | null;
+                providerCallId: string | null;
+                executionCallId: string | null;
+                taskId: string | null;
+                /** @enum {string} */
+                toolKind: "builtin" | "mcp" | "hosted" | "unknown";
+                serverId: string | null;
+                /** @enum {string} */
+                admission: "allowed" | "denied" | "invalid" | "unknown";
+                /** @enum {string} */
+                execution: "not_started" | "running" | "success" | "error" | "cancelled" | "unknown";
+                /** @enum {string} */
+                delivery: "pending" | "complete" | "partial" | "unavailable" | "unknown";
+                /** @enum {string} */
+                capture: "complete" | "partial" | "unavailable" | "unknown";
+                file: components["schemas"]["ManagedActivityFile"];
+                skill: components["schemas"]["ManagedActivitySkill"] | null;
+                requestSequence: string;
+                requestedAt: number;
+                conflictingEvidence?: boolean;
+                taskState?: string;
+                taskRuntimeState?: string | null;
+            }[];
+            hasMore: boolean;
+            nextCursor: string | null;
+        };
+        ManagedActivitySkillsPage: {
+            /** @constant */
+            schemaVersion: 1;
+            sessionId: string;
+            /** @constant */
+            scope: "self";
+            readRevision: string | null;
+            coverageStartSequence: string | null;
+            coveredThroughSequence: string | null;
+            startedAt: number | null;
+            /** @enum {string} */
+            availability: "available" | "partial" | "not_recorded" | "unsupported";
+            coverageReasons: string[];
+            /** @constant */
+            kind: "skills";
+            items: {
+                invocationId: string;
+                assistantMessageId: string;
+                ordinal: number;
+                toolName: string;
+                functionCallId: string | null;
+                providerCallId: string | null;
+                executionCallId: string | null;
+                taskId: string | null;
+                /** @enum {string} */
+                toolKind: "builtin" | "mcp" | "hosted" | "unknown";
+                serverId: string | null;
+                /** @enum {string} */
+                admission: "allowed" | "denied" | "invalid" | "unknown";
+                /** @enum {string} */
+                execution: "not_started" | "running" | "success" | "error" | "cancelled" | "unknown";
+                /** @enum {string} */
+                delivery: "pending" | "complete" | "partial" | "unavailable" | "unknown";
+                /** @enum {string} */
+                capture: "complete" | "partial" | "unavailable" | "unknown";
+                file: components["schemas"]["ManagedActivityFile"] | null;
+                skill: components["schemas"]["ManagedActivitySkill"];
+                requestSequence: string;
+                requestedAt: number;
+                conflictingEvidence?: boolean;
+                taskState?: string;
+                taskRuntimeState?: string | null;
+            }[];
+            hasMore: boolean;
+            nextCursor: string | null;
+        };
+        WebShellActivityQueryRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            /** @enum {string} */
+            kind: "tools" | "files" | "skills";
+            cursor?: string;
+            /** @default 50 */
+            limit?: number;
+        };
+        ManagedDiagnosticActivityPage: components["schemas"]["ManagedActivityToolsPage"] | components["schemas"]["ManagedActivityFilesPage"] | components["schemas"]["ManagedActivitySkillsPage"];
     };
     responses: {
         /** @description The authenticated actor belongs to another tenant than X-Qwen-Tenant-Id or has an invalid ID (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. Artifact content reads may also return artifact_content_forbidden when the actor cannot read the original bytes. */
@@ -5514,6 +5789,68 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ManagedDiagnosticAgentTrace"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    querySessionActivityStatistics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description Bounded Session execution diagnostics with explicit coverage. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticActivityStats"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    querySessionActivity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellActivityQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Bounded Session execution diagnostics with explicit coverage. */
+            200: {
+                headers: {
+                    /** @description private, no-store */
+                    "Cache-Control"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedDiagnosticActivityPage"];
                 };
             };
             400: components["responses"]["BadRequest"];

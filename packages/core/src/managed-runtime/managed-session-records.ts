@@ -949,8 +949,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         contentRef: 'ref',
         modelAttemptId: 'idOrNull',
         parentMessageId: 'idOrNull',
+        diagnosticsRef: 'ref',
       },
-      optional: ['modelAttemptId'],
+      optional: ['modelAttemptId', 'diagnosticsRef'],
     },
     'tool.intent': {
       fields: {
@@ -960,7 +961,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         toolDefinitionRef: 'ref',
         argsRef: 'ref',
         outcomeSource: 'text',
+        diagnosticsRef: 'ref',
       },
+      optional: ['diagnosticsRef'],
     },
     'message.delta': {
       fields: {
