@@ -1,5 +1,7 @@
 # Code-Hosting Channel Adapters — Design
 
+[English](channel-code-hosting.md) | [简体中文](channel-code-hosting.zh-CN.md)
+
 ## Overview
 
 The GitHub polling adapter lets AI agents monitor GitHub for tasks by polling the notifications API and posting agent responses as issue/PR comments. Unlike IM adapters (real-time webhooks/long-poll), this adapter polls on an interval.
@@ -34,17 +36,25 @@ Poll cycle:
 2. Save `windowSince = cursor.lastProcessedAt` (the cursor **before** this poll advances it)
 3. `markNotificationsAsRead(maxUpdatedAt)` — best-effort global mark (cleans up non-issue notifications)
 4. Advance global cursor to `max(notification.updated_at)`
-5. Per thread: `listComments(since=windowSince)` — enumerate comments
-6. Exclude: bot's own comments; comments with `created_at > maxUpdatedAt` (above window); comments with `created_at <= windowSince` (below window)
+5. Per thread: `listComments(since=windowSince)` — enumerate comments (from a second earlier when the window reads the cursor's own second, see below)
+6. Exclude: bot's own comments; comments with `created_at > maxUpdatedAt` (above window); comments with `created_at < windowSince`, and those of the `windowSince` second that the previous window read, or all of them when the cursor has no record of that second (below window)
 7. Process: mention detection → envelope → `handleInbound`
 
-The effective comment window is `(windowSince, maxUpdatedAt]`. Comments processed in a previous poll have `created_at <= windowSince` (the previous poll's `maxUpdatedAt`) and are excluded. This prevents duplicates regardless of whether `PUT /notifications` succeeded. Comment edits do not re-trigger processing — only `created_at` is used for window membership.
+The effective comment window is `(windowSince, maxUpdatedAt]`, plus the comments of the `windowSince` second that the previous window did not read when the cursor records that second (see below). Comments processed in a previous window have `created_at <= windowSince` (that window's `maxUpdatedAt`) and are excluded: those of earlier seconds by the bound, and those of the `windowSince` second by the list of them that the previous window read, saved with the cursor. A comment taken by an earlier poll of the same window (one held over several polls) is kept from a second dispatch by the dedupe ring of taken comments. This prevents duplicates regardless of whether `PUT /notifications` succeeded. Comment edits do not re-trigger processing — only `created_at` is used for window membership. A comment of the `windowSince` second that the previous window did not read is evaluated again on every read until the cursor moves on, so an edit that adds a mention in that time is answered.
 
 The global mark is still called (step 3) to clean up non-issue/PR notifications and reduce the unread list, but it is not load-bearing for dedup.
 
+### The Cursor's Own Second
+
+GitHub stamps comments and notifications to the second, and the cursor is the `updated_at` of the newest notification of the window that advanced it. A notification can arrive after that window was marked read and still carry the cursor's second, naming a comment of that second on a thread the window did not list. Starting the next window after the cursor's second would exclude that comment on every later read.
+
+So when a window is marked read, the cursor saves `boundaryComments`: the keys (node IDs) of the comments created in the new cursor's second that the window read, and the threads whose notification of that second the window listed and did not filter out, at most 500 of each. The next window reads that second again and leaves out only those comments before a lane handles them, so a comment of that second it has not read is processed once, and the ones it read are not taken again. Comments are listed from a second before the cursor, as notifications are, so the second is included whatever GitHub's `since` does at its boundary. A notification stamped with the cursor's second for a thread the window did not list is a late one and can name such a comment, so it is not treated as a stale re-listing while a newer window waits to be marked read: a 5xx reading it holds that window, until the window has read the thread once; after that it is stale again, so a comment of that second that GitHub did not list yet when the thread was read is read only if a later read succeeds. One for a listed thread is treated as a re-listing whose mark-as-read did not apply, and stays stale as before; if it carries a comment posted in that second after the window read the thread, the comment is still read when the thread is read, but a 5xx then does not hold the window for it. While no newer window waits, nothing is marked read, so a 5xx reading it before the window has read the thread spends none of the window's retry budget and is journaled as `failed`: the thread is read again.
+
+Without a record for the cursor (a cursor saved by a version without it, or more than 500 such comments), the window starts after the cursor's second as before, and a notification stamped with that second is a stale re-listing; the first cursor is the start time with milliseconds, which no GitHub timestamp equals. The dedupe ring keeps the keys of comments created in the cursor's second, so a comment of that second taken by a window that stays held is not taken again when the window reads it again. The list is written only when the cursor advances and holds only what the current process read, so two kinds of comment of that second are left to the ring, which keeps them from being taken again (a lane that takes comments one by one journals a `duplicate` skip once per window; the batch of a followed thread leaves them out silently): a late comment taken after the list was written, read again on every poll while its notification stays unread until the cursor moves on, and, after a restart in the middle of a held window, a comment taken before the restart.
+
 ### Known Limitation: Late Notification Delivery
 
-Because the cursor is global (not per-thread), a notification that arrives in a later poll than its comments' `created_at` can have those comments excluded by the cursor window. This requires notification delivery to be delayed across a poll boundary AND another thread's comments to advance the cursor past them in the interim. In practice this window is narrow (notification delivery typically completes within one poll interval); the user can re-mention to retry.
+Because the cursor is global (not per-thread), a notification that arrives in a later poll than its comments' `created_at` can have those comments excluded by the cursor window. This requires notification delivery to be delayed across a poll boundary AND another thread's comments to advance the cursor past them in the interim. Comments of the cursor's own second are read again when the cursor records that second (see above); comments of earlier seconds are not. In practice this window is narrow (notification delivery typically completes within one poll interval); the user can re-mention to retry.
 
 ### Known Limitation: PR Review Comments
 
@@ -55,7 +65,8 @@ Because the cursor is global (not per-thread), a notification that arrives in a 
 | Scenario                          | Behavior                                                                                                                      |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | New thread (@bot in comment)      | Appears (unread) → enumerate since cursor → process                                                                           |
-| Existing thread, new comment      | Reappears (unread) → enumerate since cursor → old comments excluded by `<= windowSince` → only new                            |
+| Existing thread, new comment      | Reappears (unread) → enumerate since cursor → old comments excluded below the window → only new                               |
+| Late notification, cursor second  | Appears (unread) → enumerate from a second before the cursor → comment the last window did not read → process                 |
 | Non-comment activity (push/label) | Appears → zero new comments in window → skip                                                                                  |
 | User marks read on github.com     | Disappears from API → not processed                                                                                           |
 | markNotificationsAsRead fails     | Cursor window still prevents duplicates → no impact on correctness                                                            |
@@ -79,7 +90,7 @@ Subclasses implement only:
 - `pollOnce()` — do the work, mutate `this.cursor`
 - `createInitialCursor()` — first-run default value
 
-The `Cursor` generic is any JSON-serializable object. GitHub uses `{ lastProcessedAt: string; dispatchedBodies?: string[] }` (the latter bounds first-contact body dedup to the most recent 500 entries).
+The `Cursor` generic is any JSON-serializable object. GitHub's cursor holds `lastProcessedAt` and dedupe records such as `dispatchedBodies` (first-contact body dedup, bounded to the most recent 500 entries) and `boundaryComments` (see [The Cursor's Own Second](#the-cursors-own-second)).
 
 ## Mention Detection
 

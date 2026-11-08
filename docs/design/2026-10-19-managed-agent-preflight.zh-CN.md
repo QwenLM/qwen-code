@@ -16,9 +16,11 @@
 命令读取服务端读取的配置，按 `SpringApplication` 在创建 context 之前准备环境的方式准备，因此每项输入都保持 Spring 的优先级：
 
 - 命令行参数（`--server.address=...`、`--qwen.managed-agent.*`）；
-- 进程环境变量（包括 `SPRING_APPLICATION_JSON`）以及 JVM 系统属性（`-D…`，例如 `JAVA_TOOL_OPTIONS` 中的）；
-- Spring Boot 读取的配置文件：由 `spring.config.location`、`spring.config.additional-location` 或 `spring.config.import` 指定的文件，以参数或 `SPRING_CONFIG_*` 变量给出（启动脚本在 `config/application.yml` 存在时设置 `SPRING_CONFIG_ADDITIONAL_LOCATION`，systemd unit 的 `server.env` 指定 `/etc/qwen-managed-agent/application.yml`）；默认位置 `./`、`./config/` 和 `./config/*/` 下的文件，除非 `spring.config.location` 替换了它们；`.yml`、`.yaml`、`.properties` 或 `.xml` 格式，文件名取 `spring.config.name`；以及它们的 profile 变体、它们 import 的文件和 config tree；
+- `SPRING_APPLICATION_JSON`，其次是 JVM 系统属性（`-D…`，例如 `JAVA_TOOL_OPTIONS` 中的），再次是其余进程环境变量；
+- Spring Boot 读取的配置文件：由 `spring.config.location`、`spring.config.additional-location` 或 `spring.config.import` 指定的文件，以参数或 `SPRING_CONFIG_*` 变量给出（启动脚本在 `config/application.yml` 存在时设置 `SPRING_CONFIG_ADDITIONAL_LOCATION`，systemd unit 的 `server.env` 指定 `/etc/qwen-managed-agent/application.yml`）；默认位置 `./`、`./config/` 和 `./config/*/` 下的文件；`.yml`、`.yaml`、`.properties` 或 `.xml` 格式，文件名取 `spring.config.name`；以及它们的 profile 变体、它们 import 的文件和 config tree；
 - classpath 中把 `QWEN_MANAGED_AGENT_*` 变量映射为属性的 `application.yml`。
+
+`spring.config.location` 会替换全部默认位置，classpath 中的也在内。因此设置了它，服务端只读它列出的位置。除非其中列出 `classpath:/`，classpath 中的 `application.yml` 就不会被读：只由该文件映射的变量（如 `QWEN_MANAGED_AGENT_SERVER_ADDRESS`）不再设置任何属性，该文件设置的默认值（如回环的 `server.address` 和 Flyway 的 locations）也随之丢失。没有地址时服务端会监听所有地址，而默认的 `auth.mode=auto` 会因此拒绝启动。只要 Spring 能完成环境准备，检查读到的配置就与服务端相同。
 
 相对位置（包括默认位置）与服务端一样在工作目录中解析，因此命令要在服务端的工作目录中运行：分发包根目录，或 unit 的 `WorkingDirectory`。在 [#16057](https://github.com/QwenLM/qwen-code/issues/16057) 之前，它只读取启动脚本或 `server.env` 指定的那个文件，漏掉了服务端从工作目录 `config/application.yml` 读到的 `server.port`。
 
@@ -27,7 +29,7 @@
 | 检查         | 通过条件                                                                                                                                                                                                                                       |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `java`       | Runtime feature version 不低于 21。                                                                                                                                                                                                            |
-| `config`     | 服务端读取的每个文件一行：service account 可读；含 secret 时不得对 group 或 others 可读；一个文件都不读时为 WARN。Spring 会拒绝启动、YAML 错误（给出行号，通常也给出文件），或本进程读不了文件、进不去或列不出目录时为 FAIL。                  |
+| `config`     | 服务端读取的每个文件一行：service account 可读；一个文件都不读，或含 secret 的文件对 group 或 others 可读时为 WARN。Spring 会拒绝启动、YAML 错误（给出行号，通常也给出文件），或本进程读不了文件、进不去或列不出目录时为 FAIL。                |
 | `key-ring`   | 至少配置了 active key ID；同时输出 previous key ID。                                                                                                                                                                                           |
 | `validation` | 绑定后的配置通过启动期属性校验。                                                                                                                                                                                                               |
 | `auth`       | 非 loopback 绑定不使用 `auto`；signed 模式配置了签名密钥；insecure bind 会给出告警。                                                                                                                                                           |

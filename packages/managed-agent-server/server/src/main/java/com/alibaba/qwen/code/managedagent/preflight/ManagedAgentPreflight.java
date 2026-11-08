@@ -559,13 +559,8 @@ public final class ManagedAgentPreflight {
     }
 
     static Check configFileCheck(Path file, ServiceAccount account) {
-        return configFileCheck(file, account, null);
-    }
-
-    /** As above, for a config tree value file that holds this property's value. */
-    static Check configFileCheck(Path file, ServiceAccount account, String property) {
-        return configFileCheck(file, account, property, property != null ? Set.of()
-                : Format.named(String.valueOf(file.getFileName())));
+        return configFileCheck(file, account, null,
+                Format.named(String.valueOf(file.getFileName())));
     }
 
     /**

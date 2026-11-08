@@ -1647,9 +1647,11 @@ describe('control-plane jobs moved off the hosted queue', () => {
           job.steps[heal].if,
           "${{ runner.environment == 'self-hosted' }}",
         );
-        // Cone mode rejects a file entry the reused index holds as a file.
+        // Cone mode rejects a file entry the reused index holds as a file,
+        // and a reused workspace can inherit non-cone mode from another
+        // job, so the pattern must cover the owner map under either mode.
         for (const step of checkouts) {
-          assert.equal(step.with['sparse-checkout'], '.github/scripts');
+          assert.equal(step.with['sparse-checkout'], '.github');
           assert.equal(step.with['sparse-checkout-cone-mode'], undefined);
         }
       });
