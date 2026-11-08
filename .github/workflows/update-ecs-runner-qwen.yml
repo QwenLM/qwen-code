@@ -76,34 +76,28 @@ jobs:
       matrix:
         # One leg per MACHINE, not per runner process: every runner on a
         # host shares the same global npm install. The hk legs carry a
-        # dedicated ecs-update-hk-N label on the first runner of each host;
-        # the hz hosts target their first runner by name instead, so no
-        # runner re-registration (which would drop its pool labels) is
-        # needed. hz4 has only ephemeral container runners whose image
-        # carries the CLI — nothing persistent to update there.
-        include:
-          - runner: 'ecs-update-hk-1'
-            by: 'label'
-          - runner: 'ecs-update-hk-2'
-            by: 'label'
-          - runner: 'ecs-update-hk-3'
-            by: 'label'
-          - runner: 'ecs-update-hk-4'
-            by: 'label'
-          - runner: 'ecs-update-hk-5'
-            by: 'label'
-          - runner: 'ecs-qwen-hz1-1'
-            by: 'name'
-          - runner: 'ecs-qwen-hz2-1'
-            by: 'name'
-          - runner: 'ecs-qwen-hz3-1'
-            by: 'name'
-          - runner: 'ecs-qwen-hz5-1'
-            by: 'name'
-          - runner: 'ecs-qwen-hz6-1'
-            by: 'name'
+        # dedicated ecs-update-hk-N label on the first runner of each host.
+        # GitHub schedules jobs by runner LABEL, never by runner name, so
+        # the hz legs carry dedicated ecs-update-hz-N labels too (added to
+        # each host's first runner via the labels API — no re-registration,
+        # pool labels intact). The static array keeps every label visible
+        # to actionlint. hz4 has only ephemeral container runners whose
+        # image carries the CLI — nothing persistent to update there.
+        runner:
+          - 'ecs-update-hk-1'
+          - 'ecs-update-hk-2'
+          - 'ecs-update-hk-3'
+          - 'ecs-update-hk-4'
+          - 'ecs-update-hk-5'
+          - 'ecs-update-hz-1'
+          - 'ecs-update-hz-2'
+          - 'ecs-update-hz-3'
+          - 'ecs-update-hz-5'
+          - 'ecs-update-hz-6'
       fail-fast: false
-    runs-on: '${{ matrix.by == ''label'' && fromJSON(format(''["self-hosted", "linux", "x64", "{0}"]'', matrix.runner)) || fromJSON(format(''["self-hosted", "linux", "{0}"]'', matrix.runner)) }}'
+    # No arch label: hk hosts are x64, hz hosts are arm64; the dedicated
+    # per-host label already pins the machine.
+    runs-on: ['self-hosted', 'linux', '${{ matrix.runner }}']
     concurrency:
       group: 'update-ecs-runner-qwen-${{ matrix.runner }}'
       cancel-in-progress: false
@@ -118,6 +112,16 @@ jobs:
           # carry a runner user's custom npm prefix into the sudo install.
           (
             cd "${RUNNER_TEMP:?}"
+            # Snapshot the legacy copy BEFORE the loop: a retry must not
+            # mistake the absence this loop itself created (rm before the
+            # /usr install) for "no legacy copy on this host" and exit 0
+            # with /usr/bin/qwen deleted and never reinstalled.
+            if [ -e /usr/bin/qwen ] || [ -L /usr/bin/qwen ]; then
+              legacy_present=1
+            else
+              legacy_present=0
+            fi
+            echo "LEGACY_PRESENT=${legacy_present}" >> "${GITHUB_ENV}"
             # All runner processes of a region share one machine, so another
             # job's concurrent `npm install -g` can race npm's rename of the
             # package dir (ENOTEMPTY). Clear trash left by crashed installs
@@ -138,7 +142,7 @@ jobs:
               # npm global prefix is a custom Node directory.
               if ! sudo env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr/local --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
                 :
-              elif [ ! -e /usr/bin/qwen ] && [ ! -L /usr/bin/qwen ]; then
+              elif [ "${legacy_present}" -eq 0 ]; then
                 exit 0
               # npm refuses (EEXIST) to replace a /usr/bin/qwen that is a
               # regular file or a symlink into another prefix. Remove the
@@ -163,6 +167,14 @@ jobs:
           VERSION: '${{ needs.resolve.outputs.version }}'
         run: |-
           set -euo pipefail
+          # A legacy copy that existed when the update started must exist
+          # when it ends: the retry loop removes /usr/bin/qwen before the
+          # /usr install, and a vanished binary must fail the leg, not skip
+          # the pinned check below.
+          if [ "${LEGACY_PRESENT:-0}" -eq 1 ] && [ ! -e /usr/bin/qwen ] && [ ! -L /usr/bin/qwen ]; then
+            echo "::error::/usr/bin/qwen existed before the update but is missing now"
+            exit 1
+          fi
           qwen_path="$(command -v qwen)"
           actual="$("${qwen_path}" --version)"
           echo "qwen path: ${qwen_path}"
@@ -171,7 +183,9 @@ jobs:
           # Every absolute path a service could resolve must agree too — a
           # fresh PATH lookup alone hid the stale /usr/bin copy on hz.
           for pinned in /usr/local/bin/qwen /usr/bin/qwen; do
-            if [ -e "${pinned}" ]; then
+            # -L aligns with the update step's definition of "exists": a
+            # dangling symlink must fail here, not silently skip the pin.
+            if [ -e "${pinned}" ] || [ -L "${pinned}" ]; then
               pinned_actual="$("${pinned}" --version)"
               echo "${pinned}: ${pinned_actual}"
               test "${pinned_actual}" = "${VERSION}"

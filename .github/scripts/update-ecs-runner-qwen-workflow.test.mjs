@@ -9,9 +9,11 @@ import assert from 'node:assert/strict';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -61,10 +63,10 @@ const updateJobName =
   workflow.match(/\n {2}update:\n {4}name: '([^']*)'/)?.[1] ?? '';
 const poolPrefix = updateJobName.replace(/\$\{\{.*\}\}$/, '');
 
-// Three layouts, because the checked-in workflow carries an `include:`
-// matrix (each leg pins its own routing mode), while older branches carry
-// the reflowed or single-line inline array prettier produces. A parser that
-// reads only one shape finds zero pools.
+// Three layouts, because the checked-in workflow carries a block-sequence
+// `runner:` matrix, while older branches carry the reflowed or single-line
+// inline array prettier produces. A parser that reads only one shape finds
+// zero pools.
 function parsePools(text) {
   const inline = text.match(/\n\s+runner:\s*\[([^\]]*)\]/)?.[1];
   if (inline !== undefined) {
@@ -72,6 +74,10 @@ function parsePools(text) {
       .split(',')
       .map((entry) => entry.trim().replace(/^'|'$/g, ''))
       .filter(Boolean);
+  }
+  const block = text.match(/\n\s+runner:\s*\n((?:\s+- '[^']+'\n)+)/)?.[1];
+  if (block !== undefined) {
+    return [...block.matchAll(/- '([^']+)'/g)].map((m) => m[1]);
   }
   return [...text.matchAll(/\n\s+- runner:\s*'([^']+)'/g)].map((m) => m[1]);
 }
@@ -86,14 +92,6 @@ function codeLines(body) {
     .split('\n')
     .filter((line) => !/^\s*#/.test(line))
     .join('\n');
-}
-
-// (runner, by) pairs from the include matrix, so routing mode is pinned
-// per leg — flipping an hz leg to label routing starves it silently.
-function parseLegs(text) {
-  return [
-    ...text.matchAll(/- runner:\s*'([^']+)'\s*\n\s*by:\s*'([^']+)'/g),
-  ].map((m) => ({ runner: m[1], by: m[2] }));
 }
 
 function jobsFixture({
@@ -131,8 +129,8 @@ function jobsFixture({
 
 // Two failed pools, one timed out (a pool wedged on a slow npm fetch is the
 // shape that produced the v0.22.3 incident), the rest healthy. The stale
-// set spans BOTH routing families so the reporter's pool naming replays
-// on a name-routed hz leg too, not only on the hk label legs.
+// set spans BOTH regions so the reporter's pool naming replays on an hz
+// leg too, not only on the hk legs.
 const firstHz = pools.findIndex((pool) => pool.includes('hz'));
 const STALE_POOLS = [...pools.slice(0, 2), pools[firstHz === -1 ? 2 : firstHz]];
 const HEALTHY_POOLS = pools.filter((pool) => !STALE_POOLS.includes(pool));
@@ -171,10 +169,25 @@ describe('ECS runner qwen update workflow', () => {
     // npm exits EEXIST on a /usr/bin/qwen that is a regular file or a
     // foreign-prefix symlink; the bin path must be removed first, and only
     // after the /usr/local install succeeded (one working CLI survives a
-    // failed leg). The second install is gated on the legacy copy existing
-    // so hk hosts do not grow a second 156 MB tree nothing reads.
+    // failed leg). The second install is gated on the legacy copy having
+    // existed when the step STARTED, not on its presence right now: the
+    // loop's own `rm -f` makes the current-state check true on attempt 2
+    // after a transient /usr failure, exiting 0 with the binary deleted.
     assert.ok(
-      update.includes('[ ! -e /usr/bin/qwen ] && [ ! -L /usr/bin/qwen ]'),
+      update.includes('if [ -e /usr/bin/qwen ] || [ -L /usr/bin/qwen ]; then'),
+    );
+    assert.ok(update.includes('elif [ "${legacy_present}" -eq 0 ]; then'));
+    assert.ok(
+      !update.includes('[ ! -e /usr/bin/qwen ] && [ ! -L /usr/bin/qwen ]'),
+      'the early exit must not read the current state the loop mutates',
+    );
+    const snapshotIndex = update.indexOf('legacy_present=1');
+    const loopIndex = update.indexOf('for attempt in 1 2 3; do');
+    assert.ok(snapshotIndex !== -1 && snapshotIndex < loopIndex);
+    assert.ok(
+      update.includes(
+        'echo "LEGACY_PRESENT=${legacy_present}" >> "${GITHUB_ENV}"',
+      ),
     );
     const rmIndex = update.indexOf('sudo rm -f /usr/bin/qwen');
     const localInstall = update.indexOf('npm install -g --prefix /usr/local');
@@ -182,30 +195,54 @@ describe('ECS runner qwen update workflow', () => {
     assert.ok(rmIndex > localInstall);
     assert.ok(usrInstall > rmIndex);
     const verify = codeLines(stepBody('Verify version'));
+    // A legacy copy present at the start must not silently vanish: the
+    // pinned loop below skips missing paths, so without this guard a
+    // deleted /usr/bin/qwen would verify green.
+    assert.ok(
+      verify.includes(
+        'if [ "${LEGACY_PRESENT:-0}" -eq 1 ] && [ ! -e /usr/bin/qwen ] && [ ! -L /usr/bin/qwen ]; then',
+      ),
+    );
     assert.ok(
       verify.includes('for pinned in /usr/local/bin/qwen /usr/bin/qwen'),
     );
     // The loop must actually assert, not just echo: dropping the test line
     // while keeping the loop was a green mutation on the first revision.
     const loopBody = verify.slice(verify.indexOf('for pinned in'));
-    assert.ok(loopBody.includes('if [ -e "${pinned}" ]'));
+    // -e || -L: the same definition of "exists" the update step uses, so a
+    // dangling /usr/bin/qwen fails the pin instead of skipping it.
+    assert.ok(loopBody.includes('if [ -e "${pinned}" ] || [ -L "${pinned}" ]'));
     assert.ok(loopBody.includes('test "${pinned_actual}" = "${VERSION}"'));
   });
 
-  it('routes every hz leg by name and every hk leg by label', () => {
-    // Flipping an hz leg to label routing starves it silently (no runner
-    // carries ecs-update-hz-N), and the reporter only fires on failure —
-    // a leg that never starts is quieter than a red one.
-    const legs = parseLegs(workflow);
-    assert.ok(legs.length >= 10);
-    for (const leg of legs) {
-      if (leg.runner.includes('hz')) {
-        assert.equal(leg.by, 'name', `${leg.runner} must route by name`);
-        assert.ok(leg.runner.startsWith('ecs-qwen-'));
-      } else {
-        assert.equal(leg.by, 'label', `${leg.runner} must route by label`);
-        assert.ok(leg.runner.startsWith('ecs-update-hk-'));
-      }
+  it('routes every leg by a dedicated per-host label, never a runner name', () => {
+    // GitHub schedules jobs by runner LABEL only. A runs-on entry that is
+    // a runner NAME queues forever, the leg is cancelled after 24 h, and
+    // the reporter deliberately ignores `cancelled` — the exact silent
+    // stale pool this workflow exists to prevent.
+    assert.ok(pools.length >= 10);
+    for (const pool of pools) {
+      assert.match(pool, /^ecs-update-(hk|hz)-\d+$/);
+    }
+    // hz4 has no persistent runner; the other five hz hosts each get a leg.
+    for (const host of [1, 2, 3, 5, 6]) {
+      assert.ok(pools.includes(`ecs-update-hz-${host}`));
+    }
+    assert.ok(!pools.some((pool) => pool.includes('hz-4')));
+    // Static runs-on: actionlint can only check labels it can see, and an
+    // expression-built label array hides typos from it.
+    assert.ok(
+      workflow.includes(
+        "    runs-on: ['self-hosted', 'linux', '${{ matrix.runner }}']",
+      ),
+    );
+    // Every matrix label must be declared for actionlint.
+    const actionlint = readFileSync('.github/actionlint.yaml', 'utf8');
+    for (const pool of pools) {
+      assert.ok(
+        actionlint.includes(`- '${pool}'`),
+        `${pool} missing from .github/actionlint.yaml`,
+      );
     }
   });
 
@@ -410,6 +447,130 @@ function runResolve({ failures = 0, version = '0.22.3', env = {} } = {}) {
   }
 }
 
+// Runs the 'Update qwen' step body against stubbed `sudo`/`npm`, with the
+// absolute prefixes relocated into a temp root. `usrInstallFailures` makes
+// the /usr install fail its first N invocations — the transient registry
+// hiccup the retry loop exists for. The stub npm creates the prefix's
+// bin/qwen on success, so "the loop deleted it and never restored it" is
+// observable instead of inferred.
+function runUpdate({
+  legacyCopy = true,
+  danglingLegacy = false,
+  usrInstallFailures = 0,
+} = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'ecs-install-'));
+  try {
+    const root = join(dir, 'root');
+    for (const prefix of ['usr/local/bin', 'usr/bin', 'usr/lib']) {
+      mkdirSync(join(root, prefix), { recursive: true });
+    }
+    if (legacyCopy) {
+      writeFileSync(join(root, 'usr/bin/qwen'), '#!/bin/sh\necho 0.26.0\n', {
+        mode: 0o755,
+      });
+    } else if (danglingLegacy) {
+      symlinkSync(join(root, 'nonexistent/qwen'), join(root, 'usr/bin/qwen'));
+    }
+    const counter = join(dir, 'usr-attempts');
+    const calls = join(dir, 'npm-calls');
+    const sudoStub = join(dir, 'sudo');
+    writeFileSync(sudoStub, '#!/usr/bin/env bash\nexec "$@"\n', {
+      mode: 0o755,
+    });
+    const npmStub = join(dir, 'npm');
+    writeFileSync(
+      npmStub,
+      [
+        '#!/usr/bin/env bash',
+        `echo "npm $*" >> ${calls}`,
+        'prefix=""',
+        'while [[ $# -gt 0 ]]; do',
+        '  if [[ "$1" == "--prefix" ]]; then prefix="$2"; shift 2; else shift; fi',
+        'done',
+        // The stub root relocates /usr to <root>/usr; match the basename
+        // so the /usr arm is distinguishable from /usr/local.
+        'if [[ "$(basename "${prefix}")" == "usr" ]]; then',
+        `  attempt=$(( $(cat ${counter} 2>/dev/null || echo 0) + 1 ))`,
+        `  echo "$attempt" > ${counter}`,
+        `  if (( attempt <= ${usrInstallFailures} )); then`,
+        '    echo "npm error code ENOTEMPTY" >&2',
+        '    exit 1',
+        '  fi',
+        'fi',
+        'mkdir -p "${prefix}/bin"',
+        `printf '#!/bin/sh\\necho 0.27.0\\n' > "\${prefix}/bin/qwen"`,
+        'chmod +x "${prefix}/bin/qwen"',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    const ghEnv = join(dir, 'github-env');
+    writeFileSync(ghEnv, '');
+    // Relocate via variables assigned from rewritten literals, so the bare
+    // `--prefix /usr` argument (no /usr/... path suffix) is covered too —
+    // a plain path replaceAll misses it and the stub would target the real
+    // /usr.
+    const body = [
+      `LOCAL_PREFIX=${join(root, 'usr/local')}`,
+      `USR_PREFIX=${join(root, 'usr')}`,
+      `USR_BIN=${join(root, 'usr/bin')}`,
+      stepBody('Update qwen')
+        .replaceAll('/usr/local/lib', '"${LOCAL_PREFIX}/lib"')
+        .replaceAll('/usr/lib', '"${USR_PREFIX}/lib"')
+        .replaceAll('/usr/local/bin', '"${LOCAL_PREFIX}/bin"')
+        .replaceAll('/usr/bin/qwen', '"${USR_BIN}/qwen"')
+        .replaceAll('--prefix /usr/local', '--prefix "${LOCAL_PREFIX}"')
+        .replaceAll('--prefix /usr ', '--prefix "${USR_PREFIX}" ')
+        // Keep the retry wall-clock negligible; the loop shape unchanged.
+        .replace('sleep $((attempt * 10))', 'sleep 0'),
+    ].join('\n');
+    const script = join(dir, 'update.sh');
+    writeFileSync(script, body);
+    const result = spawnSync('bash', [script], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH ?? ''}`,
+        RUNNER_TEMP: dir,
+        GITHUB_ENV: ghEnv,
+        VERSION: '0.27.0',
+      },
+    });
+    // The verify step against the same tree, with a `qwen` stub on PATH so
+    // the PATH-winner check runs; the pinned paths are the real assertion.
+    const qwenStub = join(dir, 'qwen');
+    writeFileSync(qwenStub, '#!/bin/sh\necho 0.27.0\n', { mode: 0o755 });
+    const verifyBody = stepBody('Verify version')
+      .replaceAll('/usr/local/bin', join(root, 'usr/local/bin'))
+      .replaceAll('/usr/bin/qwen', join(root, 'usr/bin/qwen'));
+    const verifyScript = join(dir, 'verify.sh');
+    writeFileSync(verifyScript, verifyBody);
+    const verifyResult = spawnSync('bash', [verifyScript], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH ?? ''}`,
+        VERSION: '0.27.0',
+        LEGACY_PRESENT: readFileSync(ghEnv, 'utf8').includes('LEGACY_PRESENT=1')
+          ? '1'
+          : '0',
+      },
+    });
+    return {
+      status: result.status,
+      stdout: result.stdout ?? '',
+      stderr: result.stderr ?? '',
+      ghEnv: readFileSync(ghEnv, 'utf8'),
+      npmCalls: existsSync(calls) ? readFileSync(calls, 'utf8') : '',
+      usrQwenExists: existsSync(join(root, 'usr/bin/qwen')),
+      localQwenExists: existsSync(join(root, 'usr/local/bin/qwen')),
+      verifyStatus: verifyResult.status,
+      verifyStdout: verifyResult.stdout ?? '',
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // Runs .github/scripts/ecs-fleet-update-failure-issue.sh against a stubbed
 // `gh`. The stub applies the script's real `--jq` filter with real jq, so the
 // pool-naming expression is exercised rather than mocked away, and it honours
@@ -504,6 +665,52 @@ function runReport({ openIssues = [], jobs = DEFAULT_JOBS, env = {} } = {}) {
 }
 
 describe('ECS runner qwen update replay', { skip: !replayable }, () => {
+  it('keeps a legacy host on the retry loop after a transient /usr failure', () => {
+    // The bug this pins: attempt 1 removed /usr/bin/qwen, then the /usr
+    // install failed transiently. A current-state early exit saw "no
+    // legacy copy" on attempt 2 and exited 0 — binary deleted, job green,
+    // every later run repeating the same silent skip.
+    const updated = runUpdate({ legacyCopy: true, usrInstallFailures: 1 });
+    assert.equal(updated.status, 0);
+    assert.ok(updated.usrQwenExists, '/usr/bin/qwen must be restored');
+    assert.ok(updated.localQwenExists);
+    assert.ok(updated.ghEnv.includes('LEGACY_PRESENT=1'));
+    assert.ok(updated.stdout.includes('attempt 1 failed; retrying'));
+    const usrInstalls = updated.npmCalls
+      .split('\n')
+      .filter((line) => /--prefix \S*\/usr /.test(line));
+    assert.equal(usrInstalls.length, 2, 'the /usr install must be retried');
+    assert.equal(updated.verifyStatus, 0, 'both pinned paths verify green');
+  });
+
+  it('fails the leg instead of reporting success when /usr never recovers', () => {
+    const updated = runUpdate({ legacyCopy: true, usrInstallFailures: 99 });
+    assert.equal(updated.status, 1);
+    assert.ok(!updated.usrQwenExists);
+    assert.ok(updated.localQwenExists, 'one working CLI survives a failed leg');
+    assert.ok(updated.stdout.includes('failed after 3 attempts'));
+  });
+
+  it('skips the second prefix entirely on a host without a legacy copy', () => {
+    const updated = runUpdate({ legacyCopy: false });
+    assert.equal(updated.status, 0);
+    assert.ok(updated.localQwenExists);
+    assert.ok(!updated.usrQwenExists, 'hk hosts must not grow a second tree');
+    assert.ok(updated.ghEnv.includes('LEGACY_PRESENT=0'));
+    assert.ok(!/--prefix \S*\/usr /.test(updated.npmCalls));
+    assert.equal(updated.verifyStatus, 0);
+  });
+
+  it('updates through a dangling legacy symlink instead of skipping it', () => {
+    // -e alone would report "no legacy copy" for a dangling symlink and
+    // leave it dangling forever; the snapshot uses -e || -L.
+    const updated = runUpdate({ legacyCopy: false, danglingLegacy: true });
+    assert.equal(updated.status, 0);
+    assert.ok(updated.ghEnv.includes('LEGACY_PRESENT=1'));
+    assert.ok(updated.usrQwenExists, 'the dangling symlink is replaced');
+    assert.equal(updated.verifyStatus, 0);
+  });
+
   it('waits out npm publish propagation instead of failing the race', () => {
     // `npm publish --provenance` returns before the version is resolvable
     // (~16 minutes for v0.22.3), and release.yml dispatches this workflow as
