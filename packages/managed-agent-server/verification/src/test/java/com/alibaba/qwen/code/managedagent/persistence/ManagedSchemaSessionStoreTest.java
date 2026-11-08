@@ -55,6 +55,11 @@ public class ManagedSchemaSessionStoreTest {
                         new ManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         tenant = "tenant-" + UUID.randomUUID();
+        // This create writes the immutable ma_session_principal row: under the
+        // unified ownership contract (94958d032422d, "unify unbound Session
+        // authority under the ownership row") a present row is the sole
+        // authority, so the mutations below must carry the owning actor — an
+        // actorless caller answers 404 by design.
         session =
                 tx.execute(
                                 status ->
@@ -347,8 +352,8 @@ public class ManagedSchemaSessionStoreTest {
                                                                     + " WHERE namespace = 'SESSION_COMMAND'",
                                                             Long.class);
                                             winner.execute(ignored -> store.beginSessionRename(
-                                                    tenant, "shared", "digest", other, "theirs"));
-                                            store.beginSessionRename(tenant, "shared", "digest", session, "mine");
+                                                    tenant, "shared", "digest", other, "theirs", "actor"));
+                                            store.beginSessionRename(tenant, "shared", "digest", session, "mine", "actor");
                                         }))
                 .isInstanceOfSatisfying(
                         com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class,
@@ -371,12 +376,12 @@ public class ManagedSchemaSessionStoreTest {
             var first = threads.submit(() -> {
                 start.await(10, java.util.concurrent.TimeUnit.SECONDS);
                 return tx.execute(status -> store.beginSessionRename(
-                        tenant, "first", "first-digest", session, "first"));
+                        tenant, "first", "first-digest", session, "first", "actor"));
             });
             var second = threads.submit(() -> {
                 start.await(10, java.util.concurrent.TimeUnit.SECONDS);
                 return tx.execute(status -> store.beginSessionRename(
-                        tenant, "second", "second-digest", other, "second"));
+                        tenant, "second", "second-digest", other, "second", "actor"));
             });
             assertThat(first.get(15, java.util.concurrent.TimeUnit.SECONDS).renameRevision())
                     .isEqualTo(1);
@@ -393,7 +398,7 @@ public class ManagedSchemaSessionStoreTest {
         var command =
                 tx.execute(
                         status ->
-                                store.beginSessionRename(tenant, "r1", "digest", session, "first"));
+                                store.beginSessionRename(tenant, "r1", "digest", session, "first", "actor"));
         var candidate = store.deliverableRenames(clock.millis()).getFirst();
         var old =
                 tx.execute(
@@ -425,7 +430,7 @@ public class ManagedSchemaSessionStoreTest {
                 tx.execute(
                         status ->
                                 store.beginSessionRename(
-                                        tenant, "r2", "digest2", session, "second"));
+                                        tenant, "r2", "digest2", session, "second", "actor"));
         assertThat(later.renameRevision()).isGreaterThan(command.renameRevision());
         assertThatThrownBy(
                         () ->
@@ -620,7 +625,8 @@ public class ManagedSchemaSessionStoreTest {
                                                 "digest",
                                                 session,
                                                 List.of(),
-                                                "payload"))
+                                                "payload",
+                                                "actor"))
                         .turnId();
         tx.execute(
                 status -> store.claimTurn(tenant, session, turn, "owner", Duration.ofMinutes(1)));
@@ -728,7 +734,8 @@ public class ManagedSchemaSessionStoreTest {
                                                 "digest",
                                                 session,
                                                 List.of(),
-                                                "payload"))
+                                                "payload",
+                                                "actor"))
                         .turnId();
         tx.execute(
                 status -> store.claimTurn(tenant, session, turn, "owner", Duration.ofMinutes(1)));

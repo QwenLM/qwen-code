@@ -576,7 +576,10 @@ class ManagedSessionMessageStoreTest {
     }
 
     private String session() {
-        return agents.createSession(TENANT, "message-" + UUID.randomUUID(),
+        // The actorless createSession overload is a permanent 401 refusal
+        // under the settled ownership contract (94958d032422d); creation
+        // must carry the trusted actor.
+        return agents.createSession(TENANT, "actor", "message-" + UUID.randomUUID(),
                 "qwen-code", null, "messages", Map.of(), List.of())
                 .sessionId();
     }

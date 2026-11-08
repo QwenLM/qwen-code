@@ -581,6 +581,13 @@ class WorkspaceCsiSessionMainTest {
                 return new StoreModels.RenameDelivery(
                                                 "tenant", sessionId, "unused", "title", 1, 0);
             }
+            if (type == com.alibaba.qwen.code.managedagent.model.SessionPrincipal.class) {
+                // The principal-carrying overloads must also reach the CSI
+                // guard, which refuses inside requireLegacySessionForUpdate
+                // before any ownership check; a valid same-tenant principal
+                // keeps the refusal under test the CSI one.
+                return com.alibaba.qwen.code.managedagent.model.SessionPrincipal.ofUser("tenant", "actor");
+            }
             throw new IllegalStateException("Unsupported mutation parameter " + type);
         }).toArray();
         if (method.getParameterTypes()[0] == String.class) {
@@ -644,7 +651,11 @@ class WorkspaceCsiSessionMainTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, json.valueToTree(rows));
         }
-        assertThat(result).hasSize(39);
+        // 40 = the 39 baseline tables plus flyway_schema_history; the PR's
+        // ma_session_principal ownership row table is the added baseline
+        // entry (V1__managed_schema.sql), not a stray catalog artifact.
+        assertThat(result).containsKey("ma_session_principal");
+        assertThat(result).hasSize(40);
         return result;
     }
 
