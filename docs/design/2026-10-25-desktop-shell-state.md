@@ -82,6 +82,7 @@ Both call `require_runtime_origin`, which compares the calling webview's URL ori
 4. The browser Web Shell keeps its existing `localStorage` behavior.
 5. Unknown keys, values over the cap, and calls from the bootstrap or a foreign origin are rejected.
 6. No token or other secret appears in `desktop-state.json`.
+7. A host the saved-connection catalog names boots without the daemon-target confirmation prompt, since the user saved that connection themselves; a host the catalog does not name still asks.
 
 ## Verification
 

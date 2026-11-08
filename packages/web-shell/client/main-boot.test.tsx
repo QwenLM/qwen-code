@@ -123,9 +123,8 @@ describe('web shell boot', () => {
     // file, so the boot-time confirmation decision cannot be made before
     // hydration: a module-scope read sees an empty store and asks the user to
     // confirm a host they added and saved themselves.
-    // The mirror is cleared because this run's vitest shares one
-    // `--localstorage-file` across files, and an unrelated catalog left by
-    // another file would otherwise look like a newer local copy.
+    // The mirror is cleared because earlier tests in this file leave catalogs
+    // behind, and one of them would otherwise look like a newer local copy.
     window.localStorage.clear();
     const invoke = vi.fn(
       async (command: string, args?: Record<string, unknown>) => {

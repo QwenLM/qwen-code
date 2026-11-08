@@ -82,6 +82,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 4. 浏览器 Web Shell 保持既有的 `localStorage` 行为。
 5. 未知键、超过上限的值，以及来自 bootstrap 或其他 origin 的调用都会被拒绝。
 6. `desktop-state.json` 中不出现令牌或其他秘密。
+7. 已保存连接目录中列出的主机会直接启动，不再弹出 daemon-target 确认提示，因为该连接是用户自己保存的；目录未列出的主机仍然会询问。
 
 ## 验证
 
