@@ -343,6 +343,59 @@ describe('buildFileTools', () => {
     expect(sent[0]!.fileName).toBe('invoicegnp.exe');
   });
 
+  it('strips every Unicode bidi control, not just enumerated ranges', async () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+    // The full Bidi_Control property: an enumerated range list missed U+061C.
+    const bidiControls = [
+      0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066,
+      0x2067, 0x2068, 0x2069,
+    ];
+
+    for (const code of bidiControls) {
+      await call({
+        path,
+        file_name: `invoice${String.fromCodePoint(code)}gnp.exe`,
+      });
+    }
+
+    expect(sent.map((entry) => entry.fileName)).toEqual(
+      bidiControls.map(() => 'invoicegnp.exe'),
+    );
+  });
+
+  it('strips C1 controls and the line and paragraph separators', async () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+
+    await call({ path, file_name: 'a\u0085b\u009fc\u2028d\u2029e.txt' });
+
+    expect(sent[0]!.fileName).toBe('abcde.txt');
+  });
+
+  it('falls back to the sanitized basename when the display name sanitizes away', async () => {
+    const path = join(workspace, 'invoice\u202Egnp.exe');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+
+    await call({ path, file_name: '\u200E\u202E' });
+
+    expect(sent[0]!.fileName).toBe('invoicegnp.exe');
+  });
+
+  it('uses a fixed placeholder when every character of the name is stripped', async () => {
+    const path = join(workspace, '\u200E\u202E');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+
+    const result = await call({ path });
+
+    expect(sent[0]!.fileName).toBe('file');
+    expect(textOf(result)).toBe('File sent (file).');
+  });
+
   it('sanitizes the on-disk basename when no display name is given', async () => {
     // The default path reaches the platform card and the tool result verbatim,
     // so an on-disk name carrying a bidi override spoofs the card exactly as an

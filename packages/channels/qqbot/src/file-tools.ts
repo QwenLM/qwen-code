@@ -42,6 +42,8 @@ export const QQ_OUTBOUND_VIDEO_MAX_BYTES = 30_000_000;
 export const QQ_OUTBOUND_VOICE_MAX_BYTES = 20_000_000;
 
 const MAX_FILE_NAME_CHARS = 100;
+/** Sent when a name has nothing left after sanitization. */
+const FALLBACK_FILE_DISPLAY_NAME = 'file';
 
 export type QQMediaKind = 'file' | 'image' | 'video' | 'voice';
 
@@ -179,15 +181,22 @@ function makeHandler(deps: QQFileToolDeps, spec: OutboundMediaSpec) {
       throw error;
     }
     const requestedName = args['file_name'];
-    // Sanitize the on-disk basename too: it reaches the platform card and the
-    // tool result verbatim, so a file named with a bidi override would spoof
-    // the name the user reads exactly as an explicit `file_name` would.
-    const fileName =
+    // The on-disk basename reaches the platform card and the tool result
+    // verbatim, so it is sanitized too — a file named with a bidi override
+    // spoofs the name the user reads exactly as an explicit `file_name` would.
+    // A name that sanitizes to nothing falls back to the sanitized basename and
+    // then to a fixed placeholder: falling back to the raw name would hand the
+    // platform the one string this function exists to reject.
+    const requestedDisplayName =
       spec.kind === 'file' &&
       typeof requestedName === 'string' &&
       requestedName.trim() !== ''
-        ? safeFileName(requestedName) || file.fileName
-        : safeFileName(file.fileName) || file.fileName;
+        ? safeFileName(requestedName)
+        : '';
+    const fileName =
+      requestedDisplayName ||
+      safeFileName(file.fileName) ||
+      FALLBACK_FILE_DISPLAY_NAME;
     const result = await deps.sendMedia({
       sessionId: context.sessionId,
       chatId: chat.chatId,
@@ -401,21 +410,20 @@ function descriptorPath(fd: number): string | undefined {
   }
 }
 
+/**
+ * Characters that must not survive into a display name: bidi controls reorder
+ * what the reader sees, C0/C1 controls and the line/paragraph separators are
+ * unprintable, and a lone surrogate cannot be encoded. Enumerated ranges miss
+ * code points (U+061C was one), so this names the properties instead.
+ */
+const UNSAFE_FILE_NAME_CHAR = /[\p{Bidi_Control}\p{Cc}\p{Zl}\p{Zp}\p{Cs}]/u;
+
 /** The platform file name is model-supplied, so drop separators and controls. */
 function safeFileName(name: string): string {
   let cleaned = '';
   for (const char of name) {
-    const code = char.codePointAt(0) ?? 0;
-    if (code < 0x20 || code === 0x7f || char === '/' || char === '\\') continue;
-    // Bidi overrides would let a display name read as something it is not.
-    if (
-      (code >= 0x202a && code <= 0x202e) ||
-      (code >= 0x2066 && code <= 0x2069)
-    )
-      continue;
-    if (code === 0x200e || code === 0x200f) continue;
-    // A lone surrogate (only reachable from malformed input) cannot be encoded.
-    if (code >= 0xd800 && code <= 0xdfff) continue;
+    if (char === '/' || char === '\\') continue;
+    if (UNSAFE_FILE_NAME_CHAR.test(char)) continue;
     cleaned += char;
   }
   // Slice by code point: a UTF-16 slice can cut a surrogate pair in half.
