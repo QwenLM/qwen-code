@@ -48,16 +48,6 @@ const SHELL_TOOL_NAMES = new Set(['run_shell_command', 'shell']);
 const SUBCOMMAND_STAGE_START =
   /^\s*(?:(?:env|time|nohup|command|sudo)\s+(?:(?:-[A-Za-z][A-Za-z-]*(?:\s+(?!gh\b)[^\s]+)?|[A-Za-z_][A-Za-z0-9_]*=[^\s]*)\s+)*|[A-Za-z_][A-Za-z0-9_]*=(?:\$\(|`)\s*|[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)*gh\s+(?:pr|issue)\s+comment\b/;
 
-/**
- * Leads a `gh`/`curl` invocation (read or write), with the same wrapper /
- * assignment prefixes the creation recognition accepts (so `env -u VAR gh api`
- * is counted too). Used to count how many API commands a chain runs: when a
- * creation is chained with another API command, the output — URL, JSON, or bare
- * id alike — cannot be proven to come from the creation.
- */
-const API_COMMAND_LEAD =
-  /^\s*(?:(?:env|time|nohup|command|sudo)\s+(?:(?:-[A-Za-z][A-Za-z-]*(?:\s+(?!gh\b)[^\s]+)?|[A-Za-z_][A-Za-z0-9_]*=[^\s]*)\s+)*|[A-Za-z_][A-Za-z0-9_]*=(?:\$\(|`)\s*|[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)*(?:gh|curl)\b/;
-
 const PATH_PATTERNS: readonly RegExp[] = [
   // gh api / curl writing to a comments collection.
   /\bgh\s+api\b[\s\S]*?\b(?:issues|pulls)\/\d+\/comments\b[\s\S]*?(?:-X\s+POST|--method\s+POST|-f\s|--field\s|-F\s|--raw-field\s|--input\s)/,
@@ -259,24 +249,35 @@ function creationSegment(command: string): string | undefined {
 }
 
 /**
- * Whether the creation's output cannot be proven to be the result we see. When
- * another `gh`/`curl` command runs AFTER the creation, that later command may
- * have produced the output — e.g. `gh pr comment … >/dev/null && gh api …
- * --jq '.[0].html_url'` takes its URL from the read — so attribute nothing.
- * A read BEFORE the creation is fine: the creation is the last API command and
- * a creation-shaped result is its own.
+ * Whether the creation's output cannot be proven to be the result we see. A
+ * comments-collection READ anywhere in the chain — before OR after the creation
+ * — leaves comment-shaped output (an id, a URL, or a JSON object) that cannot be
+ * distinguished from the creation's: `read && create` parses the read's object
+ * first, and `create >/dev/null && read` sees only the read's output. Command
+ * order alone does not prove which output is the creation's, so attribute
+ * nothing when such a read is present. A non-comments command (e.g. `gh pr view
+ * --json state`) leaves no comment-shaped output and does not make it ambiguous.
  */
 function creationOutputIsAmbiguous(command: string): boolean {
-  const segments = commandSegments(command);
-  const creationIdx = segments.findIndex((segment) =>
-    segmentIsCreation(segment),
+  return commandSegments(command).some((segment) => isCommentsRead(segment));
+}
+
+/**
+ * A stage that READS a comments collection and so may leave comment-shaped
+ * output: `gh api`/`curl` against `issues|pulls/<n>/comments` without a creation
+ * write flag, or `gh pr view --comments`. A creation write is not a read.
+ */
+function isCommentsRead(segment: string): boolean {
+  const stripped = stripQuotedSpans(stripShellComment(segment));
+  if (/\bgh\s+pr\s+view\b/.test(stripped) && /--comments\b/.test(stripped)) {
+    return true;
+  }
+  const unwrapped = segment.replace(/['"]/g, '');
+  return (
+    API_STAGE_START.test(unwrapped) &&
+    /\b(?:issues|pulls)\/\d+\/comments\b/.test(unwrapped) &&
+    !segmentIsCreation(segment)
   );
-  if (creationIdx === -1) return true;
-  return segments
-    .slice(creationIdx + 1)
-    .some((segment) =>
-      API_COMMAND_LEAD.test(stripQuotedSpans(stripShellComment(segment))),
-    );
 }
 
 /**

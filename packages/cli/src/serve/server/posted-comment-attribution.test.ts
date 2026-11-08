@@ -294,12 +294,38 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(redir)).toContain(issueCommentKey('131'));
   });
 
-  it('keys a creation to its own collection when another collection is read', () => {
+  it('does not attribute when a comments read precedes the creation (output origin ambiguous)', () => {
+    // The read leaves comment-shaped output that cannot be distinguished from
+    // the creation's, even though the creation targets another collection.
     const entry = shellResult(
       "gh api repos/o/r/issues/42/comments --jq '.[0].id' ; gh api repos/o/r/pulls/42/comments -X POST -f body=x",
       '{"id":900}',
     );
-    expect(extractPostedCommentIds(entry)).toEqual([reviewCommentKey('900')]);
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not credit a read object that precedes the creation object in the output', () => {
+    const entry = shellResult(
+      "gh api repos/o/r/issues/42/comments --jq '.[0] | {id,body}' && gh api repos/o/r/issues/42/comments -f body=hi --jq '{id,body}'",
+      '{"id":111,"body":"existing comment"}\n{"id":900,"body":"hi"}',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('does not credit a read URL when the creation output is redirected away', () => {
+    const entry = shellResult(
+      "gh api repos/o/r/issues/42/comments --jq '.[0].html_url' && gh pr comment 42 --body hi >/dev/null",
+      'https://github.com/o/r/pull/42#issuecomment-111',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes a creation chained after a non-comments read', () => {
+    const entry = shellResult(
+      'gh pr view 42 --json state --jq .state && gh pr comment 42 --body-file comment.md',
+      'OPEN\nhttps://github.com/o/r/pull/42#issuecomment-802',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('802')]);
   });
 
   it('does not veto a POST whose quoted body merely quotes --method GET', () => {
