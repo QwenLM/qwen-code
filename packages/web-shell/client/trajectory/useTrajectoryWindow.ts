@@ -88,6 +88,8 @@ export interface TrajectoryWindow {
   truncated: boolean;
   olderFailure?: TrajectoryWindowFailure;
   navigationError?: TrajectoryWindowFailure;
+  /** What the read in flight is for; absent while nothing is loading. */
+  loadingKind?: 'latest' | 'older' | 'newer';
   mode: 'latest' | 'history';
   navigationVersion: number;
   canRefresh: boolean;
@@ -500,6 +502,8 @@ export function useTrajectoryWindow(
     truncated: windowState.truncated,
     olderFailure: windowState.olderFailure,
     navigationError: windowState.navigationError,
+    loadingKind:
+      windowState.status === 'loading' ? pendingRef.current?.kind : undefined,
     mode: windowState.mode,
     navigationVersion: windowState.navigationVersion,
     canRefresh: Boolean(

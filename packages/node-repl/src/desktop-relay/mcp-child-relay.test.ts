@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { MAX_RELAYED_YIELD_TIME_MS } from './constants.js';
+import { MAX_RELAYED_TIMEOUT_MS } from './constants.js';
 import {
   McpChildRelay,
   type ChildChannel,
@@ -178,7 +178,7 @@ describe('McpChildRelay', () => {
     expect(child.closed).toBe(true);
   });
 
-  it('rewrites a yield above the channel budget down to it', async () => {
+  it('bounds execution and cancellation within the channel timeout', async () => {
     const child = new FakeChild();
     const relay = new McpChildRelay(child);
     const pending = relay.handle({
@@ -186,19 +186,18 @@ describe('McpChildRelay', () => {
       id: 1,
       method: 'tools/call',
       params: {
-        name: 'node_repl',
-        arguments: { code: 'longRunning()', yield_time_ms: 60_000 },
+        name: 'js',
+        arguments: { code: 'longRunning()', timeout_ms: 60_000 },
       },
     });
-    // The daemon answers one reverse-channel frame for at most 30 s; a longer
-    // yield would time the frame out while the cell kept driving the desktop.
+    // Execution plus cancellation grace must fit within one reverse-channel frame.
     expect(child.last()).toMatchObject({
       method: 'tools/call',
       params: {
-        name: 'node_repl',
+        name: 'js',
         arguments: {
           code: 'longRunning()',
-          yield_time_ms: MAX_RELAYED_YIELD_TIME_MS,
+          timeout_ms: MAX_RELAYED_TIMEOUT_MS,
         },
       },
     });
@@ -206,7 +205,7 @@ describe('McpChildRelay', () => {
     await expect(pending).resolves.toMatchObject({ id: 1, result: {} });
   });
 
-  it('leaves a yield inside the channel budget untouched', async () => {
+  it('leaves shorter execution timeouts untouched', async () => {
     const child = new FakeChild();
     const relay = new McpChildRelay(child);
     const pending = relay.handle({
@@ -214,12 +213,12 @@ describe('McpChildRelay', () => {
       id: 1,
       method: 'tools/call',
       params: {
-        name: 'node_repl',
-        arguments: { code: 'fast()', yield_time_ms: 5_000 },
+        name: 'js',
+        arguments: { code: 'fast()', timeout_ms: 5_000 },
       },
     });
     expect(child.last()).toMatchObject({
-      params: { arguments: { code: 'fast()', yield_time_ms: 5_000 } },
+      params: { arguments: { code: 'fast()', timeout_ms: 5_000 } },
     });
     child.reply({ jsonrpc: '2.0', id: child.last().id, result: {} });
     await expect(pending).resolves.toMatchObject({ id: 1, result: {} });

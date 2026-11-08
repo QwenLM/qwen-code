@@ -127,6 +127,7 @@ describe('NativeLspService disk document synchronization', () => {
       {
         getProjectRoot: () => directory,
         isTrustedFolder: () => true,
+        isExplicitlyTrustedFolder: () => true,
       } as unknown as Config,
       { getDirectories: () => [directory] } as unknown as WorkspaceContext,
       new EventEmitter(),
@@ -2278,6 +2279,48 @@ describe('NativeLspService disk document synchronization', () => {
       },
     );
 
+    it('names a starting server for goToDefinition instead of reporting no definitions', async () => {
+      handle.status = 'IN_PROGRESS';
+      const result = await execute(lspTool(), {
+        operation: 'goToDefinition',
+        filePath: file,
+        line: 1,
+        character: 1,
+      });
+      expect(result.llmContent).toContain(
+        'No LSP server is ready to provide definitions (test is in progress)',
+      );
+      expect(result.llmContent).not.toContain('No definitions found');
+      expect(connection.request).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['definitions', () => service.definitions({ uri, range })],
+      ['references', () => service.references({ uri, range })],
+      ['hover', () => service.hover({ uri, range })],
+      ['document symbols', () => service.documentSymbols(uri)],
+      ['implementations', () => service.implementations({ uri, range })],
+      ['call hierarchy', () => service.prepareCallHierarchy({ uri, range })],
+      [
+        'code actions',
+        () =>
+          service.codeActions(uri, range, {
+            diagnostics: [],
+            triggerKind: 'invoked',
+          }),
+      ],
+      ['workspace symbols', () => service.workspaceSymbols('fn')],
+    ] as Array<[string, () => Promise<unknown>]>)(
+      'rejects %s when no server is ready',
+      async (operation, query) => {
+        handle.status = 'IN_PROGRESS';
+        await expect(run(query())).rejects.toThrow(
+          `No LSP server is ready to provide ${operation} (test is in progress)`,
+        );
+        expect(connection.request).not.toHaveBeenCalled();
+      },
+    );
+
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
       'still displays a successful empty %s report as clean',
       async (operation) => {
@@ -3173,17 +3216,11 @@ describe('NativeLspService disk document synchronization', () => {
     });
 
     it.each([
-      // pyright proves it cannot own `.go` (its `py` is attributable), so the
-      // reason is coverage. kotlin's `kt` alias row makes its declaration
-      // placeable too, and none of its extensions is `.ts`, so its answer is
-      // irrelevant the same way and the reason is coverage as well — the
-      // attribution wording is reserved for a declaration no table row can
-      // place at all.
-      ['pyright', 'python', 'main.go', 'no configured server covers'],
-      ['kotlin', 'kotlin', 'main.ts', 'no configured server covers'],
+      ['pyright', 'python', 'main.go'],
+      ['kotlin', 'kotlin', 'main.ts'],
     ] as const)(
       'refuses an empty answer with no attributable owner from %s',
-      async (name, language, fileName, reason) => {
+      async (name, language, fileName) => {
         const [targetPath] = addFile(fileName, 'const value = "";\n');
         const answerer = createConnection();
         mockDiagnosticsResponses(answerer);
@@ -3195,7 +3232,7 @@ describe('NativeLspService disk document synchronization', () => {
         expect(result.error).toMatchObject({
           type: ToolErrorType.EXECUTION_FAILED,
         });
-        expect(result.error?.message).toContain(reason);
+        expect(result.error?.message).toContain('could not be attributed');
         expect(result.llmContent).not.toContain('No diagnostics found');
       },
     );
@@ -3578,7 +3615,7 @@ describe('NativeLspService disk document synchronization', () => {
         type: ToolErrorType.EXECUTION_FAILED,
       });
       expect(result.error?.message).toContain(
-        'no configured server covers the queried file',
+        'could not be attributed to the queried file',
       );
       expect(result.llmContent).not.toContain('No diagnostics found');
     });
@@ -3602,7 +3639,7 @@ describe('NativeLspService disk document synchronization', () => {
         type: ToolErrorType.EXECUTION_FAILED,
       });
       expect(result.error?.message).toContain(
-        'no configured server covers the queried file',
+        'could not be attributed to the queried file',
       );
       expect(result.llmContent).not.toContain('No diagnostics found');
     });
@@ -3612,13 +3649,11 @@ describe('NativeLspService disk document synchronization', () => {
       ['typescript', 'tsls', 'main.mts'],
       ['dockerfile', 'docker-ls', 'Dockerfile'],
     ] as const)(
-      'keeps a clean answer for an extension the tables cannot place (%s)',
+      'keeps a clean answer from the declared owner for %s',
       async (language, name, fileName) => {
-        // `.h`, `.mts` and an extensionless name appear in no diagnostics
-        // table, so no declaration can be shown to own them: ownership is
-        // undecidable here and the answering server's authoritative empty
-        // report must stand. Refusing would reject a documented working
-        // configuration with a reason the same call's pull counter contradicts.
+        // The diagnostics-local tables place `.h` and `.mts`; an extensionless
+        // name remains undecidable. In both cases the declared server's
+        // authoritative empty report must stand.
         const [targetPath] = addFile(fileName, 'export const value = 1;\n');
         const answerer = createConnection();
         mockDiagnosticsResponses(answerer);

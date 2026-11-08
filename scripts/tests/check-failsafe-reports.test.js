@@ -148,6 +148,38 @@ describe('check-failsafe-reports', () => {
     expect(check('hosted', hosted).status).toBe(0);
   });
 
+  it('exempts a class the module binds to surefire, and fails when the pom disagrees', () => {
+    // The real module name, because the exemption is keyed on it: the pom binds
+    // ManagedAgentPackagingIT to a surefire execution and excludes it from the
+    // mysql-integration failsafe, so it can never satisfy the non-hosted roster.
+    const name = 'packages/managed-agent-server/verification';
+    const sources = [
+      'com.example.ManagedAgentPackagingIT',
+      'com.example.OrdersIT',
+    ];
+    const bound = module(name, sources, { 'com.example.OrdersIT': [1, 0] });
+    writeFileSync(
+      join(bound, 'pom.xml'),
+      '<project><plugin><configuration><includes><include>**/ManagedAgentPackagingIT.java</include></includes></configuration></plugin><plugin><configuration><excludes><exclude>**/ManagedAgentPackagingIT.java</exclude></excludes></configuration></plugin></project>',
+    );
+    const exempt = check('non-hosted', bound);
+    expect(exempt.output).toContain(
+      'ManagedAgentPackagingIT runs under surefire, not failsafe',
+    );
+    expect(exempt.status).toBe(0);
+
+    // Drift guard: the exemption is only valid while the pom keeps both bindings.
+    writeFileSync(
+      join(bound, 'pom.xml'),
+      '<project><plugin><configuration><excludes><exclude>**/ManagedAgentPackagingIT.java</exclude></excludes></configuration></plugin></project>',
+    );
+    const drifted = check('non-hosted', bound);
+    expect(drifted.output).toContain(
+      'no longer binds it to a surefire include',
+    );
+    expect(drifted.status).toBe(1);
+  });
+
   it('counts the test cases failsafe folds into an outer report', () => {
     const dir = module('nested', ['com.example.OrdersIT']);
     writeFileSync(
@@ -261,7 +293,10 @@ describe('check-failsafe-reports', () => {
     expect(result.status).toBe(1);
     const noFamily = join(root, 'no-family');
     mkdirSync(join(noFamily, 'src', 'test', 'java'), { recursive: true });
-    expect(check('hosted', noFamily).status).toBe(0);
+    expect(check('hosted', noFamily).status).toBe(1);
+    expect(check('hosted', noFamily).output).toContain(
+      'no hosted test sources found',
+    );
   });
 
   it('hosts admission gates as their own family and rejects drift in both directions', () => {

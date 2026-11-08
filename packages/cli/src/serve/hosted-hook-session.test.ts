@@ -33,13 +33,21 @@ import {
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
 import {
+  HOSTED_TOOL_INPUT_ORDER,
   HostedHookSession,
   HostedHookInputConflictError,
   HostedHookRecoveryRequiredError,
   parseHostedHookPin,
   hostedHookOccurrenceId,
+  semanticInputDigest,
+  type HostedToolInputOrder,
 } from './hosted-hook-session.js';
 import { ManagedHookRuntime } from './managed-hook-runtime.js';
+import { HostedMcpSession } from './hosted-mcp-session.js';
+import {
+  commitHostedMcpSettings,
+  selectedMcpServers,
+} from './hosted-mcp-settings.js';
 import * as stdio from '../utils/stdioHelpers.js';
 import { HttpHookRunner } from '@qwen-code/qwen-code-core/hooks/httpHookRunner.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
@@ -85,6 +93,7 @@ const pin = {
   definitionDigest: 'a'.repeat(64),
 };
 const options = { baseUrl: 'http://127.0.0.1:9999', token: 'test' };
+
 const signal = () => new AbortController().signal;
 
 beforeEach(async () => {
@@ -445,6 +454,184 @@ it('commits a pinned plan before dispatch and replays the original occurrence af
   expect(session.authority.taskViews()).toEqual([]);
 });
 
+async function savedPlan(occurrenceId: string) {
+  const marker = parseHookExecution(
+    session.authority.extensionRecord(
+      'hook_execution',
+      hostedHookOccurrenceId(HookEventName.PreToolUse, occurrenceId),
+    )!.record,
+  );
+  return JSON.parse(
+    (await session.resources.read(marker.planRef)).toString(),
+  ) as { input: Record<string, unknown>; refusedInputDigest?: string };
+}
+
+it('resumes a saved occurrence on the fields an earlier release built, and plans new ones on the current fields', async () => {
+  const earlier = { tool_name: 'read_file', tool_input: { file_path: 'c' } };
+  const current = { tool_name: 'read_file', tool_input: { file_path: 'b' } };
+  const output = await hooks.fire(
+    HookEventName.PreToolUse,
+    'call-1',
+    earlier,
+    signal(),
+  );
+  const replacement = new HostedHookSession(options, session, pin);
+  expect(
+    await replacement.fire(
+      HookEventName.PreToolUse,
+      'call-1',
+      current,
+      signal(),
+      undefined,
+      earlier,
+    ),
+  ).toEqual(output);
+  await expect(
+    replacement.fire(
+      HookEventName.PreToolUse,
+      'call-1',
+      current,
+      signal(),
+      undefined,
+      { ...earlier, tool_input: { file_path: 'a' } },
+    ),
+  ).rejects.toThrow(HostedHookInputConflictError);
+  await replacement.fire(
+    HookEventName.PreToolUse,
+    'call-2',
+    current,
+    signal(),
+    undefined,
+    earlier,
+  );
+  expect((await savedPlan('call-2')).input).toMatchObject(current);
+  expect(
+    requests.flatMap((request) =>
+      request.kind === 'hook-execute'
+        ? [(request.input as unknown as Record<string, unknown>)['tool_input']]
+        : [],
+    ),
+  ).toEqual([earlier.tool_input, current.tool_input]);
+});
+
+it('resumes an oversized saved occurrence only on the digest of the fields it was planned for', async () => {
+  catalog = {
+    ...catalog,
+    hooks: [{ ...catalog.hooks[0], config: { type: HookType.Function } }],
+  };
+  hooks.setMessagesProvider(() => [{ text: 'x'.repeat(8 * 1024 * 1024 + 1) }]);
+  const earlier = { tool_name: 'read_file', tool_input: { file_path: 'c' } };
+  const output = await hooks.fire(
+    HookEventName.PreToolUse,
+    'call-1',
+    earlier,
+    signal(),
+  );
+  const saved = await savedPlan('call-1');
+  expect(saved.refusedInputDigest).toBe(semanticInputDigest(earlier));
+  expect(saved.input).not.toHaveProperty('tool_input');
+  const replacement = new HostedHookSession(options, session, pin);
+  const current = { ...earlier, tool_input: { file_path: 'b' } };
+  expect(
+    await replacement.fire(
+      HookEventName.PreToolUse,
+      'call-1',
+      current,
+      signal(),
+      undefined,
+      // Only the Session-level fields differ, which the digest leaves out.
+      { ...earlier, session_id: 'other', timestamp: 'later', messages: [] },
+    ),
+  ).toEqual(output);
+  await expect(
+    replacement.fire(
+      HookEventName.PreToolUse,
+      'call-1',
+      current,
+      signal(),
+      undefined,
+      { ...earlier, tool_use_id: 'call-2' },
+    ),
+  ).rejects.toThrow(HostedHookInputConflictError);
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(0);
+  expect(await savedPlan('call-1')).toEqual(saved);
+});
+
+it.each([false, true])(
+  'saves a tool input order on the plan and resumes the occurrence only under that order (oversized: %s)',
+  async (oversized) => {
+    if (oversized) {
+      catalog = {
+        ...catalog,
+        hooks: [{ ...catalog.hooks[0], config: { type: HookType.Function } }],
+      };
+      hooks.setMessagesProvider(() => [
+        { text: 'x'.repeat(8 * 1024 * 1024 + 1) },
+      ]);
+    }
+    const fields = { tool_name: 'read_file', tool_input: { file_path: 'a' } };
+    const fire = (owner: HostedHookSession, order?: string) =>
+      owner.fire(
+        HookEventName.PreToolUse,
+        'call-1',
+        fields,
+        signal(),
+        undefined,
+        undefined,
+        order as HostedToolInputOrder | undefined,
+      );
+    const output = await fire(hooks, HOSTED_TOOL_INPUT_ORDER);
+    const saved = await savedPlan('call-1');
+    expect(saved).toMatchObject({ toolInputOrder: HOSTED_TOOL_INPUT_ORDER });
+    if (oversized)
+      expect(saved.refusedInputDigest).toBe(semanticInputDigest(fields));
+    const replacement = new HostedHookSession(options, session, pin);
+    expect(await fire(replacement, HOSTED_TOOL_INPUT_ORDER)).toEqual(output);
+    for (const order of [undefined, 'pre-permission/1'])
+      await expect(fire(replacement, order)).rejects.toThrow(
+        HostedHookInputConflictError,
+      );
+    const dispatched = requests.filter(
+      (request) => request.kind === 'hook-execute',
+    );
+    expect(dispatched).toHaveLength(oversized ? 0 : 1);
+    // The order is the plan's own: no Hook ever receives it.
+    for (const request of dispatched)
+      expect(JSON.stringify(request)).not.toContain(HOSTED_TOOL_INPUT_ORDER);
+    expect(await savedPlan('call-1')).toEqual(saved);
+  },
+);
+
+it('never resumes an occurrence saved without an order under one, or the reverse', async () => {
+  const fields = { tool_name: 'read_file', tool_input: { file_path: 'a' } };
+  const output = await hooks.fire(
+    HookEventName.PreToolUse,
+    'call-1',
+    fields,
+    signal(),
+  );
+  expect(await savedPlan('call-1')).not.toHaveProperty('toolInputOrder');
+  await expect(
+    hooks.fire(
+      HookEventName.PreToolUse,
+      'call-1',
+      fields,
+      signal(),
+      undefined,
+      undefined,
+      HOSTED_TOOL_INPUT_ORDER,
+    ),
+  ).rejects.toThrow(HostedHookInputConflictError);
+  expect(
+    await hooks.fire(HookEventName.PreToolUse, 'call-1', fields, signal()),
+  ).toEqual(output);
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(1);
+});
+
 it('consumes once at intent even when execution fails', async () => {
   catalog = {
     ...catalog,
@@ -731,6 +918,21 @@ it('keeps its mount while a Hook outcome is unknown (#13800)', async () => {
   );
   // A shared MCP broker's mount goes back through its owner.
   expect(linked.mountHandback()).toBeUndefined();
+});
+
+it('still disowns a shared broker while holding the mount', async () => {
+  await hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
+  expect(hooks.mountHeld).toBe(true);
+  const shared = hooks.broker;
+  // The no-argument handover keeps the same broker, so the mount stays valid.
+  expect(() => hooks.delegateBrokerToMcp()).not.toThrow();
+  expect(hooks.broker).toBe(shared);
+  // Disown hands the release to MCP: close must not release the shared broker
+  // again. Without ownsBroker=false, close releases it (a double release).
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  release.mockClear();
+  await hooks.close();
+  expect(release).not.toHaveBeenCalled();
 });
 
 it('aggregates parallel results in plan order rather than reply order', async () => {
@@ -1033,6 +1235,82 @@ it('cancels a saved marker by its external id and never dispatches its cancelled
   });
 });
 
+it('cancels a Hook while the dispatch acquisition is held, before dispatch_started', async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered!: () => void;
+  const enteredPromise = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const executionBroker = vi
+    .spyOn(
+      HostedHookSession.prototype as unknown as {
+        executionBroker: (record: unknown) => Promise<unknown>;
+      },
+      'executionBroker',
+    )
+    .mockImplementation(async () => {
+      entered();
+      await held;
+      return {
+        runtime: {
+          bindingId: 'fg13d-binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        },
+      } as never;
+    });
+  const dispatched: unknown[] = [];
+  const originalCommit = session.authority.commitExtensionRecord.bind(
+    session.authority,
+  );
+  const commit = vi
+    .spyOn(session.authority, 'commitExtensionRecord')
+    .mockImplementation(async (command, request, actor) => {
+      const record = request.record as {
+        hookId?: string;
+        run?: { execution?: string };
+      };
+      if (
+        record.hookId !== '__plan__' &&
+        record.run?.execution === 'dispatch_started'
+      )
+        dispatched.push(command);
+      return originalCommit(command, request, actor);
+    });
+  const firing = hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
+  await enteredPromise;
+  // The acquisition has not returned, so the Hook execution record is still
+  // at intent and dispatch_started has never been committed. The status
+  // marker itself is the plan record, not the Hook execution.
+  const marker = await hooks.status('call-1');
+  const childExecution = () =>
+    session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .find((entry) => entry.recordId !== marker.hookExecutionId)!;
+  expect(childExecution().run.execution).toBe('intent');
+  const cancelled = await hooks.status('call-1', true);
+  expect(cancelled.cancelRequested).toBe(true);
+  // The in-flight perform is still held at the acquisition, so the child
+  // record cannot settle until it resumes.
+  expect(childExecution().run.execution).toBe('intent');
+  release();
+  expect((await firing)?.decision).toBe('block');
+  expect(dispatched).toEqual([]);
+  expect(childExecution().run).toMatchObject({
+    state: 'cancelled',
+    execution: 'not_started_proven',
+  });
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(0);
+  expect(hooks.hasPendingOperations).toBe(false);
+  executionBroker.mockRestore();
+  commit.mockRestore();
+});
+
 it('applies failClosed when a lost reply is settled through status after reconstruction', async () => {
   execute = async () => {
     throw new Error('lost reply');
@@ -1079,13 +1357,16 @@ it('applies failClosed when a lost reply is settled through status after reconst
   });
 });
 
+function heldHookExecution() {
+  return new Promise<(result: ManagedHookResult) => void>((started) => {
+    execute = () => new Promise((finish) => started(finish));
+  });
+}
+
 it('waits for Runtime admission before acknowledging an async Hook', async () => {
   catalog = { ...catalog, hooks: [{ ...catalog.hooks[0], async: true }] };
+  const admitted = heldHookExecution();
   let finish: ((result: ManagedHookResult) => void) | undefined;
-  execute = () =>
-    new Promise((resolve) => {
-      finish = resolve;
-    });
   let completed = false;
   const firing = hooks
     .fire(HookEventName.PreToolUse, 'call-1', {}, signal())
@@ -1093,13 +1374,21 @@ it('waits for Runtime admission before acknowledging an async Hook', async () =>
       completed = true;
       return result;
     });
-  await vi.waitFor(() => expect(finish).toBeDefined(), {
-    timeout: isSlowTestHost() ? 30_000 : 1_000,
-  });
-  expect(completed).toBe(false);
-  finish!({ success: true, outcome: 'success', duration: 0 });
-  await firing;
-  expect(completed).toBe(true);
+  try {
+    finish = await Promise.race([
+      admitted,
+      firing.then(() => {
+        throw new Error('Hook completed before Runtime admission.');
+      }),
+    ]);
+    expect(completed).toBe(false);
+    finish!({ success: true, outcome: 'success', duration: 0 });
+    await firing;
+    expect(completed).toBe(true);
+  } finally {
+    finish?.({ success: false, outcome: 'cancelled', duration: 0 });
+    await Promise.allSettled([firing]);
+  }
 });
 
 it('rejects async prompt Hooks instead of leaving a detached model request', async () => {
@@ -1120,32 +1409,66 @@ it('rejects async prompt Hooks instead of leaving a detached model request', asy
 });
 
 it('rejects a changed input while the same occurrence is still running', async () => {
+  const admitted = heldHookExecution();
   let finish: ((result: ManagedHookResult) => void) | undefined;
-  execute = () =>
-    new Promise((resolve) => {
-      finish = resolve;
-    });
   const firing = hooks.fire(
     HookEventName.PreToolUse,
     'call-1',
     { tool_name: 'read_file' },
     signal(),
   );
+  try {
+    finish = await Promise.race([
+      admitted,
+      firing.then(() => {
+        throw new Error('Hook completed before Runtime admission.');
+      }),
+    ]);
+    await expect(
+      hooks.fire(
+        HookEventName.PreToolUse,
+        'call-1',
+        { tool_name: 'write_file' },
+        signal(),
+      ),
+    ).rejects.toThrow(HostedHookInputConflictError);
+    expect(hooks.hasPendingOperations).toBe(true);
+    finish!({ success: true, outcome: 'success', duration: 0 });
+    await firing;
+    expect(hooks.hasPendingOperations).toBe(false);
+  } finally {
+    finish?.({ success: false, outcome: 'cancelled', duration: 0 });
+    await Promise.allSettled([firing]);
+  }
+});
+
+it('rejects another tool input order while the same occurrence is still running', async () => {
+  let finish: ((result: ManagedHookResult) => void) | undefined;
+  execute = () =>
+    new Promise((resolve) => {
+      finish = resolve;
+    });
+  const fields = { tool_name: 'read_file' };
+  const firing = hooks.fire(
+    HookEventName.PreToolUse,
+    'call-1',
+    fields,
+    signal(),
+    undefined,
+    undefined,
+    HOSTED_TOOL_INPUT_ORDER,
+  );
   await vi.waitFor(() => expect(finish).toBeDefined(), {
     timeout: isSlowTestHost() ? 30_000 : 1_000,
   });
   await expect(
-    hooks.fire(
-      HookEventName.PreToolUse,
-      'call-1',
-      { tool_name: 'write_file' },
-      signal(),
-    ),
+    hooks.fire(HookEventName.PreToolUse, 'call-1', fields, signal()),
   ).rejects.toThrow(HostedHookInputConflictError);
-  expect(hooks.hasPendingOperations).toBe(true);
   finish!({ success: true, outcome: 'success', duration: 0 });
   await firing;
-  expect(hooks.hasPendingOperations).toBe(false);
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(1);
 });
 
 it('cancels an active occurrence and does not dispatch later sequential hooks', async () => {
@@ -1156,24 +1479,29 @@ it('cancels an active occurrence and does not dispatch later sequential hooks', 
       { ...catalog.hooks[0], sequential: true, hookId: 'second' },
     ],
   };
+  const admitted = heldHookExecution();
   let finish: ((result: ManagedHookResult) => void) | undefined;
-  execute = () =>
-    new Promise((resolve) => {
-      finish = resolve;
-    });
   const firing = hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
-  await vi.waitFor(() => expect(finish).toBeDefined(), {
-    timeout: isSlowTestHost() ? 30_000 : 1_000,
-  });
-  const cancelled = await hooks.status('call-1', true);
-  expect(cancelled.cancelRequested).toBe(true);
-  finish!({ success: false, outcome: 'cancelled', duration: 0 });
-  expect((await firing)?.decision).toBe('block');
-  expect(
-    requests.filter((request) => request.kind === 'hook-execute'),
-  ).toHaveLength(1);
-  expect((await hooks.status('call-1')).run.state).toBe('cancelled');
-  expect(hooks.hasPendingOperations).toBe(false);
+  try {
+    finish = await Promise.race([
+      admitted,
+      firing.then(() => {
+        throw new Error('Hook completed before Runtime admission.');
+      }),
+    ]);
+    const cancelled = await hooks.status('call-1', true);
+    expect(cancelled.cancelRequested).toBe(true);
+    finish!({ success: false, outcome: 'cancelled', duration: 0 });
+    expect((await firing)?.decision).toBe('block');
+    expect(
+      requests.filter((request) => request.kind === 'hook-execute'),
+    ).toHaveLength(1);
+    expect((await hooks.status('call-1')).run.state).toBe('cancelled');
+    expect(hooks.hasPendingOperations).toBe(false);
+  } finally {
+    finish?.({ success: false, outcome: 'cancelled', duration: 0 });
+    await Promise.allSettled([firing]);
+  }
 });
 
 it('refuses an ambiguous external occurrence id', async () => {
@@ -1268,13 +1596,15 @@ it('cancels a detached child after its async marker has admitted it', async () =
     true,
   );
   await hooks.status('call-1', true);
-  await vi.waitFor(() =>
-    expect(
-      session.authority
-        .extensionRecordsInDomain('hook_execution')
-        .filter((record) => !record.recordId.startsWith('hook-plan-'))
-        .map((record) => record.run.state),
-    ).toEqual(['cancelled']),
+  await vi.waitFor(
+    () =>
+      expect(
+        session.authority
+          .extensionRecordsInDomain('hook_execution')
+          .filter((record) => !record.recordId.startsWith('hook-plan-'))
+          .map((record) => record.run.state),
+      ).toEqual(['cancelled']),
+    { timeout: isSlowTestHost() ? 30_000 : 1_000 },
   );
   expect(
     requests.filter((request) => request.kind === 'hook-cancel').length,
@@ -1806,19 +2136,22 @@ it('fences a hook-cancel that lands during module evaluation as outcome_unknown'
   );
   try {
     const abort = new AbortController();
-    const fired = hooks.fire(
-      HookEventName.PreToolUse,
-      'call-1',
-      {},
-      abort.signal,
-    );
-    await vi.waitFor(() =>
-      expect(
-        requests.filter((request) => request.kind === 'hook-execute'),
-      ).toHaveLength(1),
+    // Observe rejection before waiting for dispatch on a busy test host.
+    const outcome = hooks
+      .fire(HookEventName.PreToolUse, 'call-1', {}, abort.signal)
+      .then(
+        () => undefined,
+        (cause: unknown) => cause,
+      );
+    await vi.waitFor(
+      () =>
+        expect(
+          requests.filter((request) => request.kind === 'hook-execute'),
+        ).toHaveLength(1),
+      { timeout: isSlowTestHost() ? 30_000 : 1_000 },
     );
     abort.abort();
-    await expect(fired).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+    expect(await outcome).toBeInstanceOf(HostedHookRecoveryRequiredError);
     const child = session.authority
       .extensionRecordsInDomain('hook_execution')
       .find(
@@ -3102,6 +3435,113 @@ function loseFinalMarkerWrite() {
 }
 
 it.each([
+  ...[false, true].flatMap((merge) =>
+    [false, true].map((loseMarker) => ({
+      merge,
+      loseMarker,
+      event: HookEventName.PreToolUse,
+      padding: 0,
+    })),
+  ),
+  ...[false, true].flatMap((loseMarker) =>
+    [HookEventName.PreToolUse, HookEventName.PermissionRequest].map(
+      (event) => ({
+        merge: event === HookEventName.PreToolUse,
+        loseMarker,
+        event,
+        padding: 40 * 1024,
+      }),
+    ),
+  ),
+  ...[false, true].map((loseMarker) => ({
+    merge: false,
+    loseMarker,
+    event: HookEventName.PermissionRequest,
+    padding: 0,
+  })),
+])(
+  'stops malformed sequential Shell input and reconstructs its terminal prefix ($event, $merge, $loseMarker, $padding)',
+  async ({ merge, loseMarker, event, padding }) => {
+    enforceHostedResourceLimit();
+    const malformed = 'x'.repeat(padding) + 'echo 😀\ud800';
+    catalog = {
+      ...catalog,
+      hooks: ['first', 'repair'].map((hookId) => ({
+        ...catalog.hooks[0],
+        hookId,
+        eventName: event,
+        sequential: true,
+        onceKey: hookId === 'repair' ? 'repair-once' : null,
+      })),
+    };
+    execute = async (operation) => ({
+      success: true,
+      outcome: 'success',
+      duration: 0,
+      output: {
+        hookSpecificOutput:
+          event === HookEventName.PermissionRequest
+            ? {
+                decision: {
+                  behavior: 'allow',
+                  updatedInput: {
+                    command:
+                      operation.hookId === 'first'
+                        ? malformed
+                        : 'echo repaired',
+                  },
+                },
+              }
+            : {
+                [merge ? 'tool_input' : 'updatedInput']: {
+                  command:
+                    operation.hookId === 'first' ? malformed : 'echo repaired',
+                },
+              },
+      },
+    });
+    const input = {
+      tool_name: 'run_shell_command',
+      tool_input: { command: 'echo valid' },
+    };
+    const expected = {
+      hookSpecificOutput:
+        event === HookEventName.PermissionRequest
+          ? { decision: { updatedInput: { command: malformed } } }
+          : { updatedInput: { command: malformed } },
+    };
+    const publish = vi.spyOn(session.resources, 'publish');
+    const lost = loseMarker ? loseFinalMarkerWrite() : undefined;
+    const firing = hooks.fire(event, 'unicode', input, signal());
+    if (lost) {
+      await expect(firing).rejects.toThrow('lost final marker write');
+      lost.mockRestore();
+    } else await expect(firing).resolves.toMatchObject(expected);
+    const restored = new HostedHookSession(options, session, pin);
+    expect((await restored.status('unicode')).run.state).toBe('settled');
+    expect(
+      await restored.fire(event, 'unicode', input, signal()),
+    ).toMatchObject(expected);
+    expect(restored.hasPendingOperations).toBe(false);
+    for (const [kind, bytes] of publish.mock.calls)
+      if (kind === 'managed-hook-result')
+        expect(bytes.length).toBeLessThanOrEqual(60 * 1024);
+    expect(
+      requests
+        .filter((request) => request.kind === 'hook-execute')
+        .map((request) => request.hookId),
+    ).toEqual(['first']);
+    expect(
+      session.authority
+        .extensionRecordsInDomain('hook_execution')
+        .some(
+          (entry) => parseHookExecution(entry.record).onceKey === 'repair-once',
+        ),
+    ).toBe(false);
+  },
+);
+
+it.each([
   [HookEventName.PreToolUse, false],
   [HookEventName.PreToolUse, true],
   [HookEventName.PermissionRequest, false],
@@ -3298,6 +3738,74 @@ it.each([false, true])(
   },
 );
 
+it.each([false, true])(
+  'bounds assembled Unicode refusal metadata (lost marker: %s)',
+  async (loseMarker) => {
+    enforceHostedResourceLimit();
+    catalog = {
+      ...catalog,
+      hooks: ['first', 'repair'].map((hookId) => ({
+        ...catalog.hooks[0],
+        hookId,
+        sequential: true,
+      })),
+    };
+    execute = async () => ({
+      success: true,
+      outcome: 'success',
+      duration: 0,
+      output: {
+        hookSpecificOutput: {
+          tool_input: { description: '\ud800' },
+          padding: 'x'.repeat(40 * 1024),
+        },
+      },
+    });
+    const input = {
+      tool_name: 'run_shell_command',
+      tool_input: { command: 'x'.repeat(40 * 1024) },
+    };
+    const lost = loseMarker ? loseFinalMarkerWrite() : undefined;
+    const firing = hooks.fire(
+      HookEventName.PreToolUse,
+      'assembled-unicode',
+      input,
+      signal(),
+    );
+    if (lost) {
+      await expect(firing).rejects.toThrow('lost final marker write');
+      lost.mockRestore();
+    } else
+      await expect(firing).resolves.toMatchObject({
+        continue: false,
+        decision: 'block',
+      });
+    const restored = new HostedHookSession(options, session, pin);
+    expect((await restored.status('assembled-unicode')).run.state).toBe(
+      'settled',
+    );
+    expect(
+      await restored.fire(
+        HookEventName.PreToolUse,
+        'assembled-unicode',
+        input,
+        signal(),
+      ),
+    ).toMatchObject({
+      decision: 'block',
+      reason: expect.stringContaining('60 KiB'),
+      stopReason:
+        'Hosted Shell description contains an unpaired UTF-16 surrogate. Provide valid Unicode and retry.',
+    });
+    expect(restored.hasPendingOperations).toBe(false);
+    expect(
+      requests
+        .filter((request) => request.kind === 'hook-execute')
+        .map((request) => request.hookId),
+    ).toEqual(['first']);
+  },
+);
+
 it.each(['none', 'hook', 'borrowed'] as const)(
   'releases only acquired Hook owners after actual HTTP warm (%s)',
   async (mode) => {
@@ -3388,3 +3896,291 @@ it.each(['none', 'hook', 'borrowed'] as const)(
     }
   },
 );
+
+it('retains historical Hook ownership for cleanup without claiming a live MCP mount', async () => {
+  await hooks.fire(
+    HookEventName.PreToolUse,
+    'historical-hook',
+    { tool_name: 'read_file' },
+    signal(),
+  );
+  await hooks.close();
+  expect(hooks.mountHeld).toBe(false);
+  expect(hooks.broker.acquired).toBe(false);
+  expect(
+    session.authority
+      .extensionRecordsInDomain('hook_execution')
+      .some((entry) => entry.run.runtime !== null),
+  ).toBe(true);
+  const mcpPin = {
+    serverId: 'demo',
+    serverRevision: 1,
+    definitionDigest: 'a'.repeat(64),
+  };
+  const command = {
+    operationId: randomUUID(),
+    actorKey: 'b'.repeat(64),
+    action: 'remove' as const,
+    serverId: 'demo',
+    expectedRevision: 0,
+  };
+  const settings = await commitHostedMcpSettings(
+    session,
+    command,
+    selectedMcpServers([{ ...mcpPin, state: 'enabled' }], command),
+  );
+  const restored = new HostedMcpSession(
+    options,
+    session,
+    [mcpPin],
+    settings,
+    hooks.broker,
+  );
+  expect(restored.mountHeld).toBe(false);
+  expect(restored.broker.runtimeSessionId).toBe(hooks.broker.runtimeSessionId);
+  expect(
+    session.authority.extensionRecordsInDomain('mcp_configuration'),
+  ).toHaveLength(0);
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  release.mockClear();
+  await restored.closeResources({ terminal: true });
+  expect(release).toHaveBeenCalledOnce();
+  expect(restored.mountHeld).toBe(false);
+});
+
+it.each([
+  'runtime_session_busy',
+  'runtime_session_conflict',
+  'workspace_writer_unproven',
+  'runtime_admission_closed',
+])(
+  'names a refused non-terminal mount handback as recovery-required (R14-2: %s)',
+  async (code) => {
+    // A deterministic config-scoped owner closing non-terminally hands its
+    // mount back; the handback sweeps nothing, so live or unproven work
+    // refuses it. The refusal must be named as recovery-required (the Session
+    // stays attached and retryable), never escape as a raw Broker rejection,
+    // and never fall back to a terminal release that would tombstone the id.
+    const deterministic = new HostedHookSession(
+      options,
+      session,
+      pin,
+      undefined,
+      () => false,
+      `extensions-components-${'e'.repeat(64)}`,
+    );
+    await deterministic.acquire();
+    expect(deterministic.mountHeld).toBe(true);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'det-claim',
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(409, code),
+    );
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    release.mockClear();
+    await expect(deterministic.close()).rejects.toBeInstanceOf(
+      HostedHookRecoveryRequiredError,
+    );
+    expect(release).not.toHaveBeenCalled();
+  },
+);
+
+it('names a Broker-restart handback refusal as recovery-required, not a broken close (R15-2)', async () => {
+  // A Broker that restarted beside the Harness holds no resident Session
+  // Context, so releaseMount answers 503 runtime_reconciliation_required —
+  // proof nothing was handed back. It must be named recovery-required (the
+  // Session stays attached and retryable), exactly as the close's held-Runtime
+  // drain already tolerates it, never escape as a raw rejection that takes the
+  // whole close down, and never be read as a successful handback.
+  const deterministic = new HostedHookSession(
+    options,
+    session,
+    pin,
+    undefined,
+    () => false,
+    `extensions-components-${'e'.repeat(64)}`,
+  );
+  await deterministic.acquire();
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'det-claim',
+  );
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(503, 'runtime_reconciliation_required'),
+  );
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  release.mockClear();
+  await expect(deterministic.close()).rejects.toBeInstanceOf(
+    HostedHookRecoveryRequiredError,
+  );
+  expect(release).not.toHaveBeenCalled();
+});
+
+it('terminally releases the deterministic owner on DELETE of a reloaded, never-acquired instance (R15-4)', async () => {
+  const owner = `extensions-components-${'a'.repeat(64)}`;
+  const first = new HostedHookSession(
+    options,
+    session,
+    pin,
+    undefined,
+    () => false,
+    owner,
+  );
+  await first.acquire();
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'det-claim',
+  );
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockResolvedValue();
+  // Detach hands the mount back and keeps the owner re-acquirable.
+  await first.close();
+  const releasedIds: string[] = [];
+  vi.mocked(HostedWorkspaceBroker.prototype.release).mockImplementation(
+    async function (this: HostedWorkspaceBroker) {
+      releasedIds.push(this.runtimeSessionId);
+      Object.defineProperty(this, 'acquired', {
+        value: false,
+        configurable: true,
+      });
+    },
+  );
+  // Reload: a fresh instance carrying the same deterministic id, never
+  // acquired, so mountHeld is false. A DELETE must still terminally release the
+  // owner instead of orphaning it.
+  const reloaded = new HostedHookSession(
+    options,
+    session,
+    pin,
+    undefined,
+    () => false,
+    owner,
+  );
+  expect(reloaded.mountHeld).toBe(false);
+  await reloaded.close({ terminal: true });
+  // The close also retires the session's per-load hooks-activation-* earlier
+  // owner; pin the deterministic owner's terminal release specifically.
+  expect(releasedIds.filter((id) => id === owner)).toHaveLength(1);
+});
+
+it('absorbs a 404 on terminal release of a never-acquired deterministic owner (R17-1)', async () => {
+  const owner = `extensions-components-${'e'.repeat(64)}`;
+  // A reloaded instance that never acquired: mountHeld stays false and no
+  // Runtime Session row exists under the deterministic id, so the Broker's
+  // terminal release answers 404. close() must book the owner released and
+  // resolve instead of letting the refusal escape and wedging the session
+  // undeletable.
+  const absent = new HostedHookSession(
+    options,
+    session,
+    pin,
+    undefined,
+    () => false,
+    owner,
+  );
+  expect(absent.mountHeld).toBe(false);
+  vi.mocked(HostedWorkspaceBroker.prototype.release).mockRejectedValue(
+    new HostedWorkspaceBrokerRejection(404, 'runtime_session_not_found'),
+  );
+  await absent.close({ terminal: true });
+});
+
+it('absorbs a 503 reconciliation on terminal release of a never-acquired deterministic owner (R17-1)', async () => {
+  // After a Broker restart a never-acquired deterministic owner can answer 503
+  // reconciliation-required; that is benign for an un-acquired owner too.
+  const restarted = new HostedHookSession(
+    options,
+    session,
+    pin,
+    undefined,
+    () => false,
+    `extensions-components-${'d'.repeat(64)}`,
+  );
+  expect(restarted.mountHeld).toBe(false);
+  // Only the deterministic owner's terminal release answers 503; the per-load
+  // earlier-owner releases resolve so the witness isolates the terminal arm.
+  const restartedOwner = `extensions-components-${'d'.repeat(64)}`;
+  vi.mocked(HostedWorkspaceBroker.prototype.release).mockImplementation(
+    async function (this: HostedWorkspaceBroker) {
+      if (this.runtimeSessionId === restartedOwner)
+        throw new HostedWorkspaceBrokerRejection(
+          503,
+          'runtime_reconciliation_required',
+        );
+      Object.defineProperty(this, 'acquired', {
+        value: false,
+        configurable: true,
+      });
+    },
+  );
+  await restarted.close({ terminal: true });
+});
+
+it('keeps a shared Hook+MCP deterministic owner re-acquirable on a non-terminal close (R14-1)', async () => {
+  // The load builds the MCP first and hands its broker to the Hook, so the
+  // Hook borrows (ownsBroker=false) and the MCP owns the shared deterministic
+  // owner. A detach closes the Hook (which must not release a broker it does
+  // not own) then the MCP (which must hand the mount back, not tombstone).
+  const owner = `extensions-components-${'f'.repeat(64)}`;
+  const shared = new HostedWorkspaceBroker(
+    options,
+    session.authority.sessionHeader.sessionKey,
+    owner,
+  );
+  const mcpShared = new HostedMcpSession(
+    options,
+    session,
+    [],
+    undefined,
+    shared,
+    true,
+  );
+  const hooksShared = new HostedHookSession(options, session, pin, shared);
+  // Fire a Hook so the shared owner acquires and holds the mount.
+  await hooksShared.fire(
+    HookEventName.PreToolUse,
+    'shared-hook',
+    { tool_name: 'read_file' },
+    signal(),
+  );
+  expect(hooksShared.mountHeld).toBe(true);
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'shared-claim',
+  );
+  const releaseMount = vi
+    .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+    .mockResolvedValue();
+  const releasedOwners = new Set<string>();
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  release.mockImplementation(async function (this: HostedWorkspaceBroker) {
+    releasedOwners.add(this.runtimeSessionId);
+  });
+  await hooksShared.close();
+  await mcpShared.closeResources();
+  // Neither owner may terminally release the shared deterministic id a reload
+  // recomputes; the mount goes back through releaseMount instead.
+  expect(release).not.toHaveBeenCalled();
+  expect(releaseMount).toHaveBeenCalledWith('shared-claim');
+  expect(releasedOwners.has(owner)).toBe(false);
+  // The reload recomputes the identical deterministic id and must re-acquire
+  // it: refuse any re-acquire of a terminally released owner, exactly as
+  // acquireNewSession refuses a non-ACQUIRING row.
+  vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockImplementation(
+    async function (this: HostedWorkspaceBroker) {
+      if (releasedOwners.has(this.runtimeSessionId))
+        throw new HostedWorkspaceBrokerRejection(
+          409,
+          'runtime_session_not_acquirable',
+        );
+      this.runtime = {
+        bindingId: 'binding',
+        generation: '1',
+        workspaceGeneration: '1',
+      };
+    },
+  );
+  const reloaded = new HostedWorkspaceBroker(
+    options,
+    session.authority.sessionHeader.sessionKey,
+    owner,
+  );
+  await reloaded.acquire();
+});

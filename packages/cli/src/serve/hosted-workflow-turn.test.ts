@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DefinitionPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { loadCliConfig } from '../config/config.js';
@@ -85,7 +86,12 @@ vi.mock('../config/config.js', () => ({
   }),
 }));
 vi.mock('../config/settings.js', () => ({
-  loadSettings: vi.fn(() => ({ merged: {} })),
+  loadSettings: vi.fn(() => ({
+    merged: {},
+    getSystemHooks: () => undefined,
+    getUserHooks: () => undefined,
+    getProjectHooks: () => undefined,
+  })),
 }));
 
 const SCRIPT =
@@ -240,6 +246,37 @@ describe('runHostedWorkflowTurn', () => {
     expect(vi.mocked(loadSettings)).not.toHaveBeenCalled();
   });
 
+  it('passes the Session connection to workflow agents without resolving a host model pin', async () => {
+    start.mockResolvedValue(
+      handleWith({
+        ok: true,
+        outcome: {
+          runId: 'wf_0123456789abcdef',
+          result: 'ok',
+          phases: [],
+          logs: [],
+          meta: {},
+        },
+      }),
+    );
+    const modelConfiguration = {
+      authType: AuthType.USE_OPENAI,
+      model: 'session-model',
+      apiKey: 'session-key',
+      baseUrl: 'https://session.example/v1',
+    };
+    await runHostedWorkflowTurn({
+      ...base,
+      launch: { definition: pin(SCRIPT), script: SCRIPT, args: null },
+      signal: new AbortController().signal,
+      modelConfig: async () => modelConfiguration,
+    });
+    expect(
+      vi.mocked(loadCliConfig).mock.calls[0]?.[9]?.modelConfiguration,
+    ).toEqual(modelConfiguration);
+    expect(configDouble.current?.switchModel).not.toHaveBeenCalled();
+  });
+
   it('renders a completed run as the turn content, bounded and readable', async () => {
     start.mockResolvedValue(
       handleWith({
@@ -290,11 +327,18 @@ describe('runHostedWorkflowTurn', () => {
     expect(initOrder).toBeLessThan(authOrder);
     expect(authOrder).toBeLessThan(runOrder);
     // R1-14: the per-turn config posture itself: safe-mode argv, a
-    // throw-on-conflict ninth argument, never a host policy refit; and the
-    // settings load is pinned untrusted.
+    // throw-on-conflict ninth argument and a host policy that refuses only
+    // LSP — never a tool-invocation guard refit — plus the pinned session
+    // model configuration when the host supplies one; and the settings load
+    // is pinned untrusted.
     const loadCalls = vi.mocked(loadCliConfig).mock.calls;
     expect(loadCalls).toHaveLength(1);
-    expect(loadCalls[0]).toHaveLength(9);
+    expect(loadCalls[0]![1]).toMatchObject({
+      sessionId: base.sessionId,
+      sessionIdGenerated: true,
+      chatRecording: false,
+    });
+    expect(loadCalls[0]).toHaveLength(10);
     expect((loadCalls[0]![1] as { safeMode?: boolean }).safeMode).toBe(true);
     // #13858: the agents' chats open without this Harness's cwd listing.
     expect(
@@ -302,7 +346,7 @@ describe('runHostedWorkflowTurn', () => {
         ?.skipStartupContext,
     ).toBe(true);
     expect(loadCalls[0]![8]).toBe(true);
-    expect(loadCalls[0]![9]).toBeUndefined();
+    expect(loadCalls[0]![9]).toEqual({ lspDisabled: true });
     expect(vi.mocked(loadSettings).mock.calls[0]![1]).toMatchObject({
       workspaceTrusted: false,
     });

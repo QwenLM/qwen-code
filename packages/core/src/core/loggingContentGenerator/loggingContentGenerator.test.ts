@@ -21,7 +21,9 @@ import type {
 import { AuthType } from '../contentGenerator.js';
 import { LoggingContentGenerator } from './index.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
+import { StreamingToolCallParser } from '../openaiContentGenerator/streamingToolCallParser.js';
 import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
+import { setToolCallPreparations } from '../tool-call-preparation.js';
 import {
   convertResponsesEventToGemini,
   ResponsesStreamState,
@@ -1743,6 +1745,79 @@ describe('LoggingContentGenerator', () => {
     }
   });
 
+  /** Runs `chunks`, each arriving at its wall-clock time, then ends at `endMs`. */
+  const runTimedStream = async (
+    chunks: Array<[number, GenerateContentResponse]>,
+    endMs: number,
+  ) => {
+    let wallClockMs = 0;
+    const dateNowSpy = vi
+      .spyOn(Date, 'now')
+      .mockImplementation(() => wallClockMs);
+    try {
+      await runStream(
+        resolving(
+          (async function* () {
+            for (const [atMs, chunk] of chunks) {
+              wallClockMs = atMs;
+              yield chunk;
+            }
+            wallClockMs = endMs;
+          })(),
+        ),
+        'prompt-timed',
+      );
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  };
+
+  it('times a tool-call-only stream from its preparation to the complete call', async () => {
+    const preparation = createResponse('r1', 'test-model', []);
+    setToolCallPreparations(preparation, [
+      { callId: 'call_1', toolName: 'read_file' },
+    ]);
+    await runTimedStream(
+      [
+        [800, preparation],
+        [
+          1200,
+          createResponse(
+            'r1',
+            'test-model',
+            [{ functionCall: { id: 'call_1', name: 'read_file', args: {} } }],
+            usage(10, 40),
+            'STOP',
+          ),
+        ],
+      ],
+      1215,
+    );
+
+    expect(loggedResponse()).toMatchObject({
+      duration_ms: 1215,
+      ttft_ms: 800,
+      generation_ms: 400,
+    });
+    expect(llmSpan().endMetadata?.ttftMs).toBe(800);
+  });
+
+  it('reports zero generation time when all visible output arrives in one chunk', async () => {
+    await runTimedStream(
+      [
+        [900, createResponse('r1', 'test-model', [{ text: 'done' }])],
+        [905, createResponse('r1', 'test-model', [], usage(10, 40), 'STOP')],
+      ],
+      910,
+    );
+
+    expect(loggedResponse()).toMatchObject({
+      duration_ms: 910,
+      ttft_ms: 900,
+      generation_ms: 0,
+    });
+  });
+
   it('forwards cachedInputTokens from usageMetadata to endLLMRequestSpan (Phase 4a)', async () => {
     await runStream(
       streams(
@@ -1761,6 +1836,94 @@ describe('LoggingContentGenerator', () => {
       inputTokens: 100,
       cachedInputTokens: 40,
     });
+  });
+
+  it('forwards a converter-reported cache creation count to endLLMRequestSpan', async () => {
+    // The value only survives because provenance is a WeakMap keyed on the
+    // usage object and the stream forwards that same reference. Reading
+    // provenance off the converter's own object (which the converter tests
+    // do) cannot see a copy, a spread or a JSON round-trip on the way.
+    const converted = OpenAIContentConverter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-cache-write',
+        created: 123,
+        model: 'test-model',
+        choices: [],
+        usage: {
+          prompt_tokens: 373,
+          completion_tokens: 112,
+          total_tokens: 485,
+          prompt_tokens_details: { cache_write_tokens: 256 },
+        },
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      {
+        requestId: 'cache-write-request',
+        isStreaming: true,
+        toolCallParser: new StreamingToolCallParser(),
+        model: 'test-model',
+        modalities: { image: true, pdf: true, audio: true, video: true },
+        startTime: 0,
+      } as Parameters<typeof OpenAIContentConverter.convertOpenAIChunkToLlm>[1],
+    );
+
+    await runStream(
+      streams(
+        createResponse(
+          'r1',
+          'test-model',
+          [{ text: 'ok' }],
+          converted.usageMetadata,
+        ),
+      ),
+      'prompt-cache-write',
+    );
+
+    expect(llmSpan().endMetadata).toMatchObject({
+      inputTokens: 373,
+      cacheCreationInputTokens: 256,
+    });
+  });
+
+  it('leaves cache creation unreported when the provider omits the field', async () => {
+    const converted = OpenAIContentConverter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-no-cache-write',
+        created: 123,
+        model: 'test-model',
+        choices: [],
+        usage: {
+          prompt_tokens: 373,
+          completion_tokens: 112,
+          total_tokens: 485,
+        },
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      {
+        requestId: 'no-cache-write-request',
+        isStreaming: true,
+        toolCallParser: new StreamingToolCallParser(),
+        model: 'test-model',
+        modalities: { image: true, pdf: true, audio: true, video: true },
+        startTime: 0,
+      } as Parameters<typeof OpenAIContentConverter.convertOpenAIChunkToLlm>[1],
+    );
+
+    await runStream(
+      streams(
+        createResponse(
+          'r1',
+          'test-model',
+          [{ text: 'ok' }],
+          converted.usageMetadata,
+        ),
+      ),
+      'prompt-no-cache-write',
+    );
+
+    // Absent must stay absent: session-tracing writes the attribute only when
+    // the value is defined, so a defaulted 0 would emit it on every turn.
+    expect(llmSpan().endMetadata!.cacheCreationInputTokens).toBeUndefined();
   });
 
   it('leaves ttftMs undefined when stream yields no user-visible chunks (Phase 4a)', async () => {

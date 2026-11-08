@@ -101,7 +101,7 @@ Gemini extensions are automatically converted to Qwen Code format during install
 
 #### From Qoder Plugins
 
-Qwen Code supports [Qoder plugins](https://docs.qoder.com/en/cli/sdk/plugins) that contain a `.qoder-plugin/plugin.json` manifest. Install a local directory, archive, Git repository, archive URL, or scoped npm package with the existing `qwen extensions install` command:
+Qwen Code supports [Qoder plugins](https://docs.qoder.com/en/cli/sdk/plugins) that contain a `.qoder-plugin/plugin.json` manifest. Install a local directory, archive, Git repository, archive URL, or npm package with the existing `qwen extensions install` command:
 
 ```bash
 qwen extensions install ./sample-qoder-plugin
@@ -127,25 +127,28 @@ The portable runtime supports Agent Skills plus stdio and Streamable HTTP MCP se
 
 #### From npm Registry
 
-Qwen Code supports installing extensions from npm registries using scoped package names. This is ideal for teams with private registries that already have auth, versioning, and publishing infrastructure in place.
+Qwen Code supports installing extensions from npm registries using scoped or unscoped package names. This is ideal for teams with private registries that already have auth, versioning, and publishing infrastructure in place.
 
 ```bash
 # Install the latest version
 qwen extensions install @scope/my-extension
 
+# Install an unscoped package
+qwen extensions install my-extension
+
 # Install a specific version
-qwen extensions install @scope/my-extension@1.2.0
+qwen extensions install my-extension@1.2.0
 
 # Install from a custom registry
 qwen extensions install @scope/my-extension --registry https://your-registry.com
 ```
 
-Only scoped packages (`@scope/package-name`) are supported to avoid ambiguity with the `owner/repo` GitHub shorthand format.
+Both `package-name` and `@scope/package-name` are supported, with optional `@version` or `@tag` suffixes. Existing local files and directories take precedence; use an explicit path such as `./my-extension` when a local source is intended. The `owner/repo` form remains a GitHub shorthand.
 
 **Registry resolution** follows this priority:
 
 1. `--registry` CLI flag (explicit override)
-2. Scoped registry from `.npmrc` (e.g. `@scope:registry=https://...`)
+2. Scoped registry from `.npmrc` (scoped packages only, e.g. `@scope:registry=https://...`)
 3. Default registry from `.npmrc`
 4. Fallback: `https://registry.npmjs.org/`
 

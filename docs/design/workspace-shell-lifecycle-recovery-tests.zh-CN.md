@@ -7,7 +7,7 @@
 PR #13931 为精确 `hosted-workspace-shell/1` 和 `hosted-workspace-mcp/1`
 实现了 lifecycle v2。已有真实 MySQL writer/claim 测试和通用 POSIX 进程测试，
 尚未覆盖驻留 Harness 经生产 Spring HTTP 生命周期操作的完整链路。
-V2 能力声明仍默认关闭。
+Shell v2 能力现默认声明统一 profile；MCP 仍须显式启用，详见[当前生命周期设计](2026-10-23-managed-shell-lifecycle.zh-CN.md)。
 
 第一片验收覆盖前台 Turn 已结束后的公开 Shell 删除、驻留 writer 租约过期、
 Spring owner 被杀，以及资源或 detach 回复丢失。使用真实 MySQL、CLI 构建产物、

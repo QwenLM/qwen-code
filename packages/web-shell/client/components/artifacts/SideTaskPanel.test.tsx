@@ -3,7 +3,7 @@
 import { act, type ComponentProps, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, expect, it, vi } from 'vitest';
-import { I18nProvider } from '../../i18n';
+import { I18nProvider, getTranslator } from '../../i18n';
 
 const {
   connection,
@@ -177,6 +177,31 @@ it('creates a side task and reports the new session id', async () => {
   );
   expect(onCreated).toHaveBeenCalledWith('side-task:draft:1', 'side-session-1');
   expect(onTitleChange).toHaveBeenCalledWith('side-task:draft:1', 'Side task');
+});
+
+it('keeps the derived clientId within the daemon limit for a details tab', async () => {
+  // The daemon rejects client ids over 128 chars (MAX_CLIENT_ID_LENGTH).
+  // A details tab id carries a uuid request id; with a uuid parent session
+  // the derived `side-task:<parent>:<tabId>` must still fit. A longer id
+  // 400s the pane's load and the initial prompt is never sent.
+  const parentId = 'da424824-c6a7-4ce5-a5fd-9b12c9255bef';
+  const requestId = '06a69fb6-7293-4f61-a279-e7b3963b1cd3';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    renderSideTask({
+      tabId: `side-task:details:${requestId}`,
+      parentSessionId: parentId,
+      sessionId: 'side-session-1',
+    });
+    await Promise.resolve();
+  });
+
+  const clientId = providerProps.current?.['clientId'];
+  expect(typeof clientId).toBe('string');
+  expect((clientId as string).length).toBeLessThanOrEqual(128);
 });
 
 it('does not report a failed creation after the draft unmounts', async () => {
@@ -380,6 +405,26 @@ it.each(['/work/project', '/work/secondary'])(
     });
   },
 );
+
+it('threads unavailable models to its chat pane', () => {
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  transcript.blocks = [{ kind: 'user' }];
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const unavailableModels = [{ id: 'qwen-max', tooltip: 'Need Pro' }];
+  const mountUnavailableModelTooltip = () => undefined;
+  act(() => {
+    renderSideTask({ unavailableModels, mountUnavailableModelTooltip });
+  });
+  expect(latestChatPaneProps.current?.unavailableModels).toEqual(
+    unavailableModels,
+  );
+  expect(latestChatPaneProps.current?.mountUnavailableModelTooltip).toBe(
+    mountUnavailableModelTooltip,
+  );
+});
 
 it('threads model management policy to its chat pane', () => {
   connection.sessionId = 'side-session-1';
@@ -616,6 +661,127 @@ it('sends the /btw question as the first side-task prompt', async () => {
     'side-task:side-session-1',
     'Explain the current implementation',
     true,
+  );
+});
+
+it('does not re-send a retained initial prompt to a child that already has a user prompt', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.displayName = 'Side task';
+  connection.status = 'connected';
+  transcript.blocks = [{ kind: 'user', text: 'the explanation already ran' }];
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    renderSideTask({ initialPrompt: 'Explain the pending question' });
+    await Promise.resolve();
+  });
+
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['image', { images: [{ data: 'AQID', mimeType: 'image/png' }] }],
+  ['file', { files: [{ name: 'notes.txt', mimeType: 'text/plain' }] }],
+  [
+    'resource link',
+    {
+      resourceLinks: [
+        {
+          type: 'resource_link',
+          uri: 'file:///tmp/notes.txt',
+          name: 'notes.txt',
+        },
+      ],
+    },
+  ],
+])(
+  'does not re-send a retained initial prompt to a child whose only user prompt is %s-only',
+  async (_label, media) => {
+    connection.sessionId = 'side-session-1';
+    connection.displayName = 'Side task';
+    connection.status = 'connected';
+    // Media-only prompts submit with empty text; the child is not empty.
+    transcript.blocks = [{ kind: 'user', text: '', ...media }];
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      renderSideTask({ initialPrompt: 'Explain the pending question' });
+      await Promise.resolve();
+    });
+
+    expect(sendPrompt).not.toHaveBeenCalled();
+  },
+);
+
+it.each([
+  ['en', 'The main session is waiting'],
+  ['zh-CN', '主会话正在等我'],
+])(
+  'names a details child from the question, not the instruction boilerplate (%s)',
+  async (language, boilerplatePrefix) => {
+    // R1-1 / R2-4: both the EN and zh-CN details prompts lead with the question
+    // snapshot so the generic first-prompt naming (first 200 code points) yields
+    // a question-derived title rather than the identical instruction prefix.
+    connection.sessionId = 'side-session-1';
+    connection.displayName = 'Side task';
+    connection.status = 'connected';
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    const question = 'Which cache backend should the session use?';
+    const questions = `1. ${question}\n   - SQLite: local file database\n   - Redis: in-memory store`;
+    const detailsPrompt = getTranslator(language as 'en' | 'zh-CN')(
+      'askUser.detailsPrompt',
+      { questions },
+    );
+
+    await act(async () => {
+      renderSideTask({
+        initialPrompt: detailsPrompt,
+        modelManagement: { allowAdd: false },
+      });
+      await Promise.resolve();
+    });
+
+    expect(sendPrompt).toHaveBeenCalledWith(
+      detailsPrompt,
+      expect.objectContaining({ onAdmitted: expect.any(Function) }),
+    );
+    const title = renameSession.mock.calls[0]?.[0] as string;
+    expect(title).toContain(question);
+    expect(title.startsWith(boilerplatePrefix)).toBe(false);
+  },
+);
+
+it('sends a retained initial prompt once transcript loading completes', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.displayName = 'Side task';
+  connection.status = 'connected';
+  connection.loadingTranscript = true;
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    renderSideTask({ initialPrompt: 'Explain the pending question' });
+    await Promise.resolve();
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+
+  connection.loadingTranscript = false;
+  await act(async () => {
+    renderSideTask({ initialPrompt: 'Explain the pending question' });
+    await Promise.resolve();
+  });
+  expect(sendPrompt).toHaveBeenCalledTimes(1);
+  expect(sendPrompt).toHaveBeenCalledWith(
+    'Explain the pending question',
+    expect.objectContaining({ onAdmitted: expect.any(Function) }),
   );
 });
 
