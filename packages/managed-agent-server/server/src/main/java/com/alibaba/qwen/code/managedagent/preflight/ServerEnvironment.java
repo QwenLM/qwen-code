@@ -596,8 +596,8 @@ final class ServerEnvironment {
                     continue;
                 }
                 Path declaring = file(resource(tracked.getOrigin(key)));
-                if (declaring != null) {
-                    Path directory = declaring.getParent();
+                Path directory = declaring == null ? null : declaring.getParent();
+                if (directory != null) {
                     String base = looked.contains(declaring) || directory.getParent() == null
                             ? directory.toUri().toString()
                             : directory.getParent().toUri() + "*/";

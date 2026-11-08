@@ -4,11 +4,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.ApplicationContextFactory;
 import org.springframework.boot.WebApplicationType;
+import org.springframework.boot.env.OriginTrackedMapPropertySource;
+import org.springframework.boot.origin.OriginTrackedValue;
+import org.springframework.boot.origin.TextResourceOrigin;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.MapPropertySource;
 import org.springframework.core.env.MutablePropertySources;
 import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.env.SystemEnvironmentPropertySource;
+import org.springframework.core.io.FileSystemResource;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -70,6 +74,22 @@ class ServerEnvironmentTest {
     /** What the launcher or server.env sets. */
     private static ConfigurableEnvironment named(String locations) {
         return environment(Map.of("SPRING_CONFIG_ADDITIONAL_LOCATION", locations));
+    }
+
+    @Test
+    void ignoresImportOriginsWithoutAParentDirectory() throws IOException {
+        Path root = directory.toAbsolutePath().getRoot();
+        assertNull(root.getParent());
+        TextResourceOrigin origin = new TextResourceOrigin(new FileSystemResource(root),
+                new TextResourceOrigin.Location(0, 0));
+        assertEquals(root, origin.getResource().getFile().toPath());
+        OriginTrackedMapPropertySource source = new OriginTrackedMapPropertySource("parentless-origin",
+                Map.of("spring.config.import", OriginTrackedValue.of(
+                        "optional:configtree:" + directory + "/", origin)));
+        assertEquals(origin, source.getOrigin("spring.config.import"));
+        ConfigurableEnvironment environment = environment(Map.of());
+        environment.getPropertySources().addFirst(source);
+        assertEquals(List.of(root), ServerEnvironment.files(environment, directory));
     }
 
     private Path write(String name, String text) throws IOException {
