@@ -708,6 +708,17 @@ export async function start_sandbox(
       )}`,
     );
   }
+  // A custom trust store is the folder-trust feature's only authority; the
+  // container cannot see the host path, and its fallback (QWEN_HOME) may not
+  // hold the decision either, so workspace hooks and settings stay withheld.
+  if (process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH']) {
+    args.push(
+      '--env',
+      `QWEN_CODE_TRUSTED_FOLDERS_PATH=${getContainerPath(
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      )}`,
+    );
+  }
   if (process.env['QWEN_CODE_WARNINGS_FILE']) {
     args.push(
       '--env',

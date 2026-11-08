@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -407,6 +408,7 @@ class HostedProcessCrashIT {
             }
             startSpring();
             if (List.of("Linux", "Mac OS X").contains(System.getProperty("os.name"))) {
+                WorkspaceTestStorage.prepareNativeRoot(root.resolve("workspace"));
                 var storageRegistrationProperties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
                 storageRegistrationProperties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
                 storageRegistrationProperties.getRuntimeBroker().setWorkspaceMounts(List.of(
@@ -673,7 +675,7 @@ class HostedProcessCrashIT {
                         .containsEntry("runtime_session_id", execution.get("runtime_session_id"))
                         .containsEntry("binding_id", execution.get("binding_id"))
                         .containsEntry("runtime_generation", execution.get("runtime_generation"))
-                        .containsEntry("session_state", "READY").containsEntry("is_execution_exclusive", false);
+                        .containsEntry("session_state", "READY").containsEntry("is_rewind_pending", false);
                 assertThat(((Number) member.get("runtime_generation")).longValue()).isEqualTo(1);
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding b"
                         + " JOIN ma_runtime_session rs ON rs.binding_id=b.binding_id AND rs.runtime_generation=b.runtime_generation"

@@ -126,7 +126,7 @@ class ManagedRuntimeRetentionRaceTest {
         fixture.retire();
         fixture.jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"
                 + " runtime_generation = NULL, runtime_session_id = NULL");
-        fixture.jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL, is_execution_exclusive = FALSE");
+        fixture.jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL, is_rewind_pending = FALSE");
         var locked = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         var first = new AtomicBoolean(true);
@@ -281,7 +281,7 @@ class ManagedRuntimeRetentionRaceTest {
             if (reference == Reference.OPERATOR || reference == Reference.CSI_RETIREMENT) {
                 jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"
                         + " runtime_generation = NULL, runtime_session_id = NULL");
-                jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL, is_execution_exclusive = FALSE");
+                jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL, is_rewind_pending = FALSE");
             }
         }
 

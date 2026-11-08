@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.26.7",
+  "version": "0.27.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git",
@@ -66,6 +66,7 @@
     "@datafe-open/markdown-chart-echarts": "^0.1.12",
     "@datafe-open/markdown-chart-react": "^0.1.12",
     "@modelcontextprotocol/ext-apps": "^1.7.5",
+    "@noble/hashes": "1.8.0",
     "@tanstack/react-table": "^8.21.3",
     "@tanstack/react-virtual": "^3.13.26",
     "@types/hast": "^3.0.5",

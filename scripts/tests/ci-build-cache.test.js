@@ -330,4 +330,56 @@ describe('ci-build-cache CLI', () => {
       fixture.cleanup();
     }
   });
+
+  it('keys a commit exactly as the worktree keyed it at that commit', () => {
+    // A pull request restores the build its base saved: `key --at <base>`
+    // has to reproduce the key the base's own run computed from its index.
+    const fixture = makeFixture();
+    const git = (...args) =>
+      execFileSync(
+        'git',
+        ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args],
+        { cwd: fixture.repo, encoding: 'utf8' },
+      ).trim();
+    try {
+      git('commit', '-qm', 'base');
+      const base = git('rev-parse', 'HEAD');
+      const baseKey = fixture.run('key').stdout.trim();
+      expect(fixture.run('key', '--at', base).stdout.trim()).toBe(baseKey);
+
+      writeFileSync(
+        join(fixture.repo, 'packages/b/src/index.ts'),
+        'export const b = 1;\n',
+      );
+      git('add', '-A');
+      git('commit', '-qm', 'head');
+      expect(fixture.run('key').stdout.trim()).not.toBe(baseKey);
+      expect(fixture.run('key', '--at', base).stdout.trim()).toBe(baseKey);
+      expect(fixture.run('key', '--at', 'HEAD').stdout.trim()).toBe(
+        fixture.run('key').stdout.trim(),
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it('rejects a key request without a commit after --at', () => {
+    const fixture = makeFixture();
+    try {
+      expect(() => fixture.run('key', '--at')).toThrow();
+      expect(() => fixture.run('key', 'HEAD')).toThrow();
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it('leaves an unbundled tree alone when recopying host assets', () => {
+    const fixture = makeFixture();
+    try {
+      fixture.run('host-assets');
+      expect(existsSync(join(fixture.repo, 'dist'))).toBe(false);
+    } finally {
+      fixture.cleanup();
+    }
+  });
 });
