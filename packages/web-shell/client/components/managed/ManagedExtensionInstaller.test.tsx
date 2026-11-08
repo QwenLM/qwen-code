@@ -419,7 +419,7 @@ it('requires known credential headers to contain only the declared secret refere
   ).not.toThrow();
 });
 
-it('installs a reviewed Skill archive without requiring personal authorization for the v2 preparation contract', async () => {
+it('installs a reviewed Skill archive through the v1 preparation contract', async () => {
   const client = api();
   client.previewPackage.mockResolvedValue({
     ...inspection,
@@ -456,7 +456,7 @@ it('installs a reviewed Skill archive without requiring personal authorization f
   expect(client.importPackage).toHaveBeenCalledWith(
     'workspace',
     undefined,
-    expect.objectContaining({ sourceKind: 'skill', compilerVersion: 2 }),
+    expect.objectContaining({ sourceKind: 'skill', compilerVersion: 1 }),
     file,
     expect.any(Object),
   );

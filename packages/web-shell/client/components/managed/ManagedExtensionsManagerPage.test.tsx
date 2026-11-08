@@ -270,10 +270,7 @@ describe('Managed extension selection', () => {
   });
 });
 
-it.each([
-  'extension_config_revision_conflict',
-  'extension_selection_upgrade_required',
-])(
+it.each(['extension_config_revision_conflict'])(
   'refreshes and unlocks a definitive %s rejection for a new request',
   async (code) => {
     const target = provider();
@@ -322,6 +319,11 @@ it.each([
     409,
     'hosted_extension_configuration_conflict',
     'Commit conflict',
+  ),
+  new JavaManagedAgentHttpError(
+    409,
+    'extension_selection_upgrade_required',
+    'Unsupported selection protocol',
   ),
   new JavaManagedAgentHttpError(
     503,

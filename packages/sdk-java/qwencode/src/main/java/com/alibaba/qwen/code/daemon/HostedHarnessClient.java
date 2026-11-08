@@ -2523,8 +2523,7 @@ public final class HostedHarnessClient implements AutoCloseable {
         HttpRequest request = builder.build();
         CompletableFuture<HttpResponse<HttpSupport.Body>> pending;
         try {
-            pending = httpClient.sendAsync(request, HttpSupport.bodyHandler(path.contains("/extensions/skills/")
-                    ? 8 * 1024 * 1024 : HttpSupport.MAXIMUM_JSON_BYTES));
+            pending = httpClient.sendAsync(request, HttpSupport.bodyHandler());
         } catch (RejectedExecutionException e) {
             // sendAsync surfaces a submit-time rejection synchronously —
             // for a saturated-but-running pool and a terminated one alike —

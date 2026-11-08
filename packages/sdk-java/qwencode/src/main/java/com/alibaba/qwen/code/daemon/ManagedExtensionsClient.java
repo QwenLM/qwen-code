@@ -196,7 +196,7 @@ public final class ManagedExtensionsClient {
         }
         String operation = method + " Managed extensions";
         try {
-            int limit = route.contains("/imports") || route.contains("/inspection") || route.contains("/skills/")
+            int limit = route.contains("/imports") || route.contains("/inspection")
                     ? 8 * 1024 * 1024 : HttpSupport.MAXIMUM_JSON_BYTES;
             HttpSupport.Response response = HttpSupport.consume(http.send(request.build(), HttpSupport.bodyHandler(limit)), operation);
             DaemonClient.requireStatus(response, 200, operation);
