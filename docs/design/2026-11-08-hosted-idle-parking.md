@@ -6,12 +6,22 @@ Status: proposal for discussion, not accepted. This is step 6 of [#16320](https:
 
 ## What parking has to remove
 
-While a Session stays loaded in the Hosted Harness, it costs platform work with nothing running. #16320 measured 51–56 statements a minute per resident Session. The sources:
+While a Session stays loaded in the Hosted Harness, it costs platform work with nothing running. #16320 measured 51–56 statements a minute per resident Session. The sources of that work:
 
 - **Activation renewal.** One `/writers:renew` every 20 s (`managed-session-assembly.ts:60`, a third of the 60 s lease).
 - **Heartbeat.** One `POST /session/:id/heartbeat` from Java every 30 s (`ManagedAgentProperties.java:636`). The Harness handler only echoes (`hosted-harness-session.ts:12411`).
 - **Harness memory.** The Session's whole event log stays in the Harness (`managed-session-authority.ts:469`).
 - **Listener.** A Session that ran a Shell also keeps a loopback listener (`HostedShellPublisher`).
+
+In #16320's idle windows, almost all the statements that grew with the number of Sessions belong to the activation renewal transaction, which runs three times a minute per Session. Each renewal is therefore about 17–19 statements. The heartbeat runs no SQL: the SDK only sends the HTTP request (`HostedHarnessClient.java:2486-2490`), and the Harness handler only echoes.
+
+A longer writer lease would cut those statements without new code, but not the rest:
+
+- The renewal interval is a third of `writer-lease-duration`, which Java sends with each load (`QwenHostedHarnessConnector.java:2236-2237`). It defaults to 60 s and can be set up to 300 s (`docs/users/managed-agent-configuration-reference.md`). At 300 s the renewals cost a fifth as much.
+- The lease also decides how long a Session waits, after its Harness stops or crashes, before another Harness can take it over: an acquire is refused while another writer's lease is live (`JournalWriterLifecycle.java:266-271`). The phase 0 rig below waited 65 s after a graceful stop. A 300 s lease therefore leaves each resident Session unable to load for up to five minutes after every Harness crash, and after every restart that does not release its Sessions first. Today only a pool drain releases them, and only the idle ones.
+- It leaves the heartbeat, the Harness memory and the listener in place.
+
+A longer lease combines with parking, but it shrinks what parking saves, and so lengthens the break-even below.
 
 Parking means: unload the Session from the Harness after it idles, keep its sandbox resident, and load it again on the next input.
 
@@ -49,7 +59,7 @@ Parking means: unload the Session from the Harness after it idles, keep its sand
 
 1. **It is built for a draining pool member, and only that.**
    - The route exists only when the Harness has an `instanceId` (`hosted-harness-session.ts:4416-4419`), and it refuses while the instance accepts work (`:4443-4446`).
-   - The POST gate on a releasing Session (`:7935`) and request tracking (`:4418`) also exist only with an instance.
+   - The gate on a releasing Session's non-GET requests (`:7935`) and request tracking (`:4418`) also exist only with an instance.
    - Loads are not gated per Session at all. The load route (`:7924`) is registered before that gate, and `open()` refuses only when the whole instance is quiescing (`:4993`).
    - The Store requires a `QUIESCING` pool placement (`JournalWriterLifecycle.java:503`). The receipt is keyed by placement epoch (`HarnessPlacementStore.releaseId`, contracts module `HarnessPlacementStore.java:29-31`), and its schema requires `instanceId`, `bootId` and `placementEpoch` (`ManagedHarnessReleaseRecords.java:14-24`).
    - The SDK and connector refuse without a placement (`QwenHostedHarnessConnector.java:273-275`). Nothing in the control plane calls `releaseOwnership`.
@@ -87,37 +97,56 @@ The Harness is the right owner, for three reasons:
 
 **Park sequence in the Harness.**
 
-1. **Idle clock.** The clock is the latest of three times: the Session's last admitted mutation, its last journal commit, and its last `turn.settled`. A long Turn that just settled, or a wake-pump Turn with no POST, therefore restarts the clock. Heartbeats and read-only status requests do not count. `GET` session asks the Harness for recovery status whenever the node caches an attachment of a non-initial Session with no active Turn (`SessionRecoveryService.java:121-135`, `:160-169`), so a client polling a Session would otherwise keep it loaded. After `park-after`, the Harness tries to park.
-2. **Pre-check.** Check the conditions that do not change while the Session is idle: MCP, Hooks, CSI, a pool placement that is `ACTIVE`, and an instance that is accepting work. A Session that can never park therefore never raises the gate. A drain owns a quiescing Session, and a park never starts once the instance stops accepting.
+1. **Idle clock.** The clock is the latest of five times: the Session's last admitted mutation, its last journal commit other than an activation renewal, its last `turn.settled`, the end of its current load, and the end of its last park attempt that left it loaded. A long Turn that just settled, or a wake-pump Turn with no POST, therefore restarts the clock, and a Session that a read woke stays loaded for at least `park-after`. A load's activation install is itself a journal commit, but the clock should not rely on that. Activation renewals must not count, because without the Store's in-place renewal each one commits a journal transaction (`managed-session-authority.ts:3766-3789`). Heartbeats and read-only status requests do not count either. `GET` session asks the Harness for recovery status whenever the node caches an attachment of a non-initial Session with no active Turn (`SessionRecoveryService.java:121-135`, `:160-169`), so a client polling a Session would otherwise keep it loaded. After `park-after`, the Harness tries to park. An attempt that leaves the Session loaded (a failed pre-check, check or stage, an abandoned wait or an intact refusal) therefore restarts the clock, so the next attempt comes `park-after` later.
+2. **Pre-check.** Before raising the gate, check every condition that can be read without it:
+   - MCP, Hooks and CSI;
+   - the conditions of step 5, except this Session's own in-flight requests and openings;
+   - in a pool, no drain owns the Session: the instance is accepting work, and no ownership release has started (`session.ownershipRelease`, `hosted-harness-session.ts:4494`).
+
+   A Session that cannot park now, for example one that holds a publisher or a running Monitor, therefore does not raise the gate. The gate is left to settle only the Session's in-flight work. The last item concerns the pool and the instance rather than the Session's own work: a drain owns a Session it has started to release, and a park never starts once the instance stops accepting. The pre-check, raising the gate and the busy test of `releaseIdleOwner` run in one synchronous step, so a drain and a park never both take the same Session.
+
 3. **Gate.** Set a per-Session gate, in both modes:
-   - POSTs to the Session answer `409 hosted_session_parking`;
-   - a load for it waits inside `open()`, and that waiting load is counted neither as an opening nor as an in-flight request.
-   - In a pool, a held load carries the pre-park placement token. After a receipt it would fail with `harness_placement_released` (`HarnessPlacementStore.java:195-197`), and `open()` would report that as a generic 503. So after a receipt a pool member answers the held load with a retryable 409, as drain does with `hosted_harness_quiescing` (`hosted-harness-session.ts:4993`).
+   - every request to the Session other than a GET answers `409 hosted_session_parking`, as the release gate does (`hosted-harness-session.ts:7935`). That includes heartbeats, lifecycle calls and `DELETE /session/:id`. The Java section says how each caller handles it;
+   - a load for it waits inside `open()`, and that waiting load is counted neither as an opening nor as an in-flight request. It waits only for a short bound and then answers a retryable `409 hosted_session_parking`, which Java treats as a wait (below). A plain load runs under Java's `request-timeout`, 30 s by default (`ManagedAgentProperties.java:632`, `HostedHarnessClient.java:370-371`), and that time also has to cover the load itself.
+   - In a pool, a load can carry the pre-park placement token: a held load, or one that selected the placement before the receipt and arrives after the Session is gone, while the instance still accepts work. After a receipt it fails with `harness_placement_released` (persistence module `HarnessPlacementStore.java:195-197`), and `open()` would report that as a generic 503. So a pool member answers any load whose acquire meets `harness_placement_released` or `harness_placement_changed` with a retryable 409 that carries the code, held or not, as drain does with `hosted_harness_quiescing` (`hosted-harness-session.ts:4993`). `isPoolWait` must accept that form; from the Harness it accepts only `hosted_harness_quiescing` today (`HarnessCoordinator.java:1694-1703`).
 4. **Wait, bounded.** Wait until this Session's other in-flight operations settle, tracking each until its own work settles rather than until the response finishes.
    - The instance counter waits for `finish` on purpose, because a disconnected response cannot prove its operation ended (`hosted-harness-instance.ts:79-82`). But a client that gives up then keeps the owner unreleasable for the life of the process. Drain accepts that because it ends in the crash path; a park cannot.
    - If the wait outlasts a bound, abandon the attempt and clear the gate.
-5. **Check.** Run the remaining conditions. If one fails, clear the gate. They are the existing list with the instance-wide terms replaced by this Session's own requests and openings, plus:
+5. **Check.** Run the conditions again under the gate. If one fails, clear the gate. They are the existing list with the instance-wide terms replaced by this Session's own requests and openings, plus:
    - no pending inputs at all. Today an unattempted wake input is allowed (`hosted-harness-session.ts:4500-4512`);
    - none of the post-Turn completions that the drain gate admits are still owed (`:7940-7975`): channel receipts and deliveries, message and child operations, automation reconciles;
    - no open `/events` stream. Java opens one only while it drives a Turn (`HarnessCoordinator.java:868`, `:1384`);
-   - no pending channel reply-plan retry.
-6. **Stage.** Pause the renewals and wait for any in-flight renewal to finish before entering the authority's serial queue. Activation renewal runs inside that queue (`managed-session-authority.ts:3737`), so pausing from inside it would deadlock; today's `prepareOwnershipRelease` also stops renewal first (`managed-session-assembly.ts:334-335`).
+   - no pending channel reply-plan retry;
+   - no unsettled append or activation renewal in the authority. Each turn of its serial queue settles them first (`managed-session-authority.ts:3355-3358`), and settling can renew or reacquire;
+   - a writer that still accepts appends. A Session whose writer has stopped (`writesStopped`, `managed-session-authority.ts:635`) cannot stage a release, so it is not a candidate.
+6. **Stage.** Pause the renewals and wait for any in-flight renewal to finish before entering the authority's serial queue. Activation renewal runs inside that queue (`managed-session-authority.ts:3737`), so pausing from inside it would deadlock; today's `prepareOwnershipRelease` also stops renewal first (`managed-session-assembly.ts:334-335`). Until the outcome, the Store client makes no lease extension of its own either: no timer renewal, no on-demand renewal before a read or write (`http-managed-session-store.ts:2496-2508`), and no reacquire. Reads run on the remaining lease.
 
    Then, in one turn of the queue:
    - run the pending-input check;
    - encode the activation release as the next journal transaction, without applying it;
    - hold the queue until there is an outcome, so nothing else is encoded against the same head.
 
+   If anything fails before the park verb is sent, the attempt ends as an intact refusal does: nothing staged is kept, the renewals resume and the gate clears. That covers an in-flight renewal from either loop that ends without a grant or leaves a renewal unsettled, and a failed pending-input check. The park's turn of the queue refuses on unsettled state instead of settling it, because settling can renew or reacquire. Two cases drop the Session locally instead: a definitive writer or lease refusal at any of these steps, and a local grant with less than a third of its lease left, because resuming would then reacquire. Judging the second by the local clock is fine, because dropping is always safe.
+
+   The release's boundary body (`managed-session-authority.ts:3856-3865`) is only staged locally (`http-managed-session-store.ts:622-643`) and travels with the commit as `bytesBase64` (`:700-713`). The park verb's request therefore carries it, and an exact retry carries the same staged body.
+
    While a Session parks, `releaseIdleOwner` treats it as busy.
 
 7. **Commit.** Call the Store park verb described below.
 8. **Outcome.**
-   - **Refusals that leave the head and the writer intact** (a lifecycle claim, a quiescing placement) discard the staged transaction, resume the renewals and clear the gate.
+   - **Refusals that leave the head and the writer intact** (a protocol-2 lifecycle claim) discard the staged transaction, resume the renewals and clear the gate.
      - Only a refusal that also confirms the writer and its lease counts as intact. Today the release checks the claim and `QUIESCING` before the writer (`JournalWriterLifecycle.java:502-511`), so the park verb must check the writer first, or report its verdict with the refusal.
-     - Without that verdict, for example after an unknown outcome, a refusal drops the Session.
+     - Without that verdict, a refusal drops the Session. After an unknown outcome, every later refusal drops it too, because the earlier attempt may have committed.
+     - A protocol-1 lifecycle admission does not refuse a park, because `requireNoLifecycleClaim` matches only protocol 2 (`JournalFencing.java:202-207`). A park can then commit under a protocol-1 close, which still converges, because the close loads the Session first.
    - **Every other refusal drops the Session locally.** That covers a writer or proof conflict, a changed generation, and an expired lease. The Store decides expiry by database time, so the Harness must not judge it by its own clock. Resuming after such a refusal would silently reacquire the writer (`http-managed-session-store.ts:1281-1285`). Both possible heads, sealed or active with a lapsed lease, can be reacquired.
-   - **An unknown outcome keeps the gate.** The Harness retries the same operation until it reads back a receipt or a refusal. The Store looks the receipt up before it checks the writer (`JournalWriterLifecycle.java:487-501`), and the checks before that lookup are MAC checks, so an exact retry still finds the receipt after a successor has acquired.
-   - **After a receipt**, stop every timer of the Session, including the channel reply-plan retries, which release leaves running today (`hosted-harness-session.ts:6940-6963`). Then delete it.
+   - **An unknown outcome keeps the gate.** The Harness retries the same operation until it reads back a receipt or a refusal, or reaches the cap below. The Store looks the receipt up before it checks the writer (`JournalWriterLifecycle.java:487-501`), and the checks before that lookup are MAC checks, so an exact retry still finds the receipt after a successor has acquired.
+     - Retries back off exponentially with jitter, so that a slow Store does not meet a retry storm from every parking Session.
+     - At a cap, the Harness drops the Session locally, as after a refusal that is not intact, and counts the abandonment in a metric. Clearing the gate and resuming is not safe, because the park may have committed, or may still commit before the next renewal advances the counter.
+     - A drop after a refusal leaves no receipt, and one after an unknown outcome may leave none. Without a receipt, until the next load, `GET` session reports `operator_required` (`SessionRecoveryService.java:131-135`), and once the lease lapses, a wake hint that is still set costs a scan of the whole journal (`WakeRecoveryStore.java:109-139`). The metric, which also counts abandoned waits, shows how often this happens.
+     - Dropping is safe at any time because of the park verb's lease fence (below). An attempt still in flight cannot seal the head under a later load: a reload by this Harness with the same token extends the lease in the same generation (`JournalWriterLifecycle.java:266-283`), a takeover after the lease lapses bumps the generation, and either one refuses the attempt.
+     - Without a binding key, each Store client makes up its own token (`http-managed-session-store.ts:1034-1035`). After a drop with the lease still live, the next load in single mode therefore waits for the lease to lapse, up to one `writer-lease-duration`, instead of extending it.
+     - In a pool, after any drop that follows an unknown outcome, a member answers held loads with the retryable 409, because it cannot tell whether a receipt exists.
+   - **After a receipt, and on every local drop**, stop every timer of the Session, including the channel reply-plan retries, which release leaves running today (`hosted-harness-session.ts:6940-6963`). Then delete it.
 
 **The Store park verb.** One JDBC transaction does the following:
 
@@ -131,15 +160,18 @@ It is fenced by:
 - the writer: an `ACTIVE` head, the writer id, generation and token, and an unexpired lease;
 - a proof of the pre-park revision, committed sequence and last digest;
 - the activation id and epoch being released;
-- `requireNoLifecycleClaim`, as the current release is (`JournalWriterLifecycle.java:506`).
+- `requireNoLifecycleClaim`, as the current release is (`JournalWriterLifecycle.java:506`);
+- the lease as the attempt's grant last saw it. Any acquire or renewal since that grant then refuses the attempt, including a reload by the same Harness in the same generation (`JournalWriterLifecycle.java:266-283`) and a renewal the Store runs late. That needs a counter on the head that every acquire and renewal advances. `writer_lease_until` does not serve: `laterOf` leaves it unchanged when a shorter lease is requested, within one millisecond, or after the database clock steps back (`:273-274`, `:347-348`, `:639-641`). Lifecycle admission also moves it (`AgentLifecycleOperations.java:533-543`). The counter need not count that: once admitted, the claim refuses every later attempt (`JournalFencing.java:202-207`), and counting it would turn that intact refusal into one that is not intact.
+
+The verb reads the database time and checks the lease only after it has locked the head, as the release does (`JournalWriterLifecycle.java:507-510`). An attempt that already holds the head when a reload arrives therefore commits first. The reload's acquire takes the placement guard first (`:170-171`), which the verb already holds, as the release does (`:465`). So it waits behind the attempt and then finds the head sealed if the attempt committed, or times out and is retried.
 
 In a pool it also moves the `ACTIVE` placement to `RELEASED` and checks the epoch.
 
 The receipt:
 
 - is keyed by writer generation, or by placement epoch when there is one;
-- carries the post-commit revision, sequence and digest, which the SQL `ready` view needs. Today the receipt copies the request's revision and commit proof (`JournalWriterLifecycle.java:481-483`). Those equal the final head only because the activation release committed before the call (`:511-515`). The park's request proves the pre-park head, so the receipt needs post-commit fields beside the proof: `committedSequence` must equal the proof's (`ManagedHarnessReleaseRecords.java:32-34`). The schema also requires `instanceId`, `bootId` and `placementEpoch` (`:14-24`), which single mode lacks;
-- needs a retention rule. Each park writes a resource, a record and a ref row (`JournalWriterLifecycle.java:527-539`), where today's receipts are one per placement epoch. Keep at least the latest, so that an exact retry still finds it.
+- carries the post-commit revision, sequence and digest, which the SQL `ready` view needs. Today the receipt copies the request's revision and commit proof (`JournalWriterLifecycle.java:481-483`). Those equal the final head only because the activation release committed before the call (`:511-515`). The park's request proves the pre-park head, so the receipt needs post-commit fields beside the proof: `committedSequence` must equal the proof's (`ManagedHarnessReleaseRecords.java:32-34`). Of the fields the schema requires (`:14-24`), `instanceId` and `placementEpoch` come only from a pool placement. `bootId` exists in both modes, because the writer id is the Harness's boot id (`QwenHostedHarnessConnector.java:2235`) and the release requires the two to be equal (`JournalWriterLifecycle.java:459`);
+- needs a retention rule. Each park writes a resource, a record and a ref row (`JournalWriterLifecycle.java:527-539`), where today's receipts are one per placement epoch. Keep at least the latest, so that an exact retry still finds it. If a successor has acquired and parked again since, the older receipt may be gone. An exact retry of the old attempt is then refused and the Session dropped, which is safe.
 
 The verb should follow an existing lock order: placement guard, then tenant guard, then Session root, as the release does (`JournalWriterLifecycle.java:465-467`).
 
@@ -183,13 +215,30 @@ After the seal, any writer may acquire with the next generation (`JournalWriterL
 **Java.** A connector rule for admission verbs: prompts, approval and question answers, channel, automation, message and child operations.
 
 - A `404 hosted_session_not_found` on a cached attachment retries once through a passive load. A 404 comes from the gate or the handler's identity check before any work (`hosted-harness-session.ts:1214-1229`), and relay verbs replay by derived command ids, so the retry cannot execute anything twice.
-- Remove the entry with compare-and-remove, as `doSettleLifecycle` does (`QwenHostedHarnessConnector.java:357-360`). Only when that succeeds, also remove its pending recovery and its `mcpManagementAttachments` entry. Otherwise a stale reference's 404 could wipe the entry a concurrent recovery load just set.
+- Remove the stale entry and its pending-recovery marker in one atomic step per key: one `attachments.computeIfPresent` call that removes the entry only if it is still the reference that answered 404, and clears the marker inside the same call.
+  - A compare-and-remove followed by a separate marker removal is not enough, and `doSettleLifecycle` has that gap (`QwenHostedHarnessConnector.java:358-360`). Between the two steps a concurrent recovery load can publish a new reference and set its marker, and the cleanup then removes the new marker. The new reference survives, but the recovery entry, `doRecoverManagedRuntime`, hands out its snapshot only while the marker is set (`:1989-1991`), so the next dispatch answers that nothing is parked.
+  - The rule is general: the marker changes only inside a per-key step that checks the entry is still the reference the change is for, and every publication or removal of an entry sets or clears its marker in that same step. Phase 2 brings every connector path under it, and merges the passive load's two steps into one.
+    - Three paths already follow it. The cancellation takeover publishes and sets its marker in one such step (`:1892-1902`). `doCancelManagedRuntime` clears its marker only while the entry is still its reference (`:982-990`), and the recovery cleanup load does the same for its own (`:1853-1862`).
+    - The passive load publishes first and then sets the marker in a second step that checks the entry is still its own (`:566-603`). That is safe against a stale cleanup, but between the two steps the new entry carries the old marker.
+    - The other paths do not follow it yet:
+      - `doContinueManagedRuntime` (`:955`) and `doCancel` (`:1144`) clear the marker by key after their call, the hazard described above;
+      - the approval-mode check (`:1924-1925`) clears it after a separate compare-and-remove, as `doSettleLifecycle` does, and `releaseOwnership` clears it whether or not its compare-and-remove succeeded (`:283-284`);
+      - the recovery entry (`:1968-1973`) and `committedStopAttachment` (`:1326-1331`) publish with a `put` and update the marker afterwards;
+      - `discardManagedRecovery` (`:1784-1785`), the recovery entry's failure path (`:1981-1982`), lifecycle detach (`:451-453`) and close (`:1432-1434`) remove both by key alone;
+      - generation adoption and the connector's own close change the markers in bulk (`:2347-2351`, `:1460-1462`);
+      - `lifecycleAttachment` and the first load publish with a `put` (`:387`, `:539`), and two failure paths of the attach remove by compare-and-remove (`:551`, `:557`), all without touching the marker, so a newer reference can inherit a stale one.
+  - The `mcpManagementAttachments` entry is also removed only if it is still the entry the connector read before the call.
+  - A regression test forces the interleaving above, and checks that the newer reference keeps its marker and that the recovery entry still returns its snapshot.
 - A 404 on the Turn path goes through `recoverManagedRuntime`, so that `pendingRecovery` and `bindRecoveredHarness` still apply.
 - In a pool, the retry goes back through `HarnessPoolConnector.select` with acquiring allowed. The leaf connector's thread-local `PoolCall` still carries the old placement (`QwenHostedHarnessConnector.java:126-137`).
 - Lifecycle settle keeps its rule that absence proves nothing.
 - Cancel stays out of the rule, because its 404s can follow side effects (`hosted-harness-session.ts:11743-11745`).
 - `409 hosted_session_parking` is a wait. For the Turn path it joins `isPoolWait` (`HarnessCoordinator.java:1694-1703`). The relay verbs need the same wait, because today they pass a Harness 409 straight back.
-- The SDK tells the connector when a heartbeat retires an attachment. Verbs outside the rule then see a stale reference for at most one heartbeat interval per node: rename, reading a context compression, opening a Turn's Harness stream, MCP management, extension management (`applyExtensions`, `continueExtensionOperation`), and cancel.
+  - Lifecycle settle and detach, the load that close and delete start with, and `DELETE /session/:id`, the close of a Session without lifecycle protocol 2 (`QwenHostedHarnessConnector.java:1431-1436`), classify it as a wait through `isPoolWait` (`SessionLifecycleCoordinator.java:335-339`), which reschedules them outside the retry budget.
+  - The heartbeat already treats a 409 as transient: it retires its attachment only on a `404 hosted_session_not_found` or a generation change (`HostedHarnessClient.java:2539-2563`).
+  - Other verbs, and loaders outside the 404 rule, return it as a transient error, as they do a stale reference.
+  - `channelAttachment` and `create()` answer any 409 with a passive load (`QwenHostedHarnessConnector.java:1481-1489`, `:1626-1630`), so they must recognise this code first.
+- The SDK tells the connector when a heartbeat retires an attachment. The notice carries the retired reference, and the connector removes it through the same per-key step, so a notice that arrives after a newer load leaves that load's entry and marker alone. Verbs outside the rule then see a stale reference for at most one heartbeat interval per node: rename, reading a context compression, opening a Turn's Harness stream, MCP management, extension management (`applyExtensions`, `continueExtensionOperation`), and cancel.
 - Pool verbs reselect from SQL on every call (`HarnessPoolConnector.java:245-300`), so stale references are mainly a single-mode problem.
 - `GET` session reports `ready` from SQL for a head sealed behind a release receipt at the current revision, with no unsettled inputs.
 
@@ -207,18 +256,18 @@ Because the head is sealed, a load takes it over at once instead of waiting for 
 
 **What keeps working while parked**
 
-| Work                                                      | Driven by                                 | Parked behaviour                                                                                                                              |
-| --------------------------------------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Prompts, approvals, questions                             | Java                                      | The next verb loads the Session. A pending approval or question means a Turn is running, so that Session is not idle.                         |
-| Cancel                                                    | Java                                      | A cache miss runs recovery. A parked Session has no Turn to cancel. A stale cached reference answers 404 until the heartbeat notice drops it. |
-| Rename, context compression, MCP and extension management | Java                                      | Outside the 404 rule. A cache miss loads the Session; a stale reference fails for at most one heartbeat interval.                             |
-| Close, delete, archive                                    | Java lifecycle                            | Load the Session first, then take the existing close path.                                                                                    |
-| Automations, channels, Session messages, child results    | Java clock and relays                     | They load the Session.                                                                                                                        |
-| Public event stream                                       | SQL and the event hub                     | Unchanged. The Harness's own event streams stop with the Session.                                                                             |
-| MQ owner subscriptions                                    | `OwnerSubscriptions`                      | They drop the Session once it has no active writer, and the MQ wake loads it.                                                                 |
-| Background Shells, Monitors                               | The Harness's publisher and Monitor loops | Not parkable: nothing outside the Harness receives their output.                                                                              |
-| MCP servers, Hooks                                        | A Runtime Session held for the Session    | Not parkable until phase 5.                                                                                                                   |
-| CSI-guarded Sessions                                      | —                                         | Not parkable.                                                                                                                                 |
+| Work                                                      | Driven by                                 | Parked behaviour                                                                                                                                                                        |
+| --------------------------------------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Prompts, approvals, questions                             | Java                                      | The next verb loads the Session. A pending approval or question means a Turn is running, so that Session is not idle.                                                                   |
+| Cancel                                                    | Java                                      | A cache miss runs recovery. A parked Session has no Turn to cancel. A stale cached reference answers 404 until the heartbeat notice drops it. A 409 during a park attempt is transient. |
+| Rename, context compression, MCP and extension management | Java                                      | Outside the 404 rule. A cache miss loads the Session; a stale reference fails for at most one heartbeat interval, and a 409 during a park attempt is transient.                         |
+| Close, delete, archive                                    | Java lifecycle                            | Load the Session first, then take the existing close path. A `409 hosted_session_parking` is rescheduled as a wait. Archive needs a closed Session and makes no Harness call.           |
+| Automations, channels, Session messages, child results    | Java clock and relays                     | They load the Session.                                                                                                                                                                  |
+| Public event stream                                       | SQL and the event hub                     | Unchanged. The Harness's own event streams stop with the Session.                                                                                                                       |
+| MQ owner subscriptions                                    | `OwnerSubscriptions`                      | They drop the Session once it has no active writer, and the MQ wake loads it.                                                                                                           |
+| Background Shells, Monitors                               | The Harness's publisher and Monitor loops | Not parkable: nothing outside the Harness receives their output.                                                                                                                        |
+| MCP servers, Hooks                                        | A Runtime Session held for the Session    | Not parkable until phase 5.                                                                                                                                                             |
+| CSI-guarded Sessions                                      | —                                         | Not parkable.                                                                                                                                                                           |
 
 ## Phases
 
@@ -232,7 +281,7 @@ Because the head is sealed, a load takes it over at once instead of waiting for 
 
    This overlaps #16320 step 7's shared publisher listener, so one of the two should go first.
 
-2. **Java tolerance.** The connector rule, the heartbeat notice and the recovery view. These are useful without parking.
+2. **Java tolerance.** The connector rule, including the per-key marker rule on every path, the waits on `409 hosted_session_parking`, the heartbeat notice and the recovery view. These are useful without parking.
 3. **Make a load cheaper per Turn of history.** A Workspace load reads every durable reference the journal holds at least once, and phase 0 measured about 43 reads and 870 statements per earlier Turn (below). Parking would cost more than it saves for any Session that is not parked long. The options are:
    - (a) **Read each body once.** Reuse the bytes the restore verification already read:
      - fill the message-body cache with the message bodies it reads, so the projection does not read them again;
@@ -259,12 +308,12 @@ Because the head is sealed, a load takes it over at once instead of waiting for 
    None of these makes a load independent of history, because the state a Session needs grows with it: its messages and extension records. They cut the cost per earlier Turn. Question 5 asks which to take.
 
 4. **Parking for Sessions without MCP, Hooks or live background runs.** It covers:
-   - the one-transaction Store park verb and its receipt shape;
-   - non-latching staging, renewal pause and Store-client park;
-   - the idle clock, the per-Session conditions, and the gate on POSTs and loads;
-   - the retry rule for an unknown outcome;
+   - the one-transaction Store park verb and its receipt shape, and a lease counter on the head that every acquire and renewal advances and every writer grant carries (a schema change);
+   - non-latching staging, a pause of every lease extension the Store client makes on its own, and Store-client park;
+   - the idle clock, the per-Session conditions, and the gate on non-GET requests and loads;
+   - the retry rule for an unknown outcome, with its backoff and cap;
    - a `park-after` setting, off by default until the load cost after phase 3 picks a value;
-   - tests where an input, a load and a Java or Harness restart race a release.
+   - the tests and the rig checks listed for phase 4 under Validation.
 5. **MCP and Hook Sessions.** Choose one of:
    - (a) Keep their Runtime Session held across the park, and adopt it on load without counting an idle hold as work.
    - (b) Stop the servers on park and start them on wake. This frees sandbox memory but adds their startup to the first Turn after a wake.
@@ -282,6 +331,8 @@ Out of scope:
 - `qwen serve --profile hosted-harness`;
 - MySQL 8.4.6 in Docker, on tmpfs with the binary log off. Wall times are therefore lower bounds, but statement counts do not depend on it;
 - a scripted model, with each Turn making one approved `run_shell_command` call.
+
+Statements come from `performance_schema.events_statements_summary_by_digest`, truncated before each measured Turn. Read-lease round trips are its count of `INSERT INTO ma_read_lease`. CPU is utime and stime from `/proc`. Every number is from a single run with no repetition, so the table is indicative. The per-Turn slopes come from three history lengths. The rig scripts are not in the repository; #16320 describes how to set up the same stack.
 
 **Procedure.**
 
@@ -325,6 +376,7 @@ Each load follows one more Turn than the history column shows, because the loade
 - **Idle traffic and break-even.**
   - Idle traffic is 51–56 statements a minute per resident Session, as #16320 measured. This run did not measure idle traffic.
   - Each earlier Turn adds about 16 minutes to how long a Session must stay parked before its next wake costs less than the idle traffic it saved. That comes to about 45 minutes for the 1-Turn Session, about 11–12 hours for the 40-Turn one, and 52–57 hours for the 200-Turn one.
+  - These figures assume the default 60 s lease. With a 300 s lease the idle traffic is about a fifth, and each break-even about five times as long.
   - Measured in MySQL CPU the picture is worse, assuming an idle statement costs what a loaded Turn's statement costs. For the 40- and 200-Turn loads, a cold load's statements cost about twice as much MySQL CPU each (1.2 times for the 1-Turn load); the rig did not find out why.
   - The wake also adds about 85 ms per earlier Turn to the first Turn: 17 s at 200 Turns.
 - **Harness memory.** These figures are for the Harness process alone, after a forced GC, without the three Runtime workers. In the restarted Harness, before any Session was loaded, the heap was 90.3 MiB and USS 163.3 MiB. With the three Sessions loaded again it was 119.8 MiB and 294.7 MiB. Most of the USS growth is native or retained memory rather than heap. The message-body cache is bounded at 64 MiB, but it held under 1 MiB here: external memory grew by 0.9 MiB.
@@ -332,6 +384,59 @@ Each load follows one more Turn than the history column shows, because the loade
   This growth is not what unloading would return. Before the restart the old Harness had the same three Sessions loaded at the same heap, 119.8 MiB, but 334.6 MiB USS. So USS depends on the process's history: warm-up and memory the allocator keeps. The three Sessions' own state is at most the 29.5 MiB heap growth, about 24 MiB of it outside code space. How much an unload returns has to be measured by unloading within one process.
 
 That is why phase 3 comes before parking.
+
+## Validation
+
+Each phase lands with tests for its own rules. The deterministic outcomes need tests as much as the races do. A mis-plumbed verdict either drops a Session whose head still says it is owned, or keeps the gate up so that every non-GET request answers `409 hosted_session_parking`. Java's 404 retry would hide the first from an end-to-end test.
+
+- **Phase 1.**
+  - A Session whose Shells, Monitors and held Runtime Sessions have all ended is not held.
+  - A load does not re-add a hold the Broker has released.
+  - Close still drains what is live.
+- **Phase 2.**
+  - The interleaving in the Java section: neither a stale reference's 404 nor a late heartbeat notice removes a newer reference or its recovery marker.
+  - A 404 on an admission verb retries once through a passive load. The 404 rule does not apply to cancel or lifecycle settle.
+  - The Turn path and the relay verbs wait on `409 hosted_session_parking` instead of failing.
+  - A heartbeat that retires an attachment also drops the connector's entry.
+  - Every connector path that writes the recovery marker writes only its own reference's.
+  - A 404 on the Turn path goes through `recoverManagedRuntime`, a pool retry goes back through `select`, and the `mcpManagementAttachments` entry is removed only by identity.
+  - Lifecycle settle, detach, the close load and `DELETE /session/:id` reschedule a `409 hosted_session_parking` as a wait, other verbs return it as transient, `channelAttachment` and `create()` do not turn it into a load, and a heartbeat that meets it keeps its attachment.
+  - `GET` session reports `ready` for a head sealed behind a release receipt at the current revision with no unsettled inputs, and keeps today's answer otherwise.
+- **Phase 3.**
+  - On the phase 0 rig, the statements and time a load adds per earlier Turn, before and after.
+  - With (a) and (b), a corrupted or missing resource still fails the load with `restore_verification_failed`.
+- **Phase 4, in the Harness.** One test per outcome:
+  - an intact refusal: the staged transaction is discarded, the renewals resume, the gate clears and the next POST is accepted;
+  - an unknown outcome followed by an intact refusal: the Session is dropped, not resumed;
+  - a protocol-1 lifecycle admission does not refuse a park, and the close that follows still converges;
+  - a refusal that is not intact: the Session is dropped locally with its timers stopped, and the next load acquires the head as any load would;
+  - an unknown outcome followed by an exact retry that reads back the receipt, including after a successor has acquired;
+  - an unknown outcome that outlasts the cap: the retries are spaced by the backoff, the Session is dropped locally with its timers stopped, and an attempt still in flight cannot seal the head under a reload by the same Harness;
+  - during the stage, no read, timer or reacquire extends the lease, and any failure before the park verb is sent ends the attempt as an intact refusal: an unsettled renewal or a failed pending-input check. A definitive writer or lease refusal, or a grant with less than a third of its lease left, drops the Session instead;
+  - a wait that outlasts its bound, a failed check and an intact refusal: the gate clears and the clock restarts;
+  - a Session that a drain has started to release, on an instance that is not accepting work, or whose writer has stopped raises no gate, and a drain and a park never both take the same Session;
+  - a held load answers the retryable `409 hosted_session_parking` after its bound. In single mode, a load held across a receipt goes on to take the sealed head over. In a pool, any load that meets a released or changed placement answers a retryable 409, held or not, and Java reselects;
+  - a receipt stops every timer of the Session, including the channel reply-plan retries, and deletes it; an abandonment is counted in the metric;
+  - a Session that fails the pre-check, such as one holding a publisher or a running Monitor: across several `park-after` periods it raises no gate and answers no 409;
+  - heartbeats, `GET` session polling and activation renewals, including renewals committed as journal transactions, do not restart the clock, and a Session that a read woke is not parked before `park-after` has passed;
+  - an input, a load, and a Java or Harness restart, each racing a park.
+- **Phase 4, in the Store.**
+  - The park verb checks the writer before the lifecycle claim and the placement state, or returns its writer verdict with the refusal.
+  - An exact retry finds the receipt before any writer check, including after a successor has acquired.
+  - An attempt is refused once the lease has lapsed, and once any acquire or renewal has run since its grant, including one that asked for a shorter lease, a same-generation reload by the same Harness and a renewal the Store runs late. Lifecycle admission does not count.
+  - The lease is checked only after the head is locked, so an attempt that holds the head commits before a reload's acquire reads it.
+  - The park verb's request carries the staged boundary body, and an exact retry carries the same one.
+  - The commit clears `is_wake_pending` and sets `wake_head_revision` for an uncompacted journal, and leaves the hint of a compacted journal unchanged, as today.
+  - The receipt carries the post-commit revision, sequence and digest, with `committedSequence` equal to the proof's, and the retention rule keeps at least the latest receipt.
+  - In a pool, the placement moves from `ACTIVE` to `RELEASED` only at the matching epoch.
+  - The verb takes the placement guard, the tenant guard and the Session root in that order.
+- **Phase 4, on the rig.**
+  - A parked Session adds no statements and no heartbeats per idle minute, against the 51–56 statements a minute a resident Session adds today. Measure it as #16320 did: the slope between idle windows with different numbers of Sessions.
+  - A wake takes a sealed head over without waiting for a lease to lapse.
+  - The idle budget per resident Session joins the regression check of #16320 step 8.
+- **Phase 5.**
+  - With (a), an idle hold does not count as work, and a load adopts the held Runtime Session.
+  - With (b), a wake starts the servers again before the first Turn uses them.
 
 ## Questions to agree on
 
