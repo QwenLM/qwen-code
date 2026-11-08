@@ -401,6 +401,21 @@ export function createManager(config, dependencies = {}) {
     let orphanLabels = null;
     if ((containers.length || networks.length) && !state?.name) {
       orphanLabels = await collectIdentities(containers, networks);
+      // A foreign or missing instance label means the pile may belong to
+      // another pool sharing the host. Refuse BEFORE deleting anything:
+      // removing our slot's resources (or registrations) would then be
+      // guesswork, so stay blocked until manual reconciliation.
+      const slotPrefix = `qwen-${config.poolId}-${slot}-`;
+      if (
+        !orphanLabels.every(
+          (name) =>
+            typeof name === 'string' &&
+            name.replace(/^ecs-/, '').startsWith(slotPrefix),
+        )
+      )
+        throw new Error(
+          'Orphaned resources carry no unambiguous slot identity; manual reconciliation required',
+        );
       try {
         state = recoverIdentity(slot, orphanLabels);
       } catch (error) {
@@ -466,17 +481,21 @@ export function createManager(config, dependencies = {}) {
       // A recorded runnerName is exact. A label-recovered identity carries
       // only the instance name: main registered under the bare display name,
       // this version under a suffixed one, so match either form and let the
-      // runnerId checks below reject anything ambiguous.
+      // runnerId checks below reject anything ambiguous. A registration
+      // GitHub still reports online may belong to a live runner outside
+      // this host's view, so a label-recovered (not state-recorded)
+      // identity only ever sweeps offline matches.
       const matches = state.runnerName
         ? (runner) => runner.name === state.runnerName
         : (runner) =>
-            runner.name === state.name ||
-            runner.name === runnerName(slot) ||
-            (typeof runner.name === 'string' &&
-              runner.name.startsWith(`${runnerName(slot)}-`) &&
-              /^[0-9a-f]{8}$/.test(
-                runner.name.slice(runnerName(slot).length + 1),
-              ));
+            runner.status !== 'online' &&
+            (runner.name === state.name ||
+              runner.name === runnerName(slot) ||
+              (typeof runner.name === 'string' &&
+                runner.name.startsWith(`${runnerName(slot)}-`) &&
+                /^[0-9a-f]{8}$/.test(
+                  runner.name.slice(runnerName(slot).length + 1),
+                )));
       const runners = all.filter(matches);
       if (
         state.runnerId &&
@@ -530,19 +549,8 @@ export function createManager(config, dependencies = {}) {
     if (!state?.name && orphanLabels) {
       // The identity-less sweep above removed the resources but could not
       // target their registrations. Sweep every registration this slot's
-      // naming scheme owns so an orphan cannot block its replacement —
-      // but only when every removed resource carried this slot's identity
-      // prefix. A foreign or missing instance label means the pile may
-      // belong to another pool sharing the host; deleting our slot's
-      // registrations by name would then be guesswork, so stay blocked.
-      const prefix = `qwen-${config.poolId}-${slot}-`;
-      const identifiable = (name) =>
-        typeof name === 'string' &&
-        name.replace(/^ecs-/, '').startsWith(prefix);
-      if (!orphanLabels.every(identifiable))
-        throw new Error(
-          'Orphaned resources carry no unambiguous slot identity; manual reconciliation required',
-        );
+      // naming scheme owns so an orphan cannot block its replacement.
+      // Slot ownership of the pile was verified before any deletion above.
       // A registration still online may belong to a live runner outside
       // this host's view; only sweep ones GitHub already reports offline.
       const owned = (await listRunners()).filter(

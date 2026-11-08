@@ -81,6 +81,14 @@ async function fixture(t) {
       const path = args.find((v) => v.startsWith('/'));
       if (path.includes('generate-jitconfig')) {
         const body = JSON.parse(options.input);
+        // Real GitHub rejects a duplicate registration name; a fixture
+        // that silently replaces the record hides "the sweep deleted an
+        // online registration and the cycle replenished over it".
+        if (runner && runner.name === body.name) {
+          const error = new Error('gh failed (exit 1, HTTP 422)');
+          error.status = 422;
+          throw error;
+        }
         runner = { id: ++counter, name: body.name };
         if (jitFailure) throw jitFailure();
         if (loseJit) throw new Error('network failure');
@@ -1170,7 +1178,12 @@ test('an orphan pile never deletes a registration GitHub still reports online', 
   f.setRunner({ id: 77, name: 'ecs-qwen-trial-01-cafe1234', status: 'online' });
   await createManager(f.config, { command: f.command }).cycle(1);
   assert.ok(
-    !f.calls.some((c) => c.program === 'gh' && c.args.includes('DELETE')),
+    !f.calls.some(
+      (c) =>
+        c.program === 'gh' &&
+        c.args.includes('DELETE') &&
+        c.args.includes('/repos/owner/repo/actions/runners/77'),
+    ),
     'an online registration may belong to a live runner outside this host',
   );
 });
