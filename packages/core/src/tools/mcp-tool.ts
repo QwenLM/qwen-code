@@ -48,6 +48,7 @@ import {
   addMCPStatusChangeListener,
   getAllMCPServerStatuses,
   getMCPServerStatus,
+  isMCPServerTeardownIntent,
   MCPServerStatus,
   removeMCPStatusChangeListener,
 } from './mcp-status.js';
@@ -509,12 +510,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     // Every deliberate teardown -- operator Disconnect, Clear OAuth,
     // `disableMcpServer`, session shutdown -- also writes
     // `CONNECTED -> DISCONNECTED` to the same process-wide registry, so the
-    // transition alone cannot tell abort damage apart. Bind the repair to the
-    // client this invocation actually called: an intentional teardown drops
-    // that client from its manager before the disconnect completes.
-    const client = this.mcpClient as
-      | { getStatus?: () => MCPServerStatus }
-      | undefined;
+    // transition alone cannot tell abort damage apart. The owner records its
+    // intent before closing the transport; read that instead of a status
+    // field, which the tool's client (the raw SDK `Client`) does not have.
     let wasConnected =
       getMCPServerStatus(this.serverName) === MCPServerStatus.CONNECTED;
     const detach = () => {
@@ -538,13 +536,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         return;
       }
       detach();
-      // A manager that stopped this client first is tearing the server down on
-      // purpose; resurrecting it would leave a connected but untracked
-      // transport that nothing ever closes.
-      if (
-        client?.getStatus !== undefined &&
-        client.getStatus() !== MCPServerStatus.CONNECTED
-      ) {
+      // A server its owner is stopping on purpose must stay stopped:
+      // resurrecting it would leave a connected but untracked transport that
+      // nothing ever closes.
+      if (isMCPServerTeardownIntent(this.serverName)) {
         return;
       }
       // Best-effort and detached from the caller: `attemptReconnect` needs

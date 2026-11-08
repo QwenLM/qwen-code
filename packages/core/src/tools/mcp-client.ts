@@ -35,6 +35,7 @@ import { DiscoveredMCPTool } from './mcp-tool.js';
 import type { McpToolAnnotations } from './mcp-tool.js';
 import { SdkControlClientTransport } from './sdk-control-client-transport.js';
 import {
+  markMCPServerTeardownIntent,
   MCPServerStatus,
   recordMCPServerLastError,
   updateMCPServerStatus,
@@ -866,6 +867,11 @@ export class McpClient {
     // `discover()` reading `this.status` would otherwise see the stale
     // CONNECTED value and try to register tools that we're about to drop.
     this.status = MCPServerStatus.DISCONNECTED;
+    // Record the intent BEFORE the registry notifies listeners: a cancelled
+    // invocation's abort-repair listener fires synchronously inside the
+    // `updateMCPServerStatus` call below and must be able to tell this
+    // deliberate teardown from abort damage (issue #12160).
+    markMCPServerTeardownIntent(this.serverName);
     updateMCPServerStatus(this.serverName, MCPServerStatus.DISCONNECTED);
     this.isDisconnecting = true;
     if (this.transport) {
