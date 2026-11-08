@@ -224,6 +224,51 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar session pinning (issue #9465)', () => {
+  it('carries the selected question sort into secondary archive queries', async () => {
+    connection.capabilities = {
+      ...organizationCapabilities,
+      features: [
+        ...organizationCapabilities.features,
+        'session_last_user_prompt_sort',
+        'workspace_qualified_rest_core',
+      ],
+    };
+    workspace.capabilities = {
+      ...connection.capabilities,
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'secondary', cwd: '/tmp/other', primary: false, trusted: true },
+      ],
+    };
+    renderSidebar();
+    await flushSidebar();
+    const archiveQuery = () =>
+      useSessionCatalogQueries.mock.calls
+        .flatMap((call) => call[1])
+        .filter(
+          (query) =>
+            query.workspaceCwd === '/tmp/other' &&
+            query.options.archiveState === 'archived',
+        )
+        .at(-1);
+    expect(archiveQuery()?.options.sortBy).toBe('updatedAt');
+    await act(async () =>
+      click(
+        container.querySelector<HTMLElement>(
+          'button[aria-label="Sort sessions"]',
+        )!,
+        true,
+      ),
+    );
+    const choice = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ).find((item) => item.textContent === 'Last question');
+    expect(choice).toBeDefined();
+    await act(async () => click(choice!));
+    await flushSidebar();
+    expect(archiveQuery()?.options.sortBy).toBe('lastUserPromptAt');
+  });
+
   it('does not restore cleared activity unread when the legacy catalog catches up', async () => {
     const running = makeSession('background', {
       displayName: 'Background result',

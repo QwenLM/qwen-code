@@ -80,24 +80,46 @@ Local `gh` authentication requires an HTTPS `baseUrl` so the daemon host credent
 
 ## Configuration Options
 
-| Option                    | Default                  | Description                                                                                                                                                                                                        |
-| ------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication                                                                                                                               |
-| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                                                                                                                                          |
-| `pollInterval`            | `60000`                  | Poll interval in ms                                                                                                                                                                                                |
-| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                                                                                                                                             |
-| `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"` with the repo (`owner/repo`) listed in `groups`, or `"pairing"` with the repo approved for notifications to flow                                                                   |
-| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run                                                                                                                                   |
-| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                                                                                                                                       |
-| `deliverToBoundSessions`  | `false`                  | Deliver events for PRs bound to a live session into that session as a prompt instead of a channel-owned session (daemon-managed channels only)                                                                     |
-| `prWatchEvents`           | unset                    | Optional state transitions to watch for bound PRs: `ci_failure`, `merge_conflict`, `head_change`, `state_change`. Requires `deliverToBoundSessions`                                                                |
-| `boundSessionActions`     | unset                    | Optional operator instruction templates for bound-session delivery, keyed by event class with optional role prefixes (`review:`, `verify:`, `fix:`). Enables role-aware fan-out. Requires `deliverToBoundSessions` |
+| Option                    | Default                  | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pollInterval`            | `60000`                  | Poll interval in ms                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"` with the repo (`owner/repo`) listed in `groups`, or `"pairing"` with the repo approved for notifications to flow                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `repoFilterMode`          | `"off"`                  | Repository event filter: `"allowlist"` processes only the repositories listed in `repoFilter`, `"blocklist"` processes all except them, `"off"` processes everything. Applies to notification intake only                                                                                                                                                                                                                                                                                                                                                                                           |
+| `repoFilter`              | unset                    | `owner/repo` repository names used by `repoFilterMode`; required while the mode is `"allowlist"` or `"blocklist"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `deliverToBoundSessions`  | `false`                  | Deliver events for PRs bound to a live session into that session as a prompt instead of a channel-owned session (daemon-managed channels only)                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `prWatchEvents`           | unset                    | Optional state transitions to watch for bound PRs: `ci_failure`, `merge_conflict`, `head_change`, `state_change`. Requires `deliverToBoundSessions`                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `prWatchLimit`            | `30`                     | Maximum open bound PRs watched per poll, kept between 1 and 500. Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR costs about one `pulls.get` per poll — ~60 requests/hour at the 60s default, so a 5000/hour PAT budget admits ~80 watched PRs (~69 open while a terminal backlog drains at the 1.2x fan-out); over budget, every watch pass aborts on rate limits. Raise `pollInterval` when raising this. Requires `deliverToBoundSessions` and `prWatchEvents` |
+| `boundSessionActions`     | unset                    | Optional operator instruction templates for bound-session delivery, keyed by event class with optional role prefixes (`review:`, `verify:`, `fix:`). Enables role-aware fan-out. Requires `deliverToBoundSessions`                                                                                                                                                                                                                                                                                                                                                                                  |
 
 Use `reasonFilter` to drop noisy notification classes such as `ci_activity` or `state_change`. Do not use `reasonFilter: ["mention"]` as a replacement for `groups.*.requireMention`: GitHub's `mention` reason is sticky at the thread level, so real new @mentions can arrive later under `comment`, `subscribed`, `author`, or other reasons and would be skipped.
 
 Valid `reasonFilter` values are `mention`, `review_requested`, `assign`, `author`, `comment`, `ci_activity`, `manual`, `state_change`, `subscribed`, `team_mention`, `security_alert`, `approval_requested`, `invitation`, `member_feature_requested`, and `security_advisory_credit`.
 
 Filtered notifications are marked read only after all accepted work in the poll window completes. Removing the filter later will not replay notifications the channel already skipped.
+
+### Repository event filter
+
+Use `repoFilterMode` together with `repoFilter` to filter incoming notifications by repository:
+
+```json
+{
+  "repoFilterMode": "blocklist",
+  "repoFilter": ["octo/noisy-repo", "octo/archive"]
+}
+```
+
+- `"allowlist"` processes only the listed repositories; `"blocklist"` processes every repository except the listed ones; `"off"` (the default) processes everything.
+- Repository names are matched case-insensitively and must be written as `owner/repo`. An active mode with an empty or malformed list is rejected at save time and at channel start.
+- While the mode is `"off"`, a stored list is ignored, so you can park a list without it affecting the channel.
+- The filter composes with `groupPolicy`: when both restrict repositories, only the intersection is processed. It applies to every incoming notification, including notifications about PRs bound to a live session (`deliverToBoundSessions`); only the PR state watch events (`prWatchEvents`) bypass it.
+- Filtered notifications are journaled as `repo_filter` skips in the Channel event timeline and do not hold the poll cursor. Like `reasonFilter` skips, they are marked read with the window and are not replayed when the filter changes.
+
+In the Web Shell editor, **Repository Filter** offers Off / Allowlist / Blocklist, and the **Filtered Repositories** list appears while a mode is active. You can paste repository or PR URLs there; they are shortened to `owner/repo` on save. Only URLs on the channel's own GitHub host are shortened — `github.com`, or the GitHub Enterprise host derived from the API base URL; URLs on any other host are rejected. On that host, URLs under known non-repository GitHub areas (`orgs/`, `apps/`, `settings/`, `trending/`, and similar) are also rejected instead of shortened. That area list is best-effort: a URL from a GitHub area not on the list can still be shortened, so check the saved `owner/repo` entries after pasting.
 
 ### Editing from the Web Shell
 
@@ -138,6 +160,8 @@ Note that under `groupPolicy: "pairing"`, access is granted per repository: once
 
 The adapter detects mentions by scanning comment text and first-contact issue or PR bodies for `@bot-username` using a case-insensitive regex. It does not trust `reason: "mention"` alone because that value is sticky at the thread level. Other reasons select review, triage, followed-thread, or fallback prompts.
 
+Editing an older comment to add the mention does not reach the bot. GitHub notifies the bot of the new mention, but the adapter reads only comments created after its poll cursor, apart from those of the cursor's own second that the window which ended there did not read (see [How It Works](#how-it-works)). The Channel events page records such a comment, when it mentions the bot and was edited after the cursor, as skipped with the reason `edited_comment`. A comment the channel already took (answered it, or read it in a batch of followed-thread comments) gets no row, but that record is bounded, so the row can also name an older comment the bot answered before. A mention added later to an issue or pull request body is answered only while the bot has not read the thread yet, since the body is read only on first contact; after that it is not answered and leaves no row. To ask the bot, post a new comment.
+
 ## How It Works
 
 The adapter uses GitHub's Notifications API as a wake-up signal:
@@ -149,9 +173,9 @@ The adapter uses GitHub's Notifications API as a wake-up signal:
 5. **Commit the poll window** only after accepted work completes: mark notifications read and advance the cursor
 6. **First-contact fallback**: a brand-new unread issue/PR body can be processed when no comment was dispatched; mention notifications still require an actual body mention
 
-The comment window is `(previousCursor, currentMaxUpdatedAt]`. The notification cursor and the accepted, running, and failed tasks are stored under `~/.qwen/channels/<workspace-scope>/` with private file permissions, so two workspaces running a channel of the same name keep separate cursors. On restart, the channel recovers those tasks before polling GitHub again. Failed tasks are attempted up to three times, then become terminal; cancelled tasks are terminal and are not rerun. A task whose final reply was already posted, suppressed, or queued for definite no-write retry is not rerun.
+The comment window is `(previousCursor, currentMaxUpdatedAt]`, plus the comments created in the `previousCursor` second itself that the window which ended there did not read. GitHub stamps comments and notifications to the second, so a notification that arrives after its window was marked read can name a comment of the cursor's own second. The cursor file lists the comments of that second the window read and the threads whose notification of that second it listed and did not filter out (up to 500 each), and the next window leaves out only those comments. Without that list (the first window after upgrading from a version without it, or more than 500 comments of that second read by the window), the window starts after the cursor's second, and such a comment is not answered. The notification cursor and the accepted, running, and failed tasks are stored under `~/.qwen/channels/<workspace-scope>/` with private file permissions, so two workspaces running a channel of the same name keep separate cursors. On restart, the channel recovers those tasks before polling GitHub again. Failed tasks are attempted up to three times, then become terminal; cancelled tasks are terminal and are not rerun. A task whose final reply was already posted, suppressed, or queued for definite no-write retry is not rerun.
 
-The notification cursor does not advance while recoverable tasks remain, or when inbound task state cannot be read or written. It also stays put when GitHub fails while a notification is being read and may answer differently later. Mark-as-read takes a single timestamp, so every listed notification stays unread and the next poll reads the whole window again; comments already handled are not answered twice. A rate limit or a credential failure stops reading the rest of that poll and holds the window until GitHub answers again. A 5xx, or a network failure before GitHub answers (Octokit reports it as 500), holds the window for at most 30 polls: on the 30th poll that sees one, the threads that still fail are skipped and the window can be marked read. At the default interval that is about 30 minutes, plus the in-call retries of each failing read (three attempts with 1 s and 2 s pauses). The count is kept in memory, so a restart begins it again. A notification listed again at or before the cursor, because its mark-as-read did not apply, belongs to a window that already committed: a 5xx reading it neither holds the window nor spends the budget (a rate limit still holds it, since the threads after it have not been read). A permanent answer such as 404, or a local error, skips the thread at once, with two exceptions that hold the window already, so the thread is read again: an error from a failing task store, which holds the whole window on its own, and an error while one of the thread's own tasks has not settled (an error inside its run leaves it running), which holds the window until that task settles. In the Channel event timeline these failures carry the reason `github_api_error`: a `failed` row means the window is held and the thread will be read again, and a `skipped` row means the channel stopped holding the window for it, so a comment of the thread in that window is lost if the thread still fails when the window is marked read. A notification listed again at or before the cursor normally has no such comment, since its activity was read before an earlier window was marked read. While a window is held, the Channel event timeline records a failing thread on its first failing poll in that window and on every tenth, a rate limit or credential failure on its first and every tenth poll, and a skipped thread or comment once. The rows written once per window are tracked under up to 8,192 keys; a row whose key no longer fits is written on every poll. This prevents a crash, an agent failure, or a GitHub hiccup from losing a comment and preserves the deduplication keys needed to avoid a second dispatch from the notification feed. There are two deliberate exceptions. **Bound-session backpressure** (see below): a deferred bound delivery has its own durable retry and a bounded deferral horizon, so it does not hold the shared cursor — its notification is marked read while the event stays recoverable in the task store. **Watch tasks while pending-event reconciliation is blocked** (for example an unreadable watch state file): they cannot make progress until a reconciliation succeeds, and watch events are detected from PR state rather than notifications, so they leave the cursor free as well — unrelated comments keep flowing, and the watch events deliver exactly once after the state file recovers.
+The notification cursor does not advance while recoverable tasks remain, or when inbound task state cannot be read or written. It also stays put when GitHub fails while a notification is being read and may answer differently later. Mark-as-read takes a single timestamp, so every listed notification stays unread and the next poll reads the whole window again; comments already handled are not answered twice. A rate limit or a credential failure stops reading the rest of that poll and holds the window until GitHub answers again. A 5xx, or a network failure before GitHub answers (Octokit reports it as 500), holds the window for at most 30 polls: on the 30th poll that sees one, the threads that still fail are skipped and the window can be marked read. At the default interval that is about 30 minutes, plus the in-call retries of each failing read (three attempts with 1 s and 2 s pauses). The count is kept in memory, so a restart begins it again. A notification listed again before the cursor, because its mark-as-read did not apply, belongs to a window that already committed: a 5xx reading it neither holds the window nor spends the budget (a rate limit still holds it, since the threads after it have not been read). One stamped with the cursor's own second is treated the same way when the last window listed it too, or when the cursor has no list for that second. Otherwise it can be a late notification for a comment the last window did not read: a 5xx reading it holds a newer window waiting to be marked read like any other until the window has read the thread once, and while no newer window waits, a 5xx before the window has read the thread spends nothing and is reported as `failed`, since nothing is marked read and the thread is read again. A permanent answer such as 404, or a local error, skips the thread at once, with two exceptions that hold the window already, so the thread is read again: an error from a failing task store, which holds the whole window on its own, and an error while one of the thread's own tasks has not settled (an error inside its run leaves it running), which holds the window until that task settles. In the Channel event timeline these failures carry the reason `github_api_error`: a `failed` row means the window is held and the thread will be read again, and a `skipped` row means the channel stopped holding the window for it, so a comment of the thread in that window is lost if the thread still fails when the window is marked read. A notification listed again before the cursor normally has no such comment, since its activity was read before an earlier window was marked read. While a window is held, the Channel event timeline records a failing thread on its first failing poll in that window and on every tenth, a rate limit or credential failure on its first and every tenth poll, and a skipped thread or comment once. The rows written once per window are tracked under up to 8,192 keys; a row whose key no longer fits is written on every poll. This prevents a crash, an agent failure, or a GitHub hiccup from losing a comment and preserves the deduplication keys needed to avoid a second dispatch from the notification feed. There are two deliberate exceptions. **Bound-session backpressure** (see below): a deferred bound delivery has its own durable retry and a bounded deferral horizon, so it does not hold the shared cursor — its notification is marked read while the event stays recoverable in the task store. **Watch tasks while pending-event reconciliation is blocked** (for example an unreadable watch state file): they cannot make progress until a reconciliation succeeds, and watch events are detected from PR state rather than notifications, so they leave the cursor free as well — unrelated comments keep flowing, and the watch events deliver exactly once after the state file recovers.
 
 Non-comment activity (push, label changes) bumps the notification's `updated_at` but produces zero new comments in the window, so re-fetched threads are skipped without triggering the agent.
 
@@ -193,6 +217,17 @@ By default every event is handled by a channel-owned session. With
 (the PR bindings shown in the Web Shell sidebar, registered when a session
 creates or reviews a PR) are delivered into that session as a prompt instead,
 so the session that follows the PR handles the event with its existing context.
+
+Public-path replies (events with no bound session, including the fallback
+when a bound session has gone and no replacement exists) run in a background
+task runner: the poll loop claims the event durably and moves on, so a long
+agent turn on one PR never blocks watch detection, bound delivery, or intake
+of new notifications. Public tasks execute one at a time in claim order —
+which also serializes them against each other on a shared channel session —
+and a turn interrupted by a restart is recovered from the durable task store.
+While a thread's public turn runs, the channel stops re-fetching that
+thread's comments on every poll of the frozen notification window; the
+thread is re-read once the turn settles.
 
 - The injected prompt marks all GitHub content as untrusted event data. The
   session's reply stays in the session; it is **not** published to GitHub
@@ -296,13 +331,29 @@ settled CI costs one API call per poll; a PR whose CI is still pending is
 re-checked every 5 minutes until it settles, and settled heads are re-checked
 every 10 minutes (GitHub does not advance a PR's `updated_at` on check
 re-runs, so the periodic re-check is what catches a re-run turning red). At
-most 30 bound PRs are actively polled. A credential failure or rate limit
-(401/403/429) aborts the whole watch pass for that poll — one shared failure
-must not issue one doomed request per watched PR — while a per-PR permanent
-status (404/410/451) only skips that PR. A failing Checks endpoint never
-suppresses the other three detections: their data comes from `pulls.get`,
-and the last known CI aggregate stands until a fetch succeeds again.
+most `prWatchLimit` open bound PRs are actively polled (default 30), most
+recently bound first. Bindings already recorded as merged/closed drain in an
+additional slice outside that budget (20% of the limit, at least one, plus
+any leftover open budget) — each needs one final observation before it
+leaves the watch set, so dead bindings never crowd out live PRs and the
+drain still progresses when open PRs fill the limit. A binding the watch
+already observed closed is tiered as terminal even if the registry still
+says open. When the open budget cannot cover every open binding, the
+channel logs `PR watch cap exceeded` with the excluded list; raise
+`prWatchLimit` (and `pollInterval`) to cover more open PRs. Each watched PR
+costs about one `pulls.get` per poll — ~60 requests/hour at the 60s default,
+so a 5000/hour PAT budget admits ~80 watched PRs (~69 open while a terminal
+backlog drains at the 1.2x fan-out); an over-budget configuration makes
+every watch pass abort on rate limits. A credential
+failure or rate limit (401/403/429) aborts the whole watch pass for that poll
+— one shared failure must not issue one doomed request per watched PR —
+while a per-PR permanent status (404/410/451) only skips that PR. A failing
+Checks endpoint never suppresses the other three detections: their data
+comes from `pulls.get`, and the last known CI aggregate stands until a fetch
+succeeds again.
 Transitions are persisted before delivery, so restarts do not re-fire them.
+A head move fires whoever pushed it, including the bound session itself —
+see Known Limitations.
 
 ### Role-Aware Action Templates
 
@@ -346,10 +397,11 @@ event.
 **Templates.** Values are operator instruction templates with `%repo%`,
 `%pr%`, `%url%`, `%title%`, `%event%`, `%sender%`, and `%role%` variables;
 `%%` renders a literal `%`, and an unknown `%foo%` stays literal so typos are
-visible. Substituted GitHub values are sanitized and capped at 200 code
-points with a visible marker. The rendered instruction appears in a labeled
-`[Operator instruction — trusted, from this channel's configuration]` block;
-the untrusted-data warning explicitly covers the substituted values. Example
+visible. Substituted GitHub values are sanitized, and `%title%` and
+`%sender%` are also capped at 200 code points with a visible marker. The
+rendered instruction appears under an `[Operator instruction — trusted]`
+label and a `Source: this channel's configuration` line; the untrusted-data
+warning explicitly covers the substituted values. Example
 for a review / verify / fix split across three workspaces:
 
 ```json
@@ -374,15 +426,47 @@ the session's model keeps discretion and its approval mode governs actions.
 A template containing `--publish` is the operator's explicit publication
 consent for the rounds it triggers — configure it deliberately. With
 `boundSessionActions` absent, delivery keeps the legacy single-winner
-behavior and the generic prompt, byte for byte.
+behavior; the prompt then carries the built-in guidance below for a
+role-carrying binding, and stays byte for byte the generic prompt for an
+untyped one.
+
+### Built-In Role Guidance (No Templates Configured)
+
+You do not have to write templates to keep roles apart. Without
+`boundSessionActions`, a binding that carries a role still gets a `Role:` line
+naming that role, and the prompt's workflow sentence is replaced by built-in
+guidance for it (summarized below; the delivered text is a little longer):
+
+| Role     | Built-in guidance                                                                                                                        |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `review` | Act as the reviewer: inspect the change and report findings. Do not push or modify the branch.                                           |
+| `verify` | Act as the verifier: verify and report. Attribute CI failures rather than fixing them. Do not merge, rebase, resolve conflicts, or push. |
+| `fix`    | Act as the fixer: investigate and fix; your workflow decides whether to push. Re-read the current head first.                            |
+
+An untyped binding keeps the generic sentence ("Handle the event with your
+normal workflow…"). A configured template always wins over the built-in
+guidance, and the per-role subscription is unchanged: a role with no matching
+key still receives nothing.
+
+Event bodies state facts only. `ci_failure` reports the head and the failed
+checks, `merge_conflict` reports `mergeable_state: dirty`, and a merged PR is
+reported as merged — none of them tells the session to fix, rebase, or wrap up.
+What to do about an event comes from your template, the built-in role guidance,
+or the session's own workflow, never from the event data.
+
+Like a template, this guidance is an instruction rather than an authorization
+boundary; tool permissions remain the boundary.
 
 ## Known Limitations
 
 - **First start skips existing unread notifications.** The cursor initializes to "now" on first launch. Notifications created before the bot starts are not processed unless the thread receives new activity afterwards.
 - If a user marks a notification as read on github.com before the bot's poll cycle, the bot will not process it.
 - The bot does not read comments before the current polling window; `author` and `comment` notifications may aggregate up to 20 comments from that window.
+- **A late notification can miss its comment.** The cursor follows the newest notification, so a notification GitHub delivers after a newer one was marked read can name a comment from before the cursor. Comments created in the cursor's own second are still read when the cursor lists that second's comments (see [How It Works](#how-it-works)); earlier ones are not, and the user has to post again.
 - Inline PR review comments and review summary bodies are not enumerated; only issue/PR comments are processed.
 - The selected credential must support the Notifications API. Fine-grained PATs do not support it; use local `gh` authentication or a classic PAT with `notifications` scope.
+- **A bound session receives its own pushes.** `head_change` compares head SHAs and GitHub's PR object does not name the pusher, so the channel cannot tell a bound session's own push from someone else's. When the pushing session is the recipient, the event arrives as a queued turn attributed to `Author: GitHub`, with both SHAs in the summary.
+- **Breaking a push → event → push chain.** With `boundSessionActions`, a role whose template chain resolves nothing is skipped — keep `watch:head_change` and the catch-alls away from the role that pushes; the example above wakes review and verify, not fix. Without it, the single most recently active follower receives every subscribed transition, so drop `head_change` from `prWatchEvents` or have the session compare the summary's target SHA with the head it just pushed. `/verify-pr` re-runs for a head it has not verified, including one it pushed itself; `/autofix-pr` treats its own pushed heads as its own work. The other three transitions are never suppressed by authorship — a self-pushed head whose CI turns red still fires `ci_failure`.
 
 ## Starting the Channel
 
