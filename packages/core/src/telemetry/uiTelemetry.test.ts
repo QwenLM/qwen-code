@@ -1610,6 +1610,53 @@ describe('UiTelemetryService.getTotalOutputTokens', () => {
     expect(service.getTotalOutputTokens('session-a')).toBe(38.75);
   });
 
+  it.each([false, true])(
+    'restores replay output baselines with incoming metrics=%s',
+    (incomingMetrics) => {
+      const service = new UiTelemetryService();
+      service.addEvent(response('outgoing', 100), 'session-a');
+      service.restoreSessionOutputTokensBaseline('session-a', 1000.25);
+      if (incomingMetrics)
+        service.addEvent(response('incoming', 10), 'session-b');
+      service.restoreSessionOutputTokensBaseline('session-b', 200.5);
+      service.restoreSessionOutputTokensBaseline('unrelated', 50.75);
+      const processMetrics = structuredClone(service.getMetrics());
+      const beforeIncoming = structuredClone(
+        service.getMetricsForSession('session-b'),
+      );
+      const snapshot = service.snapshotForReplay('session-b', 'session-a');
+      service.resetSession('session-a');
+      service.resetSession('session-b');
+      service.addEvent(response('replay', 7), 'session-a');
+      service.restoreSessionOutputTokensBaseline('session-a', 9000);
+      service.restoreSessionOutputTokensBaseline('session-b', 8000);
+      service.restoreSessionOutputTokensBaseline('unrelated', 77.75);
+
+      service.restoreFromReplaySnapshot(snapshot);
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(service.getTotalOutputTokens('session-a')).toBe(1000.25);
+      expect(service.getTotalOutputTokens('session-b')).toBe(200.5);
+      expect(service.getMetricsForSession('session-b')).toEqual(beforeIncoming);
+      expect(service.getTotalOutputTokens('unrelated')).toBe(77.75);
+      expect(service.getMetrics()).toEqual(processMetrics);
+    },
+  );
+
+  it('removes output baselines created by an abandoned replay', () => {
+    const service = new UiTelemetryService();
+    service.addEvent(response('outgoing', 12), 'session-a');
+    const snapshot = service.snapshotForReplay('session-b', 'session-a');
+    service.restoreSessionOutputTokensBaseline('session-a', 1000);
+    service.restoreSessionOutputTokensBaseline('session-b', 2000);
+
+    service.restoreFromReplaySnapshot(snapshot);
+
+    expect(service.getTotalOutputTokens('session-a')).toBe(12);
+    expect(service.getTotalOutputTokens('session-b')).toBe(0);
+    expect(service.getMetricsForSession('session-b').models).toEqual({});
+  });
+
   it('restores a durable Session model ledger once without resetting warm usage or charging process totals', () => {
     const service = new UiTelemetryService();
     service.addEvent(response('main', 120), 'session-a');

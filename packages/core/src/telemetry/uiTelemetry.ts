@@ -402,6 +402,7 @@ export interface UiTelemetryReplaySnapshot {
   readonly sessionId: string;
   /** Absent when the session had no bucket yet — restore removes it again. */
   readonly sessionMetrics: SessionMetrics | undefined;
+  readonly sessionOutputBaseline: number | undefined;
   readonly sessionWasClosed: boolean;
   /**
    * The session the process was on when the replay began — the one a failed
@@ -415,6 +416,7 @@ export interface UiTelemetryReplaySnapshot {
   readonly outgoingSessionId?: string;
   /** Absent when the outgoing session had no bucket yet — restore removes it. */
   readonly outgoingSessionMetrics?: SessionMetrics | undefined;
+  readonly outgoingSessionOutputBaseline?: number | undefined;
   readonly outgoingSessionWasClosed?: boolean;
   readonly lastPromptTokenCount: number;
   readonly lastCachedContentTokenCount: number;
@@ -593,10 +595,14 @@ export class UiTelemetryService extends EventEmitter {
       sessionMetrics: sessionMetrics
         ? cloneSessionMetrics(sessionMetrics)
         : undefined,
+      sessionOutputBaseline: this.#sessionOutputBaselines.get(sessionId),
       sessionWasClosed: this.#closedSessions.has(sessionId),
       outgoingSessionId: outgoing,
       outgoingSessionMetrics: outgoingSessionMetrics
         ? cloneSessionMetrics(outgoingSessionMetrics)
+        : undefined,
+      outgoingSessionOutputBaseline: outgoing
+        ? this.#sessionOutputBaselines.get(outgoing)
         : undefined,
       outgoingSessionWasClosed: outgoing
         ? this.#closedSessions.has(outgoing)
@@ -621,12 +627,14 @@ export class UiTelemetryService extends EventEmitter {
       snapshot.sessionId,
       snapshot.sessionMetrics,
       snapshot.sessionWasClosed,
+      snapshot.sessionOutputBaseline,
     );
     if (snapshot.outgoingSessionId) {
       this.#restoreSessionState(
         snapshot.outgoingSessionId,
         snapshot.outgoingSessionMetrics,
         snapshot.outgoingSessionWasClosed,
+        snapshot.outgoingSessionOutputBaseline,
       );
     }
     this.#lastPromptTokenCount = snapshot.lastPromptTokenCount;
@@ -641,6 +649,7 @@ export class UiTelemetryService extends EventEmitter {
     sessionId: string,
     metrics: SessionMetrics | undefined,
     wasClosed: boolean | undefined,
+    outputBaseline: number | undefined,
   ): void {
     if (metrics) {
       this.#sessionMetrics.set(sessionId, cloneSessionMetrics(metrics));
@@ -648,6 +657,11 @@ export class UiTelemetryService extends EventEmitter {
       // No bucket existed before the replay; the replay created one. Drop it
       // rather than leave an empty bucket that reads as a live session.
       this.#sessionMetrics.delete(sessionId);
+    }
+    if (outputBaseline === undefined) {
+      this.#sessionOutputBaselines.delete(sessionId);
+    } else {
+      this.#sessionOutputBaselines.set(sessionId, outputBaseline);
     }
     if (wasClosed) {
       this.#closedSessions.add(sessionId);
