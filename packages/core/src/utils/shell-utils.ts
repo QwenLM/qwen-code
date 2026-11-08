@@ -238,6 +238,31 @@ export function getShellConfiguration(): ShellConfiguration {
 export const isWindows = () => os.platform() === 'win32';
 
 /**
+ * The name the model should see for a shell: the executable a command
+ * actually runs under, not the platform's usual shell. PowerShell is named by
+ * its real executable so `pwsh` is not described as Windows PowerShell 5.1.
+ */
+export function getShellDisplayName({
+  executable,
+  shell,
+}: ShellConfiguration): string {
+  switch (shell) {
+    case 'cmd':
+      return 'cmd.exe';
+    case 'powershell': {
+      const basename = path.win32.basename(executable).toLowerCase();
+      return basename === 'pwsh.exe' ? 'pwsh.exe' : 'powershell.exe';
+    }
+    case 'bash':
+      return 'bash';
+    default: {
+      const _exhaustive: never = shell;
+      return _exhaustive;
+    }
+  }
+}
+
+/**
  * Escapes a string so that it can be safely used as a single argument
  * in a shell command, preventing command injection.
  *
