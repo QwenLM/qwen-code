@@ -2006,6 +2006,32 @@ describe('startSessionPrRefreshTimer', () => {
     ).toBeUndefined();
   });
 
+  it('never reads the PR-watch deps while the observation switch is off', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A);
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'open')],
+    });
+    const getPrWatchDeps = vi.fn(() => undefined);
+    vi.useFakeTimers();
+
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      getPrWatchDeps,
+    });
+    await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
+    await vi.waitFor(() => {
+      expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
+    });
+    // The switch is off: the tick refreshes state but never touches the
+    // PR-watch seam (no claim, no view, no watch-file write).
+    expect(getPrWatchDeps).not.toHaveBeenCalled();
+    handle?.dispose();
+  });
+
   it('sweeps only trusted workspaces after the first-run delay', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const untrustedRuntime = timerRuntime('untrusted', untrustedCwd, false);

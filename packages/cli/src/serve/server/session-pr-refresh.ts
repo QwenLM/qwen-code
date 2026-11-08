@@ -37,9 +37,26 @@ import {
   type SessionArchiveCoordinator,
 } from './session-archive.js';
 import { invalidateWorkspaceSessionListCache } from './session-list.js';
+import { pullRequestKey, samePullRequest } from './session-pr-url.js';
+import {
+  runPrWatchObservationTick,
+  type PrWatchObservationTickDeps,
+} from './pr-watch-observation.js';
 
 export const DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const FIRST_RUN_DELAY_MS = 60_000;
+
+/**
+ * Internal switch for the daemon PR-state watch observation (master design
+ * §7, PR A). It stays off: the refresh runs no `gh pr view`, writes no watch
+ * file and claims no ownership, and the `sessionPrWatch` setting is not read.
+ * A later increment turns it on; tests exercise the observation functions
+ * directly rather than through this gated timer hook. The explicit `boolean`
+ * annotation keeps the literal `false` from narrowing the gated block to
+ * unreachable dead code (hence the no-inferrable-types exemption).
+ */
+// eslint-disable-next-line @typescript-eslint/no-inferrable-types
+export const SESSION_PR_WATCH_OBSERVATION_ENABLED: boolean = false;
 
 /**
  * Aggregate deadline for one workspace's capped `mr view` loop. The
@@ -51,46 +68,6 @@ const FIRST_RUN_DELAY_MS = 60_000;
  * rotating window retries it on later sweeps.
  */
 export const AONE_SWEEP_VIEW_BUDGET_MS = 60_000;
-
-/**
- * Identity of a PR url as `host/owner/repo` plus number, tolerant of the
- * spellings the bind path accepts (`www.`, `http:`, a `/files` suffix,
- * case). Wider than `canonicalSessionPrUrl` on purpose and local to this
- * sweep's lookup matching: same-PR identity everywhere else (re-binds, the
- * sidecar's write gate, the session-list merge) keeps the canonical rule.
- */
-function pullRequestKey(
-  url: string,
-): { repo: string; number: number } | undefined {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return undefined;
-  }
-  // GitHub also serves `/pull/N.diff` and `/pull/N.patch`.
-  const match =
-    /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|\.diff$|\.patch$|$)/.exec(
-      parsed.pathname,
-    );
-  if (!match) return undefined;
-  const host = parsed.hostname.replace(/^www\./, '');
-  return {
-    repo: `${host}/${match[1]}/${match[2]}`.toLowerCase(),
-    number: Number(match[3]),
-  };
-}
-
-function samePullRequest(left: string, right: string): boolean {
-  const a = pullRequestKey(left);
-  const b = pullRequestKey(right);
-  return (
-    a !== undefined &&
-    b !== undefined &&
-    a.repo === b.repo &&
-    a.number === b.number
-  );
-}
 
 /**
  * The slice of {@link SessionArchiveCoordinator} the sweep needs: the
@@ -514,6 +491,12 @@ export function startSessionPrRefreshTimer(deps: {
    * controllable clock to drive budget truncation at the timer level.
    */
   now?: () => number;
+  /**
+   * Resolved per tick for the daemon PR-state watch observation. Only read
+   * when {@link SESSION_PR_WATCH_OBSERVATION_ENABLED} is on; the daemon parks
+   * the watch dir, lock registry and allowed hosts on the serve app.
+   */
+  getPrWatchDeps?: () => PrWatchObservationTickDeps | undefined;
 }): { dispose(): void } | undefined {
   const intervalMs = resolveSessionPrRefreshIntervalMs(deps.env ?? process.env);
   if (intervalMs === undefined) return undefined;
@@ -525,11 +508,19 @@ export function startSessionPrRefreshTimer(deps: {
   // windows. Kept monotonic (not mod'd here) — the sweep reduces it modulo
   // the live set size itself, so a shrinking set never skews the rotation.
   const aoneSweepOffsets = new Map<string, number>();
+  // Rotating GitHub view-window offset per workspace for the PR-state watch
+  // observation, and a tick counter that rotates the workspace order so a
+  // persistent deadline overrun starves no workspace (master design §1).
+  const githubSweepOffsets = new Map<string, number>();
+  let watchTickCount = 0;
   let running = false;
   const tick = async (): Promise<void> => {
     if (running) return;
     running = true;
     try {
+      // Anchor the watch deadline at the tick start (master §1), before the
+      // state refresh, so a slow refresh cannot push it past the interval.
+      const tickStart = (deps.now ?? Date.now)();
       const archiveCoordinator = deps.getArchiveCoordinator?.();
       const live = deps.workspaceRegistry.listAll();
       for (const runtime of live) {
@@ -568,6 +559,37 @@ export function startSessionPrRefreshTimer(deps: {
       const liveCwds = new Set(live.map((r) => r.workspaceCwd));
       for (const cwd of [...aoneSweepOffsets.keys()]) {
         if (!liveCwds.has(cwd)) aoneSweepOffsets.delete(cwd);
+      }
+      // Daemon PR-state watch observation (master design §1), gated off in
+      // this increment. With the switch off this block is inert: no gh pr
+      // view, no watch-file write, no ownership claim, and the refresh above
+      // is unchanged. The workspace order rotates per tick so a persistent
+      // deadline overrun starves no workspace; the untrusted primary is
+      // included for views only (its env resolver runs no gh in the checkout).
+      if (SESSION_PR_WATCH_OBSERVATION_ENABLED) {
+        const watchDeps = deps.getPrWatchDeps?.();
+        if (watchDeps) {
+          const watchWorkspaces = live.filter((r) => r.trusted || r.primary);
+          const rotation = watchTickCount % Math.max(watchWorkspaces.length, 1);
+          const ordered = [
+            ...watchWorkspaces.slice(rotation),
+            ...watchWorkspaces.slice(0, rotation),
+          ];
+          watchTickCount += 1;
+          try {
+            await runPrWatchObservationTick(ordered, watchDeps, {
+              intervalMs,
+              sweepOffsets: githubSweepOffsets,
+              deadline: tickStart + intervalMs / 2,
+            });
+          } catch (error) {
+            if (error instanceof DaemonDrainingError) return;
+            // A failed observation tick must not starve the state refresh.
+          }
+          for (const cwd of [...githubSweepOffsets.keys()]) {
+            if (!liveCwds.has(cwd)) githubSweepOffsets.delete(cwd);
+          }
+        }
       }
     } finally {
       running = false;
