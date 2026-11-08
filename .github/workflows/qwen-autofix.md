@@ -4910,10 +4910,20 @@ everywhere.
 
 The af-148 premise holds for them too: none of the three
 checks code out, so the reused workspace needs no restore
-or wipe step. Their only scratch paths come from mktemp
-(O_EXCL, owner-only) and are removed in-step, so unlike
-review-scan they need no per-run WORKDIR, age sweep or EXIT
-trap. They call gh and jq, both already used by route on
+or wipe step. Every scratch path comes from mktemp (O_EXCL,
+owner-only): the error-capture files are removed inline and
+the gh config dir is removed by an EXIT trap. That trap is
+not optional on this pool. Nothing reclaims RUNNER_TEMP
+here, and the pool's only age sweep walks /tmp, which cannot
+reach it, so without the trap each command would leave one
+more directory behind for good — free on a hosted VM that
+dies with the job, unbounded on a persistent host. It rides
+EXIT rather than a trailing rm because these steps return
+early on several refusal paths, and it stays step-scoped
+rather than per call because every gh call below reuses that
+one dir. No per-run WORKDIR is needed all the same: mktemp
+names are unpredictable, unlike review-scan's run_id-derived
+path. They call gh and jq, both already used by route on
 this pool; they run no node, docker or tmux, so they get no
 'Check runner environment' capability preflight.
 
@@ -4937,12 +4947,15 @@ One residual is accepted here deliberately, and it is the
 scan lane's, not a new posture: the dir is minted once per
 step and reused across that step's gh calls. RUNNER_TEMP is
 same-UID-writable, so a process left behind on the pool can
-plant a config.yml into it between two calls. takeover-command
-has two 5-second comment-retry backoffs, which is the same
-bounded window review-scan's retry sleeps already leave. The
-heartbeat is the case that could not take it — its 600-second
-sleep made the window a certainty, so af-149 mints per call
-through a wrapper instead. These steps are seconds long and
-hold no loop; if that window is ever judged unacceptable for
-them, the same wrapper is the remedy, not a return to hosted.
+plant a config.yml into it between two calls. The EXIT trap
+ends the dir with the step, so nothing is left to plant into
+afterwards; it does not close the between-calls gap itself.
+takeover-command has two 5-second comment-retry backoffs,
+which is the same bounded window review-scan's retry sleeps
+already leave. The heartbeat is the case that could not take
+it — its 600-second sleep made the window a certainty, so
+af-149 mints per call through a wrapper instead. These steps
+are seconds long and hold no loop; if that window is ever
+judged unacceptable for them, the same wrapper is the
+remedy, not a return to hosted.
 ```

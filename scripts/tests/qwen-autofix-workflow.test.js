@@ -7757,6 +7757,14 @@ exit 1
         },
         encoding: 'utf8',
       });
+      // af-161: nothing reclaims RUNNER_TEMP on the persistent pool, so the
+      // step must take its gh config dir with it on EVERY exit path. This
+      // runs inside the helper so every vector below is covered, including
+      // the early-return refusals a trailing rm would have missed.
+      expect(
+        readdirSync(dir).filter((n) => n.startsWith('autofix-gh-config.')),
+        'the ack step left its gh config dir behind on the pool',
+      ).toEqual([]);
       const commentPath = join(dir, 'comment.md');
       const callsPath = join(dir, 'calls.log');
       const result = {
@@ -12785,6 +12793,22 @@ exit 1
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
     }
+    // The command lane's three preambles are hand-copied, and the per-step
+    // loop above only pins that four tokens are present and ordered — a
+    // later hardening edit (a reworded abort, one more unset) could land on
+    // one copy and leave the other two behind with every assertion green.
+    // Pin the copies byte-identical, the way the sanitize lane already
+    // does. The block runs through the EXIT trap so the cleanup is covered
+    // too, and the non-empty guard matters: three empty slices would also
+    // collapse to a Set of size 1.
+    const commandPreambles = commandSteps.map(
+      (step) =>
+        step.match(
+          /export GH_HOST=github\.com[\s\S]*?trap 'rm -rf "\$\{GH_CONFIG_DIR\}"' EXIT\n/,
+        )?.[0] ?? '',
+    );
+    expect(commandPreambles[0]).toBeTruthy();
+    expect(new Set(commandPreambles).size).toBe(1);
     // post_status mints hermetically PER CALL (R11-1): RUNNER_TEMP is
     // same-UID-writable, so a dir minted once and reused across the step's
     // gh calls is plantable — a config.yml carrying http_unix_socket
@@ -13228,6 +13252,45 @@ exit 1
         ).toBe(false);
       } finally {
         rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('takes the command lane gh config dir off the pool on every exit path', () => {
+    // af-161 / R1-1: nothing reclaims RUNNER_TEMP on this persistent pool
+    // and the /tmp age sweep cannot reach it, so a dir left behind accrues
+    // forever. The ack and re-arm replays assert this over their whole step
+    // bodies; takeover-command has no such replay, so run each preamble on
+    // its own and prove the trap fires on a normal end AND on the early
+    // `exit 0` refusal paths these steps are full of. Probed: dropping the
+    // trap line leaves the directory behind and reds this test.
+    for (const [i, name] of commandStepNames.entries()) {
+      // Stop at the mint, then take any trailing comment/trap lines. Making
+      // the trap itself part of the required match would turn a removed
+      // trap into an extraction failure — the residue assertion below has
+      // to be what reds, so the block must stay runnable without it.
+      const preamble = commandSteps[i].match(
+        /export GH_HOST=github\.com[\s\S]*?export GH_CONFIG_DIR\n(?:[ \t]*#[^\n]*\n|[ \t]*trap[^\n]*\n)*/,
+      )?.[0];
+      expect(preamble, name).toBeTruthy();
+      for (const tail of ['', 'exit 0', 'exit 1']) {
+        const dir = mkdtempSync(join(tmpdir(), 'autofix-ghcfg-exit-'));
+        try {
+          const proc = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', `${preamble}${tail}\n`],
+            { env: { ...process.env, RUNNER_TEMP: dir }, encoding: 'utf8' },
+          );
+          expect(proc.status, `${name} (${tail || 'normal end'})`).toBe(
+            tail === 'exit 1' ? 1 : 0,
+          );
+          expect(
+            readdirSync(dir).filter((n) => n.startsWith('autofix-gh-config.')),
+            `${name} (${tail || 'normal end'}) left its gh config dir behind`,
+          ).toEqual([]);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
       }
     }
   });
@@ -21127,6 +21190,12 @@ exit 1
           },
           encoding: 'utf8',
         });
+        // af-161: the re-arm step must take its gh config dir with it on
+        // every exit path — RUNNER_TEMP is not reclaimed on this pool.
+        expect(
+          readdirSync(dir).filter((n) => n.startsWith('autofix-gh-config.')),
+          'the re-arm step left its gh config dir behind on the pool',
+        ).toEqual([]);
         return {
           status: res.status,
           stdout: res.stdout ?? '',

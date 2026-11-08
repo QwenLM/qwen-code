@@ -1637,6 +1637,10 @@ jobs:
             exit 1
           fi
           export GH_CONFIG_DIR
+          # Nothing reclaims RUNNER_TEMP on this pool and these steps return
+          # early on several paths, so cleanup rides EXIT, not a tail rm. It
+          # stays step-scoped: every gh call below reuses this same dir.
+          trap 'rm -rf "${GH_CONFIG_DIR}"' EXIT
           api_error_file="$(mktemp)"
           if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
             api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
@@ -1908,6 +1912,10 @@ jobs:
             exit 1
           fi
           export GH_CONFIG_DIR
+          # Nothing reclaims RUNNER_TEMP on this pool and these steps return
+          # early on several paths, so cleanup rides EXIT, not a tail rm. It
+          # stays step-scoped: every gh call below reuses this same dir.
+          trap 'rm -rf "${GH_CONFIG_DIR}"' EXIT
           # The marker only counts when the AUTOFIX_BOT authored it (both the
           # scan and the address-side recheck filter markers by that login), so
           # a mis-scoped PAT would post a comment that silently does nothing.
@@ -1981,6 +1989,10 @@ jobs:
             exit 1
           fi
           export GH_CONFIG_DIR
+          # Nothing reclaims RUNNER_TEMP on this pool and these steps return
+          # early on several paths, so cleanup rides EXIT, not a tail rm. It
+          # stays step-scoped: every gh call below reuses this same dir.
+          trap 'rm -rf "${GH_CONFIG_DIR}"' EXIT
           api_error_file="$(mktemp)"
           if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
             api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
